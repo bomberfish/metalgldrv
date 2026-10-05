@@ -1,0 +1,266 @@
+diff --git a/framework/platform/metalgl/tcuMetalGLPlatform.mm b/framework/platform/metalgl/tcuMetalGLPlatform.mm
+new file mode 100644
+index 0000000..87034ac
+--- /dev/null
++++ b/framework/platform/metalgl/tcuMetalGLPlatform.mm
+@@ -0,0 +1,224 @@
++/*-------------------------------------------------------------------------
++ * drawElements Quality Program Tester Core
++ * ----------------------------------------
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ *//*!
++ * \file
++ * \brief macOS EGL platform for metalgldrv (desktop GL over Metal).
++ *
++ * EGL and GL are both loaded from a single dylib (libmetalgldrv.dylib by
++ * default, located through the executable's LC_RPATH; override with the
++ * METALGLDRV_LIBRARY environment variable).  The display is obtained with
++ * eglGetDisplay(EGL_DEFAULT_DISPLAY).  Offscreen rendering uses pbuffers
++ * (--deqp-surface-type=pbuffer); "window" surfaces are backed by a bare,
++ * never-displayed CAMetalLayer passed as the EGLNativeWindowType.
++ *//*--------------------------------------------------------------------*/
++
++#include "tcuPlatform.hpp"
++#include "tcuDefs.hpp"
++#include "tcuVector.hpp"
++#include "deUniquePtr.hpp"
++#include "egluPlatform.hpp"
++#include "egluNativeDisplay.hpp"
++#include "egluNativeWindow.hpp"
++#include "egluGLContextFactory.hpp"
++#include "eglwLibrary.hpp"
++#include "eglwEnums.hpp"
++#include "gluPlatform.hpp"
++
++#include <cstdlib>
++#include <string>
++
++#import <QuartzCore/CAMetalLayer.h>
++
++#if !defined(DEQP_METALGL_LIBRARY_PATH)
++#define DEQP_METALGL_LIBRARY_PATH "@rpath/libmetalgldrv.dylib"
++#endif
++
++namespace tcu
++{
++namespace metalgl
++{
++
++static const char *getDriverLibraryPath(void)
++{
++    const char *env = std::getenv("METALGLDRV_LIBRARY");
++    return (env && env[0]) ? env : DEQP_METALGL_LIBRARY_PATH;
++}
++
++class Library : public eglw::DefaultLibrary
++{
++public:
++    Library(void) : eglw::DefaultLibrary(getDriverLibraryPath())
++    {
++    }
++};
++
++// ---------------------------------------------------------------- display
++
++class Display : public eglu::NativeDisplay
++{
++public:
++    static const Capability CAPABILITIES = CAPABILITY_GET_DISPLAY_LEGACY;
++
++    Display(void) : eglu::NativeDisplay(CAPABILITIES)
++    {
++    }
++
++    const eglw::Library &getLibrary(void) const
++    {
++        return m_library;
++    }
++    eglw::EGLNativeDisplayType getLegacyNative(void)
++    {
++        return (eglw::EGLNativeDisplayType)0; // EGL_DEFAULT_DISPLAY
++    }
++
++private:
++    Library m_library;
++};
++
++// ---------------------------------------------------------------- window
++
++class Window : public eglu::NativeWindow
++{
++public:
++    static const Capability CAPABILITIES =
++        Capability(CAPABILITY_CREATE_SURFACE_LEGACY | CAPABILITY_GET_SURFACE_SIZE | CAPABILITY_SET_SURFACE_SIZE);
++
++    Window(const eglu::WindowParams &params) : eglu::NativeWindow(CAPABILITIES), m_layer(nil)
++    {
++        const int w = params.width == eglu::WindowParams::SIZE_DONT_CARE ? 256 : params.width;
++        const int h = params.height == eglu::WindowParams::SIZE_DONT_CARE ? 256 : params.height;
++        @autoreleasepool
++        {
++            m_layer              = [[CAMetalLayer alloc] init];
++            m_layer.frame        = CGRectMake(0, 0, w, h);
++            m_layer.drawableSize = CGSizeMake(w, h);
++        }
++    }
++
++    ~Window(void)
++    {
++        [m_layer release];
++    }
++
++    eglw::EGLNativeWindowType getLegacyNative(void)
++    {
++        return (eglw::EGLNativeWindowType)m_layer;
++    }
++
++    tcu::IVec2 getSurfaceSize(void) const
++    {
++        const CGSize s = m_layer.drawableSize;
++        return tcu::IVec2((int)s.width, (int)s.height);
++    }
++
++    void setSurfaceSize(tcu::IVec2 size)
++    {
++        m_layer.frame        = CGRectMake(0, 0, size.x(), size.y());
++        m_layer.drawableSize = CGSizeMake(size.x(), size.y());
++    }
++
++    void setVisibility(eglu::WindowParams::Visibility)
++    {
++    }
++
++private:
++    CAMetalLayer *m_layer;
++};
++
++class WindowFactory : public eglu::NativeWindowFactory
++{
++public:
++    WindowFactory(void) : eglu::NativeWindowFactory("metallayer", "Offscreen CAMetalLayer", Window::CAPABILITIES)
++    {
++    }
++
++    eglu::NativeWindow *createWindow(eglu::NativeDisplay *, const eglu::WindowParams &params) const
++    {
++        return new Window(params);
++    }
++};
++
++class DisplayFactory : public eglu::NativeDisplayFactory
++{
++public:
++    DisplayFactory(void)
++        : eglu::NativeDisplayFactory("metalgl", "metalgldrv EGL_DEFAULT_DISPLAY", Display::CAPABILITIES)
++    {
++        m_nativeWindowRegistry.registerFactory(new WindowFactory());
++    }
++
++    eglu::NativeDisplay *createDisplay(const eglw::EGLAttrib *) const
++    {
++        return new Display();
++    }
++};
++
++// ---------------------------------------------------------------- platform
++
++class EglPlatform : public eglu::Platform
++{
++public:
++    EglPlatform(void)
++    {
++        m_nativeDisplayFactoryRegistry.registerFactory(new DisplayFactory());
++    }
++
++    de::MovePtr<glu::ContextFactory> createContextFactory(void)
++    {
++        return de::MovePtr<glu::ContextFactory>(new eglu::GLContextFactory(m_nativeDisplayFactoryRegistry));
++    }
++};
++
++class GLPlatform : public glu::Platform
++{
++public:
++    void registerFactory(de::MovePtr<glu::ContextFactory> factory)
++    {
++        m_contextFactoryRegistry.registerFactory(factory.release());
++    }
++};
++
++class Platform : public tcu::Platform
++{
++public:
++    Platform(void)
++    {
++        m_glPlatform.registerFactory(m_eglPlatform.createContextFactory());
++    }
++
++    const eglu::Platform &getEGLPlatform(void) const
++    {
++        return m_eglPlatform;
++    }
++    const glu::Platform &getGLPlatform(void) const
++    {
++        return m_glPlatform;
++    }
++
++private:
++    EglPlatform m_eglPlatform;
++    GLPlatform m_glPlatform;
++};
++
++} // namespace metalgl
++} // namespace tcu
++
++tcu::Platform *createPlatform(void)
++{
++    return new tcu::metalgl::Platform();
++}
+diff --git a/targets/metalgl/metalgl.cmake b/targets/metalgl/metalgl.cmake
+new file mode 100644
+index 0000000..edf76c7
+--- /dev/null
++++ b/targets/metalgl/metalgl.cmake
+@@ -0,0 +1,30 @@
++# macOS target for metalgldrv: desktop GL 4.6 + EGL 1.5 from one dylib.
++#
++#   -DDEQP_TARGET=metalgl -DMETALGLDRV_LIB_DIR=/path/to/metalgldrv/build
++#
++# EGL and GL entry points are loaded at runtime (dlopen) from
++# @rpath/libmetalgldrv.dylib; METALGLDRV_LIB_DIR is baked into the binaries'
++# rpath.  The METALGLDRV_LIBRARY env var overrides the path at runtime.
++
++message("*** Using metalgl (macOS EGL/metalgldrv) target")
++
++set(DEQP_TARGET_NAME "MetalGL")
++set(DEQP_SUPPORT_EGL ON)
++
++set(METALGLDRV_LIB_DIR "" CACHE PATH "Directory containing libmetalgldrv.dylib (added to rpath)")
++
++enable_language(OBJCXX)
++
++find_library(QUARTZCORE_LIBRARY QuartzCore)
++find_library(FOUNDATION_LIBRARY Foundation)
++
++set(TCUTIL_PLATFORM_SRCS metalgl/tcuMetalGLPlatform.mm)
++set(TCUTIL_PLATFORM_LIBS ${QUARTZCORE_LIBRARY} ${FOUNDATION_LIBRARY})
++
++# Fallback path used by eglu::GLContextFactory if the driver ever stops
++# advertising EGL_KHR_get_all_proc_addresses.
++add_definitions(-DDEQP_OPENGL_LIBRARY_PATH="@rpath/libmetalgldrv.dylib")
++
++if (METALGLDRV_LIB_DIR)
++	set(CMAKE_BUILD_RPATH "${METALGLDRV_LIB_DIR}")
++endif ()
