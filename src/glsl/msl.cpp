@@ -262,7 +262,8 @@ private:
         return v->name + "_" + std::to_string(v->id);
     }
     bool isDefaultUniform(const Variable* v) {
-        return v->global && v->q.storage == Storage::Uniform && !v->block && !v->type.containsOpaque() &&
+        return v->global && v->q.storage == Storage::Uniform && !v->block &&
+               (!v->type.containsOpaque() || v->type.stripArrays().base == BT::Struct) && v->type.base != BT::Subroutine &&
                v->builtin != BuiltinVar::DepthRange;
     }
     const BlockBinding* blockOf(const Variable* v) {
@@ -491,6 +492,7 @@ std::string Emitter::loaderFor(const Type& t, const TL& L) {
         for (size_t i = 0; i < t.sdef->members.size(); i++) {
             const Member& m = t.sdef->members[i];
             if (m.type.isArray() && m.type.dims[0] == 0) continue;
+            if (m.type.containsOpaque()) fail("structures containing opaque types cannot be used as values");
             body += "    r.m_" + m.name + " = " + loaderFor(m.type, L->members[i]) + "(p, o + " + std::to_string(L->offsets[i]) + "u);\n";
         }
         body += "    return r;\n";
@@ -988,6 +990,36 @@ std::string Emitter::withOuts(const std::string& callee, const Expr* e, const st
 }
 
 std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
+    // opaque members of uniform structs: resolve the constant access path to its binding
+    if (e->kind == EK::Field || (e->kind == EK::Index && e->args[0]->kind == EK::Field)) {
+        const Expr* leaf = e->kind == EK::Field ? e : e->args[0];
+        std::function<bool(const Expr*, std::string&)> path = [&](const Expr* y, std::string& out) -> bool {
+            if (y->kind == EK::Var) { out = y->var->name; return !y->var->param; }
+            if (y->kind == EK::Field) {
+                if (!path(y->args[0], out)) return false;
+                out += "." + y->args[0]->type.sdef->members[y->field].name;
+                return true;
+            }
+            if (y->kind == EK::Index) {
+                if (!y->args[1]->cv) fail("dynamic indexing of uniform structures containing opaque types is not supported");
+                if (!path(y->args[0], out)) return false;
+                out += "[" + std::to_string(y->args[1]->cv->c[0].i) + "]";
+                return true;
+            }
+            return false;
+        };
+        std::string p;
+        if (!path(leaf, p)) fail("unsupported opaque member expression");
+        auto it = P.opaque.find(p);
+        if (it == P.opaque.end()) fail("internal: opaque uniform '" + p + "' has no binding");
+        const OpaqueBinding& ob = it->second;
+        std::string t = "A->s" + std::to_string(ob.slot), sm = ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : "";
+        if (e->kind == EK::Index) {
+            std::string idx = ex(e->args[1]);
+            return {t + "[" + idx + "]", sm.empty() ? "" : sm + "[" + idx + "]"};
+        }
+        return {t, sm};
+    }
     if (e->kind == EK::Var) {
         const Variable* v = e->var;
         if (v->param) {
@@ -999,7 +1031,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         const OpaqueBinding& ob = it->second;
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
     }
-    if (e->kind == EK::Index && e->args[0]->kind == EK::Var && !e->args[0]->var->param) {
+    if (e->kind == EK::Index && e->args[0]->kind == EK::Var) {
         auto r = texRef(e->args[0]);
         std::string idx = ex(e->args[1]);
         return {r.first + "[" + idx + "]", r.second.empty() ? "" : r.second + "[" + idx + "]"};
@@ -1697,13 +1729,21 @@ std::string Emitter::fnSignature(const Function* f) {
         const Type& t = p->type;
         std::string n = varName(p);
         if (t.base == BT::Sampler) {
-            if (t.isArray()) fail("arrays of samplers as function parameters are not supported");
-            r += texType(t, 0) + " " + n + "_t, sampler " + n + "_s";
+            if (t.dims.size() > 1) fail("arrays of arrays of samplers as function parameters are not supported");
+            if (t.isArray()) {
+                std::string N = std::to_string(t.dims[0]);
+                r += "constant array<" + texType(t.stripArrays(), 0) + ", " + N + ">& " + n + "_t, constant array<sampler, " + N + ">& " + n + "_s";
+            } else {
+                r += texType(t, 0) + " " + n + "_t, sampler " + n + "_s";
+            }
             continue;
         }
         if (t.base == BT::Image) {
-            if (t.isArray()) fail("arrays of images as function parameters are not supported");
-            r += texType(t, p->q.memory) + " " + n + "_t";
+            if (t.dims.size() > 1) fail("arrays of arrays of images as function parameters are not supported");
+            if (t.isArray())
+                r += "constant array<" + texType(t.stripArrays(), p->q.memory) + ", " + std::to_string(t.dims[0]) + ">& " + n + "_t";
+            else
+                r += texType(t, p->q.memory) + " " + n + "_t";
             continue;
         }
         if (t.base == BT::AtomicUint) {

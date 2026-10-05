@@ -417,6 +417,7 @@ void Linker::addUniformEntries(const std::string& name, const Type& t, TL L, uin
                               blockIndex, stageMask, ssbo, topArraySize, topArrayStride, location, usedLocs, nullptr);
         return;
     }
+    if (t.stripArrays().isOpaque()) return;  // reported separately with their slots
     Type et = t.elem();
     bool elemIsAggregate = !t.dims.empty() && (et.base == BT::Struct || !et.dims.empty());
     if (!t.dims.empty() && elemIsAggregate) {
@@ -544,20 +545,22 @@ void Linker::assignUniforms() {
             if (v->builtin == BuiltinVar::DepthRange) continue;  // fed from MGLSys
             if (v->type.base == BT::Subroutine) continue;         // subroutine uniforms have their own interface
             bool opq = v->type.containsOpaque();
-            auto& idx = opq ? opIdx : defIdx;
-            auto& vec = opq ? opaques : defaults;
-            auto it = idx.find(v->name);
-            if (it == idx.end()) {
-                idx[v->name] = vec.size();
-                vec.push_back({v, 1u << s});
-            } else {
-                Entry& e = vec[it->second];
-                if (e.v->type != v->type) {
-                    // structs from different stages are distinct objects; compare spelling
-                    if (e.v->type.str() != v->type.str()) error("uniform '" + v->name + "' declared with different types in different stages");
+            bool aggregate = v->type.stripArrays().base == BT::Struct;
+            auto addTo = [&](std::map<std::string, size_t>& idx, std::vector<Entry>& vec) {
+                auto it = idx.find(v->name);
+                if (it == idx.end()) {
+                    idx[v->name] = vec.size();
+                    vec.push_back({v, 1u << s});
+                } else {
+                    Entry& e = vec[it->second];
+                    if (e.v->type != v->type && e.v->type.str() != v->type.str())
+                        error("uniform '" + v->name + "' declared with different types in different stages");
+                    e.mask |= 1u << s;
                 }
-                e.mask |= 1u << s;
-            }
+            };
+            // structs mixing opaque and plain members: plain members live in the default block
+            if (!opq || aggregate) addTo(defIdx, defaults);
+            if (opq) addTo(opIdx, opaques);
         }
     }
     int slot = 0;
@@ -667,26 +670,39 @@ void Linker::assignUniforms() {
     // --- opaque uniforms --------------------------------------------------------
     std::map<int, int> acbByBinding;
     std::map<int, uint32_t> acNextOffset;
-    for (auto& e : opaques) {
-        const Variable* v = e.v;
-        Type bt = v->type.stripArrays();
-        if (bt.base == BT::Struct) {
-            error("opaque types inside structures are not supported ('" + v->name + "')");
-            continue;
+    // expand opaque leaves (struct members / arrays of structs) into individual uniforms named by their path
+    struct OpaqueLeaf { const Variable* v; std::string path; Type type; uint32_t mask; bool explicitLoc; };
+    std::vector<OpaqueLeaf> leaves;
+    std::function<void(const Entry&, const std::string&, const Type&)> expand = [&](const Entry& e, const std::string& path, const Type& t) {
+        Type bt = t.stripArrays();
+        if (bt.isOpaque()) {
+            leaves.push_back({e.v, path, t, e.mask, path == e.v->name});
+            return;
         }
-        int n = std::max(1, v->type.totalArrayElements());
-        if (v->type.dims.size() > 1) error("arrays of arrays of opaque types are not supported ('" + v->name + "')");
+        if (bt.base != BT::Struct) return;
+        if (t.isArray()) {
+            for (int i = 0; i < t.dims[0]; i++) expand(e, path + "[" + std::to_string(i) + "]", t.elem());
+            return;
+        }
+        for (auto& m : t.sdef->members) expand(e, path + "." + m.name, m.type);
+    };
+    for (auto& e : opaques) expand(e, e.v->name, e.v->type);
+    for (auto& lf : leaves) {
+        const Variable* v = lf.v;
+        Type bt = lf.type.stripArrays();
+        int n = std::max(1, lf.type.totalArrayElements());
+        if (lf.type.dims.size() > 1) error("arrays of arrays of opaque types are not supported ('" + lf.path + "')");
         OpaqueBinding ob;
         ob.type = bt;
         ob.count = n;
         ob.memory = v->q.memory;
         Uniform u;
-        u.name = v->type.isArray() ? v->name + "[0]" : v->name;
+        u.name = lf.type.isArray() ? lf.path + "[0]" : lf.path;
         u.type = glTypeEnum(bt);
-        u.arraySize = v->type.isArray() ? v->type.dims[0] : 1;
-        u.stageMask = e.mask;
-        u.binding = std::max(0, v->q.layout.binding);
-        if (v->q.layout.location >= 0) u.location = v->q.layout.location;
+        u.arraySize = lf.type.isArray() ? lf.type.dims[0] : 1;
+        u.stageMask = lf.mask;
+        u.binding = lf.explicitLoc ? std::max(0, v->q.layout.binding) : 0;
+        if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location;
         else {
             int loc = location;
             for (;;) {
@@ -734,15 +750,15 @@ void Linker::assignUniforms() {
             auto& acb = refl.atomicCounterBuffers[ai];
             acb.dataSize = std::max(acb.dataSize, aoff + 4 * n);
             acb.activeUniforms.push_back(uidx);
-            acb.stageMask |= e.mask;
+            acb.stageMask |= lf.mask;
             ob.acbIndex = ai;
             ob.acOffset = aoff;
             u.offset = (int)aoff;
-            u.arrayStride = v->type.isArray() ? 4 : 0;
+            u.arrayStride = lf.type.isArray() ? 4 : 0;
             u.atomicCounterBufferIndex = ai;
         }
         refl.uniforms.push_back(u);
-        prog_->opaque[v->name] = ob;
+        prog_->opaque[lf.path] = ob;
     }
     // subroutines (per stage)
     for (int s = 0; s < (int)Stage::Count; s++) {

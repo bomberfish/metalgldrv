@@ -1,0 +1,35 @@
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+layout(std430, binding = 2) buffer D { double d[4]; dvec3 v3; dmat2 m2; } db;
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+double Dv(double v) { return v + double(seq[0]); }
+void main() {
+    double a = Dv(1.0LF) / Dv(3.0LF);
+    // 1/3 in binary64 = 0x3FD5555555555555
+    uvec2 bits = unpackDouble2x32(a);
+    check(bits == uvec2(0x55555555u, 0x3FD55555u));
+    check(a * 3.0LF == 1.0LF);
+    double big = Dv(16777217.0LF);              // not representable in float
+    check(big - 16777216.0LF == 1.0LF);
+    check(sqrt(Dv(2.0LF)) * sqrt(Dv(2.0LF)) - 2.0LF < 1e-15LF);
+    check(floor(Dv(-1.5LF)) == -2.0LF && ceil(Dv(-1.5LF)) == -1.0LF && fract(Dv(2.25LF)) == 0.25LF);
+    check(int(Dv(-7.9LF)) == -7 && uint(Dv(7.9LF)) == 7u && float(Dv(0.5LF)) == 0.5);
+    check(min(Dv(3.0LF), 2.0LF) == 2.0LF && max(Dv(3.0LF), 2.0LF) == 3.0LF && clamp(Dv(5.0LF), 0.0LF, 1.0LF) == 1.0LF);
+    dvec3 v = dvec3(Dv(1.0LF), 2.0LF, 2.0LF);
+    check(length(v) == 3.0LF && dot(v, v) == 9.0LF);
+    check(cross(dvec3(Dv(1.0LF), 0, 0), dvec3(0, 1, 0)) == dvec3(0, 0, 1));
+    dmat2 m = dmat2(Dv(1.0LF), 2.0LF, 3.0LF, 4.0LF);
+    check(m * dvec2(1.0LF, 1.0LF) == dvec2(4.0LF, 6.0LF));
+    check(determinant(m) == -2.0LF && inverse(m)[0] == dvec2(-2.0LF, 1.0LF));
+    check(transpose(m)[0] == dvec2(1.0LF, 3.0LF));
+    db.d[1] = a;
+    db.v3 = v * 0.5LF;
+    db.m2 = m;
+    check(db.d[1] == a && db.v3.z == 1.0LF && db.m2[1][1] == 4.0LF);
+    check(mix(Dv(0.0LF), 10.0LF, 0.25LF) == 2.5LF && step(Dv(1.0LF), 0.5LF) == 0.0LF);
+    check(Dv(0.1LF) + 0.2LF != 0.3LF && abs(Dv(0.1LF) + 0.2LF - 0.3LF) < 1e-16LF);
+    check(isnan(Dv(0.0LF) / 0.0LF) && isinf(Dv(1.0LF) / 0.0LF));
+}
