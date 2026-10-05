@@ -1,0 +1,7 @@
+/third_party/
+/build/
+/.venv/
+*.o
+.DS_Store
+/build-*/
+compile_commands.json
