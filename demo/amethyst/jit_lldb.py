@@ -32,8 +32,47 @@ def _reg(frame, name):
     return int(frame.FindRegister(name).GetValue(), 16)
 
 
+_REGNUM = {"x0": 0x0, "x16": 0x10, "pc": 0x20}
+
+
 def _set_reg(frame, name, value):
-    frame.FindRegister(name).SetValueFromCString("0x%x" % value)
+    # Raw gdb-remote P packet (lldb's register write is refused on this transport).
+    thread = frame.GetThread()
+    process = thread.GetProcess()
+    dbg = process.GetTarget().GetDebugger()
+    le = value.to_bytes(8, "little").hex()
+    resp = _packet(dbg, "P%x=%s;thread:%x;" % (_REGNUM[name], le, thread.GetThreadID()))
+    if resp != "OK":
+        print("[jit] P packet for %s -> %r" % (name, resp))
+    # Make lldb drop its cached register values.
+    process.GetThreadByID(thread.GetThreadID())
+    dbg.GetCommandInterpreter().HandleCommand("register read pc", lldb.SBCommandReturnObject())
+
+
+_state = {"extension": False}
+
+
+def _prepare(debugger, process, addr, length):
+    """Allocate (addr == 0) and debugger-touch a region; returns its address or 0."""
+    err = lldb.SBError()
+    if addr == 0:
+        resp = _packet(debugger, "_M%x,rx" % length)
+        try:
+            addr = int(resp, 16)
+        except ValueError:
+            print("[jit] RX allocation failed: %r" % resp)
+            return 0
+    p = addr & ~(PAGE - 1)
+    end = addr + length
+    n = 0
+    while p < end:
+        b = process.ReadMemory(p, 1, err)
+        if err.Success():
+            process.WriteMemory(p, b, err)
+        n += 1
+        p += PAGE
+    print("[jit] prepared region 0x%x (+0x%x, %d pages)" % (addr, length, n))
+    return addr
 
 
 def _handle_brk(debugger, process, thread):
@@ -42,16 +81,34 @@ def _handle_brk(debugger, process, thread):
     err = lldb.SBError()
     insn = process.ReadUnsignedFromMemory(pc, 4, err)
     if err.Fail() or (insn & 0xFFE0001F) != 0xD4200000:
+        print("[jit] stop at pc 0x%x insn %s (err %s)" % (pc, hex(insn) if not err.Fail() else "?", err.GetCString()))
         return False
     imm = (insn >> 5) & 0xFFFF
+    if imm == 0x69:
+        x0 = _reg(frame, "x0")
+        _set_reg(frame, "pc", pc + 4)
+        if not _state["extension"]:
+            # Probe before the extension script: answer like the Universal script.
+            _set_reg(frame, "x0", 0x690000E0)
+            print("[jit] legacy probe answered")
+        else:
+            # BreakGetJITMapping(bytes): allocate + prepare an RX region.
+            _set_reg(frame, "x0", _prepare(debugger, process, 0, x0))
+        return True
+    if imm == 0x68:  # legacy "new breakpoints" script upload
+        _set_reg(frame, "pc", pc + 4)
+        return True
     if imm != 0xF00D:
+        print("[jit] brk #0x%x at 0x%x not handled" % (imm, pc))
         return False
     x16, x0, x1 = _reg(frame, "x16"), _reg(frame, "x0"), _reg(frame, "x1")
     _set_reg(frame, "pc", pc + 4)
     if x16 == 0:
         print("[jit] detach requested")
         return "detach"
-    if x16 == 1:
+    if x16 == 3:  # detach-after-first-break preference; we stay attached
+        return True
+    if x16 in (1, 4):
         if x0 == 0 and x1 == 0:
             return True
         addr = x0
@@ -76,7 +133,8 @@ def _handle_brk(debugger, process, thread):
         print("[jit] prepared region 0x%x (+0x%x, %d pages)" % (addr, x1, n))
         return True
     if x16 == 2:
-        return True  # extension script: not needed
+        _state["extension"] = True  # extension script installs the 0x69 allocation handler
+        return True
     print("[jit] unknown command %d" % x16)
     return True
 
@@ -112,6 +170,28 @@ def jit_loop(debugger, command, result, internal_dict):
                     print("[jit] stop: thread %d reason %s" % (t.GetIndexID(), t.GetStopDescription(256)))
                     debugger.HandleCommand("thread backtrace %d" % t.GetIndexID())
             time.sleep(0.01)
+
+
+def main():
+    """Standalone mode (no lldb CLI event thread): jit_lldb.py <udid> <pid>"""
+    import sys
+    udid, pid = sys.argv[1], sys.argv[2]
+    lldb.SBDebugger.Initialize()
+    dbg = lldb.SBDebugger.Create()
+    dbg.SetAsync(False)
+    for cmd in ("device select %s" % udid, "device process attach --pid %s" % pid):
+        ret = lldb.SBCommandReturnObject()
+        dbg.GetCommandInterpreter().HandleCommand(cmd, ret)
+        print(ret.GetOutput() or "", ret.GetError() or "", flush=True)
+    if not dbg.GetSelectedTarget().GetProcess().IsValid():
+        print("[jit] attach failed")
+        return 1
+    jit_loop(dbg, "", None, None)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 def __lldb_init_module(debugger, internal_dict):

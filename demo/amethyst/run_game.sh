@@ -12,14 +12,13 @@ PROFILE_NAME="${1:-Fabulously Optimized}"
 SECONDS_TO_RUN="${2:-120}"
 OUT="${OUT:-$HERE/../../build/game-run}"
 mkdir -p "$OUT"
-ENV_JSON=$(python3 -c "import json,os,sys; print(json.dumps({'AME_AUTOLAUNCH_PROFILE': sys.argv[1], 'AME_FORCE_RENDERER': os.environ.get('AME_FORCE_RENDERER','libmetalgldrv.dylib'), 'MGL_LOG': os.environ.get('MGL_LOG','2')}))" "$PROFILE_NAME")
+ENV_JSON=$(python3 -c "import json,os,sys; print(json.dumps({'AME_AUTOLAUNCH_PROFILE': sys.argv[1], 'AME_FORCE_RENDERER': os.environ.get('AME_FORCE_RENDERER','libmetalgldrv.dylib'), 'MGL_LOG': os.environ.get('MGL_LOG','2'), 'MGL_LOG_FILE': 'documents'}))" "$PROFILE_NAME")
 echo "== launching $BUNDLE suspended ($PROFILE_NAME)"
 xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --start-stopped \
     --environment-variables "$ENV_JSON" --json-output "$OUT/launch.json" "$BUNDLE" >/dev/null || exit 1
 PID=$(python3 -c "import json; d=json.load(open('$OUT/launch.json')); print(d['result']['process']['processIdentifier'])")
 echo "== pid $PID; attaching lldb (JIT handler)"
-xcrun lldb --batch -o "command script import $HERE/jit_lldb.py" -o "device select $DEVICE" \
-    -o "device process attach --pid $PID" -o "jit_loop" > "$OUT/lldb.log" 2>&1 &
+PYTHONPATH="$(xcrun lldb -P)" /Applications/Xcode.app/Contents/Developer/usr/bin/python3 -u "$HERE/jit_lldb.py" "$DEVICE" "$PID" > "$OUT/lldb.log" 2>&1 &
 LLDB=$!
 sleep "$SECONDS_TO_RUN"
 echo "== collecting logs"
@@ -30,4 +29,7 @@ if [ "${KEEP_RUNNING:-0}" != 1 ]; then
     xcrun devicectl device process terminate --device "$DEVICE" --pid "$PID" >/dev/null 2>&1
 fi
 echo "== logs in $OUT (latestlog.txt, lldb.log)"
+xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BUNDLE" \
+    --source Documents/latestlog.old.txt --destination "$OUT/latestlog.old.txt" >/dev/null 2>&1
+xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BUNDLE" --source Documents/metalgldrv.log --destination "$OUT/metalgldrv.log" >/dev/null 2>&1
 grep -E "metalgldrv|EGLBridge|RENDERER|Exception|Error|FATAL|crash" "$OUT/latestlog.txt" | head -60
