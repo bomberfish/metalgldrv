@@ -303,6 +303,8 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                     view = t->mtl;
                 } else {
                     MTLTextureType vt = mtlTextureType(s.textureTarget, t->samples);
+                    // imageCube / imageCubeArray are declared as texture2d_array in MSL.
+                    if (vt == MTLTextureTypeCube || vt == MTLTextureTypeCubeArray) vt = MTLTextureType2DArray;
                     NSUInteger slices = t->mtl.arrayLength * (t->mtl.textureType == MTLTextureTypeCube || t->mtl.textureType == MTLTextureTypeCubeArray ? 6 : 1);
                     NSRange sr = NSMakeRange(0, slices);
                     if (!iu.layered && (t->mtl.textureType == MTLTextureType2DArray || t->mtl.textureType == MTLTextureTypeCube ||
@@ -348,6 +350,7 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     s->alphaRef = 0;
     s->alphaFunc = GL_ALWAYS;
     s->minSampleShading = ctx->sampleShading ? ctx->minSampleShading : 0;
+    s->renderTargetHeight = (float)ctx->curPass.height;
     memcpy(s->currentAttrib, ctx->currentAttrib, sizeof(float) * 4 * kMaxVertexAttribs);
     return sa.gpu;
 }
@@ -367,7 +370,8 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
             int loc = a.location + k;
             if (loc >= kMaxVertexAttribs) break;
             VertexAttribKey& ak = key.attribs[loc];
-            const VertexAttrib* va = vao ? &vao->attribs[loc] : nullptr;
+            // dvec3/dvec4 span two locations but are specified through the first one.
+            const VertexAttrib* va = vao ? &vao->attribs[ts.base == BaseType::Double ? a.location : loc] : nullptr;
             bool enabled = va && va->enabled;
             if (enabled) {
                 const VertexBinding& vb = vao->bindings[va->binding];
@@ -381,9 +385,25 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                     // Unnormalized integer data feeding a float input: Metal converts integer formats to float.
                     f = vertexFormatFor(va->type, va->size, false, true);
                 }
-                if (va->type == GL_DOUBLE || va->type == GL_FIXED) {
+                if (va->type == GL_DOUBLE && va->isLong) {
+                    // dvecN arrive as raw bits: double/dvec2 -> uint2/uint4 at `loc`; dvec3/4 span two
+                    // locations (uint4 + uint2/uint4). k indexes the location within the attribute.
+                    int comps = va->size;
+                    int dwords = comps * 2;
+                    int first = k == 0 ? std::min(dwords, 4) : dwords - 4;
+                    f = first == 2 ? MTLVertexFormatUInt2 : first == 4 ? MTLVertexFormatUInt4 : MTLVertexFormatInvalid;
+                    if (k > 0) {
+                        // second location of a dvec3/dvec4: same binding, +16 bytes
+                        ak.format = (uint8_t)f;
+                        ak.bufferIndex = glsl::kBufVertex0 + vao->attribs[a.location].binding;
+                        ak.offset = vao->attribs[a.location].relativeOffset + 16;
+                        bindingUsed |= 1u << vao->attribs[a.location].binding;
+                        continue;
+                    }
+                }
+                if (va->type == GL_FIXED || (va->type == GL_DOUBLE && !va->isLong)) {
                     static bool warned = false;
-                    if (!warned) MGL_WARN("GL_DOUBLE/GL_FIXED vertex attributes not supported yet");
+                    if (!warned) MGL_WARN("GL_FIXED / non-L GL_DOUBLE vertex attributes not supported yet");
                     warned = true;
                     enabled = false;
                 } else if (f == MTLVertexFormatInvalid) {
