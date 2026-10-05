@@ -18,11 +18,20 @@ static os_log_t mglLog() {
 
 void logf(int level, const char* fmt, ...) {
     if (level > g_logLevel) return;
-    char buf[2048];
-    va_list ap;
+    char small[2048];
+    va_list ap, ap2;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_copy(ap2, ap);
+    int n = vsnprintf(small, sizeof small, fmt, ap);
     va_end(ap);
+    std::string big;
+    const char* buf = small;
+    if (n >= (int)sizeof small) {  // long messages (shader dumps) are not truncated
+        big.resize((size_t)n + 1);
+        vsnprintf(big.data(), big.size(), fmt, ap2);
+        buf = big.c_str();
+    }
+    va_end(ap2);
     static const char* tags[] = {"E", "W", "I", "D", "T"};
     fprintf(stderr, "[metalgldrv %s] %s\n", tags[level], buf);
     // METALGLDRV_LOG_FILE=<path> (or "documents" for $HOME/Documents/metalgldrv.log)

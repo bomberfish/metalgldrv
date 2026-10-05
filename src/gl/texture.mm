@@ -122,7 +122,11 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
     td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
     MTLTextureUsage usage = MTLTextureUsageShaderRead;
     if (fmt->renderable) usage |= MTLTextureUsageRenderTarget;
-    if (t->needsShaderWrite) usage |= MTLTextureUsageShaderWrite | MTLTextureUsageShaderAtomic;
+    if (t->needsShaderWrite) {
+        usage |= MTLTextureUsageShaderWrite;
+        // Metal allows texture atomics only on 32-bit integer single-channel formats.
+        if (fmt->mtl == MTLPixelFormatR32Uint || fmt->mtl == MTLPixelFormatR32Sint) usage |= MTLTextureUsageShaderAtomic;
+    }
     if (fmt->srgb || t->needsFormatView || fmt->kind == FmtKind::DepthStencil) usage |= MTLTextureUsagePixelFormatView;
     td.usage = usage;
     id<MTLTexture> nt = [ctx->dev->mtl newTextureWithDescriptor:td];

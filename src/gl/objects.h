@@ -277,6 +277,7 @@ public:
     bool compiled = false;
     std::string infoLog;
     std::shared_ptr<const glsl::Shader> shader;
+    int attachCount = 0;  // programs this shader is attached to (deletion is deferred until 0)
     // SPIR-V (ARB_gl_spirv) not supported; binary shaders rejected.
 };
 

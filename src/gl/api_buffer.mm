@@ -160,7 +160,11 @@ API void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
     MGL_CTX();
     Ref<Buffer>* r = ctx->bufferBindingRef(target);
     if (!r) {
-        if (target == GL_ELEMENT_ARRAY_BUFFER) return ctx->setError(GL_INVALID_OPERATION, "no VAO bound");
+        if (target == GL_ELEMENT_ARRAY_BUFFER) {
+            // No VAO: nothing stores the binding, but the name is still validated (Mesa/NVIDIA behavior).
+            bufferForBind(ctx, buffer);
+            return;
+        }
         return ctx->setError(GL_INVALID_ENUM);
     }
     Buffer* b = bufferForBind(ctx, buffer);

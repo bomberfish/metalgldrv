@@ -1,6 +1,7 @@
 // Draw calls, compute dispatch, memory barriers.
 #import "gl/texture.h"
 #include <cmath>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include "gl/gltypes.h"
@@ -1296,6 +1297,25 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         if (ctx->rasterizerDiscard) return;
     }
     if (ctx->rasterizerDiscard) return;
+    if (envFlag("METALGLDRV_DUMP_LAYOUT")) {
+        // One line per (program, layout) for diagnosing vertex input issues in the field.
+        static std::set<std::string> seen;
+        std::string desc;
+        for (const auto& a : prog->refl.attributes) {
+            char buf[256];
+            if (a.location < 0 || a.location >= kMaxVertexAttribs) continue;
+            const VertexAttrib& va = ctx->vao->attribs[a.location];
+            const VertexBinding& vb = ctx->vao->bindings[va.binding];
+            snprintf(buf, sizeof buf, " %s@%d(t%x)=%s[%x x%d n%d i%d off%u b%u stride%d boff%lld div%u]", a.name.c_str(), a.location, a.type,
+                     va.enabled ? "on" : "off", va.type, va.size, va.normalized, va.integer, va.relativeOffset, va.binding, vb.stride,
+                     (long long)vb.offset, vb.divisor);
+            desc += buf;
+        }
+        std::string k = std::to_string(prog->name) + desc;
+        if (seen.insert(k).second)
+            MGL_INFO("layout prog %u mode %x indexed %d type %x flat %d:%s", prog->name, d.mode, d.indexed, d.indexType,
+                     refl.usesFlatShading, desc.c_str());
+    }
     vk.manualFetch = wantManualFetch(ctx);
     if (vk.manualFetch) fillVertexFetch(ctx, prog, vk);
     else vk.attribSignFlip = attribSignFlip(ctx, prog);

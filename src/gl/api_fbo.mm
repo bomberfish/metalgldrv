@@ -730,9 +730,10 @@ id<MTLTexture> readAttachmentTexture(Context* ctx, Framebuffer* fb, const Format
     return t;
 }
 
-static id<MTLTexture> readDepthStencilTexture(Context* ctx, Framebuffer* fb, bool stencil, const FormatInfo** f, int* level, int* slice) {
+id<MTLTexture> readDepthStencilTexture(Context* ctx, Framebuffer* fb, bool stencil, const FormatInfo** f, int* level, int* slice) {
     *level = 0;
     *slice = 0;
+    if (!fb) return nil;
     if (fb->isDefault) {
         Surface* s = fb->surface;
         if (!s || !s->depthStencil) return nil;

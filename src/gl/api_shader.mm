@@ -102,9 +102,9 @@ API GLuint APIENTRY glCreateShader(GLenum type) {
     return n;
 }
 
+// A shader flagged for deletion keeps its name until it is no longer attached anywhere.
 static void maybeFreeShader(Context* ctx, ShaderObj* s) {
-    if (!s->deleted) return;
-    // Still attached somewhere? The Ref from ProgramObj::attached keeps it alive anyway.
+    if (s->deleted && s->attachCount <= 0 && ctx->share->shaderPrograms.get(s->name) == s) ctx->share->shaderPrograms.remove(s->name);
 }
 
 API void APIENTRY glDeleteShader(GLuint shader) {
@@ -113,8 +113,8 @@ API void APIENTRY glDeleteShader(GLuint shader) {
     std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
     ShaderObj* s = getShader(ctx, shader);
     if (!s) return;
-    Ref<Object> keep = ctx->share->shaderPrograms.remove(shader);
-    (void)keep;
+    s->deleted = true;
+    maybeFreeShader(ctx, s);
 }
 
 API GLboolean APIENTRY glIsShader(GLuint shader) {
@@ -253,6 +253,13 @@ API void APIENTRY glDeleteProgram(GLuint program) {
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
     // A program in use stays alive via ctx->program until unbound.
+    if (ctx->program.get() != p) {
+        for (auto& a : p->attached) {
+            a->attachCount--;
+            maybeFreeShader(ctx, a.get());
+        }
+        p->attached.clear();
+    }
     ctx->share->shaderPrograms.remove(program);
 }
 
@@ -271,6 +278,7 @@ API void APIENTRY glAttachShader(GLuint program, GLuint shader) {
         if (a->type == s->type && s->type != GL_NONE && false) return ctx->setError(GL_INVALID_OPERATION);
     }
     p->attached.push_back(s);
+    s->attachCount++;
 }
 
 API void APIENTRY glDetachShader(GLuint program, GLuint shader) {
@@ -280,7 +288,10 @@ API void APIENTRY glDetachShader(GLuint program, GLuint shader) {
     Object* o = ctx->share->shaderPrograms.get(shader);
     for (auto it = p->attached.begin(); it != p->attached.end(); ++it) {
         if (it->get()->name == shader) {
+            Ref<ShaderObj> s = *it;
             p->attached.erase(it);
+            s->attachCount--;
+            maybeFreeShader(ctx, s.get());
             return;
         }
     }
@@ -378,6 +389,18 @@ API void APIENTRY glLinkProgram(GLuint program) {
         return;
     }
     p->linked = true;
+    // METALGLDRV_DUMP_GLSL=<substring>: log the sources of linked programs containing it.
+    if (const char* dump = getenv("METALGLDRV_DUMP_GLSL")) {
+        std::string all;
+        for (auto& sh : p->attached)
+            for (auto& src : sh->sources) all += src;
+        if (all.find(dump) != std::string::npos)
+            for (auto& sh : p->attached) {
+                std::string src;
+                for (auto& part : sh->sources) src += part;
+                MGL_INFO("program %u shader type %x GLSL:\n%s", p->name, sh->type, src.c_str());
+            }
+    }
     p->program = r.program;
     p->refl = std::move(r.reflection);
     setupLinkedProgram(p);

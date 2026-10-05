@@ -501,7 +501,8 @@ static void texStorageMS(Context* ctx, Texture* t, GLsizei samples, GLenum inter
     if (samples < 1 || w < 1 || h < 1 || d < 1) return ctx->setError(GL_INVALID_VALUE);
     if (samples > 4) return ctx->setError(GL_INVALID_OPERATION);
     if (t->immutable) return ctx->setError(GL_INVALID_OPERATION);
-    int s = samples <= 1 ? 1 : samples <= 2 ? 2 : 4;
+    // Metal multisample textures need >= 2 samples; GL allows rounding the count up.
+    int s = samples <= 2 && [ctx->dev->mtl supportsTextureSampleCount:2] ? 2 : 4;
     t->samples = s;
     t->fixedSampleLocations = fixed;
     TexImageLevel& L = t->levels[0][0];
@@ -1142,15 +1143,20 @@ API void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void* img)
 
 // --- copies from the framebuffer ---
 id<MTLTexture> readAttachmentTexture(Context* ctx, Framebuffer* fb, const FormatInfo** f, int* level, int* slice);  // api_fbo.mm
+id<MTLTexture> readDepthStencilTexture(Context* ctx, Framebuffer* fb, bool stencil, const FormatInfo** f, int* level, int* slice);
 
 static void copyTexSubImage(Context* ctx, Texture* t, GLenum target, GLint level, int dx, int dy, int dz, int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
     Framebuffer* fb = ctx->readFb.get();
-    const FormatInfo* sf;
-    int slevel, sslice;
-    id<MTLTexture> src = readAttachmentTexture(ctx, fb, &sf, &slevel, &sslice);
-    if (!src) return ctx->setError(GL_INVALID_OPERATION, "no read buffer");
     if (!ensureTextureStorage(ctx, t)) return;
+    // Depth/stencil destinations copy from the read framebuffer's depth/stencil buffer.
+    const FormatInfo* tf = formatInfoForMTL(t->mtl.pixelFormat);
+    bool depthDst = tf && isDepthOrStencil(tf);
+    const FormatInfo* sf = nullptr;
+    int slevel, sslice;
+    id<MTLTexture> src = depthDst ? readDepthStencilTexture(ctx, fb, tf->kind == FmtKind::Stencil, &sf, &slevel, &sslice)
+                                  : readAttachmentTexture(ctx, fb, &sf, &slevel, &sslice);
+    if (!src) return ctx->setError(GL_INVALID_OPERATION, "no read buffer");
     int face = faceIndex(target);
     int dstSlice = face;
     if (t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) dstSlice = dz;

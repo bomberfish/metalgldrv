@@ -2,6 +2,7 @@
 #include <atomic>
 #include "gl/context.h"
 #include "util/log.h"
+#include "util/stats.h"
 
 namespace mgl {
 
@@ -21,11 +22,20 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     h = hashBytes(&key.rasterDiscard, 1, h);
     h = hashBytes(&key.attribSignFlip, sizeof key.attribSignFlip, h);
     h = hashBytes(&key.manualFetch, 1, h);
-    if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch)
-        h = hashBytes(key.attribs, sizeof key.attribs, h);
+    if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch) {
+        // Field by field: VertexFetch has padding bytes with indeterminate contents.
+        for (const glsl::VertexFetch& f : key.attribs) {
+            uint64_t packed[2] = {(uint64_t)f.enabled | (uint64_t)f.normalized << 1 | (uint64_t)f.integer << 2 | (uint64_t)f.isDouble << 3 |
+                                      (uint64_t)f.size << 8 | (uint64_t)f.binding << 16 | (uint64_t)f.glType << 32,
+                                  f.relativeOffset};
+            if (!f.enabled) packed[0] = packed[1] = 0;
+            h = hashBytes(packed, sizeof packed, h);
+        }
+    }
     auto it = prog->variants.find(h);
     if (it != prog->variants.end()) return it->second.get();
     auto v = std::make_shared<ProgramVariant>();
+    MGL_STAT("variant-compile");
     static std::atomic<uint64_t> nextUid{1};
     v->uid = nextUid++;
     v->manualFetch = key.manualFetch;
@@ -45,7 +55,11 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
                             v->msl.source.c_str());
             } else {
                 v->ok = true;
-                if (envFlag("METALGLDRV_DUMP_MSL")) MGL_INFO("program %u MSL:\n%s", prog->name, v->msl.source.c_str());
+                // METALGLDRV_DUMP_MSL=1 dumps every variant; any other value dumps variants whose MSL contains it.
+                static const char* dumpMsl = getenv("METALGLDRV_DUMP_MSL");
+                if (dumpMsl && *dumpMsl && strcmp(dumpMsl, "0") &&
+                    (!strcmp(dumpMsl, "1") || v->msl.source.find(dumpMsl) != std::string::npos))
+                    MGL_INFO("program %u MSL:\n%s", prog->name, v->msl.source.c_str());
             }
         }
     }
@@ -148,6 +162,7 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
         c.writeMask = m;
     }
     NSError* err = nil;
+    MGL_STAT("render-pipeline-create");
     id<MTLRenderPipelineState> pso = [ctx_->dev->compiler newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:nil error:&err];
     if (!pso) MGL_ERR("render pipeline creation failed: %s", err.localizedDescription.UTF8String);
     render_[k] = pso;
