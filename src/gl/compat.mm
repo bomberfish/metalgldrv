@@ -7,3 +7,4 @@ using namespace mgl;
 bool mglCompatCap(Context* ctx, GLenum cap, bool v) { return false; }
 bool mglCompatIsEnabled(Context* ctx, GLenum cap, bool* out) { return false; }
 bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat) { return false; }
+void mglCompatPrepareDraw(Context* ctx, ProgramObj* prog) {}

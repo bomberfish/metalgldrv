@@ -322,10 +322,12 @@ public:
     bool everActive = false;
     uint64_t result = 0;
     bool resultAvailable = true;
-    uint64_t serial = 0;  // command buffer whose completion makes result available
-    id<MTLBuffer> resultBuffer = nil;  // GPU results (visibility, timestamps)
+    uint64_t serial = 0;       // command buffer whose completion makes result available
+    uint64_t beginSerial = 0;  // timer queries: first command buffer measured
+    uint32_t index = 0;        // indexed queries (stream / xfb buffer)
+    id<MTLBuffer> resultBuffer = nil;  // occlusion: visibility result buffer
     uint32_t resultOffset = 0;
-    std::vector<std::pair<id<MTLBuffer>, uint32_t>> segments;  // occlusion results across render passes
+    uint64_t cpuCount = 0;     // primitive queries counted on the CPU
 };
 
 class SyncObj : public RefCounted {

@@ -507,6 +507,8 @@ void Context::beginPass() {
         rp.visibilityResultBuffer = visibilityBuffer;
         rp.visibilityResultType = MTLVisibilityResultTypeAccumulate;
     }
+    passVisibilityBuffer = visibilityBuffer;
+    encVisibilityOffset = -2;
     if (computeEnc) {
         [computeEnc endEncoding];
         computeEnc = nil;

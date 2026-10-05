@@ -65,15 +65,28 @@ uint64_t Device::reserveSerial() {
     return nextSerial_++;
 }
 
+bool Device::gpuTimes(uint64_t serial, double* start, double* end) {
+    std::lock_guard<std::mutex> g(mutex_);
+    auto it = gpuTimes_.find(serial);
+    if (it == gpuTimes_.end()) return false;
+    *start = it->second.first;
+    *end = it->second.second;
+    return true;
+}
+
 bool Device::isComplete(uint64_t serial) {
     std::lock_guard<std::mutex> g(mutex_);
     return isCompleteLocked(serial);
 }
 
-void Device::markComplete(uint64_t serial, NSError* error) {
+void Device::markComplete(uint64_t serial, NSError* error, double gpuStart, double gpuEnd) {
     if (error) MGL_ERR("GPU command buffer %llu failed: %s", (unsigned long long)serial, error.description.UTF8String);
     {
         std::lock_guard<std::mutex> g(mutex_);
+        if (gpuEnd > 0) {
+            gpuTimes_[serial] = {gpuStart, gpuEnd};
+            while (gpuTimes_.size() > 4096) gpuTimes_.erase(gpuTimes_.begin());
+        }
         submitted_.erase(serial);
         completedAbove_.insert(serial);
         while (!completedAbove_.empty() && *completedAbove_.begin() == watermark_ + 1) {
@@ -126,7 +139,7 @@ void Device::submit(id<MTL4CommandBuffer> cb, id<MTL4CommandAllocator> alloc, ui
                     id<CAMetalDrawable> drawable) {
     MTL4CommitOptions* opts = [MTL4CommitOptions new];
     [opts addFeedbackHandler:^(id<MTL4CommitFeedback> fb) {
-        this->markComplete(serial, fb.error);
+        this->markComplete(serial, fb.error, fb.GPUStartTime, fb.GPUEndTime);
     }];
     std::lock_guard<std::mutex> g(mutex_);
     if (residencyDirty_) {

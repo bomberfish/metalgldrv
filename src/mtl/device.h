@@ -6,6 +6,7 @@
 #include <deque>
 #include <condition_variable>
 #include <mutex>
+#include <map>
 #include <set>
 #include <vector>
 
@@ -39,6 +40,8 @@ public:
     bool isComplete(uint64_t serial);
     void waitFor(uint64_t serial);
     void waitIdle();
+    // GPU execution interval (host time, seconds) of a completed serial; false if unknown.
+    bool gpuTimes(uint64_t serial, double* start, double* end);
     // A reserved serial whose command buffer was never submitted.
     void abandonSerial(uint64_t serial) { markComplete(serial, nil); }
 
@@ -68,7 +71,8 @@ private:
     Device() = default;
     bool init();
 
-    void markComplete(uint64_t serial, NSError* error);
+    void markComplete(uint64_t serial, NSError* error, double gpuStart = 0, double gpuEnd = 0);
+    std::map<uint64_t, std::pair<double, double>> gpuTimes_;
 
     std::mutex mutex_;
     std::condition_variable cv_;

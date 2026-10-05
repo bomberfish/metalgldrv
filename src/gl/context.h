@@ -279,6 +279,9 @@ public:
     // Visibility (occlusion query) buffer for the current pass
     id<MTLBuffer> visibilityBuffer = nil;
     uint32_t visibilityNext = 0;
+    id<MTLBuffer> passVisibilityBuffer = nil;  // buffer attached to the open pass
+    int64_t encVisibilityOffset = -2;           // -1 disabled, -2 unknown
+    bool conditionalPass = true;
 
     bool resolvePass(PassDesc& out);  // builds a pass description from the draw framebuffer
     void beginPass();
