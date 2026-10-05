@@ -31,6 +31,11 @@ file(GLOB_RECURSE DRV_SOURCES CONFIGURE_DEPENDS
 add_library(metalgldrv SHARED ${DRV_SOURCES} ${GEN_DIR}/gl_stubs.cpp ${GEN_DIR}/gl_procs.cpp)
 target_include_directories(metalgldrv PRIVATE src ${GEN_DIR} include)
 target_link_libraries(metalgldrv PRIVATE mglsl "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework CoreGraphics")
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  target_link_libraries(metalgldrv PRIVATE "-framework UIKit")
+else()
+  target_link_libraries(metalgldrv PRIVATE "-framework AppKit")
+endif()
 target_compile_options(metalgldrv PRIVATE -fvisibility=hidden -fobjc-arc -Wall -Wno-unused-parameter -Wno-unused-function)
 set_target_properties(metalgldrv PROPERTIES
   OUTPUT_NAME metalgldrv

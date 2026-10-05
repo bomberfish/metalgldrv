@@ -1,1 +1,5 @@
-# Host tests are added as components land.
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS host/*.cpp host/*.mm)
+add_executable(mgltest ${TEST_SOURCES})
+target_include_directories(mgltest PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/gen ${CMAKE_SOURCE_DIR}/tests/host)
+target_link_libraries(mgltest PRIVATE metalgldrv "-framework Foundation")
+set_target_properties(mgltest PROPERTIES BUILD_RPATH "${CMAKE_BINARY_DIR}")

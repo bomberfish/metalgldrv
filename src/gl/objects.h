@@ -1,0 +1,413 @@
+// GL object model.
+#pragma once
+#import <Metal/Metal.h>
+#include <atomic>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include "glapi.h"
+#include "glsl/glsl.h"
+#include "mtl/formats.h"
+
+namespace mgl {
+
+class Context;
+
+// ---------------------------------------------------------------------------
+// Intrusive refcounting
+// ---------------------------------------------------------------------------
+class RefCounted {
+public:
+    virtual ~RefCounted() = default;
+    void ref() { refs_.fetch_add(1, std::memory_order_relaxed); }
+    void unref() {
+        if (refs_.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this;
+    }
+
+private:
+    std::atomic<int> refs_{0};
+};
+
+template <typename T>
+class Ref {
+public:
+    Ref() = default;
+    Ref(T* p) : p_(p) { if (p_) p_->ref(); }
+    Ref(const Ref& o) : p_(o.p_) { if (p_) p_->ref(); }
+    Ref(Ref&& o) noexcept : p_(o.p_) { o.p_ = nullptr; }
+    template <typename U>
+    Ref(const Ref<U>& o) : p_(o.get()) { if (p_) p_->ref(); }
+    ~Ref() { if (p_) p_->unref(); }
+    Ref& operator=(const Ref& o) { Ref(o).swap(*this); return *this; }
+    Ref& operator=(Ref&& o) noexcept { Ref(std::move(o)).swap(*this); return *this; }
+    Ref& operator=(T* p) { Ref(p).swap(*this); return *this; }
+    void swap(Ref& o) noexcept { std::swap(p_, o.p_); }
+    T* get() const { return p_; }
+    T* operator->() const { return p_; }
+    T& operator*() const { return *p_; }
+    explicit operator bool() const { return p_ != nullptr; }
+    bool operator==(const T* p) const { return p_ == p; }
+    bool operator!=(const T* p) const { return p_ != p; }
+    bool operator==(const Ref& o) const { return p_ == o.p_; }
+    bool operator!=(const Ref& o) const { return p_ != o.p_; }
+
+private:
+    T* p_ = nullptr;
+};
+
+// Base for named GL objects.
+class Object : public RefCounted {
+public:
+    GLuint name = 0;
+    std::string label;      // KHR_debug object label
+    bool deleted = false;   // glDelete* called while still bound/attached
+};
+
+// ---------------------------------------------------------------------------
+// Buffers
+// ---------------------------------------------------------------------------
+class Buffer : public Object {
+public:
+    ~Buffer() override;
+    id<MTLBuffer> mtl = nil;     // current storage (may be renamed on orphan/busy writes)
+    uint8_t* cpu = nullptr;      // contents of mtl (shared storage)
+    GLsizeiptr size = 0;
+    GLenum usage = GL_STATIC_DRAW;
+    GLbitfield storageFlags = 0;  // glBufferStorage flags (0 = mutable)
+    bool immutable = false;
+    uint64_t lastUse = 0;         // serial of last command buffer referencing mtl
+    uint64_t lastGpuWrite = 0;    // serial of last GPU write (SSBO/xfb/copy) for read-back sync
+    // mapping
+    bool mapped = false;
+    GLbitfield mapAccess = 0;
+    GLintptr mapOffset = 0;
+    GLsizeiptr mapLength = 0;
+    void* mapPointer = nullptr;
+    uint8_t* mapShadow = nullptr;   // staging for non-persistent writes to busy buffers
+    // texture buffer views referencing this buffer get invalidated on rename
+    uint32_t generation = 0;
+
+    uint64_t gpuAddress() const { return mtl ? mtl.gpuAddress : 0; }
+};
+
+// ---------------------------------------------------------------------------
+// Samplers
+// ---------------------------------------------------------------------------
+struct SamplerState {
+    GLenum minFilter = GL_NEAREST_MIPMAP_LINEAR, magFilter = GL_LINEAR;
+    GLenum wrapS = GL_REPEAT, wrapT = GL_REPEAT, wrapR = GL_REPEAT;
+    float minLod = -1000, maxLod = 1000, lodBias = 0;
+    GLenum compareMode = GL_NONE, compareFunc = GL_LEQUAL;
+    float maxAnisotropy = 1;
+    float borderColor[4] = {0, 0, 0, 0};
+    bool borderIsInt = false;
+    bool seamless = true;
+    bool operator==(const SamplerState& o) const;
+};
+
+class Sampler : public Object {
+public:
+    SamplerState state;
+};
+
+// ---------------------------------------------------------------------------
+// Textures
+// ---------------------------------------------------------------------------
+struct TexImageLevel {
+    int width = 0, height = 0, depth = 0;  // depth = layers for arrays, 6 for cube faces stored per face
+    GLenum internalFormat = 0;            // as specified by the app (for queries)
+    const FormatInfo* fmt = nullptr;
+    bool defined() const { return fmt != nullptr; }
+};
+
+class Texture : public Object {
+public:
+    ~Texture() override;
+    GLenum target = 0;
+    // Per-level image specification (faces of cube maps share the per-level
+    // description; cube faces are slices 0..5 in Metal).
+    static constexpr int kMaxLevels = 16;
+    TexImageLevel levels[6][kMaxLevels];  // [face][level]
+    bool immutable = false;
+    int immutableLevels = 0;
+    int samples = 0;
+    bool fixedSampleLocations = true;
+
+    // Texture parameters
+    SamplerState sampler;
+    int baseLevel = 0, maxLevel = 1000;
+    GLenum swizzle[4] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
+    GLenum depthStencilMode = GL_DEPTH_COMPONENT;
+    GLenum srgbDecode = GL_DECODE_EXT;
+    bool generateMipmapHint = false;  // GL_GENERATE_MIPMAP (compat)
+
+    // Texture views (ARB_texture_view)
+    Ref<Texture> viewParent;
+    int viewMinLevel = 0, viewNumLevels = 0, viewMinLayer = 0, viewNumLayers = 0;
+
+    // Buffer textures
+    Ref<Buffer> buffer;
+    GLenum bufferFormat = 0;
+    GLintptr bufferOffset = 0;
+    GLsizeiptr bufferSize = -1;
+    uint32_t bufferGeneration = 0;
+
+    // Metal storage. Allocated lazily when the texture is first used
+    // (images may be specified level by level).
+    id<MTLTexture> mtl = nil;
+    const FormatInfo* storageFmt = nullptr;
+    int storageLevels = 0, storageW = 0, storageH = 0, storageD = 0, storageLayers = 0;
+    bool storageDirty = true;  // level specs changed -> (re)allocate and migrate
+    bool needsShaderWrite = false;  // bound as an image -> storage needs ShaderWrite usage
+    bool needsFormatView = false;   // reinterpreted by a texture view
+    uint64_t lastUse = 0;
+    uint64_t lastGpuWrite = 0;
+
+    // Cached sampling views keyed by (base,max level, swizzle, format, ds mode)
+    struct ViewKey {
+        uint64_t a, b;
+        bool operator==(const ViewKey& o) const { return a == o.a && b == o.b; }
+    };
+    struct ViewKeyHash {
+        size_t operator()(const ViewKey& k) const { return std::hash<uint64_t>()(k.a * 31 + k.b); }
+    };
+    std::unordered_map<ViewKey, id<MTLTexture>, ViewKeyHash> views;
+
+    const TexImageLevel& level(int l, int face = 0) const { return levels[face][l]; }
+    const TexImageLevel& baseImage() const { return levels[0][std::min(std::max(baseLevel, 0), kMaxLevels - 1)]; }
+    bool isCube() const { return target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_CUBE_MAP_ARRAY; }
+    int faces() const { return target == GL_TEXTURE_CUBE_MAP ? 6 : 1; }
+};
+
+// ---------------------------------------------------------------------------
+// Renderbuffers
+// ---------------------------------------------------------------------------
+class Renderbuffer : public Object {
+public:
+    ~Renderbuffer() override;
+    GLenum internalFormat = GL_RGBA4;
+    const FormatInfo* fmt = nullptr;
+    int width = 0, height = 0, samples = 0;
+    id<MTLTexture> mtl = nil;
+    uint64_t lastUse = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Framebuffers
+// ---------------------------------------------------------------------------
+struct Attachment {
+    GLenum type = GL_NONE;  // GL_NONE, GL_TEXTURE, GL_RENDERBUFFER, GL_FRAMEBUFFER_DEFAULT
+    Ref<Texture> tex;
+    Ref<Renderbuffer> rb;
+    int level = 0;
+    int layer = 0;          // layer / cube face (cube: face index), -1 = layered
+    bool layered = false;
+    bool operator==(const Attachment& o) const {
+        return type == o.type && tex.get() == o.tex.get() && rb.get() == o.rb.get() && level == o.level && layer == o.layer &&
+               layered == o.layered;
+    }
+};
+
+enum { kMaxDrawBuffers = 8, kAttDepth = 8, kAttStencil = 9, kNumAttachments = 10 };
+
+class Framebuffer : public Object {
+public:
+    Attachment att[kNumAttachments];  // color 0..7, depth, stencil
+    GLenum drawBuffers[kMaxDrawBuffers] = {GL_COLOR_ATTACHMENT0, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE};
+    GLenum readBuffer = GL_COLOR_ATTACHMENT0;
+    // default framebuffer parameters (ARB_framebuffer_no_attachments)
+    int defaultWidth = 0, defaultHeight = 0, defaultLayers = 0, defaultSamples = 0;
+    bool defaultFixedSampleLocations = false;
+    uint32_t version = 1;  // bumped on any attachment change
+    bool isDefault = false;
+    class Surface* surface = nullptr;  // default framebuffer only
+};
+
+// ---------------------------------------------------------------------------
+// Vertex arrays
+// ---------------------------------------------------------------------------
+struct VertexAttrib {
+    bool enabled = false;
+    GLint size = 4;
+    GLenum type = GL_FLOAT;
+    bool normalized = false, integer = false, isLong = false;
+    GLuint relativeOffset = 0;
+    GLuint binding = 0;
+    const void* clientPointer = nullptr;  // compat: client-side arrays (no buffer bound)
+};
+
+struct VertexBinding {
+    Ref<Buffer> buffer;
+    GLintptr offset = 0;
+    GLsizei stride = 16;
+    GLuint divisor = 0;
+};
+
+enum { kMaxVertexAttribs = 16, kMaxVertexBindings = 16 };
+
+class VertexArray : public Object {
+public:
+    VertexAttrib attribs[kMaxVertexAttribs];
+    VertexBinding bindings[kMaxVertexBindings];
+    Ref<Buffer> elementBuffer;
+    uint32_t version = 1;
+};
+
+// ---------------------------------------------------------------------------
+// Shaders / programs
+// ---------------------------------------------------------------------------
+class ShaderObj : public Object {
+public:
+    GLenum type = 0;
+    std::vector<std::string> sources;
+    bool compiled = false;
+    std::string infoLog;
+    std::shared_ptr<const glsl::Shader> shader;
+    // SPIR-V (ARB_gl_spirv) not supported; binary shaders rejected.
+};
+
+struct PipelineCacheEntry;
+struct ProgramVariant;
+
+class ProgramObj : public Object {
+public:
+    ~ProgramObj() override;
+    std::vector<Ref<ShaderObj>> attached;
+    std::map<std::string, int> attribBindings, fragDataBindings, fragDataIndices;
+    std::vector<std::string> xfbVaryings;
+    GLenum xfbBufferMode = GL_INTERLEAVED_ATTRIBS;
+    bool separable = false, retrievableHint = false;
+
+    // link results
+    bool linked = false, validated = false;
+    uint32_t linkGeneration = 0;
+    std::string infoLog;
+    std::shared_ptr<const glsl::LinkedProgram> program;
+    glsl::Reflection refl;
+
+    // default uniform block storage (MSL layout as reported by reflection)
+    std::vector<uint8_t> uniformData;
+    uint32_t uniformVersion = 1;
+    // location -> (uniform index, array element)
+    struct Loc { int uniform; int element; };
+    std::vector<Loc> locations;
+    // current values of sampler/image uniforms (texture unit per element)
+    std::vector<int> samplerUnits;  // indexed by slot
+    std::vector<int> blockBindings; // uniform block index -> binding point
+    std::vector<int> storageBindings;
+
+    // compiled pipeline variants
+    std::unordered_map<uint64_t, std::shared_ptr<ProgramVariant>> variants;
+};
+
+class ProgramPipelineObj : public Object {
+public:
+    Ref<ProgramObj> stages[(int)glsl::Stage::Count];
+    Ref<ProgramObj> activeProgram;
+    bool validated = false;
+    std::string infoLog;
+};
+
+// ---------------------------------------------------------------------------
+// Queries / sync / transform feedback
+// ---------------------------------------------------------------------------
+class Query : public Object {
+public:
+    GLenum target = 0;
+    bool active = false;
+    bool everActive = false;
+    uint64_t result = 0;
+    bool resultAvailable = true;
+    uint64_t serial = 0;  // command buffer whose completion makes result available
+    id<MTLBuffer> resultBuffer = nil;  // GPU results (visibility, timestamps)
+    uint32_t resultOffset = 0;
+    std::vector<std::pair<id<MTLBuffer>, uint32_t>> segments;  // occlusion results across render passes
+};
+
+class SyncObj : public RefCounted {
+public:
+    uint64_t serial = 0;
+    bool signaled() const;
+};
+
+class TransformFeedbackObj : public Object {
+public:
+    struct BufBinding {
+        Ref<Buffer> buffer;
+        GLintptr offset = 0;
+        GLsizeiptr size = 0;
+    };
+    BufBinding buffers[4];
+    bool active = false, paused = false;
+    GLenum primitiveMode = 0;
+    Ref<ProgramObj> program;
+    uint32_t written[4] = {};  // vertices captured per stream (for DrawTransformFeedback)
+    uint64_t verticesWritten = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Name spaces
+// ---------------------------------------------------------------------------
+template <typename T>
+class NameSpace {
+public:
+    GLuint genName() {
+        while (objects_.count(next_) || reserved_.count(next_)) next_++;
+        reserved_.insert({next_, true});
+        return next_++;
+    }
+    T* get(GLuint name) const {
+        auto it = objects_.find(name);
+        return it == objects_.end() ? nullptr : it->second.get();
+    }
+    bool isName(GLuint name) const { return objects_.count(name) || reserved_.count(name); }
+    bool isReservedOnly(GLuint name) const { return reserved_.count(name) && !objects_.count(name); }
+    T* create(GLuint name, T* obj) {
+        obj->name = name;
+        reserved_.erase(name);
+        objects_[name] = Ref<T>(obj);
+        return obj;
+    }
+    void reserve(GLuint name) {
+        if (!objects_.count(name)) reserved_[name] = true;
+    }
+    Ref<T> remove(GLuint name) {
+        reserved_.erase(name);
+        auto it = objects_.find(name);
+        if (it == objects_.end()) return Ref<T>();
+        Ref<T> r = it->second;
+        objects_.erase(it);
+        if (r) r->deleted = true;
+        return r;
+    }
+    template <typename F>
+    void forEach(F f) {
+        for (auto& [n, o] : objects_) f(o.get());
+    }
+
+private:
+    std::unordered_map<GLuint, Ref<T>> objects_;
+    std::unordered_map<GLuint, bool> reserved_;
+    GLuint next_ = 1;
+};
+
+// Objects shared between contexts.
+class ShareGroup : public RefCounted {
+public:
+    std::recursive_mutex mutex;
+    NameSpace<Buffer> buffers;
+    NameSpace<Texture> textures;
+    NameSpace<Renderbuffer> renderbuffers;
+    NameSpace<Sampler> samplers;
+    NameSpace<Object> shaderPrograms;  // ShaderObj or ProgramObj share one namespace
+    std::unordered_map<SyncObj*, Ref<SyncObj>> syncs;
+    // Display lists (compat) live here too in the future.
+    ShaderObj* shader(GLuint n) { return dynamic_cast<ShaderObj*>(shaderPrograms.get(n)); }
+    ProgramObj* program(GLuint n) { return dynamic_cast<ProgramObj*>(shaderPrograms.get(n)); }
+};
+
+}  // namespace mgl
