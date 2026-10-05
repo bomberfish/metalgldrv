@@ -49,7 +49,7 @@ GLuint compileProgram(const char* vs, const char* fs, std::string* log) {
     return p;
 }
 
-int main(int argc, char** argv) {
+int mglRunTests(int argc, char** argv) {
     EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (!eglInitialize(dpy, nullptr, nullptr)) {
         fprintf(stderr, "eglInitialize failed\n");
