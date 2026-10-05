@@ -1,4 +1,8 @@
 #import "gl/context.h"
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+#endif
 #include <cstdarg>
 #include "gl/internal_shaders.h"
 #include "gl/pipeline.h"
@@ -599,9 +603,26 @@ void Surface::syncSizeFromLayer() {
         CGSize d = layer.drawableSize;
         w = (int)d.width;
         h = (int)d.height;
-    } else if ((int)layer.drawableSize.width != w || (int)layer.drawableSize.height != h) {
-        layer.drawableSize = CGSizeMake(w, h);
     }
+    // Drawable size: the render size, or the native size when upscaling with MetalFX.
+    int ow = w, oh = h;
+    static const bool upscale = [] {
+        const char* u = getenv("MGL_UPSCALER");
+        return u && (strcasecmp(u, "metalfx") == 0 || strcasecmp(u, "spatial") == 0);
+    }();
+    if (upscale && b.width > 0) {
+#if TARGET_OS_IPHONE
+        CGFloat native = UIScreen.mainScreen.scale;
+#else
+        CGFloat native = 2.0;
+#endif
+        ow = std::max(w, (int)lround(b.width * native));
+        oh = std::max(h, (int)lround(b.height * native));
+    }
+    if (ow > 0 && oh > 0 && ((int)layer.drawableSize.width != ow || (int)layer.drawableSize.height != oh))
+        layer.drawableSize = CGSizeMake(ow, oh);
+    outWidth = ow;
+    outHeight = oh;
     resize(w, h);
 }
 

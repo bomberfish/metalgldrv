@@ -1,4 +1,5 @@
 #import "gl/internal_shaders.h"
+#import <MetalFX/MetalFX.h>
 #include <string>
 #include <unordered_map>
 #include "util/log.h"
@@ -168,10 +169,61 @@ struct QuadArgsCPU {
     uint32_t pad;
 };
 
+// Upscales the surface color image to the drawable size with MetalFX (spatial).
+static id<MTLTexture> metalfxUpscale(Context* ctx, Surface* s, int outW, int outH) {
+    if (![MTLFXSpatialScalerDescriptor supportsMetal4FX:ctx->dev->mtl]) return nil;
+    id<MTL4FXSpatialScaler> scaler = s->upscaler;
+    if (!scaler || scaler.inputWidth != (NSUInteger)s->width || scaler.inputHeight != (NSUInteger)s->height ||
+        scaler.outputWidth != (NSUInteger)outW || scaler.outputHeight != (NSUInteger)outH) {
+        MTLFXSpatialScalerDescriptor* d = [MTLFXSpatialScalerDescriptor new];
+        d.colorTextureFormat = s->color.pixelFormat;
+        d.outputTextureFormat = s->color.pixelFormat;
+        d.inputWidth = s->width;
+        d.inputHeight = s->height;
+        d.outputWidth = outW;
+        d.outputHeight = outH;
+        d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+        scaler = [d newSpatialScalerWithDevice:ctx->dev->mtl compiler:ctx->dev->compiler];
+        if (!scaler) {
+            static bool warned = false;
+            if (!warned) MGL_WARN("MetalFX spatial scaler unavailable; using plain scaling");
+            warned = true;
+            return nil;
+        }
+        if (s->upscaled) ctx->dev->releaseAfter(s->upscaled, s->lastUse);
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:s->color.pixelFormat width:outW height:outH mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = scaler.outputTextureUsage | MTLTextureUsageShaderRead;
+        s->upscaled = [ctx->dev->mtl newTextureWithDescriptor:td];
+        ctx->dev->makeResident(s->upscaled);
+        if (s->upscaler) ctx->dev->retainUntil(s->upscaler, s->lastUse);
+        s->upscaler = scaler;
+        if (!s->upscaleFence) s->upscaleFence = [ctx->dev->mtl newFence];
+        MGL_INFO("MetalFX spatial upscaling %dx%d -> %dx%d", s->width, s->height, outW, outH);
+    }
+    // Order the scaler after all rendering: an empty encoder waits on prior work and signals the fence.
+    ctx->endEncoder();
+    id<MTL4ComputeCommandEncoder> ce = [ctx->commandBuffer() computeCommandEncoder];
+    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    [ce updateFence:s->upscaleFence afterEncoderStages:MTLStageDispatch];
+    [ce endEncoding];
+    scaler.colorTexture = s->color;
+    scaler.outputTexture = s->upscaled;
+    scaler.inputContentWidth = s->width;
+    scaler.inputContentHeight = s->height;
+    scaler.fence = s->upscaleFence;
+    [scaler encodeToCommandBuffer:ctx->commandBuffer()];
+    return s->upscaled;
+}
+
 void presentSurface(Context* ctx, Surface* s, id<CAMetalDrawable> drawable) {
     id<MTLTexture> dst = drawable.texture;
     // Resolve MSAA default framebuffer first.
     ctx->endEncoder();
+    id<MTLTexture> srcTex = s->color;
+    if (s->outWidth > s->width && (int)dst.width == s->outWidth && (int)dst.height == s->outHeight) {
+        if (id<MTLTexture> up = metalfxUpscale(ctx, s, s->outWidth, s->outHeight)) srcTex = up;
+    }
     MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
     rp.colorAttachments[0].texture = dst;
     rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -194,7 +246,7 @@ void presentSurface(Context* ctx, Surface* s, id<CAMetalDrawable> drawable) {
     q.srcRect[0] = 0; q.srcRect[1] = 1; q.srcRect[2] = 1; q.srcRect[3] = 0;
     memcpy(qa.cpu, &q, sizeof q);
     UploadAlloc pa = ctx->upload(8);
-    MTLResourceID rid = s->color.gpuResourceID;
+    MTLResourceID rid = srcTex.gpuResourceID;
     memcpy(pa.cpu, &rid, 8);
     [ctx->renderArgTable setAddress:qa.gpu atIndex:0];
     [ctx->renderArgTable setAddress:pa.gpu atIndex:1];

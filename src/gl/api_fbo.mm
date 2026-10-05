@@ -900,6 +900,17 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
     GLenum st;
     if (!mglFramebufferComplete(ctx, rfb, &st) || !mglFramebufferComplete(ctx, dfb, &st)) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
     if (ctx->rasterizerDiscard) return;
+    if (dfb->isDefault && dfb->surface) {
+        static int logged = 0;
+        static int last[8] = {};
+        int cur[8] = {sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1};
+        if (logged < 30 && memcmp(cur, last, sizeof cur)) {
+            MGL_INFO("blit to default fb: src (%d,%d)-(%d,%d) dst (%d,%d)-(%d,%d) surface %dx%d", sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1,
+                     dfb->surface->width, dfb->surface->height);
+            memcpy(last, cur, sizeof cur);
+            logged++;
+        }
+    }
     ctx->applyClearNow();
     ctx->endEncoder();
     auto blitOne = [&](id<MTLTexture> src, int slevel, int sslice, id<MTLTexture> dst, int dlevel, int dslice, BlitParams::What what, bool linear) {

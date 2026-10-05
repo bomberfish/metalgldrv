@@ -71,6 +71,12 @@ public:
     const FormatInfo* dsFmt = nullptr;
     Ref<Framebuffer> fb;  // the default framebuffer object (name 0)
     uint64_t lastUse = 0;
+    // MGL_UPSCALER=metalfx: the drawable is kept at native resolution and the
+    // rendered image is upscaled with MetalFX's spatial scaler at present time.
+    id upscaler = nil;               // id<MTL4FXSpatialScaler>
+    id<MTLTexture> upscaled = nil;
+    id<MTLFence> upscaleFence = nil;
+    int outWidth = 0, outHeight = 0; // drawable size
     bool resize(int w, int h);  // (re)allocate images; returns true if changed
     void syncSizeFromLayer();
 };
