@@ -2,18 +2,18 @@
 
 Builds [Amethyst-iOS](https://github.com/AngelAuraMC/Amethyst-iOS) (pinned at
 `f98c413`) with `libmetalgldrv.dylib` embedded and selectable as
-**Settings → Renderer → "MetalGL (experimental)"** (also in the per-profile
+**Settings → Renderer → "metalgldrv (experimental)"** (also in the per-profile
 renderer picker). No Amethyst source lives in this repo, only `patches/`.
 
 ## What the patch changes
 
 - `utils.h`: `RENDERER_NAME_METALGL "libmetalgldrv.dylib"`.
 - `LauncherPreferences.m` + `en.lproj/Localizable.strings`: new renderer
-  choice, shown as "MetalGL (experimental)". Other languages fall back to English.
-- `egl_bridge.m`: MetalGL uses the EGL bridge (like ANGLE). `pojavSetWindowHint`
+  choice, shown as "metalgldrv (experimental)". Other languages fall back to English.
+- `egl_bridge.m`: metalgldrv uses the EGL bridge (like ANGLE). `pojavSetWindowHint`
   now records the `GLFW_CONTEXT_VERSION_MAJOR/MINOR`, `GLFW_OPENGL_PROFILE` and
   `GLFW_OPENGL_FORWARD_COMPAT` hints.
-- `ctxbridges/gl_bridge.m`: for MetalGL, EGL is loaded with dlsym from
+- `ctxbridges/gl_bridge.m`: for metalgldrv, EGL is loaded with dlsym from
   `@rpath/libmetalgldrv.dylib` (not `libtinygl4angle.dylib`). The config uses
   `EGL_OPENGL_BIT`, the bridge calls `eglBindAPI(EGL_OPENGL_API)`, and the
   context is created with `EGL_CONTEXT_MAJOR/MINOR_VERSION`, the profile mask
@@ -71,7 +71,7 @@ Notes:
 - Running Java still needs JIT, the same as stock Amethyst: attach a debugger,
   for example with StikDebug.
 - Logs are written to `Documents/latestlog.txt` in the app container. The
-  bridge logs `EGLBridge: MetalGL context requested: …`. To fetch the log:
+  bridge logs `EGLBridge: metalgldrv context requested: …`. To fetch the log:
   `xcrun devicectl device copy from --device <udid> --domain-type appDataContainer --domain-identifier <bundle id> --source Documents/latestlog.txt --destination .`
 
 ## Regenerating the patch

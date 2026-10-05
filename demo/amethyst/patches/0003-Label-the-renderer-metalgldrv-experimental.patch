@@ -1,0 +1,84 @@
+From 26d04d48616c246c340726f73e6ad2471f0f86f4 Mon Sep 17 00:00:00 2001
+From: bomberfish <me@bomberfish.ca>
+Date: Mon, 5 Oct 2026 17:11:49 -0400
+Subject: [PATCH 3/3] Label the renderer metalgldrv (experimental)
+
+---
+ Natives/ctxbridges/gl_bridge.m                 | 14 +++++++-------
+ Natives/resources/en.lproj/Localizable.strings |  4 ++--
+ 2 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/Natives/ctxbridges/gl_bridge.m b/Natives/ctxbridges/gl_bridge.m
+index e0efb3f..e68022b 100644
+--- a/Natives/ctxbridges/gl_bridge.m
++++ b/Natives/ctxbridges/gl_bridge.m
+@@ -13,13 +13,13 @@
+ 
+ int gl_hint_major, gl_hint_minor, gl_hint_profile, gl_hint_forward_compat;
+ 
+-static BOOL isMetalGL() {
++static BOOL isMetalgldrv() {
+     return [NSProcessInfo.processInfo.environment[@"RENDERER"] isEqualToString:@ RENDERER_NAME_METALGL];
+ }
+ 
+ void dlsym_EGL() {
+-    // MetalGL provides its own EGL; every other EGL-based renderer goes through ANGLE
+-    void* dl_handle = dlopen(isMetalGL() ? "@rpath/" RENDERER_NAME_METALGL : "@rpath/libtinygl4angle.dylib", RTLD_GLOBAL);
++    // metalgldrv provides its own EGL; every other EGL-based renderer goes through ANGLE
++    void* dl_handle = dlopen(isMetalgldrv() ? "@rpath/" RENDERER_NAME_METALGL : "@rpath/libtinygl4angle.dylib", RTLD_GLOBAL);
+     NSCAssert(dl_handle, @(dlerror()));
+     handle.eglBindAPI = dlsym(dl_handle, "eglBindAPI");
+     handle.eglChooseConfig = dlsym(dl_handle, "eglChooseConfig");
+@@ -60,8 +60,8 @@ static bool gl_init() {
+     gl_render_window_t* bundle = calloc(1, sizeof(gl_render_window_t));
+ 
+     NSString *renderer = NSProcessInfo.processInfo.environment[@"RENDERER"];
+-    BOOL metalGL = isMetalGL();
+-    BOOL desktopGL = metalGL || [renderer isEqualToString:@ RENDERER_NAME_MTL_ANGLE];
++    BOOL metalgldrv = isMetalgldrv();
++    BOOL desktopGL = metalgldrv || [renderer isEqualToString:@ RENDERER_NAME_MTL_ANGLE];
+ 
+     const EGLint attribs[] = {
+         EGL_RED_SIZE, 8,
+@@ -109,7 +109,7 @@ static bool gl_init() {
+ 
+     EGLint ctx_attribs[16];
+     int n = 0;
+-    if (metalGL && gl_hint_major > 0) {
++    if (metalgldrv && gl_hint_major > 0) {
+         // Desktop GL: request the version/profile the game asked GLFW for
+         ctx_attribs[n++] = EGL_CONTEXT_MAJOR_VERSION;
+         ctx_attribs[n++] = gl_hint_major;
+@@ -124,7 +124,7 @@ static bool gl_init() {
+             ctx_attribs[n++] = EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE;
+             ctx_attribs[n++] = EGL_TRUE;
+         }
+-        NSLog(@"EGLBridge: MetalGL context requested: %d.%d profile=0x%x fwd=%d",
++        NSLog(@"EGLBridge: metalgldrv context requested: %d.%d profile=0x%x fwd=%d",
+             gl_hint_major, gl_hint_minor, gl_hint_profile, gl_hint_forward_compat);
+     } else {
+         ctx_attribs[n++] = EGL_CONTEXT_CLIENT_VERSION;
+diff --git a/Natives/resources/en.lproj/Localizable.strings b/Natives/resources/en.lproj/Localizable.strings
+index 9692f18..cd402ae 100644
+--- a/Natives/resources/en.lproj/Localizable.strings
++++ b/Natives/resources/en.lproj/Localizable.strings
+@@ -179,14 +179,14 @@
+ "preference.title.renderer.release.angle" = "ANGLE";
+ "preference.title.renderer.release.mg" = "MobileGlues";
+ "preference.title.renderer.release.zink" = "Zink";
+-"preference.title.renderer.release.metalgl" = "MetalGL (experimental)";
++"preference.title.renderer.release.metalgl" = "metalgldrv (experimental)";
+ 
+ "preference.title.renderer.debug.auto" = "Auto: gl4es or ANGLE";
+ "preference.title.renderer.debug.gl4es" = "holy gl4es - exports OpenGL 2.1";
+ "preference.title.renderer.debug.angle" = "ANGLE (1.17+) - exports OpenGL 3.2 (Core Profile, limited)";
+ "preference.title.renderer.debug.mg" = "MobileGlues (1.17+) - exports OpenGL 4.0, EXPERIMENTAL";
+ "preference.title.renderer.debug.zink" = "Zink (Mesa 21.0) - exports OpenGL 4.1";
+-"preference.title.renderer.debug.metalgl" = "MetalGL (experimental)";
++"preference.title.renderer.debug.metalgl" = "metalgldrv (experimental)";
+ 
+ "preference.detail.renderer" = "Change the OpenGL render engine to use. Zink is temporarily disabled on iOS 16 and later to diagnose issues.";
+ 
+-- 
+2.54.0 (Apple Git-157)
+
