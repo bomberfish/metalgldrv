@@ -137,6 +137,7 @@ struct PipelineArgs {
     float defaultOuter[4] = {1, 1, 1, 1}, defaultInner[2] = {1, 1};
     bool dump = false;
     int expectPrims = -1;
+    uint32_t xfbCapacity = 4096;
 };
 int runPipeline(const PipelineArgs& pa);
 int runTessCheck(bool verbose);
@@ -286,6 +287,7 @@ int main(int argc, char** argv) {
             else if (a == "--outer") { auto f = parseFloats(next()); for (size_t k = 0; k < 4 && k < f.size(); k++) pa.defaultOuter[k] = f[k]; }
             else if (a == "--inner") { auto f = parseFloats(next()); for (size_t k = 0; k < 2 && k < f.size(); k++) pa.defaultInner[k] = f[k]; }
             else if (a == "--expect-prims") pa.expectPrims = std::stoi(next());
+            else if (a == "--xfb-capacity") pa.xfbCapacity = (uint32_t)std::stoi(next());
             else if (a == "--dump") pa.dump = true;
             else {
                 std::string ext = a.substr(a.rfind('.') + 1);

@@ -39,6 +39,7 @@ struct PipelineArgs {
     float defaultOuter[4] = {1, 1, 1, 1}, defaultInner[2] = {1, 1};
     bool dump = false;
     int expectPrims = -1;
+    uint32_t xfbCapacity = 4096;
 };
 
 static id<MTLDevice> gDev;
@@ -66,9 +67,9 @@ int runPipeline(const PipelineArgs& pa) {
     if (!lr.program) { fprintf(stderr, "%s", lr.infoLog.c_str()); return 3; }
     const Reflection& r = lr.reflection;
     bool tess = mask & (1u << (int)Stage::TessEval), gs = mask & (1u << (int)Stage::Geometry);
-    bool xfbOnly = !pa.xfb.empty() && !tess && !gs;
+    bool xfbOnly = !pa.xfb.empty() && !tess;  // with a geometry shader: serial capture kernel (mgl_gs_xfb)
     VariantKey key;
-    key.kind = tess ? PipelineKind::Tessellation : gs ? PipelineKind::MeshGeometry : xfbOnly ? PipelineKind::XfbCapture : PipelineKind::Classic;
+    key.kind = tess ? PipelineKind::Tessellation : xfbOnly ? PipelineKind::XfbCapture : gs ? PipelineKind::MeshGeometry : PipelineKind::Classic;
     for (auto& a : r.attributes) {
         VertexFetch& f = key.attribs[a.location];
         f.enabled = true;
@@ -129,7 +130,7 @@ int runPipeline(const PipelineArgs& pa) {
         for (int b = 0; b < 4; b++) {
             info.xfbBuffer[b] = xfbBuf[b].gpuAddress;
             info.xfbStride[b] = r.multipass.xfbStride[b];
-            info.xfbCapacity[b] = 4096;
+            info.xfbCapacity[b] = pa.xfbCapacity;
         }
         id<MTLBuffer> infoBuf = [dev newBufferWithBytes:&info length:sizeof info options:MTLResourceStorageModeShared];
         id<MTLBuffer> args = [dev newBufferWithLength:std::max<size_t>(8, r.slots.size() * 8) options:MTLResourceStorageModeShared];
@@ -165,7 +166,7 @@ int runPipeline(const PipelineArgs& pa) {
             return true;
         };
         if (xfbOnly) {
-            if (!computePass(entry(EntryPoint::Kernel), MTLSizeMake(nverts * pa.instances, 1, 1), true)) return 5;
+            if (!computePass(entry(EntryPoint::Kernel), MTLSizeMake(gs ? 1 : nverts * pa.instances, 1, 1), true)) return 5;
             [cb commit];
             [cb waitUntilCompleted];
             if (cb.error) { fprintf(stderr, "GPU error: %s\n", cb.error.localizedDescription.UTF8String); return 6; }
@@ -174,7 +175,8 @@ int runPipeline(const PipelineArgs& pa) {
             for (int b = 0; b < 4; b++) {
                 if (!(r.multipass.xfbBufferMask & (1u << b))) continue;
                 const float* f = (const float*)xfbBuf[b].contents;
-                uint32_t n = r.multipass.xfbStride[b] / 4 * c[0] * pa.vpp;
+                uint32_t outVpp = gs ? (r.gsOutputPrimitive == 0 ? 1 : r.gsOutputPrimitive == 3 ? 2 : 3) : pa.vpp;
+                uint32_t n = r.multipass.xfbStride[b] / 4 * c[0] * outVpp;
                 printf("buffer %d (stride %u):", b, r.multipass.xfbStride[b]);
                 for (uint32_t i = 0; i < n && i < 64; i++) printf(" %g", f[i]);
                 printf("\n");

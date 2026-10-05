@@ -49,6 +49,10 @@ pipes = [
      "buffer 0 (stride 12): 2 4 0 6 8 1 10 12 2 2 4 100 6 8 101 10 12 102"),
     ("xfb_separate", P("xfb.vert"), ["--verts", "1,2,3,4,5,6", "--xfb", "id,twice", "--xfb-separate", "--expect-prims", "1"],
      "buffer 1 (stride 8): 2 4 6 8 10 12"),
+    ("gs_xfb", P("gs_xfb.vert", "gs_xfb.geom"), ["--verts", "0,0,0,0,0,0,1,1,1,1,1,1", "--xfb", "val", "--expect-prims", "4"],
+     "buffer 0 (stride 4): 0 1 2 2 1 3 10 11 12 12 11 13"),
+    ("gs_xfb_overflow", P("gs_xfb.vert", "gs_xfb.geom"), ["--verts", "0,0,0,0,0,0,1,1,1,1,1,1", "--xfb", "val", "--xfb-capacity", "28",
+     "--expect-prims", "2"], "written=2 generated=4"),
     ("xfb_skip", P("xfb.vert"), ["--verts", "1,2,3,4,5,6", "--xfb", "id,gl_SkipComponents2,gl_Position", "--expect-prims", "1"],
      "buffer 0 (stride 28):"),
 ]

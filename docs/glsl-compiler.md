@@ -93,6 +93,9 @@ Vertex ids come from the uint32 list `indexBuffer` (+ `baseVertex`).
   only (checked against `xfbCapacity[b]` bytes); counters[0] += primitives written, counters[1] += primitives generated.
   Captured layout comes from `Reflection::xfbVaryings` (glTransformFeedbackVaryings incl. gl_NextBuffer / gl_SkipComponentsN, or
   xfb_buffer/xfb_offset/xfb_stride qualifiers, which take precedence).
+  With a geometry shader, XfbCapture yields `mgl_gs_xfb` (Kernel, dispatch exactly 1 thread): it walks instances x primitives x
+  invocations in order, runs VS + GS and records the GS output decomposed into lists in GL order (whole primitives only, same
+  counters). Dispatch it before the MeshGeometry draw that rasterizes; advance xfbVertexBase by the written primitive count.
 * Fragment shaders paired with mesh pipelines read gl_PrimitiveID from the per-primitive `[[user(mgl_primid)]]`; gl_Layer /
   gl_ViewportIndex are per-primitive outputs. `Reflection::usesFlatShading` tells the classic path when index rotation for
   GL_LAST_VERTEX_CONVENTION is needed; `writesLayer`/`writesViewportIndex` describe the last pre-raster stage.
@@ -116,6 +119,6 @@ alias them (explicit locations), as on NVIDIA.
 Stores and atomics on read-write images are followed by `texture.fence()` so an invocation observes its own writes.
 
 ## Not yet supported
-Transform feedback of geometry/tessellation output, tessellation + geometry together, gl_CullDistance culling (values are passed through,
+Transform feedback of tessellation output, geometry streams other than 0, tessellation + geometry together, gl_CullDistance culling (values are passed through,
 no primitives are culled), float image atomics (Metal has none), whole-value use of structs containing opaque types, dynamic indexing of
 uniform struct arrays containing opaque members, interpolateAtSample on multisample-less targets uses the sample position Metal reports.
