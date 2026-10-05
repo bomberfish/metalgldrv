@@ -18,10 +18,19 @@ add_custom_command(
   DEPENDS ${CMAKE_SOURCE_DIR}/scripts/gen_glapi.py ${CMAKE_SOURCE_DIR}/registry/gl.xml
   COMMENT "Generating GL API surface")
 
+# --- MSL runtime libraries embedded into generated shaders ---
+add_custom_command(
+  OUTPUT ${GEN_DIR}/fp64_msl.inc
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/embed.py ${CMAKE_SOURCE_DIR}/src/glsl/runtime/fp64.metal ${GEN_DIR}/fp64_msl.inc kFp64MSL
+  DEPENDS ${CMAKE_SOURCE_DIR}/scripts/embed.py ${CMAKE_SOURCE_DIR}/src/glsl/runtime/fp64.metal
+  COMMENT "Embedding fp64 MSL library")
+add_custom_target(mgl_embedded DEPENDS ${GEN_DIR}/fp64_msl.inc)
+
 # --- GLSL compiler (pure C++, no platform deps; also built for host tools) ---
 file(GLOB_RECURSE GLSL_SOURCES CONFIGURE_DEPENDS src/glsl/*.cpp)
 add_library(mglsl STATIC ${GLSL_SOURCES})
-target_include_directories(mglsl PUBLIC src)
+add_dependencies(mglsl mgl_embedded)
+target_include_directories(mglsl PUBLIC src ${GEN_DIR})
 set_target_properties(mglsl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_options(mglsl PRIVATE -fvisibility=hidden -Wall -Wno-unused-parameter)
 

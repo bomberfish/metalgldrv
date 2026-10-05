@@ -1,0 +1,226 @@
+From 3aa9a8661f8db54d36b4775b44c202d939dae429 Mon Sep 17 00:00:00 2001
+From: bomberfish <me@bomberfish.ca>
+Date: Mon, 5 Oct 2026 16:17:44 -0400
+Subject: [PATCH] Add MetalGL (metalgldrv) as an experimental desktop GL
+ renderer
+
+metalgldrv is an OpenGL 4.6 implementation on Metal that ships its own
+EGL 1.5. Select it like ANGLE desktop GL, but load EGL from
+libmetalgldrv.dylib instead of libtinygl4angle.dylib and forward the
+GLFW context version/profile hints to eglCreateContext.
+---
+ Natives/LauncherPreferences.m                 |  6 ++-
+ Natives/ctxbridges/gl_bridge.h                |  3 ++
+ Natives/ctxbridges/gl_bridge.m                | 45 +++++++++++++++----
+ Natives/egl_bridge.m                          | 12 ++++-
+ Natives/glfw_keycodes.h                       |  4 ++
+ .../resources/en.lproj/Localizable.strings    |  2 +
+ Natives/utils.h                               |  1 +
+ 7 files changed, 62 insertions(+), 11 deletions(-)
+
+diff --git a/Natives/LauncherPreferences.m b/Natives/LauncherPreferences.m
+index aefdfe8..3d7dffb 100644
+--- a/Natives/LauncherPreferences.m
++++ b/Natives/LauncherPreferences.m
+@@ -139,7 +139,8 @@ UIEdgeInsets getDefaultSafeArea() {
+         @ RENDERER_NAME_GL4ES,
+         @ RENDERER_NAME_MTL_ANGLE,
+         @ RENDERER_NAME_MOBILEGLUES,
+-        @ RENDERER_NAME_VK_ZINK
++        @ RENDERER_NAME_VK_ZINK,
++        @ RENDERER_NAME_METALGL
+     ].mutableCopy;
+ 
+     if (containsDefault) {
+@@ -157,7 +158,8 @@ UIEdgeInsets getDefaultSafeArea() {
+         localize(@"preference.title.renderer.debug.gl4es", nil),
+         localize(@"preference.title.renderer.debug.angle", nil),
+         localize(@"preference.title.renderer.debug.mg", nil),
+-        localize(@"preference.title.renderer.debug.zink", nil)
++        localize(@"preference.title.renderer.debug.zink", nil),
++        localize(@"preference.title.renderer.debug.metalgl", nil)
+     ].mutableCopy;
+ 
+     if (containsDefault) {
+diff --git a/Natives/ctxbridges/gl_bridge.h b/Natives/ctxbridges/gl_bridge.h
+index 46c5509..f14bd08 100644
+--- a/Natives/ctxbridges/gl_bridge.h
++++ b/Natives/ctxbridges/gl_bridge.h
+@@ -33,4 +33,7 @@ typedef struct {
+     EGLSurface surface;
+ } gl_render_window_t;
+ 
++// GLFW context hints recorded by pojavSetWindowHint() in egl_bridge.m
++extern int gl_hint_major, gl_hint_minor, gl_hint_profile, gl_hint_forward_compat;
++
+ void set_gl_bridge_tbl();
+diff --git a/Natives/ctxbridges/gl_bridge.m b/Natives/ctxbridges/gl_bridge.m
+index 6e76883..e0efb3f 100644
+--- a/Natives/ctxbridges/gl_bridge.m
++++ b/Natives/ctxbridges/gl_bridge.m
+@@ -5,13 +5,21 @@
+ #include "bridge_tbl.h"
+ #include "environ.h"
+ #include "gl_bridge.h"
++#include "glfw_keycodes.h"
+ #include "utils.h"
+ 
+ static EGLDisplay g_EglDisplay;
+ static egl_library handle;
+ 
++int gl_hint_major, gl_hint_minor, gl_hint_profile, gl_hint_forward_compat;
++
++static BOOL isMetalGL() {
++    return [NSProcessInfo.processInfo.environment[@"RENDERER"] isEqualToString:@ RENDERER_NAME_METALGL];
++}
++
+ void dlsym_EGL() {
+-    void* dl_handle = dlopen("@rpath/libtinygl4angle.dylib", RTLD_GLOBAL);
++    // MetalGL provides its own EGL; every other EGL-based renderer goes through ANGLE
++    void* dl_handle = dlopen(isMetalGL() ? "@rpath/" RENDERER_NAME_METALGL : "@rpath/libtinygl4angle.dylib", RTLD_GLOBAL);
+     NSCAssert(dl_handle, @(dlerror()));
+     handle.eglBindAPI = dlsym(dl_handle, "eglBindAPI");
+     handle.eglChooseConfig = dlsym(dl_handle, "eglChooseConfig");
+@@ -52,7 +60,8 @@ static bool gl_init() {
+     gl_render_window_t* bundle = calloc(1, sizeof(gl_render_window_t));
+ 
+     NSString *renderer = NSProcessInfo.processInfo.environment[@"RENDERER"];
+-    BOOL angleDesktopGL = [renderer isEqualToString:@ RENDERER_NAME_MTL_ANGLE];
++    BOOL metalGL = isMetalGL();
++    BOOL desktopGL = metalGL || [renderer isEqualToString:@ RENDERER_NAME_MTL_ANGLE];
+ 
+     const EGLint attribs[] = {
+         EGL_RED_SIZE, 8,
+@@ -61,7 +70,7 @@ static bool gl_init() {
+         EGL_ALPHA_SIZE, 8,
+         EGL_DEPTH_SIZE, 24,
+         EGL_SURFACE_TYPE, EGL_WINDOW_BIT|EGL_PBUFFER_BIT,
+-        EGL_RENDERABLE_TYPE, angleDesktopGL ? EGL_OPENGL_BIT : EGL_OPENGL_ES3_BIT,
++        EGL_RENDERABLE_TYPE, desktopGL ? EGL_OPENGL_BIT : EGL_OPENGL_ES3_BIT,
+         EGL_NONE
+     };
+ 
+@@ -82,7 +91,7 @@ static bool gl_init() {
+     }
+ 
+     EGLBoolean bindResult;
+-    if (angleDesktopGL) {
++    if (desktopGL) {
+         NSDebugLog(@"EGLBridge: Binding to desktop OpenGL");
+         bindResult = handle.eglBindAPI(EGL_OPENGL_API);
+     } else {
+@@ -98,10 +107,30 @@ static bool gl_init() {
+         return NULL;
+     }
+ 
+-    const EGLint ctx_attribs[] = {
+-        EGL_CONTEXT_CLIENT_VERSION, 3,
+-        EGL_NONE
+-    };
++    EGLint ctx_attribs[16];
++    int n = 0;
++    if (metalGL && gl_hint_major > 0) {
++        // Desktop GL: request the version/profile the game asked GLFW for
++        ctx_attribs[n++] = EGL_CONTEXT_MAJOR_VERSION;
++        ctx_attribs[n++] = gl_hint_major;
++        ctx_attribs[n++] = EGL_CONTEXT_MINOR_VERSION;
++        ctx_attribs[n++] = gl_hint_minor;
++        if (gl_hint_profile == GLFW_OPENGL_CORE_PROFILE || gl_hint_profile == GLFW_OPENGL_COMPAT_PROFILE) {
++            ctx_attribs[n++] = EGL_CONTEXT_OPENGL_PROFILE_MASK;
++            ctx_attribs[n++] = gl_hint_profile == GLFW_OPENGL_CORE_PROFILE ?
++                EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT : EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT;
++        }
++        if (gl_hint_forward_compat) {
++            ctx_attribs[n++] = EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE;
++            ctx_attribs[n++] = EGL_TRUE;
++        }
++        NSLog(@"EGLBridge: MetalGL context requested: %d.%d profile=0x%x fwd=%d",
++            gl_hint_major, gl_hint_minor, gl_hint_profile, gl_hint_forward_compat);
++    } else {
++        ctx_attribs[n++] = EGL_CONTEXT_CLIENT_VERSION;
++        ctx_attribs[n++] = 3;
++    }
++    ctx_attribs[n] = EGL_NONE;
+     bundle->context = handle.eglCreateContext(g_EglDisplay, bundle->config, share ? share->context : EGL_NO_CONTEXT, ctx_attribs);
+     if (!bundle->context) {
+         NSDebugLog(@"EGLBridge: Error eglCreateContext finished with error: 0x%x", handle.eglGetError());
+diff --git a/Natives/egl_bridge.m b/Natives/egl_bridge.m
+index 606ccf1..c974ef8 100644
+--- a/Natives/egl_bridge.m
++++ b/Natives/egl_bridge.m
+@@ -60,7 +60,8 @@ int pojavInitOpenGL() {
+         renderer = @ RENDERER_NAME_MOBILEGLUES;
+         setenv("RENDERER", renderer.UTF8String, 1);
+         set_gl_bridge_tbl();
+-    } else if ([renderer isEqualToString:@ RENDERER_NAME_MTL_ANGLE]) {
++    } else if ([renderer isEqualToString:@ RENDERER_NAME_MTL_ANGLE] ||
++               [renderer isEqualToString:@ RENDERER_NAME_METALGL]) {
+         set_gl_bridge_tbl();
+     } else if ([renderer hasPrefix:@"libOSMesa"]) {
+         setenv("GALLIUM_DRIVER","zink",1);
+@@ -75,6 +76,15 @@ int pojavInitOpenGL() {
+ }
+ 
+ void pojavSetWindowHint(int hint, int value) {
++    // Remember the requested context version/profile for renderers that
++    // can create a matching desktop GL context (see gl_bridge.m)
++    switch (hint) {
++        case GLFW_CONTEXT_VERSION_MAJOR: gl_hint_major = value; break;
++        case GLFW_CONTEXT_VERSION_MINOR: gl_hint_minor = value; break;
++        case GLFW_OPENGL_PROFILE: gl_hint_profile = value; break;
++        case GLFW_OPENGL_FORWARD_COMPAT: gl_hint_forward_compat = value; break;
++    }
++
+     if (hint == GLFW_CLIENT_API) {
+         clientAPI = value;
+     } else if (strcmp(getenv("RENDERER"), "auto")==0 && hint == GLFW_CONTEXT_VERSION_MAJOR) {
+diff --git a/Natives/glfw_keycodes.h b/Natives/glfw_keycodes.h
+index 4e9b669..64cb0e8 100644
+--- a/Natives/glfw_keycodes.h
++++ b/Natives/glfw_keycodes.h
+@@ -36,7 +36,11 @@
+ #define GLFW_OPENGL_API 0x30001
+ 
+ #define GLFW_CONTEXT_VERSION_MAJOR 0x00022002
++#define GLFW_CONTEXT_VERSION_MINOR 0x00022003
++#define GLFW_OPENGL_FORWARD_COMPAT 0x00022006
+ #define GLFW_OPENGL_PROFILE 0x00022008
++#define GLFW_OPENGL_CORE_PROFILE 0x00032001
++#define GLFW_OPENGL_COMPAT_PROFILE 0x00032002
+ 
+ /*! @defgroup hat_state Joystick hat states
+  *  @brief Joystick hat states.
+diff --git a/Natives/resources/en.lproj/Localizable.strings b/Natives/resources/en.lproj/Localizable.strings
+index 9541a1f..9692f18 100644
+--- a/Natives/resources/en.lproj/Localizable.strings
++++ b/Natives/resources/en.lproj/Localizable.strings
+@@ -179,12 +179,14 @@
+ "preference.title.renderer.release.angle" = "ANGLE";
+ "preference.title.renderer.release.mg" = "MobileGlues";
+ "preference.title.renderer.release.zink" = "Zink";
++"preference.title.renderer.release.metalgl" = "MetalGL (experimental)";
+ 
+ "preference.title.renderer.debug.auto" = "Auto: gl4es or ANGLE";
+ "preference.title.renderer.debug.gl4es" = "holy gl4es - exports OpenGL 2.1";
+ "preference.title.renderer.debug.angle" = "ANGLE (1.17+) - exports OpenGL 3.2 (Core Profile, limited)";
+ "preference.title.renderer.debug.mg" = "MobileGlues (1.17+) - exports OpenGL 4.0, EXPERIMENTAL";
+ "preference.title.renderer.debug.zink" = "Zink (Mesa 21.0) - exports OpenGL 4.1";
++"preference.title.renderer.debug.metalgl" = "MetalGL (experimental)";
+ 
+ "preference.detail.renderer" = "Change the OpenGL render engine to use. Zink is temporarily disabled on iOS 16 and later to diagnose issues.";
+ 
+diff --git a/Natives/utils.h b/Natives/utils.h
+index 431b61e..c9bc0cb 100644
+--- a/Natives/utils.h
++++ b/Natives/utils.h
+@@ -38,6 +38,7 @@
+ #define RENDERER_NAME_MTL_ANGLE "libtinygl4angle.dylib"
+ #define RENDERER_NAME_MOBILEGLUES "libmobileglues.dylib"
+ #define RENDERER_NAME_VK_ZINK "libOSMesa.8.dylib"
++#define RENDERER_NAME_METALGL "libmetalgldrv.dylib"
+ 
+ #define SPECIALBTN_KEYBOARD -1
+ #define SPECIALBTN_TOGGLECTRL -2
+-- 
+2.54.0 (Apple Git-157)
+
