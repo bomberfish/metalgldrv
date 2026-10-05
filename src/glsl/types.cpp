@@ -9,6 +9,7 @@ namespace glsl {
 bool Type::operator==(const Type& o) const {
     if (base != o.base || vec != o.vec || cols != o.cols || dims != o.dims) return false;
     if (base == BT::Struct) return sdef == o.sdef;
+    if (base == BT::Subroutine) return subr == o.subr;
     if (base == BT::Sampler || base == BT::Image)
         return dim == o.dim && arrayed == o.arrayed && shadow == o.shadow && ms == o.ms && sampled == o.sampled;
     return true;
@@ -66,6 +67,7 @@ static std::string dimSuffix(const Type& t) {
 std::string Type::str() const {
     std::string s;
     if (base == BT::Struct) s = sdef ? sdef->name : "struct";
+    else if (base == BT::Subroutine) s = subr ? subr->name : "subroutine";
     else if (base == BT::Sampler) s = std::string(sampled == BT::Int ? "i" : sampled == BT::UInt ? "u" : "") + "sampler" + dimSuffix(*this);
     else if (base == BT::Image) s = std::string(sampled == BT::Int ? "i" : sampled == BT::UInt ? "u" : "") + "image" + dimSuffix(*this);
     else if (cols) {

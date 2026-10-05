@@ -1,0 +1,60 @@
+#version 450 core
+// Uses glslrun's test textures (see tools/glslrun/glslrun.mm testTexture).
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+uniform sampler2D t2;
+uniform isampler2D it2;
+uniform usampler2D ut2;
+uniform sampler2DArray t2a;
+uniform sampler3D t3;
+uniform sampler2DShadow s2;
+uniform samplerBuffer tb;
+uniform sampler2DRect trect;
+layout(rgba32f) uniform image2D img;
+layout(r32ui) uniform uimage2D uimg;
+layout(r32i) uniform iimage2D iimg;
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+vec2 uv(int x, int y) { return (vec2(x, y) + 0.5) / 4.0; }
+float F(float v) { return v + float(seq[0]); }
+void main() {
+    check(texture(t2, uv(1, 2)) == vec4(1, 2, 0, 9));
+    check(textureLod(t2, uv(1, 2), 1.0) == vec4(0, 1, 1, 104));
+    check(texelFetch(t2, ivec2(3, 1), 0) == vec4(3, 1, 0, 7));
+    check(texelFetch(t2, ivec2(1, 1), 1) == vec4(1, 1, 1, 105));
+    check(textureSize(t2, 0) == ivec2(4) && textureSize(t2, 1) == ivec2(2) && textureQueryLevels(t2) == 3);
+    check(textureOffset(t2, uv(1, 1), ivec2(1, 2)) == vec4(2, 3, 0, 14));
+    check(texelFetchOffset(t2, ivec2(0), 0, ivec2(2, 1)) == vec4(2, 1, 0, 6));
+    check(textureProj(t2, vec3(uv(1, 2) * F(2.0), 2.0)) == vec4(1, 2, 0, 9));
+    check(textureGrad(t2, uv(3, 0), vec2(0.0), vec2(0.0)) == vec4(3, 0, 0, 3));
+    // gather: (i0,j1), (i1,j1), (i1,j0), (i0,j0) of the 2x2 footprint with i0 = j0 = 1
+    check(textureGather(t2, vec2(F(0.5), 0.5)) == vec4(1, 2, 2, 1));
+    check(textureGather(t2, vec2(F(0.5), 0.5), 3) == vec4(9, 10, 6, 5));
+    check(textureGatherOffset(t2, vec2(F(0.5), 0.5), ivec2(1, 0), 1) == vec4(2, 2, 1, 1));
+    check(textureGatherOffsets(t2, vec2(F(0.5), 0.5), ivec2[4](ivec2(0), ivec2(1, 0), ivec2(0, 1), ivec2(-1)), 3) == vec4(5, 6, 9, 0));
+    // integer textures
+    check(texelFetch(it2, ivec2(2, 3), 0) == ivec4(2, 3, 0, 14));
+    check(texture(ut2, uv(3, 3)) == uvec4(3, 3, 0, 15));
+    // depth compare (LEQUAL: ref <= depth); depth(1,1) = 5/16
+    check(texture(s2, vec3(uv(1, 1), F(0.3))) == 1.0 && texture(s2, vec3(uv(1, 1), F(0.4))) == 0.0);
+    check(textureGather(s2, vec2(F(0.5), 0.5), 0.4) == vec4(1, 1, 0, 0));
+    // arrays / 3D / buffer / rect
+    check(texture(t2a, vec3(uv(2, 3), F(0.6))) == vec4(2, 3, 1, 30));
+    check(textureSize(t2a, 0) == ivec3(4, 4, 2));
+    check(texture(t3, vec3(uv(1, 2), F(0.75))) == vec4(1, 2, 1, 25));
+    check(textureSize(t3, 0) == ivec3(4, 4, 2));
+    check(texelFetch(tb, int(F(5.0))) == vec4(5, 10, 15, 20) && textureSize(tb) == 16);
+    check(texture(trect, vec2(F(1.5), 2.5)) == vec4(1, 2, 0, 9) && textureSize(trect) == ivec2(4));
+    // images
+    check(imageLoad(img, ivec2(2, 3)) == vec4(2, 3, 0, 1));
+    imageStore(img, ivec2(0, 1), vec4(7, 8, 9, 10));
+    check(imageLoad(img, ivec2(0, 1)) == vec4(7, 8, 9, 10));
+    check(imageSize(img) == ivec2(4));
+    check(imageLoad(uimg, ivec2(1, 2)).x == 9u);
+    uint old = imageAtomicAdd(uimg, ivec2(1, 1), 10u);
+    check(old == 5u && imageLoad(uimg, ivec2(1, 1)).x == 15u);
+    uint prev = imageAtomicCompSwap(uimg, ivec2(2, 1), 6u, 100u);
+    check(prev == 6u && imageLoad(uimg, ivec2(2, 1)).x == 100u);
+    check(imageAtomicMax(iimg, ivec2(3, 3), -5) == 15 && imageAtomicExchange(iimg, ivec2(3, 3), 4) == 15);
+}

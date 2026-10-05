@@ -34,5 +34,7 @@ void main() {
     c += textureLod(s2, uv.xyz, 0.0) * vec4(1.0);
     c += texelFetchOffset(t2, ivec2(4), 0, ivec2(1, 1));
     c += vec4(texture(it2, uv.xy));
+    c += textureGatherOffsets(t2, uv.xy, ivec2[4](ivec2(0), ivec2(1, 0), ivec2(0, 1), ivec2(-1)), 2);
+    c += vec4(textureGatherOffsets(s2, uv.xy, 0.5, ivec2[4](ivec2(0), ivec2(1, 0), ivec2(0, 1), ivec2(-1))));
     color = c;
 }

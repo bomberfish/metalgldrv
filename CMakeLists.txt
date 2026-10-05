@@ -24,7 +24,12 @@ add_custom_command(
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/embed.py ${CMAKE_SOURCE_DIR}/src/glsl/runtime/fp64.metal ${GEN_DIR}/fp64_msl.inc
   DEPENDS ${CMAKE_SOURCE_DIR}/scripts/embed.py ${CMAKE_SOURCE_DIR}/src/glsl/runtime/fp64.metal
   COMMENT "Embedding fp64 MSL library")
-add_custom_target(mgl_embedded DEPENDS ${GEN_DIR}/fp64_msl.inc)
+add_custom_command(
+  OUTPUT ${GEN_DIR}/multipass_msl.inc
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/embed.py ${CMAKE_SOURCE_DIR}/src/glsl/runtime/multipass.metal ${GEN_DIR}/multipass_msl.inc
+  DEPENDS ${CMAKE_SOURCE_DIR}/scripts/embed.py ${CMAKE_SOURCE_DIR}/src/glsl/runtime/multipass.metal
+  COMMENT "Embedding multi-pass MSL helpers")
+add_custom_target(mgl_embedded DEPENDS ${GEN_DIR}/fp64_msl.inc ${GEN_DIR}/multipass_msl.inc)
 
 # --- GLSL compiler (pure C++, no platform deps; also built for host tools) ---
 file(GLOB_RECURSE GLSL_SOURCES CONFIGURE_DEPENDS src/glsl/*.cpp)

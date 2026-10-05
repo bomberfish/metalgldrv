@@ -1,0 +1,21 @@
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+struct Material { float scale; sampler2D tex; vec2 offset; usampler2D utex[2]; };
+uniform Material mat;
+uniform Material mats[2];
+uniform sampler2D arr[3];
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+vec4 fetchAll(sampler2D s[3], int i) { return texelFetch(s[i], ivec2(1, 2), 0); }
+uvec4 fromStruct(usampler2D u) { return texelFetch(u, ivec2(3, 0), 0); }
+void main() {
+    // default-block members of the struct are zero (glslrun default block), opaque members bound to test textures
+    check(mat.scale == 0.0 && mat.offset == vec2(0.0));
+    check(texelFetch(mat.tex, ivec2(2, 1), 0) == vec4(2, 1, 0, 6));
+    check(texelFetch(mat.utex[1], ivec2(1, 1), 0) == uvec4(1, 1, 0, 5));
+    check(texelFetch(mats[1].tex, ivec2(0, 3), 0) == vec4(0, 3, 0, 12));
+    check(fetchAll(arr, int(seq[2])) == vec4(1, 2, 0, 9));
+    check(fromStruct(mats[0].utex[0]) == uvec4(3, 0, 0, 3));
+}

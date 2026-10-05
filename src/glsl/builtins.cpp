@@ -291,7 +291,10 @@ void addTextureFunctions(Ctx& c) {
                 const Type gP = vecT(BT::Float, cd + (arr ? 1 : 0));
                 if (sh) {
                     c.add("textureGather", Type::vector(BT::Float, 4), {T, gP, F});
-                    if (!cube) c.add("textureGatherOffset", Type::vector(BT::Float, 4), {T, gP, F, Type::vector(BT::Int, 2)});
+                    if (!cube) {
+                        c.add("textureGatherOffset", Type::vector(BT::Float, 4), {T, gP, F, Type::vector(BT::Int, 2)});
+                        c.add("textureGatherOffsets", Type::vector(BT::Float, 4), {T, gP, F, Type::vector(BT::Int, 2).arrayOf(4)});
+                    }
                 } else {
                     c.add("textureGather", G4, {T, gP});
                     c.add("textureGather", G4, {T, gP, I});
@@ -633,6 +636,10 @@ out vec4 gl_TexCoord[];
 out float gl_FogFragCoord;
 )";
 
+const char* kPerVertexInTess = R"(
+in gl_PerVertex { vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8]; float gl_CullDistance[8]; } gl_in[];
+)";
+
 const char* kTessControlPreamble = R"(
 in int gl_PatchVerticesIn;
 in int gl_PrimitiveID;
@@ -705,8 +712,8 @@ const std::string& builtinPreamble(Stage stage) {
             std::string p = kCommonPreamble;
             switch ((Stage)s) {
                 case Stage::Vertex: p += kVertexPreamble; break;
-                case Stage::TessControl: p += kPerVertexIn; p += kTessControlPreamble; break;
-                case Stage::TessEval: p += kPerVertexIn; p += kTessEvalPreamble; break;
+                case Stage::TessControl: p += kPerVertexInTess; p += kTessControlPreamble; break;
+                case Stage::TessEval: p += kPerVertexInTess; p += kTessEvalPreamble; break;
                 case Stage::Geometry: p += kPerVertexIn; p += kGeometryPreamble; break;
                 case Stage::Fragment: p += kFragmentPreamble; break;
                 case Stage::Compute: p += kComputePreamble; break;

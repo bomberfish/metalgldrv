@@ -55,7 +55,8 @@ CompileResult compile(Stage stage, const std::vector<std::string>& sources, cons
 //   Sampler                                : MTLResourceID of the sampler state
 //   BufferSize                             : uint64 byte size of the bound SSBO range
 //                                            (for runtime-sized arrays .length())
-enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer };
+enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer,
+                                SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */ };
 
 struct Slot {
     SlotKind kind;
@@ -143,6 +144,29 @@ struct LinkInput {
 
 struct LinkedProgram;  // opaque compiled program state (holds the per-stage IR)
 
+// Additional reflection for multi-pass pipelines (filled by the linker).
+struct MultiPassInfo {
+    uint32_t tcsVertexOutBytes = 0;   // bytes per control point record in MGLDrawInfo::tcsVertexOut
+    uint32_t tcsPatchOutBytes = 0;    // bytes per patch record in MGLDrawInfo::tcsPatchOut (levels at 0: outer[4], inner[2])
+    uint32_t tcsOutputVertices = 0;   // control points per output patch (patch input size when there is no TCS: 0 = use patchVertices)
+    uint32_t xfbStride[4] = {0, 0, 0, 0};
+    uint32_t xfbBufferMask = 0;       // buffers written by transform feedback
+};
+
+// ARB_shader_subroutine (per stage)
+struct SubroutineUniform {
+    std::string name;
+    int location = -1;               // GL subroutine uniform location (per stage); arrays occupy [location, location+arraySize)
+    int arraySize = 1;
+    std::vector<int> compatible;     // indices into StageSubroutines::functions
+};
+struct StageSubroutines {
+    std::vector<std::string> functions;      // GL subroutine index = position
+    std::vector<SubroutineUniform> uniforms;
+    int numLocations = 0;                    // GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS
+    int slot = -1;                           // argument slot holding a GPU address of `uint index[numLocations]`
+};
+
 struct Reflection {
     uint32_t stageMask = 0;
     std::vector<Attribute> attributes;
@@ -165,6 +189,11 @@ struct Reflection {
     bool tesPointMode = false;
     bool usesFragDepth = false, earlyFragmentTests = false, usesDiscard = false;
     bool usesFp64 = false;
+    bool usesFlatShading = false;           // any flat-qualified input reaching the fragment shader
+    bool writesLayer = false, writesViewportIndex = false;  // by the last pre-rasterization stage
+    MultiPassInfo multipass;
+    std::vector<uint8_t> defaultUniformInit;  // initial contents of the default uniform block (defaultUniformSize bytes)
+    StageSubroutines subroutines[(int)Stage::Count];
 };
 
 struct LinkResult {
@@ -253,6 +282,9 @@ struct alignas(16) MGLSys {
     float minSampleShading;
     float renderTargetHeight;              // height of the bound framebuffer (layout(origin_upper_left) gl_FragCoord)
     uint32_t pad1;
+    float tessDefaultOuter[4];             // GL_PATCH_DEFAULT_OUTER_LEVEL (used when there is no TCS)
+    float tessDefaultInner[2];             // GL_PATCH_DEFAULT_INNER_LEVEL
+    uint32_t pad2[2];
     float currentAttrib[32][4];            // glVertexAttrib* values for disabled arrays
 };
 
@@ -286,11 +318,5 @@ struct alignas(16) MGLDrawInfo {
     uint64_t counters;            // device atomic counters (primitives generated/written)
 };
 
-// Additional reflection for multi-pass pipelines (filled by the linker).
-struct MultiPassInfo {
-    uint32_t tcsVertexOutBytes = 0;
-    uint32_t tcsPatchOutBytes = 0;
-    uint32_t xfbStride[4] = {0, 0, 0, 0};
-};
 
 }  // namespace glsl

@@ -18,6 +18,10 @@ const char* const kFp64Library =
 const char* const kFp64Library = "// fp64 library (fp64_msl.inc) not available in this build\n";
 #endif
 
+const char* const kMultipassLibrary =
+#include <multipass_msl.inc>
+    ;
+
 // Double matrices: C columns of vec<ulong, R>; all arithmetic via the mgl_f64_* library.
 const char* const kDmatHelpers = R"DMAT(template <int C, int R>
 struct mgl_dmat {
@@ -355,6 +359,28 @@ template <typename Tex, typename C, typename T> inline T mgl_img_cas_a(Tex t, C 
     }
 }
 )"});
+    // multi-pass helpers: split the embedded file at "//@chunk sym..." markers
+    {
+        std::string all = kMultipassLibrary;
+        size_t pos = all.find("//@chunk ");
+        while (pos != std::string::npos) {
+            size_t eol = all.find('\n', pos);
+            std::string header = all.substr(pos + 9, eol - pos - 9);
+            size_t next = all.find("//@chunk ", eol);
+            std::string body = all.substr(eol + 1, next == std::string::npos ? std::string::npos : next - eol - 1);
+            Chunk ch;
+            size_t a = 0;
+            while (a < header.size()) {
+                size_t b = header.find(' ', a);
+                if (b == std::string::npos) b = header.size();
+                if (b > a) ch.symbols.push_back(header.substr(a, b - a));
+                a = b + 1;
+            }
+            ch.code = body;
+            c.push_back(ch);
+            pos = next;
+        }
+    }
     return c;
 }
 
@@ -374,6 +400,9 @@ struct MGLSys {
     float minSampleShading;
     float renderTargetHeight;
     uint pad1;
+    float tessDefaultOuter[4];
+    float tessDefaultInner[2];
+    uint pad2[2];
     float4 currentAttrib[32];
 };
 )";
@@ -382,7 +411,7 @@ void collectIdents(const std::string& s, std::set<std::string>& out) {
     size_t i = 0, n = s.size();
     while (i < n) {
         char ch = s[i];
-        if (ch == 'm' && s.compare(i, 4, "mgl_") == 0 && (i == 0 || !(std::isalnum((unsigned char)s[i - 1]) || s[i - 1] == '_'))) {
+        if (((ch == 'm' && s.compare(i, 4, "mgl_") == 0) || (ch == 'M' && s.compare(i, 3, "MGL") == 0)) && (i == 0 || !(std::isalnum((unsigned char)s[i - 1]) || s[i - 1] == '_'))) {
             size_t j = i;
             while (j < n && (std::isalnum((unsigned char)s[j]) || s[j] == '_')) j++;
             out.insert(s.substr(i, j - i));

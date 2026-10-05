@@ -12,7 +12,8 @@ From-scratch GLSL 1.10–4.60 → MSL 4.0 compiler. Public interface: `src/glsl/
 | `msl.cpp` | MSL emission |
 | `msl_prelude.cpp` | demand-driven MSL helper prelude (+ fp64 library hook) |
 
-Tools: `build/tools/glslc` (compile/link/emit/validate, `--time`), `build/tools/glslrun` (executes self-checking compute tests and `--draw` graphics tests on the GPU).
+Tools: `build/tools/glslc` (compile/link/emit/validate, `--time`, `--xfb a,b`), `build/tools/glslrun` (executes self-checking compute
+tests with known test textures, `--draw` graphics tests, `--pipeline` GS/tess/xfb with the runtime's dispatch, `--tesscheck`).
 Tests: `tests/glsl/run_cases.py build/tools/glslc`, `tests/glsl/run_exec.py build/tools/glslrun`, `tests/glsl/corpus.py` (real-world corpora kept outside the repo in `~/metalgldrv-deps/corpus`).
 
 ## Runtime ABI
@@ -70,5 +71,54 @@ Fed by the runtime through the default block, reported in `Reflection::uniforms`
 ### fp64
 `double` → `ulong` (IEEE bit pattern), `dvecN` → `ulongN`, `dmatCxR` → `mgl_dmat<C,R>` (C columns of `vec<ulong,R>`). All arithmetic/comparison/conversion goes through the `mgl_f64_*` library (src/glsl/runtime/fp64.metal, embedded via `fp64_msl.inc` when that header is on the include path; it must expand to a string-literal expression). Matrix helpers (`mgl_dmat_*`) are composed on the library in the prelude.
 
+### Multi-pass pipelines (MGLDrawInfo at buffer(22) = kBufStageIO)
+All non-classic kinds fetch vertices manually: attribute at location L uses `VariantKey::attribs[L]` (binding, glType, size (5 = BGRA),
+normalized, integer, isDouble, relativeOffset) with `MGLDrawInfo::vertexBuffer/vertexStride/vertexDivisor[binding]` (stride must be the
+effective stride; instanced: element = instance / divisor + baseInstance). Disabled arrays (`enabled = false`) read `MGLSys::currentAttrib[L]`.
+Vertex ids come from the uint32 list `indexBuffer` (+ `baseVertex`).
+
+* **MeshGeometry** (`mgl_gs`, EntryPoint::Mesh): no object function. Grid (primitiveCount, instanceCount, gsInvocations),
+  threads = vertices per input primitive (1/2/4/3/6). maxMeshVertices = max_vertices (<= 256), maxMeshPrimitives = strip-adjusted.
+  Strips are converted to lists with GL's last-vertex provoking order (flat varyings follow GL's default). gl_PrimitiveIDIn = list
+  primitive index within the instance, gl_InvocationID = grid z.
+* **Tessellation**: pass 1 `mgl_tcs` (Kernel): dispatchThreadgroups(patches, instances, 1), threadsPerThreadgroup = TCS output vertices
+  (32 when there is no TCS). Writes `tcsVertexOut[(instance*patches + patch) * cps + cp]` records of `multipass.tcsVertexOutBytes`
+  (cps = `multipass.tcsOutputVertices`, or `patchVertices` when it is 0) and `tcsPatchOut[...]` records of `multipass.tcsPatchOutBytes`
+  (float outer[4], inner[2] at offset 0, patch varyings from byte 32). Without a TCS the levels come from `MGLSys::tessDefaultOuter/Inner`.
+  Pass 2 `mgl_tes_obj` (Object, 1 thread, payload 128 B) + `mgl_tes` (Mesh, 64 threads, <= 130 vertices / 128 primitives):
+  grid (patches, instances, 1); the object stage sizes the mesh grid itself. Tessellation follows GL 4.6 11.2.2
+  (clamping/rounding per spacing, culling on outer <= 0 or NaN, all domains, point_mode, cw/ccw), verified watertight by `glslrun --tesscheck`.
+* **XfbCapture** (`mgl_xfb`, Kernel, 64 threads): dispatchThreads(count * instances). Writes captured varyings at
+  (xfbVertexBase + t) * `multipass.xfbStride[b]` + offset into `xfbBuffer[b]` for buffers in `multipass.xfbBufferMask`, whole primitives
+  only (checked against `xfbCapacity[b]` bytes); counters[0] += primitives written, counters[1] += primitives generated.
+  Captured layout comes from `Reflection::xfbVaryings` (glTransformFeedbackVaryings incl. gl_NextBuffer / gl_SkipComponentsN, or
+  xfb_buffer/xfb_offset/xfb_stride qualifiers, which take precedence).
+  With a geometry shader, XfbCapture yields `mgl_gs_xfb` (Kernel, dispatch exactly 1 thread): it walks instances x primitives x
+  invocations in order, runs VS + GS and records the GS output decomposed into lists in GL order (whole primitives only, same
+  counters). Dispatch it before the MeshGeometry draw that rasterizes; advance xfbVertexBase by the written primitive count.
+* Fragment shaders paired with mesh pipelines read gl_PrimitiveID from the per-primitive `[[user(mgl_primid)]]`; gl_Layer /
+  gl_ViewportIndex are per-primitive outputs. `Reflection::usesFlatShading` tells the classic path when index rotation for
+  GL_LAST_VERTEX_CONVENTION is needed; `writesLayer`/`writesViewportIndex` describe the last pre-raster stage.
+* The tessellator chunk sets `#pragma METAL fp math_mode(safe)` / `fp contract(off)` (shared vertices must be bit-identical); this
+  applies to the rest of the generated source.
+
+### Subroutines
+`Reflection::subroutines[stage]`: `functions` (GL subroutine index = position), `uniforms` (location, arraySize, compatible indices),
+`numLocations`. Stages that use subroutine uniforms get a `SlotKind::SubroutineIndices` slot (index = stage) holding the GPU address of
+`uint selected[numLocations]` (glUniformSubroutinesuiv values). Unselected/incompatible indices make the call a no-op returning zero.
+
+### Uniform initializers
+`Reflection::defaultUniformInit` holds the initial default-block bytes (initializers in GLSL, zero elsewhere). Copy it into the
+program's default-uniform storage at link time.
+
+### Compatibility attribute locations
+gl_Vertex = 0, gl_Normal = 2, gl_Color = 3, gl_SecondaryColor = 4, gl_FogCoord = 5, gl_MultiTexCoordN = 8 + N. Generic attributes may
+alias them (explicit locations), as on NVIDIA.
+
+### Images
+Stores and atomics on read-write images are followed by `texture.fence()` so an invocation observes its own writes.
+
 ## Not yet supported
-Geometry/tessellation shaders and transform-feedback capture (generateMSL returns an error; reflection is produced), subroutines, opaque types inside structs, arrays of samplers/images as function parameters, uniform initializer values in reflection, interpolateAt* (returns the interpolated input), gl_CullDistance, fragment-stage gl_ClipDistance reads, float image atomics, textureGatherOffsets.
+Transform feedback of tessellation output, geometry streams other than 0, tessellation + geometry together, gl_CullDistance culling (values are passed through,
+no primitives are culled), float image atomics (Metal has none), whole-value use of structs containing opaque types, dynamic indexing of
+uniform struct arrays containing opaque members, interpolateAtSample on multisample-less targets uses the sample position Metal reports.
