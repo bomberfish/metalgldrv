@@ -280,6 +280,7 @@ void Context::endEncoder() {
 }
 
 id<MTL4ComputeCommandEncoder> Context::computeEncoder() {
+    if (renderEnc) MGL_STAT_CALLER("pass-split:compute");
     if (pendingClear.any()) applyClearNow();
     if (renderEnc) endPass();
     if (!computeEnc) {
@@ -531,6 +532,7 @@ void Context::beginPass() {
     [renderEnc setArgumentTable:renderArgTable
                        atStages:MTLRenderStageVertex | MTLRenderStageFragment | MTLRenderStageObject | MTLRenderStageMesh];
     pendingClear.reset();
+    passFb_ = drawFb.get();
     curPass = p;
     passOpen = true;
     passDirty = false;
@@ -539,6 +541,7 @@ void Context::beginPass() {
 }
 
 void Context::endPass() {
+    if (renderEnc) MGL_STAT_CALLER("endPass");
     if (renderEnc) {
         [renderEnc endEncoding];
         renderEnc = nil;
@@ -556,10 +559,16 @@ id<MTL4RenderCommandEncoder> Context::renderEncoder() {
         if (resolvePass(p) && p == curPass && !pendingClear.any()) {
             passDirty = false;
         } else {
+            if (pendingClear.any()) MGL_STAT("split:pending-clear");
+            else if (drawFb.get() == passFb_) MGL_STAT("split:same-fb-new-attachments");
+            else MGL_STAT("split:other-fb");
             endPass();
         }
     }
-    if (passOpen && pendingClear.any()) endPass();
+    if (passOpen && pendingClear.any()) {
+        MGL_STAT("split:pending-clear-2");
+        endPass();
+    }
     if (!passOpen) beginPass();
     return renderEnc;
 }

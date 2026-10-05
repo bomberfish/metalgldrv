@@ -638,7 +638,9 @@ static void doClear(Context* ctx, bool color, int colorDB, const float* fval, co
         if ((dbMask & (1u << i)) && ctx->blend[i].colorMask != 0xF) fullMasks = false;
     if (doStencil && (ctx->stencil[0].writeMask & 0xff) != 0xff) fullMasks = false;
     // Load-action path: only when no draws happened yet in this pass (or no pass open).
-    bool canFold = !scissored && fullMasks && !ctx->passOpen;
+    // Fold into the next pass's load action when nothing has been drawn into this
+    // framebuffer yet (no open pass, or the open pass belongs to another framebuffer).
+    bool canFold = !scissored && fullMasks && (!ctx->passOpen || ctx->passFb_ != fb);
     if (canFold) {
         auto& pc = ctx->pendingClear;
         for (int i = 0; i < kMaxDrawBuffers; i++) {

@@ -1,0 +1,27 @@
+From 4fd2f4a4c115d37f1cf2e92752ab6df9078bb0e4 Mon Sep 17 00:00:00 2001
+From: bomberfish <me@bomberfish.ca>
+Date: Mon, 5 Oct 2026 17:34:17 -0400
+Subject: [PATCH 4/4] Unattended test hook: AME_EXTRA_JVM_ARGS
+
+---
+ Natives/JavaLauncher.m | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Natives/JavaLauncher.m b/Natives/JavaLauncher.m
+index bf414fc..6a98aa5 100644
+--- a/Natives/JavaLauncher.m
++++ b/Natives/JavaLauncher.m
+@@ -72,6 +72,10 @@ void init_loadCustomEnv() {
+ 
+ void init_loadCustomJvmFlags(int* argc, const char** argv) {
+     NSString *jvmargs = [PLProfiles resolveKeyForCurrentProfile:@"javaArgs"];
++    // Unattended testing (metalgldrv demo): AME_EXTRA_JVM_ARGS is appended to the profile's flags.
++    if (getenv("AME_EXTRA_JVM_ARGS") && *getenv("AME_EXTRA_JVM_ARGS")) {
++        jvmargs = [NSString stringWithFormat:@"%@ %s", jvmargs ?: @"", getenv("AME_EXTRA_JVM_ARGS")];
++    }
+     if (jvmargs == nil) return;
+     // Make the separator happy
+     jvmargs = [jvmargs stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+-- 
+2.54.0 (Apple Git-157)
+

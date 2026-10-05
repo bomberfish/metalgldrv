@@ -191,7 +191,23 @@ static void texImage(Context* ctx, GLenum target, GLint level, GLint internalfor
     bool isDS = isDepthOrStencil(f);
     bool fmtDS = format == GL_DEPTH_COMPONENT || format == GL_DEPTH_STENCIL || format == GL_STENCIL_INDEX;
     if (isDS != fmtDS) return ctx->setError(GL_INVALID_OPERATION, "depth/stencil format mismatch");
-    if (isProxy(target)) return;  // proxies always succeed within limits
+    if (isProxy(target)) {
+        // Proxy: record the level if it would succeed, otherwise clear it (GL 4.6 §8.22).
+        Ref<Texture>& pt = ctx->proxyTextures[target];
+        if (!pt) {
+            pt = newTexture(target);
+            pt->target = target;
+        }
+        int maxDim = (target == GL_PROXY_TEXTURE_3D || target == GL_PROXY_TEXTURE_2D_ARRAY) ? 2048 : 16384;
+        bool fits = w <= 16384 && (dims < 2 || h <= 16384) && (dims < 3 || d <= 2048) && (w >> level) <= maxDim;
+        int face = 0;
+        if (fits) {
+            pt->levels[face][level] = TexImageLevel{w, dims >= 2 ? h : 1, dims >= 3 ? d : 1, (GLenum)internalformat, f};
+        } else {
+            for (int l = 0; l < Texture::kMaxLevels; l++) pt->levels[face][l] = TexImageLevel();
+        }
+        return;
+    }
     if (isCubeFace(target) && w != h) return ctx->setError(GL_INVALID_VALUE);
     Texture* t = texForTarget(ctx, target);
     if (!t) return;
@@ -840,7 +856,9 @@ static bool getLevelParam(Context* ctx, Texture* t, int face, GLint level, GLenu
 static GLenum levelQueryTarget(Context* ctx, GLenum target, Texture** t, int* face) {
     *face = faceIndex(target);
     if (isProxy(target)) {
-        *t = nullptr;
+        auto it = ctx->proxyTextures.find(target);
+        *t = it == ctx->proxyTextures.end() ? nullptr : it->second.get();
+        *face = 0;
         return target;
     }
     if (target == GL_TEXTURE_CUBE_MAP) {

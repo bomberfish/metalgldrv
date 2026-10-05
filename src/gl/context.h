@@ -161,6 +161,7 @@ public:
     Ref<Texture> textures[kMaxTextureUnits][kNumTexTargets];
     Ref<Sampler> samplers[kMaxTextureUnits];
     Ref<Texture> defaultTextures[kNumTexTargets];  // texture object 0 per target
+    std::map<GLenum, Ref<Texture>> proxyTextures;    // GL_PROXY_TEXTURE_* level state
     ImageUnit imageUnits[kMaxImageUnits];
 
     Ref<ProgramObj> program;
@@ -266,6 +267,7 @@ public:
     // render pass tracking
     PassDesc curPass;
     bool passOpen = false;
+    Framebuffer* passFb_ = nullptr;  // framebuffer the open pass was started for (stats only)
     bool passDirty = true;           // framebuffer binding/attachments changed
     PendingClear pendingClear;       // clears not yet applied (folded into next pass load action)
     uint64_t drawFbVersionSeen = 0;
