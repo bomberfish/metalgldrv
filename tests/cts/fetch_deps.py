@@ -39,7 +39,13 @@ for pkg in fs.PACKAGES:
         with open(stamp, "w") as f:
             f.write(pkg.revision + "\n")
     elif isinstance(pkg, fs.SourcePackage) and pkg.baseDir in WANT_PKG:
+        stamp = os.path.join(ext, pkg.baseDir, pkg.extractDir, ".cts-rev")
+        if os.path.exists(stamp) and open(stamp).read().strip() == pkg.checksum:
+            print(f"[fetch] {pkg.baseDir} up to date")
+            continue
         print(f"[fetch] {pkg.baseDir} (tarball)")
         fs.pkg = pkg  # fetch_sources.py refers to module-globals "pkg" and "args"
         fs.args = type("A", (), {"insecure": False})()
         pkg.update("https", False)
+        with open(stamp, "w") as f:
+            f.write(pkg.checksum + "\n")

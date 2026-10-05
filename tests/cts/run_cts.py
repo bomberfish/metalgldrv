@@ -56,7 +56,11 @@ def parse_qpa(text):
                 texts = [t.strip() for t in re.findall(r"<Text>(.*?)</Text>", block, re.S)]
                 texts = [t for t in texts if t and "state reset failed" not in t and "will terminate" not in t]
                 if texts:
-                    det = f"{det}: {texts[0][:300]}"
+                    # Prefer the last message that reads like a diagnosis; call-log
+                    # lines ("glFoo(...);") are context, not the failure reason.
+                    kw = re.compile(r"fail|error|expect|invalid|mismatch|wrong|unexpected|not ", re.I)
+                    diag = [t for t in texts if kw.search(t) and not re.match(r"^gl\w+\(.*\);?$", t)]
+                    det = f"{det}: {(diag[-1] if diag else texts[0])[:300]}"
             results[cur] = (status, det)
             blocks[cur] = block
             cur = None
@@ -139,22 +143,7 @@ def summarize_ips(path, max_frames=40):
     return "\n".join(out)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--glcts", required=True)
-    ap.add_argument("--workdir", required=True, help="directory containing gl_cts/ data (cwd for glcts)")
-    ap.add_argument("--caselist", action="append", default=[])
-    ap.add_argument("--filter", action="append", default=[], help="fnmatch pattern(s) of cases to include")
-    ap.add_argument("--exclude", action="append", default=[], help="fnmatch pattern(s) of cases to exclude")
-    ap.add_argument("--outdir", required=True)
-    ap.add_argument("--timeout", type=float, default=60.0, help="per-case inactivity timeout (s)")
-    ap.add_argument("--top", type=int, default=25, help="number of failure categories to list")
-    ap.add_argument("--group-depth", type=int, default=2)
-    ap.add_argument("--jobs", type=int, default=1, help="parallel glcts processes")
-    ap.add_argument("--max-restarts", type=int, default=10000)
-    ap.add_argument("extra", nargs="*", help="extra glcts args")
-    a = ap.parse_args()
-
+def run_suite(a):
     os.makedirs(a.outdir, exist_ok=True)
     cases = load_cases(a.caselist, a.filter, a.exclude)
     if not cases:
@@ -168,12 +157,14 @@ def main():
     crashes = []
     terminations = Counter()  # glcts self-terminations after a case (e.g. state reset errors)
     lock = threading.Lock()
+    bt_seen = {}  # crash output signature -> first case (lldb re-run only once per signature)
     nproc = [0]
     t0 = time.time()
 
     def worker(wid, shard):
         remaining = list(shard)
         chunk = 0
+        startfail = 0
         while remaining and chunk <= a.max_restarts:
             chunk += 1
             tag = f"w{wid}-c{chunk}"
@@ -221,8 +212,16 @@ def main():
                         if ips:
                             break
                         time.sleep(0.25)
+                    tail = "".join(open(stdout_path, errors="replace").readlines()[-4:])
+                    sig_key = re.sub(r"0x[0-9a-fA-F]+|\d+", "N", tail)
+                    with lock:
+                        seen = bt_seen.get(sig_key)
+                        if not seen:
+                            bt_seen[sig_key] = inflight
                     if ips:
                         bt = f"report: {ips}\n{summarize_ips(ips)}"
+                    elif seen:
+                        bt = f"(same output signature as {seen}; see its backtrace)"
                     else:
                         # ReportCrash throttles repeated reports; re-run the case under lldb instead.
                         bt = "(no .ips crash report; backtrace from lldb re-run)\n" + lldb_backtrace(a, inflight, tag)
@@ -245,13 +244,29 @@ def main():
             done = set(res)
             if inflight is not None:
                 done.add(inflight)
-            elif rc != 0 and not res:
-                print(f"[run] glcts exited rc={rc} without running any case; see {stdout_path}",
-                      file=sys.stderr, flush=True)
+                startfail = 0
+            elif (rc != 0 or timed_out) and not res:
+                # Died/hung before the first case began (e.g. in context creation for it).
+                startfail += 1
+                if startfail >= 3:
+                    print(f"[run] glcts failed to start 3x in a row (rc={rc}); see {stdout_path}",
+                          file=sys.stderr, flush=True)
+                    with lock:
+                        for c in remaining:
+                            results[c] = ("Other", f"glcts failed to start (rc={rc})")
+                    return
+                c0 = remaining[0]
+                st = "Timeout" if timed_out else "Crash"
+                tail = "".join(open(stdout_path, errors="replace").readlines()[-8:])
                 with lock:
-                    for c in remaining:
-                        results[c] = ("Other", f"glcts failed to start (rc={rc})")
-                return
+                    results[c0] = (st, f"glcts died before the case started (rc={rc})")
+                    crashes.append((c0, st, f"died before case start (rc={rc})",
+                                    "glcts output tail:\n" + "".join("  | " + l for l in tail.splitlines(True))))
+                    print(f"[run] {st}: {c0} before case start (rc={rc})", flush=True)
+                done.add(c0)
+                inflight = c0  # keep stdout
+            else:
+                startfail = 0
             before = len(remaining)
             remaining = [c for c in remaining if c not in done]
             if len(remaining) == before:
@@ -284,6 +299,37 @@ def main():
     elapsed = time.time() - t0
     results = OrderedDict((c, results[c]) for c in cases if c in results)
     chunk = nproc[0]
+
+    return results, crashes, terminations, elapsed, chunk, cases
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--glcts")
+    ap.add_argument("--workdir", help="directory containing gl_cts/ data (cwd for glcts)")
+    ap.add_argument("--caselist", action="append", default=[])
+    ap.add_argument("--filter", action="append", default=[], help="fnmatch pattern(s) of cases to include")
+    ap.add_argument("--exclude", action="append", default=[], help="fnmatch pattern(s) of cases to exclude")
+    ap.add_argument("--outdir", required=True)
+    ap.add_argument("--timeout", type=float, default=60.0, help="per-case inactivity timeout (s)")
+    ap.add_argument("--top", type=int, default=25, help="number of failure categories to list")
+    ap.add_argument("--group-depth", type=int, default=2)
+    ap.add_argument("--from-qpa", action="store_true", help="only re-summarize OUTDIR/results.qpa")
+    ap.add_argument("--jobs", type=int, default=1, help="parallel glcts processes")
+    ap.add_argument("--max-restarts", type=int, default=10000)
+    ap.add_argument("extra", nargs="*", help="extra glcts args")
+    a = ap.parse_args()
+
+    a.outdir = os.path.abspath(a.outdir)
+    if a.from_qpa:
+        res, _, _, _ = parse_qpa(open(os.path.join(a.outdir, "results.qpa"), errors="replace").read())
+        results, crashes, terminations, elapsed, chunk = res, [], Counter(), 0.0, 0
+        cases = list(res)
+    else:
+        rc = run_suite(a)
+        if isinstance(rc, int):
+            return rc
+        results, crashes, terminations, elapsed, chunk, cases = rc
 
     # ---- summary
     groups = defaultdict(Counter)

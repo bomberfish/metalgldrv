@@ -65,10 +65,5 @@ cmake -G Ninja -S "$CTS_DIR" -B "$CTS_BUILD" \
     -DMETALGLDRV_LIB_DIR="$DRIVER_BUILD"
 ninja -C "$CTS_BUILD" ${CTS_JOBS:+-j "$CTS_JOBS"} glcts
 
-# Object files are ~GBs; they are only needed for incremental rebuilds.
-if [[ "${CTS_KEEP_OBJECTS:-0}" != 1 ]]; then
-    find "$CTS_BUILD" -name '*.o' -delete
-    echo "[setup] deleted object files (set CTS_KEEP_OBJECTS=1 to keep)"
-fi
-
+# (The whole build tree is ~0.5 GB; the CTS checkout + externals ~1.8 GB.)
 echo "[setup] glcts: $CTS_BUILD/external/openglcts/modules/glcts"

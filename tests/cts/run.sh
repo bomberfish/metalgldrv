@@ -21,6 +21,9 @@
 #   --               remaining args are passed to glcts verbatim
 #
 # Outputs in DIR: results.qpa (merged log), results.csv, summary.txt,
+# Driver env vars (METALGLDRV_LOG=3 to log GL errors, METALGLDRV_DUMP_FAILED_GLSL, ...)
+# are passed through to glcts. The driver dylib is snapshotted into DIR first.
+#
 # crashes.txt (crash/timeout cases with faulting-thread backtraces from the
 # macOS .ips crash reports).
 set -euo pipefail
@@ -71,11 +74,15 @@ fi
 if [[ $build == 1 ]]; then
     ninja -C "$DRIVER_BUILD" metalgldrv >/dev/null
 fi
-export METALGLDRV_LIBRARY="$DRIVER_BUILD/libmetalgldrv.dylib"
-[[ -f "$METALGLDRV_LIBRARY" ]] || { echo "missing $METALGLDRV_LIBRARY" >&2; exit 2; }
+[[ -f "$DRIVER_BUILD/libmetalgldrv.dylib" ]] || { echo "missing $DRIVER_BUILD/libmetalgldrv.dylib" >&2; exit 2; }
 
 [[ -z "$out" ]] && out="$HERE/results/$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$out"
+mkdir -p "$out"; out="$(cd "$out" && pwd)"
+
+# Snapshot the driver so concurrent rebuilds of build/ don't affect a running suite.
+cp "$DRIVER_BUILD/libmetalgldrv.dylib" "$out/libmetalgldrv.dylib"
+export METALGLDRV_LIBRARY="$out/libmetalgldrv.dylib"
+(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null; git -C "$REPO" status --short -- src 2>/dev/null | head -50) > "$out/driver-version.txt" || true
 
 args=(--glcts "$GLCTS_DIR/glcts" --workdir "$GLCTS_DIR" --outdir "$out" --timeout "$timeout" --jobs "$jobs")
 for c in "${resolved[@]}"; do args+=(--caselist "$c"); done
