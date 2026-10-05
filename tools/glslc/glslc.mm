@@ -37,6 +37,7 @@ static const char* slotKindName(SlotKind k) {
         case SlotKind::Image: return "Image";
         case SlotKind::BufferSize: return "BufferSize";
         case SlotKind::XfbBuffer: return "XfbBuffer";
+        case SlotKind::SubroutineIndices: return "SubroutineIndices";
     }
     return "?";
 }
@@ -71,6 +72,15 @@ static void printReflection(const Reflection& r) {
            r.multipass.xfbStride[2], r.multipass.xfbStride[3], r.multipass.xfbBufferMask, r.usesFlatShading, r.writesLayer,
            r.writesViewportIndex);
     for (auto& x : r.xfbVaryings) printf("xfb %s type=0x%x size=%d buffer=%d offset=%d\n", x.name.c_str(), x.type, x.arraySize, x.buffer, x.offset);
+    for (int st = 0; st < (int)Stage::Count; st++) {
+        auto& ss = r.subroutines[st];
+        for (size_t i = 0; i < ss.functions.size(); i++) printf("subroutine[%d] %zu: %s\n", st, i, ss.functions[i].c_str());
+        for (auto& u : ss.uniforms) {
+            printf("subroutine uniform[%d] %s location=%d size=%d compatible=", st, u.name.c_str(), u.location, u.arraySize);
+            for (int c : u.compatible) printf("%d ", c);
+            printf("\n");
+        }
+    }
     printf("defaultUniformSize=%u localSize=%d,%d,%d fp64=%d discard=%d\n", r.defaultUniformSize, r.localSize[0], r.localSize[1],
            r.localSize[2], r.usesFp64, r.usesDiscard);
 }

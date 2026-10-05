@@ -65,6 +65,7 @@ private:
     std::set<std::string> fragInputsAvailable_;  // from the vertex stage
     bool haveVsOutputs_ = false;
     bool hasShared_ = false;
+    std::map<std::string, std::string> interpLeaf_;  // FS input leaf accessor (without "g.") -> In member, for interpolateAt*
     bool needEq_ = false;
 
     [[noreturn]] void fail(const std::string& m) { throw EmitError{m}; }
@@ -295,7 +296,8 @@ private:
     bool isBufferRooted(const Expr* e);
     std::pair<std::string, std::string> texRef(const Expr* e);
     std::string withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs, const std::vector<Type>& ptypes,
-                         const Type& ret, const std::function<std::string(size_t, const Expr*)>& argFn);
+                         const Type& ret, const std::function<std::string(size_t, const Expr*)>& argFn, const std::string& firstArg = "");
+    std::string subroutineDispatchers();
 
     // ---- statements ------------------------------------------------------------------
     void stmt(const Stmt* s, std::string& o, int ind);
@@ -817,6 +819,20 @@ std::string Emitter::ex(const Expr* e) {
         case EK::Ctor: return ctor(e);
         case EK::Call: return callUser(e);
         case EK::Builtin: return callBuiltin(e);
+        case EK::SubroutineCall: {
+            const auto& ss = P.refl.subroutines[(int)stage_];
+            auto it = P.subroutineLocation.find({(int)stage_, e->var->name});
+            if (ss.slot < 0 || it == P.subroutineLocation.end()) fail("internal: subroutine uniform without location");
+            std::string sel = "A->s" + std::to_string(ss.slot) + "[" + std::to_string(it->second) + "u" +
+                              (e->aux ? " + uint(" + ex(e->aux) + ")" : "") + "]";
+            std::vector<uint8_t> outs;
+            std::vector<Type> ptypes;
+            for (auto* p : e->fn->params) {
+                outs.push_back(p->q.storage == Storage::Out ? 1 : p->q.storage == Storage::InOut ? 2 : 0);
+                ptypes.push_back(p->type);
+            }
+            return withOuts("mgl_sub_" + e->var->name, e, outs, ptypes, e->type, [&](size_t, const Expr* a) { return ex(a); }, sel);
+        }
         case EK::Length: {
             const Expr* a = e->args[0];
             Acc acc;
@@ -945,8 +961,8 @@ std::string Emitter::ctor(const Expr* e) {
 
 std::string Emitter::withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs,
                               const std::vector<Type>& ptypes, const Type& ret,
-                              const std::function<std::string(size_t, const Expr*)>& argFn) {
-    std::string pre, post, args;
+                              const std::function<std::string(size_t, const Expr*)>& argFn, const std::string& firstArg) {
+    std::string pre, post, args = firstArg;
     for (size_t i = 0; i < e->args.size(); i++) {
         const Expr* a = e->args[i];
         std::string s;
@@ -961,7 +977,7 @@ std::string Emitter::withOuts(const std::string& callee, const Expr* e, const st
         } else {
             s = argFn(i, a);
         }
-        if (!s.empty()) args += (args.empty() ? "" : ", ") + s;
+        if (!s.empty()) args += (args.empty() ? "" : ", ") + s;  // firstArg (if any) already in args
     }
     std::string call = callee + "(" + args + ")";
     if (post.empty()) return pre.empty() ? call : "(" + pre + call + ")";
@@ -1129,7 +1145,41 @@ std::string Emitter::callBuiltin(const Expr* e) {
     if (n == "bitfieldExtract") return "extract_bits(" + a(0) + ", uint(" + a(1) + "), uint(" + a(2) + "))";
     if (n == "bitfieldInsert") return "insert_bits(" + a(0) + ", " + a(1) + ", uint(" + a(2) + "), uint(" + a(3) + "))";
     if (n == "bitCount") return mt(rt) + "(popcount(" + a(0) + "))";
-    if (n == "interpolateAtCentroid" || n == "interpolateAtSample" || n == "interpolateAtOffset") return a(0);
+    if (n == "interpolateAtCentroid" || n == "interpolateAtSample" || n == "interpolateAtOffset") {
+        const Expr* x = A[0];
+        std::string post;
+        if (x->kind == EK::Swizzle) {
+            post = ".";
+            for (int i = 0; i < x->nswz; i++) post += kSwz[x->swz[i]];
+            if (x->args[0]->type.isScalar()) post.clear();
+            x = x->args[0];
+        } else if (x->kind == EK::Index && x->args[0]->type.isVector() && x->args[1]->cv) {
+            post = "[" + std::to_string(x->args[1]->cv->c[0].i) + "]";
+            x = x->args[0];
+        }
+        std::function<bool(const Expr*, std::string&)> path = [&](const Expr* y, std::string& out) -> bool {
+            if (y->kind == EK::Var) { out = varName(y->var); return true; }
+            if (y->kind == EK::Field) {
+                if (!path(y->args[0], out)) return false;
+                out += ".m_" + y->args[0]->type.sdef->members[y->field].name;
+                return true;
+            }
+            if (y->kind == EK::Index && y->args[1]->cv && !y->args[0]->type.isVector()) {
+                if (!path(y->args[0], out)) return false;
+                out += "[" + std::to_string(y->args[1]->cv->c[0].i) + "]";
+                return true;
+            }
+            return false;
+        };
+        std::string pth;
+        auto it = path(x, pth) ? interpLeaf_.find(pth) : interpLeaf_.end();
+        if (it == interpLeaf_.end()) return a(0);  // not resolvable to one interpolant: value at the default location
+        std::string call = "mgl_in->" + it->second;
+        if (n == "interpolateAtCentroid") call += ".interpolate_at_centroid()";
+        else if (n == "interpolateAtSample") call += ".interpolate_at_sample(uint(" + a(1) + "))";
+        else call += ".interpolate_at_offset(" + a(1) + " + 0.5f)";  // Metal offsets are relative to the pixel's top-left corner
+        return call + post;
+    }
     if (n == "noise1") return "0.0f";
     if (n == "noise2" || n == "noise3" || n == "noise4") return mt(rt) + "(0.0f)";
     if (n == "allInvocationsEqual" || n == "allInvocationsEqualARB") {
@@ -1574,6 +1624,36 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
     }
 }
 
+std::string Emitter::subroutineDispatchers() {
+    std::string out;
+    std::set<std::string> done;
+    for (auto* v : sc_->used) {
+        if (v->type.base != BT::Subroutine || !done.insert(v->name).second) continue;
+        const Function* proto = v->type.subr;
+        std::string params = "uint mgl_sel", args;
+        for (size_t i = 0; i < proto->params.size(); i++) {
+            const Variable* p = proto->params[i];
+            std::string n = "a" + std::to_string(i);
+            if (p->type.isOpaque()) fail("opaque subroutine parameters are not supported");
+            bool ref = p->q.storage == Storage::Out || p->q.storage == Storage::InOut;
+            params += ", " + (ref ? "thread " + mt(p->type) + "& " : mt(p->type) + " ") + n;
+            args += (i ? ", " : "") + n;
+        }
+        out += "    " + mt(proto->ret) + " mgl_sub_" + v->name + "(" + params + ") {\n        switch (mgl_sel) {\n";
+        for (auto& [mangled, f] : sc_->defs) {
+            if (std::find(f->subroutineTypes.begin(), f->subroutineTypes.end(), proto->name) == f->subroutineTypes.end()) continue;
+            auto it = P.subroutineIndex.find({(int)stage_, f->name});
+            if (it == P.subroutineIndex.end() || !fnNames_.count(f)) continue;
+            std::string call = fnNames_.at(f) + "(" + args + ")";
+            out += "            case " + std::to_string(it->second) + "u: " + (proto->ret.isVoid() ? call + "; return;" : "return " + call + ";") + "\n";
+        }
+        out += "            default: break;\n        }\n";
+        if (!proto->ret.isVoid()) out += "        return " + mt(proto->ret) + "{};\n";
+        out += "    }\n";
+    }
+    return out;
+}
+
 std::string Emitter::fnSignature(const Function* f) {
     std::string r = mt(f->ret) + " " + fnNames_.at(f) + "(";
     bool first = true;
@@ -1681,6 +1761,7 @@ void Emitter::collectStructs(std::vector<const StructDef*>& order) {
         if (!e) return;
         visitType(e->type);
         for (auto* a : e->args) ve(a);
+        ve(e->aux);
     };
     std::function<void(const Stmt*)> vs = [&](const Stmt* s) {
         if (!s) return;
@@ -1729,6 +1810,8 @@ void Emitter::emitArgs(std::string& o) {
         }
     }
     for (auto& acb : P.refl.atomicCounterBuffers) decl[acb.slot] = "device uchar* s" + std::to_string(acb.slot) + ";";
+    for (auto& ss : P.refl.subroutines)
+        if (ss.slot >= 0) decl[ss.slot] = "device const uint* s" + std::to_string(ss.slot) + ";";
     o += "struct MGLArgs {\n";
     bool any = false;
     for (size_t i = 0; i < slots.size(); i++) {
@@ -1786,6 +1869,7 @@ void Emitter::prepareStage(Stage s) {
                 si.usedMembers[b->var].insert(e->field);
         }
         for (auto* a : e->args) ve(a);
+        ve(e->aux);
     };
     std::function<void(const Stmt*)> vs = [&](const Stmt* st) {
         if (!st) return;
@@ -1863,6 +1947,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
 
     for (auto& [m, f] : sc_->defs)
         if (sc_->reachable.count(f)) funcs += emitFunction(f);
+    funcs += subroutineDispatchers();
     temps_.clear();
     std::string initBody;
     declared.clear();
@@ -2204,8 +2289,37 @@ void Emitter::emitClassicVS(std::string& o) {
 }
 
 void Emitter::emitFS(std::string& o, bool meshInput) {
-    emitBody(Stage::Fragment, o);
+    prepareStage(Stage::Fragment);
+    useStage(Stage::Fragment);
     StageInfo& si = si_[(int)Stage::Fragment];
+    // inputs used with interpolateAt* stay interpolants, reachable from G through mgl_in
+    std::set<const Variable*> interpVars;
+    {
+        std::function<void(const Expr*)> ve = [&](const Expr* e) {
+            if (!e) return;
+            if (e->kind == EK::Builtin && e->fn->name.compare(0, 13, "interpolateAt") == 0) {
+                const Expr* r = e->args[0];
+                while (r->kind == EK::Swizzle || r->kind == EK::Index || r->kind == EK::Field) r = r->args[0];
+                if (r->kind == EK::Var && r->var->q.storage == Storage::In && r->var->builtin == BuiltinVar::None) interpVars.insert(r->var);
+            }
+            for (auto* a : e->args) ve(a);
+            ve(e->aux);
+        };
+        std::function<void(const Stmt*)> vs = [&](const Stmt* st) {
+            if (!st) return;
+            for (auto* b : st->body) vs(b);
+            ve(st->expr);
+            vs(st->init);
+            ve(st->cond);
+            vs(st->condDecl);
+            ve(st->incr);
+            vs(st->then);
+            vs(st->els);
+            for (auto* v : st->vars) ve(v->init);
+        };
+        for (auto* f : sc_->reachable) vs(f->body);
+    }
+    interpLeaf_.clear();
     auto& biByKind = si.bi;
     std::string inS = "struct In {\n", outS = "struct Out {\n", copyIn, copyOut, params;
     bool anyIn = false, anyOut = false;
@@ -2245,6 +2359,15 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             if (lt.base == BT::Double) {
                 inS += "    uint2 " + nm + " [[user(" + nm + "), flat]];\n";
                 copyIn += "    " + leaves[i].second + " = as_type<ulong>(in." + nm + ");\n";
+                anyIn = true;
+                continue;
+            }
+            if (interpVars.count(v) && lt.base == BT::Float && lq.interp != Interp::Flat) {
+                std::string mode = lq.interp == Interp::NoPerspective ? "no_perspective" : "perspective";
+                inS += "    interpolant<" + mt(lt) + ", interpolation::" + mode + "> " + nm + " [[user(" + nm + ")]];\n";
+                std::string at = lq.centroid ? "interpolate_at_centroid()" : "interpolate_at_center()";
+                copyIn += "    " + leaves[i].second + " = in." + nm + "." + at + ";\n";
+                interpLeaf_[leaves[i].second.substr(2)] = nm;  // strip "g."
                 anyIn = true;
                 continue;
             }
@@ -2370,7 +2493,10 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     std::string alpha;
     if (color0Float && sc_->primary->compat)
         alpha = "    if (sys.alphaFunc != 0x0207u && !mgl_alpha_pass(" + color0 + ".a, sys.alphaFunc, sys.alphaRef)) discard_fragment();\n";
-    o += inS + outS + "}  // namespace fs\n\n";
+    bool useInterp = !interpLeaf_.empty();
+    emitBody(Stage::Fragment, o, inS, useInterp ? "    thread In* mgl_in;\n" : "");
+    if (useInterp) copyIn += "    g.mgl_in = &in;\n";
+    o += outS + "}  // namespace fs\n\n";
     std::string e;
     if (sc_->inLayout.earlyFragmentTests) e += "[[early_fragment_tests]]\n";
     e += std::string("fragment ") + (anyOut ? "fs::Out" : "void") + " mgl_fs(";

@@ -77,6 +77,8 @@ struct LinkedProgram {
     std::map<std::string, std::pair<int, int>> fragOutputs;  // FS output var name -> (location, index)
     std::set<std::string> vsOutputNames;                   // flattened varying names produced by the last pre-raster stage
     int defaultSlot = -1;
+    std::map<std::pair<int, std::string>, int> subroutineLocation;  // (stage, uniform) -> location
+    std::map<std::pair<int, std::string>, int> subroutineIndex;     // (stage, function) -> index
 };
 
 // Varying naming shared by producer/consumer stages.

@@ -55,7 +55,8 @@ CompileResult compile(Stage stage, const std::vector<std::string>& sources, cons
 //   Sampler                                : MTLResourceID of the sampler state
 //   BufferSize                             : uint64 byte size of the bound SSBO range
 //                                            (for runtime-sized arrays .length())
-enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer };
+enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer,
+                                SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */ };
 
 struct Slot {
     SlotKind kind;

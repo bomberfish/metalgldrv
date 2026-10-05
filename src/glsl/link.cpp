@@ -116,6 +116,7 @@ struct Walker {
         if (!e) return;
         onExpr(e);
         for (auto* a : e->args) expr(a);
+        expr(e->aux);
     }
     void stmt(const Stmt* s) {
         if (!s) return;
@@ -213,6 +214,16 @@ void Linker::collectStage(Stage s) {
     };
     w.onExpr = [&](const Expr* e) {
         if (e->kind == EK::Var && e->var->global) sc.used.insert(e->var);
+        if (e->kind == EK::SubroutineCall) {
+            sc.used.insert(e->var);
+            for (auto& [mangled, f] : sc.defs) {
+                if (std::find(f->subroutineTypes.begin(), f->subroutineTypes.end(), e->fn->name) == f->subroutineTypes.end()) continue;
+                if (!sc.reachable.count(f)) {
+                    sc.reachable.insert(f);
+                    work.push_back(f);
+                }
+            }
+        }
         if (e->kind == EK::Call) {
             auto it = sc.defs.find(e->fn->mangled);
             if (it == sc.defs.end()) {
@@ -531,6 +542,7 @@ void Linker::assignUniforms() {
             }
             if (v->q.storage != Storage::Uniform) continue;
             if (v->builtin == BuiltinVar::DepthRange) continue;  // fed from MGLSys
+            if (v->type.base == BT::Subroutine) continue;         // subroutine uniforms have their own interface
             bool opq = v->type.containsOpaque();
             auto& idx = opq ? opIdx : defIdx;
             auto& vec = opq ? opaques : defaults;
@@ -731,6 +743,73 @@ void Linker::assignUniforms() {
         }
         refl.uniforms.push_back(u);
         prog_->opaque[v->name] = ob;
+    }
+    // subroutines (per stage)
+    for (int s = 0; s < (int)Stage::Count; s++) {
+        StageCode& sc = prog_->stages[s];
+        if (!sc.main) continue;
+        StageSubroutines& ss = refl.subroutines[s];
+        std::vector<const Function*> fns;
+        std::set<std::string> seenFn;
+        for (auto& sh : sc.shaders)
+            for (auto& g : sh->globals)
+                if (g.kind == GlobalDecl::FunctionDef && !g.fn->subroutineTypes.empty() && seenFn.insert(g.fn->name).second) fns.push_back(g.fn);
+        if (fns.empty()) continue;
+        std::vector<int> index(fns.size(), -1);
+        std::set<int> usedIdx;
+        for (size_t i = 0; i < fns.size(); i++)
+            if (fns[i]->subroutineIndex >= 0) {
+                index[i] = fns[i]->subroutineIndex;
+                if (!usedIdx.insert(index[i]).second) error("duplicate subroutine index " + std::to_string(index[i]));
+            }
+        int next = 0;
+        for (size_t i = 0; i < fns.size(); i++)
+            if (index[i] < 0) {
+                while (usedIdx.count(next)) next++;
+                index[i] = next;
+                usedIdx.insert(next);
+            }
+        int maxIdx = 0;
+        for (int i : index) maxIdx = std::max(maxIdx, i);
+        ss.functions.assign(maxIdx + 1, "");
+        for (size_t i = 0; i < fns.size(); i++) ss.functions[index[i]] = fns[i]->name;
+        std::vector<const Variable*> unis;
+        for (auto* v : sc.used)
+            if (v->type.base == BT::Subroutine && v->q.storage == Storage::Uniform) unis.push_back(v);
+        std::sort(unis.begin(), unis.end(), [](const Variable* a, const Variable* b) { return a->id < b->id; });
+        std::set<int> takenLoc;
+        for (auto* v : unis)
+            if (v->q.layout.location >= 0)
+                for (int i = 0; i < v->type.arraySize(); i++) takenLoc.insert(v->q.layout.location + i);
+        int nextLoc = 0;
+        for (auto* v : unis) {
+            SubroutineUniform su;
+            su.name = v->name;
+            su.arraySize = v->type.isArray() ? v->type.dims[0] : 1;
+            if (v->q.layout.location >= 0) su.location = v->q.layout.location;
+            else {
+                for (;;) {
+                    bool free = true;
+                    for (int i = 0; i < su.arraySize; i++) if (takenLoc.count(nextLoc + i)) free = false;
+                    if (free) break;
+                    nextLoc++;
+                }
+                su.location = nextLoc;
+                for (int i = 0; i < su.arraySize; i++) takenLoc.insert(nextLoc + i);
+                nextLoc += su.arraySize;
+            }
+            for (size_t i = 0; i < fns.size(); i++)
+                if (std::find(fns[i]->subroutineTypes.begin(), fns[i]->subroutineTypes.end(), v->type.subr->name) != fns[i]->subroutineTypes.end())
+                    su.compatible.push_back(index[i]);
+            ss.numLocations = std::max(ss.numLocations, su.location + su.arraySize);
+            ss.uniforms.push_back(su);
+            prog_->subroutineLocation[{s, v->name}] = su.location;
+        }
+        for (size_t i = 0; i < fns.size(); i++) prog_->subroutineIndex[{s, fns[i]->name}] = index[i];
+        if (!unis.empty()) {
+            ss.slot = slot++;
+            refl.slots.push_back({SlotKind::SubroutineIndices, (uint32_t)s});
+        }
     }
     for (auto& acb : refl.atomicCounterBuffers) {
         acb.slot = slot++;

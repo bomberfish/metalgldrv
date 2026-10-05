@@ -58,6 +58,7 @@ struct Sym {
     int member = -1;  // anonymous block member index
     StructDef* type = nullptr;
     std::vector<Function*> funcs;
+    Function* subrType = nullptr;  // subroutine type declared with this name
 };
 
 const std::unordered_set<std::string>& qualifierKeywords() {
@@ -226,6 +227,8 @@ private:
     void parseArrayDims(Type& t);
     void parseBlock(Qualifiers q, std::vector<Stmt*>* out);
     void parseFunction(const Qualifiers& q, const Type& ret, const std::string& name);
+    std::vector<Variable*> parseParamList();
+    Expr* mkSubroutineCall(Variable* v, Expr* index, std::vector<Expr*> args, int ln);
     void parseDeclarators(Qualifiers q, const Type& t, std::string name, bool global, std::vector<Variable*>* out);
     Expr* parseInitializer(const Type& t);
     void applyStageLayout(const Qualifiers& q);
@@ -320,7 +323,7 @@ bool Parser::isQualifierAt(int k) {
     if (t.kind != PK::Ident || !qualifierKeywords().count(t.text)) return false;
     static const std::unordered_set<std::string> soft = {
         "sample", "patch", "buffer", "shared", "precise", "coherent", "volatile", "restrict", "readonly", "writeonly",
-        "subroutine", "attribute", "varying", "smooth", "flat", "noperspective", "centroid", "invariant"};
+        "attribute", "varying", "smooth", "flat", "noperspective", "centroid", "invariant"};
     if (!soft.count(t.text)) return true;
     Sym* s = lookup(t.text);
     if (s && s->var) return false;
@@ -362,7 +365,14 @@ bool Parser::parseQualifiers(Qualifiers& q) {
         else if (k == "writeonly") q.memory |= MemWriteOnly;
         else if (k == "lowp" || k == "mediump" || k == "highp") {}
         else if (k == "layout") parseLayout(q);
-        else if (k == "subroutine") fail("subroutines are not supported");
+        else if (k == "subroutine") {
+            q.subroutine = true;
+            if (accept("(")) {
+                do q.subroutineTypes.push_back(expectIdent());
+                while (accept(","));
+                expect(")");
+            }
+        }
     }
     return any;
 }
@@ -604,6 +614,41 @@ void Parser::parseExternal() {
     }
     Qualifiers q;
     bool hasQ = parseQualifiers(q);
+    if (q.subroutine) {
+        if (q.storage == Storage::Uniform) {
+            std::string tn = expectIdent();
+            Sym* ts = lookup(tn);
+            if (!ts || !ts->subrType) fail("'" + tn + "' is not a subroutine type");
+            Type t;
+            t.base = BT::Subroutine;
+            t.subr = ts->subrType;
+            std::string name = expectIdent();
+            parseDeclarators(q, t, name, true, nullptr);
+            return;
+        }
+        if (q.subroutineTypes.empty()) {
+            // subroutine type declaration: subroutine <ret> <name>(<params>);
+            Type ret = parseTypeSpecifier();
+            std::string name = expectIdent();
+            std::vector<Variable*> params = parseParamList();
+            expect(";");
+            sh_.funcs.emplace_back();
+            Function* f = &sh_.funcs.back();
+            f->name = name;
+            f->ret = ret;
+            f->params = params;
+            f->line = line();
+            Sym& sym = scopes_.back()[name];
+            if (sym.var || sym.type || sym.subrType) fail("redefinition of '" + name + "'");
+            sym.subrType = f;
+            return;
+        }
+        Type t = parseTypeSpecifier();
+        std::string name = expectIdent();
+        if (!isP("(")) fail("expected a subroutine function definition");
+        parseFunction(q, t, name);
+        return;
+    }
     if (hasQ && isP(";")) {
         p_++;
         applyStageLayout(q);
@@ -835,7 +880,7 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
     expect(";");
 }
 
-void Parser::parseFunction(const Qualifiers& q, const Type& ret, const std::string& name) {
+std::vector<Variable*> Parser::parseParamList() {
     expect("(");
     std::vector<Variable*> params;
     if (isKw("void") && isP(")", 1)) p_ += 1;
@@ -862,6 +907,11 @@ void Parser::parseFunction(const Qualifiers& q, const Type& ret, const std::stri
             expect(",");
         }
     }
+    return params;
+}
+
+void Parser::parseFunction(const Qualifiers& q, const Type& ret, const std::string& name) {
+    std::vector<Variable*> params = parseParamList();
     std::string mangled = name + "(";
     for (auto* pv : params) {
         mangled += pv->type.str();
@@ -890,7 +940,19 @@ void Parser::parseFunction(const Qualifiers& q, const Type& ret, const std::stri
         sym.funcs.push_back(f);
         sh_.functions.push_back(f);
     }
-    (void)q;
+    if (q.subroutine) {
+        f->subroutineTypes = q.subroutineTypes;
+        if (q.hasLayout && q.layout.index >= 0) f->subroutineIndex = q.layout.index;
+        for (auto& tn : q.subroutineTypes) {
+            Sym* ts = lookup(tn);
+            if (!ts || !ts->subrType) fail("'" + tn + "' is not a subroutine type");
+            const Function* proto = ts->subrType;
+            bool match = proto->ret == ret && proto->params.size() == params.size();
+            for (size_t i = 0; match && i < params.size(); i++)
+                match = proto->params[i]->type == params[i]->type && proto->params[i]->q.storage == params[i]->q.storage;
+            if (!match) fail("subroutine function '" + name + "' does not match subroutine type '" + tn + "'");
+        }
+    }
     if (!hasBody) {
         expect(";");
         return;
@@ -1294,6 +1356,11 @@ Expr* Parser::parsePostfix(Expr* e) {
         if (accept("[")) {
             Expr* i = parseExpression();
             expect("]");
+            if (e->kind == EK::Var && e->type.isArray() && e->type.base == BT::Subroutine && isP("(")) {
+                auto args = parseArgs();
+                e = mkSubroutineCall(e->var, i, args, ln);
+                continue;
+            }
             e = mkIndex(e, i, ln);
         } else if (accept(".")) {
             std::string f = expectIdent();
@@ -1670,6 +1737,27 @@ Expr* Parser::mkCtor(Type t, std::vector<Expr*> args, int ln) {
     return e;
 }
 
+Expr* Parser::mkSubroutineCall(Variable* v, Expr* index, std::vector<Expr*> args, int ln) {
+    const Function* proto = v->type.subr;
+    if (args.size() != proto->params.size()) fail("wrong number of arguments for subroutine '" + v->name + "'", ln);
+    for (size_t i = 0; i < args.size(); i++) {
+        const Variable* p = proto->params[i];
+        if (p->q.storage == Storage::Out || p->q.storage == Storage::InOut) {
+            if (!exprIsLvalue(args[i])) fail("subroutine argument " + std::to_string(i + 1) + " must be an l-value", ln);
+            markWritten(args[i]);
+            if (args[i]->type != p->type) fail("subroutine out argument type mismatch", ln);
+        } else {
+            args[i] = convert(args[i], p->type, "subroutine argument");
+        }
+    }
+    Expr* e = E(EK::SubroutineCall, proto->ret, ln);
+    e->var = v;
+    e->fn = const_cast<Function*>(proto);
+    e->args = args;
+    e->aux = index;
+    return e;
+}
+
 Function* Parser::builtinFn(const Builtin* b) {
     auto it = builtinFns_.find(b);
     if (it != builtinFns_.end()) return it->second;
@@ -1685,7 +1773,10 @@ Function* Parser::builtinFn(const Builtin* b) {
 Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
     Sym* s = lookup(name);
     if (s && s->type) return mkCtor(Type{BT::Struct, 1, 0, Dim::None, false, false, false, BT::Float, s->type, {}}, args, ln);
-    if (s && s->var) fail("'" + name + "' : called object is not a function", ln);
+    if (s && s->var) {
+        if (s->var->type.base == BT::Subroutine && !s->var->type.isArray()) return mkSubroutineCall(s->var, nullptr, args, ln);
+        fail("'" + name + "' : called object is not a function", ln);
+    }
     // candidates
     struct Cand { Function* user; const Builtin* bi; int cost; };
     std::vector<Cand> cands;

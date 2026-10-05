@@ -1,0 +1,23 @@
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+subroutine float BinOp(float a, float b);
+subroutine void Writer(out float r, float v);
+layout(index = 3) subroutine(BinOp) float addOp(float a, float b) { return a + b; }
+subroutine(BinOp) float mulOp(float a, float b) { return a * b; }
+subroutine(Writer) void twice(out float r, float v) { r = v * 2.0; }
+subroutine uniform BinOp op;
+layout(location = 5) subroutine uniform BinOp ops[2];
+subroutine uniform Writer w;
+void main() {
+    // glslrun selects the first compatible function: addOp (index 3) for BinOp, twice for Writer
+    float x = op(3.0, 4.0);
+    float y = ops[int(seq[1])](2.0, 5.0);
+    float z;
+    w(z, 21.0);
+    res[0] = 3u;
+    res[1] = x == 7.0 ? 1u : 0u;
+    res[2] = y == 7.0 ? 1u : 0u;
+    res[3] = z == 42.0 ? 1u : 0u;
+}

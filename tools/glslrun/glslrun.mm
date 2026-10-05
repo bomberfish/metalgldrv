@@ -252,6 +252,7 @@ int main(int argc, char** argv) {
         memset(acb.contents, 0, 256);
         id<MTLBuffer> args = [dev newBufferWithLength:std::max<size_t>(8, r.slots.size() * 8) options:MTLResourceStorageModeShared];
         uint64_t* slots = (uint64_t*)args.contents;
+        std::vector<id<MTLBuffer>> keep;
         for (size_t i = 0; i < r.slots.size(); i++) {
             const Slot& s = r.slots[i];
             switch (s.kind) {
@@ -260,6 +261,16 @@ int main(int argc, char** argv) {
                 case SlotKind::Ssbo: slots[i] = ssbo[std::min(7, r.storageBlocks[s.index].binding)].gpuAddress; break;
                 case SlotKind::BufferSize: slots[i] = kSize; break;
                 case SlotKind::AtomicCounter: slots[i] = acb.gpuAddress; break;
+                case SlotKind::SubroutineIndices: {
+                    const StageSubroutines& ss = r.subroutines[s.index];
+                    id<MTLBuffer> sb = [dev newBufferWithLength:std::max(4, ss.numLocations * 4) options:MTLResourceStorageModeShared];
+                    uint32_t* sel = (uint32_t*)sb.contents;
+                    for (auto& u : ss.uniforms)
+                        for (int k = 0; k < u.arraySize; k++) sel[u.location + k] = u.compatible.empty() ? 0 : (uint32_t)u.compatible[0];
+                    keep.push_back(sb);
+                    slots[i] = sb.gpuAddress;
+                    break;
+                }
                 default: slots[i] = 0; break;
             }
         }
@@ -275,6 +286,7 @@ int main(int argc, char** argv) {
         [enc useResource:ubo usage:MTLResourceUsageRead];
         [enc useResource:defaults usage:MTLResourceUsageRead];
         [enc useResource:acb usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+        for (auto b : keep) [enc useResource:b usage:MTLResourceUsageRead];
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(r.localSize[0], r.localSize[1], r.localSize[2])];
         [enc endEncoding];

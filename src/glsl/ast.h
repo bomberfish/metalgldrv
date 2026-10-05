@@ -15,10 +15,11 @@ namespace glsl {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-enum class BT : uint8_t { Void, Bool, Int, UInt, Float, Double, Struct, Sampler, Image, AtomicUint, Error };
+enum class BT : uint8_t { Void, Bool, Int, UInt, Float, Double, Struct, Sampler, Image, AtomicUint, Subroutine, Error };
 enum class Dim : uint8_t { None, D1, D2, D3, Cube, Rect, Buffer };
 
 struct StructDef;
+struct Function;
 
 struct Type {
     BT base = BT::Void;
@@ -29,6 +30,7 @@ struct Type {
     bool arrayed = false, shadow = false, ms = false;
     BT sampled = BT::Float;  // component type of sampler/image results
     StructDef* sdef = nullptr;
+    Function* subr = nullptr;  // BT::Subroutine: the subroutine type (prototype)
     std::vector<int> dims;   // array dimensions, outermost first; 0 = unsized
 
     static Type scalar(BT b) { Type t; t.base = b; return t; }
@@ -94,6 +96,8 @@ struct Qualifiers {
     bool interpExplicit = false;
     bool centroid = false, sample = false, patch = false, invariant = false, precise = false;
     uint8_t memory = 0;
+    bool subroutine = false;
+    std::vector<std::string> subroutineTypes;  // subroutine(type, ...) on function definitions
     bool hasLayout = false;
     Layout layout;
 };
@@ -185,6 +189,8 @@ struct Function {
     Stmt* body = nullptr;
     const Builtin* builtin = nullptr;
     std::string mangled;  // name + param type signature
+    std::vector<std::string> subroutineTypes;  // subroutine function: compatible subroutine types
+    int subroutineIndex = -1;                  // layout(index = N)
     bool reachable = false;
     int line = 0;
 };
@@ -192,7 +198,7 @@ struct Function {
 // ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
-enum class EK : uint8_t { Const, Var, Binary, Unary, Assign, Ternary, Call, Ctor, Index, Swizzle, Field, Comma, Length, Builtin };
+enum class EK : uint8_t { Const, Var, Binary, Unary, Assign, Ternary, Call, Ctor, Index, Swizzle, Field, Comma, Length, Builtin, SubroutineCall };
 
 enum class Op : uint8_t {
     None,
@@ -214,6 +220,7 @@ struct Expr {
     uint8_t swz[4] = {0, 0, 0, 0};
     uint8_t nswz = 0;
     std::shared_ptr<ConstVal> cv; // set when the expression is a compile-time constant
+    Expr* aux = nullptr;          // SubroutineCall: array index of the subroutine uniform (or null)
     bool isLvalue() const;
 };
 
