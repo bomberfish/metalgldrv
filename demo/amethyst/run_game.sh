@@ -1,0 +1,33 @@
+#!/bin/bash
+# Unattended Minecraft run through Amethyst + metalgldrv on a USB-connected device.
+#   demo/amethyst/run_game.sh [profile-name] [seconds]
+# Launches Amethyst suspended with AME_AUTOLAUNCH_PROFILE / AME_FORCE_RENDERER,
+# attaches lldb (enables JIT like StikDebug, see jit_lldb.py), lets the game run
+# for N seconds, then pulls Documents/latestlog.txt into $OUT.
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+DEVICE="${DEVICE:-00008142-001538391E80C01C}"
+BUNDLE="${BUNDLE_ID:-ca.bomberfish.amethyst}"
+PROFILE_NAME="${1:-Fabulously Optimized}"
+SECONDS_TO_RUN="${2:-120}"
+OUT="${OUT:-$HERE/../../build/game-run}"
+mkdir -p "$OUT"
+ENV_JSON=$(python3 -c "import json,os,sys; print(json.dumps({'AME_AUTOLAUNCH_PROFILE': sys.argv[1], 'AME_FORCE_RENDERER': os.environ.get('AME_FORCE_RENDERER','libmetalgldrv.dylib'), 'MGL_LOG': os.environ.get('MGL_LOG','2')}))" "$PROFILE_NAME")
+echo "== launching $BUNDLE suspended ($PROFILE_NAME)"
+xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --start-stopped \
+    --environment-variables "$ENV_JSON" --json-output "$OUT/launch.json" "$BUNDLE" >/dev/null || exit 1
+PID=$(python3 -c "import json; d=json.load(open('$OUT/launch.json')); print(d['result']['process']['processIdentifier'])")
+echo "== pid $PID; attaching lldb (JIT handler)"
+xcrun lldb --batch -o "command script import $HERE/jit_lldb.py" -o "device select $DEVICE" \
+    -o "device process attach --pid $PID" -o "jit_loop" > "$OUT/lldb.log" 2>&1 &
+LLDB=$!
+sleep "$SECONDS_TO_RUN"
+echo "== collecting logs"
+xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BUNDLE" \
+    --source Documents/latestlog.txt --destination "$OUT/latestlog.txt" >/dev/null 2>&1
+if [ "${KEEP_RUNNING:-0}" != 1 ]; then
+    kill $LLDB 2>/dev/null
+    xcrun devicectl device process terminate --device "$DEVICE" --pid "$PID" >/dev/null 2>&1
+fi
+echo "== logs in $OUT (latestlog.txt, lldb.log)"
+grep -E "metalgldrv|EGLBridge|RENDERER|Exception|Error|FATAL|crash" "$OUT/latestlog.txt" | head -60

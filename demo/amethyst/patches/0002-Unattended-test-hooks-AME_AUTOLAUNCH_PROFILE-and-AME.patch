@@ -1,0 +1,70 @@
+From 8f70917fc5fc6ddaa6a72340adde880d3bd5369f Mon Sep 17 00:00:00 2001
+From: bomberfish <me@bomberfish.ca>
+Date: Mon, 5 Oct 2026 16:32:22 -0400
+Subject: [PATCH] Unattended test hooks: AME_AUTOLAUNCH_PROFILE and
+ AME_FORCE_RENDERER env vars
+
+---
+ Natives/JavaLauncher.m                 |  4 ++++
+ Natives/LauncherNavigationController.m | 23 +++++++++++++++++++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/Natives/JavaLauncher.m b/Natives/JavaLauncher.m
+index abc38cb..bf414fc 100644
+--- a/Natives/JavaLauncher.m
++++ b/Natives/JavaLauncher.m
+@@ -171,6 +171,10 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
+ 
+         // Setup RENDERER
+         NSString *renderer = [PLProfiles resolveKeyForCurrentProfile:@"renderer"];
++        // Unattended testing (metalgldrv demo): AME_FORCE_RENDERER overrides the profile/global choice.
++        if (getenv("AME_FORCE_RENDERER") && *getenv("AME_FORCE_RENDERER")) {
++            renderer = @(getenv("AME_FORCE_RENDERER"));
++        }
+         NSLog(@"[JavaLauncher] RENDERER is set to %@\n", renderer);
+         setenv("RENDERER", renderer.UTF8String, 1);
+         // Setup gameDir
+diff --git a/Natives/LauncherNavigationController.m b/Natives/LauncherNavigationController.m
+index eee30d9..aee33e4 100644
+--- a/Natives/LauncherNavigationController.m
++++ b/Natives/LauncherNavigationController.m
+@@ -73,6 +73,7 @@ - (void)viewDidLoad
+     self.versionPickerView.dataSource = self;
+ 
+     [self reloadProfileList];
++    [self scheduleAutoLaunchIfRequested];
+ 
+     self.versionTextField.inputView = self.versionPickerView;
+     [self.versionTextField setupDoneButtonWithTarget:self action:@selector(versionClosePicker)];
+@@ -201,6 +202,28 @@ - (void)fetchRemoteVersionList {
+     }];
+ }
+ 
++// Unattended testing (metalgldrv demo): AME_AUTOLAUNCH_PROFILE=<profile name>
++// selects that profile and presses Play once the launcher is up.
++- (void)scheduleAutoLaunchIfRequested {
++    const char *want = getenv("AME_AUTOLAUNCH_PROFILE");
++    if (!want || !*want) return;
++    static BOOL done = NO;
++    if (done) return;
++    done = YES;
++    NSString *name = @(want);
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
++        NSUInteger idx = [PLProfiles.current.profiles.allKeys indexOfObject:name];
++        if (idx == NSNotFound) {
++            NSLog(@"[AutoLaunch] profile %@ not found", name);
++            return;
++        }
++        NSLog(@"[AutoLaunch] launching profile %@", name);
++        [self.versionPickerView selectRow:idx inComponent:0 animated:NO];
++        [self pickerView:self.versionPickerView didSelectRow:idx inComponent:0];
++        [self launchMinecraft:(UIButton *)(self.buttonInstall ?: (id)self.buttonInstallItem.buttonGlassView)];
++    });
++}
++
+ // Invoked by: startup, instance change event
+ - (void)reloadProfileList {
+     // Reload local version list
+-- 
+2.54.0 (Apple Git-157)
+
