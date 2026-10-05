@@ -2,6 +2,7 @@
 #import "gl/context.h"
 #include <cmath>
 #include "gl/gltypes.h"
+#include "gl/pipeline.h"
 #include "util/log.h"
 
 using namespace mgl;
@@ -377,7 +378,19 @@ API void APIENTRY glLinkProgram(GLuint program) {
     p->program = r.program;
     p->refl = std::move(r.reflection);
     setupLinkedProgram(p);
-    if (ctx->program.get() == p) ctx->passDirty = ctx->passDirty;  // new variants picked at next draw
+    // Compile the common variant now so the MSL compile cost lands at link time, not mid-frame.
+    uint32_t sm = p->refl.stageMask;
+    bool multiPass = sm & ((1u << (int)glsl::Stage::Geometry) | (1u << (int)glsl::Stage::TessEval));
+    if (!multiPass && !envFlag("MGL_LAZY_COMPILE")) {
+        glsl::VariantKey vk;
+        vk.kind = (sm & (1u << (int)glsl::Stage::Compute)) ? glsl::PipelineKind::Compute : glsl::PipelineKind::Classic;
+        ProgramVariant* v = ctx->pipelines_->variant(p, vk);
+        if (v && !v->ok) {
+            // Report backend failures through the link status so apps see them.
+            p->linked = false;
+            p->infoLog += "error: internal Metal shader compilation failed: " + v->error + "\n";
+        }
+    }
 }
 
 API void APIENTRY glUseProgram(GLuint program) {

@@ -21,7 +21,7 @@ add_custom_command(
 # --- MSL runtime libraries embedded into generated shaders ---
 add_custom_command(
   OUTPUT ${GEN_DIR}/fp64_msl.inc
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/embed.py ${CMAKE_SOURCE_DIR}/src/glsl/runtime/fp64.metal ${GEN_DIR}/fp64_msl.inc kFp64MSL
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/embed.py ${CMAKE_SOURCE_DIR}/src/glsl/runtime/fp64.metal ${GEN_DIR}/fp64_msl.inc
   DEPENDS ${CMAKE_SOURCE_DIR}/scripts/embed.py ${CMAKE_SOURCE_DIR}/src/glsl/runtime/fp64.metal
   COMMENT "Embedding fp64 MSL library")
 add_custom_target(mgl_embedded DEPENDS ${GEN_DIR}/fp64_msl.inc)

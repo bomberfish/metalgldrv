@@ -19,6 +19,7 @@ struct DeviceCaps {
     uint32_t maxThreadsPerThreadgroup = 1024;
     uint32_t maxThreadgroupMemory = 32768;
     bool hasFamilyApple9 = false;
+    bool bcCompression = false;
 };
 
 class Device {

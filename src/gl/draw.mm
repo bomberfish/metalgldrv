@@ -1042,7 +1042,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     key.variant = var;
     fillColorKey(ctx, key, refl);
     key.rasterEnabled = !ctx->rasterizerDiscard;
-    key.topologyClass = (uint8_t)topologyClass(d.mode);
+    key.topologyClass = (uint8_t)MTLPrimitiveTopologyClassUnspecified;  // point size is always written; only layered rendering needs a class
     if (!setupVertexInput(ctx, prog, key, table, d, minIdx, maxIdx)) return;
     id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
     if (!pso) return;
