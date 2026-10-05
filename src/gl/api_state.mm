@@ -179,6 +179,16 @@ API GLboolean APIENTRY glIsEnabledi(GLenum cap, GLuint index) {
 API void APIENTRY glViewport(GLint x, GLint y, GLsizei w, GLsizei h) {
     MGL_CTX();
     if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
+    {
+        // Log distinct full-size viewport changes (diagnostics for window scaling issues).
+        static int lastW = -1, lastH = -1, logged = 0;
+        if ((w != lastW || h != lastH) && logged < 40 && (!ctx->drawFb || ctx->drawFb->isDefault)) {
+            MGL_INFO("default-framebuffer viewport %dx%d at (%d,%d)", w, h, x, y);
+            lastW = w;
+            lastH = h;
+            logged++;
+        }
+    }
     w = std::min(w, 16384);
     h = std::min(h, 16384);
     for (int i = 0; i < kMaxViewports; i++) {

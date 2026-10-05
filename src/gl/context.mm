@@ -609,6 +609,9 @@ bool Surface::resize(int w, int h) {
     if (w <= 0) w = 1;
     if (h <= 0) h = 1;
     if (color && w == width && h == height) return false;
+    MGL_INFO("surface resize %dx%d -> %dx%d (layer bounds %.0fx%.0f scale %.2f drawable %.0fx%.0f)", width, height, w, h,
+             layer ? layer.bounds.size.width : 0.0, layer ? layer.bounds.size.height : 0.0, layer ? layer.contentsScale : 0.0,
+             layer ? layer.drawableSize.width : 0.0, layer ? layer.drawableSize.height : 0.0);
     Device* d = Device::get();
     if (color) d->releaseAfter(color, lastUse);
     if (msColor) d->releaseAfter(msColor, lastUse);

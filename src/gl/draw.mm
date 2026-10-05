@@ -450,10 +450,45 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
             addr = vb.buffer->gpuAddress() + vb.offset;
             vb.buffer->lastUse = serial;
         }
-        if ((stride & 3) || (addr & 3)) {
-            static bool warned = false;
-            if (!warned) MGL_WARN("unaligned vertex stride/offset (stride %d) not supported by Metal; results may be wrong", stride);
-            warned = true;
+        bool unaligned = (stride & 3) || (addr & 3);
+        for (int l = 0; l < kMaxVertexAttribs; l++)
+            if (key.attribs[l].format && key.attribs[l].bufferIndex == glsl::kBufVertex0 + b && (key.attribs[l].offset & 3)) unaligned = true;
+        if (unaligned) {
+            // Metal needs 4-byte aligned strides/offsets: repack the used vertex range into
+            // an aligned interleaved layout (each attribute at a 4-byte aligned offset).
+            const uint8_t* src = nullptr;
+            if (clientAttr && !(vb.buffer && vb.buffer->mtl)) src = (const uint8_t*)clientAttr->clientPointer;
+            else if (vb.buffer && vb.buffer->cpu) {
+                if (vb.buffer->lastGpuWrite && !ctx->dev->isComplete(vb.buffer->lastGpuWrite)) ctx->waitForResource(vb.buffer->lastGpuWrite);
+                src = vb.buffer->cpu + vb.offset;
+            }
+            uint32_t lo = vb.divisor ? 0 : minIndex;
+            uint32_t hi = vb.divisor ? (uint32_t)((d.instances + vb.divisor - 1) / vb.divisor + d.baseInstance) : maxIndex + 1;
+            struct Rep { int loc; uint32_t srcOff, size, dstOff; };
+            std::vector<Rep> reps;
+            uint32_t newStride = 0;
+            for (int l = 0; l < kMaxVertexAttribs; l++) {
+                VertexAttribKey& ak = key.attribs[l];
+                if (!ak.format || ak.bufferIndex != glsl::kBufVertex0 + b) continue;
+                const VertexAttrib& va = vao->attribs[l];
+                int comps = va.size == GL_BGRA ? 4 : va.size;
+                int cs = (va.type == GL_BYTE || va.type == GL_UNSIGNED_BYTE) ? 1 : (va.type == GL_SHORT || va.type == GL_UNSIGNED_SHORT || va.type == GL_HALF_FLOAT) ? 2 : va.type == GL_DOUBLE ? 8 : 4;
+                uint32_t size = (va.type == GL_INT_2_10_10_10_REV || va.type == GL_UNSIGNED_INT_2_10_10_10_REV || va.type == GL_UNSIGNED_INT_10F_11F_11F_REV) ? 4 : (uint32_t)(cs * comps);
+                reps.push_back({l, ak.offset, size, newStride});
+                ak.offset = newStride;
+                newStride += (size + 3) & ~3u;
+            }
+            if (src && newStride && hi > lo) {
+                size_t n = hi - lo;
+                UploadAlloc u = ctx->upload(n * newStride + 16, 16);
+                for (size_t v = 0; v < n; v++) {
+                    const uint8_t* sv = src + (size_t)(lo + v) * stride;
+                    uint8_t* dv = u.cpu + v * newStride;
+                    for (auto& r : reps) memcpy(dv + r.dstOff, sv + r.srcOff, r.size);
+                }
+                addr = u.gpu - (uint64_t)lo * newStride;
+                stride = (GLsizei)newStride;
+            }
         }
         [table setAddress:addr attributeStride:stride atIndex:glsl::kBufVertex0 + b];
     }
@@ -538,8 +573,13 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
     bool needCpuMinMax = false;
     // client arrays in compat need the referenced vertex range
     if (ctx->vao)
-        for (int l = 0; l < kMaxVertexAttribs; l++)
-            if (ctx->vao->attribs[l].enabled && ctx->vao->attribs[l].clientPointer) needCpuMinMax = true;
+        for (int l = 0; l < kMaxVertexAttribs; l++) {
+            const VertexAttrib& va = ctx->vao->attribs[l];
+            if (!va.enabled) continue;
+            const VertexBinding& vb = ctx->vao->bindings[va.binding];
+            // client arrays and Metal-incompatible (unaligned) layouts are repacked from a vertex range
+            if (va.clientPointer || (vb.stride & 3) || (vb.offset & 3) || (va.relativeOffset & 3)) needCpuMinMax = true;
+        }
     bool restart = ctx->primitiveRestart || ctx->primitiveRestartFixed;
     uint32_t restartIdx = ctx->primitiveRestartFixed ? (d.indexType == GL_UNSIGNED_BYTE ? 0xff : d.indexType == GL_UNSIGNED_SHORT ? 0xffff : 0xffffffffu)
                                                       : ctx->primitiveRestartIndex;
