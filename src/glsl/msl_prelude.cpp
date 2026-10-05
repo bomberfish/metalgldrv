@@ -69,23 +69,26 @@ struct mgl_array {
 // ---------------------------------------------------------------------------
 // Byte-offset buffer access (std140 / std430 / default uniform block)
 // ---------------------------------------------------------------------------
-#define MGL_LDST(T, ST)                                                                                       \
-    inline T mgl_ld_##T(constant uchar* p, uint o) { return T(*(constant ST*)(p + o)); }                      \
-    inline T mgl_ld_##T(device const uchar* p, uint o) { return T(*(device const ST*)(p + o)); }               \
-    inline T mgl_ld_##T(threadgroup const uchar* p, uint o) { return T(*(threadgroup const ST*)(p + o)); }     \
-    inline void mgl_st_##T(device uchar* p, uint o, T v) { *(device ST*)(p + o) = ST(v); }
-MGL_LDST(float, float)
-MGL_LDST(float2, float2)
-MGL_LDST(float3, packed_float3)
-MGL_LDST(float4, float4)
-MGL_LDST(int, int)
-MGL_LDST(int2, int2)
-MGL_LDST(int3, packed_int3)
-MGL_LDST(int4, int4)
-MGL_LDST(uint, uint)
-MGL_LDST(uint2, uint2)
-MGL_LDST(uint3, packed_uint3)
-MGL_LDST(uint4, uint4)
+// All buffer accesses go through uint-typed storage so that differently-typed
+// views of the same memory (common in GL: raw uint[] + typed struct) are not
+// reordered by type-based alias analysis.
+#define MGL_LDST(T, ST, CV)                                                                                    \
+    inline T mgl_ld_##T(constant uchar* p, uint o) { return as_type<T>(CV(*(constant ST*)(p + o))); }        \
+    inline T mgl_ld_##T(device const uchar* p, uint o) { return as_type<T>(CV(*(device const ST*)(p + o))); } \
+    inline T mgl_ld_##T(threadgroup const uchar* p, uint o) { return as_type<T>(CV(*(threadgroup const ST*)(p + o))); } \
+    inline void mgl_st_##T(device uchar* p, uint o, T v) { *(device ST*)(p + o) = ST(as_type<CV>(v)); }
+MGL_LDST(float, uint, uint)
+MGL_LDST(float2, uint2, uint2)
+MGL_LDST(float3, packed_uint3, uint3)
+MGL_LDST(float4, uint4, uint4)
+MGL_LDST(int, uint, uint)
+MGL_LDST(int2, uint2, uint2)
+MGL_LDST(int3, packed_uint3, uint3)
+MGL_LDST(int4, uint4, uint4)
+MGL_LDST(uint, uint, uint)
+MGL_LDST(uint2, uint2, uint2)
+MGL_LDST(uint3, packed_uint3, uint3)
+MGL_LDST(uint4, uint4, uint4)
 
 #define MGL_LDST_BOOL(T, U, PU)                                                                                \
     inline T mgl_ld_##T(constant uchar* p, uint o) { return U(*(constant PU*)(p + o)) != U(0u); }               \
@@ -122,6 +125,7 @@ MGL_LDST_STRIDED(float, float2, float3, float4)
 // GLSL builtin helpers
 // ---------------------------------------------------------------------------
 template <typename T> inline T mgl_mod(T x, T y) { return x - y * floor(x / y); }
+template <typename T> inline T mgl_isign(T x) { return select(T(0), T(1), x > T(0)) - select(T(0), T(1), x < T(0)); }
 
 template <typename T, int C, int R> inline matrix<T, C, R> mgl_mcm(matrix<T, C, R> a, matrix<T, C, R> b) {
     matrix<T, C, R> r;

@@ -895,7 +895,7 @@ std::string Emitter::callBuiltin(const Expr* e) {
         {"sin", "sin"}, {"cos", "cos"}, {"tan", "tan"}, {"asin", "asin"}, {"acos", "acos"}, {"sinh", "sinh"}, {"cosh", "cosh"},
         {"tanh", "tanh"}, {"asinh", "asinh"}, {"acosh", "acosh"}, {"atanh", "atanh"}, {"pow", "pow"}, {"exp", "exp"},
         {"log", "log"}, {"exp2", "exp2"}, {"log2", "log2"}, {"sqrt", "sqrt"}, {"inversesqrt", "rsqrt"}, {"abs", "abs"},
-        {"sign", "sign"}, {"floor", "floor"}, {"trunc", "trunc"}, {"round", "round"}, {"roundEven", "rint"}, {"ceil", "ceil"},
+        {"floor", "floor"}, {"trunc", "trunc"}, {"round", "round"}, {"roundEven", "rint"}, {"ceil", "ceil"},
         {"fract", "fract"}, {"isnan", "isnan"}, {"isinf", "isinf"}, {"fma", "fma"}, {"cross", "cross"}, {"transpose", "transpose"},
         {"determinant", "determinant"}, {"any", "any"}, {"all", "all"}, {"bitfieldReverse", "reverse_bits"},
         {"dFdx", "dfdx"}, {"dFdy", "dfdy"}, {"dFdxFine", "dfdx"}, {"dFdyFine", "dfdy"}, {"dFdxCoarse", "dfdx"},
@@ -910,6 +910,7 @@ std::string Emitter::callBuiltin(const Expr* e) {
         {"anyInvocationARB", "simd_any"}, {"allInvocationsARB", "simd_all"},
     };
     if (auto it = direct.find(n); it != direct.end()) return simple(it->second);
+    if (n == "sign") return (A[0]->type.base == BT::Int ? "mgl_isign(" : "sign(") + a(0) + ")";
     if (n == "radians") return "(" + a(0) + " * 0.0174532925199432958f)";
     if (n == "degrees") return "(" + a(0) + " * 57.2957795130823209f)";
     if (n == "atan") return A.size() == 2 ? "atan2(" + a(0) + ", " + a(1) + ")" : "atan(" + a(0) + ")";

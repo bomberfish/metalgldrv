@@ -1,0 +1,41 @@
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+bool feq(float a, float b) { return abs(a - b) <= 1e-4 * max(1.0, abs(b)); }
+bool veq(vec4 a, vec4 b) { return feq(a.x, b.x) && feq(a.y, b.y) && feq(a.z, b.z) && feq(a.w, b.w); }
+// runtime values the compiler cannot fold
+int I(int v) { return v + int(seq[0]); }
+uint U(uint v) { return v + seq[0]; }
+float F(float v) { return v + float(seq[0]); }
+
+struct S { float f; vec3 v; };
+layout(std430, binding = 2) buffer T430 { float a; vec3 b; float c; vec2 d; S s[2]; mat3 m; float tail; } t;
+layout(std430, binding = 2) buffer R430 { uint raw[]; };
+layout(std140, binding = 3) buffer T140 { float a; float arr[2]; vec3 b; mat2 m; S s; } u;
+layout(std430, binding = 3) buffer R140 { uint raw140[]; };
+void main() {
+    t.a = F(1.0); t.b = vec3(F(2.0), 3.0, 4.0); t.c = F(5.0); t.d = vec2(F(6.0), 7.0);
+    t.s[1].f = F(8.0); t.s[1].v = vec3(F(9.0));
+    t.m = mat3(F(10.0));
+    t.tail = F(11.0);
+    // std430: a@0 b@16 c@28 d@32 s@48 (stride 32: f@0 v@16) m@112 (cols 16 apart) tail@160
+    check(uintBitsToFloat(raw[0]) == 1.0);
+    check(uintBitsToFloat(raw[4]) == 2.0 && uintBitsToFloat(raw[6]) == 4.0);
+    check(uintBitsToFloat(raw[7]) == 5.0);
+    check(uintBitsToFloat(raw[8]) == 6.0 && uintBitsToFloat(raw[9]) == 7.0);
+    check(uintBitsToFloat(raw[(48 + 32) / 4]) == 8.0);
+    check(uintBitsToFloat(raw[(48 + 32 + 16) / 4]) == 9.0);
+    check(uintBitsToFloat(raw[112 / 4]) == 10.0 && uintBitsToFloat(raw[(112 + 16 + 4) / 4]) == 10.0);
+    check(uintBitsToFloat(raw[160 / 4]) == 11.0);
+    // std140: a@0 arr@16 (stride 16) b@48 m@64 (cols 16 apart) s@96 (f@96 v@112)
+    u.a = F(1.0); u.arr[1] = F(2.0); u.b = vec3(F(3.0)); u.m = mat2(F(4.0)); u.s.v = vec3(F(5.0));
+    check(uintBitsToFloat(raw140[32 / 4]) == 2.0);
+    check(uintBitsToFloat(raw140[48 / 4]) == 3.0);
+    check(uintBitsToFloat(raw140[64 / 4]) == 4.0 && uintBitsToFloat(raw140[(64 + 16 + 4) / 4]) == 4.0);
+    check(uintBitsToFloat(raw140[112 / 4]) == 5.0);
+    // reading back through the typed view
+    check(t.s[1].v.y == 9.0 && t.m[2][2] == 10.0 && u.m[1].y == 4.0);
+}

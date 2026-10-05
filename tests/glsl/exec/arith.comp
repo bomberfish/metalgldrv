@@ -1,0 +1,49 @@
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+bool feq(float a, float b) { return abs(a - b) <= 1e-4 * max(1.0, abs(b)); }
+bool veq(vec4 a, vec4 b) { return feq(a.x, b.x) && feq(a.y, b.y) && feq(a.z, b.z) && feq(a.w, b.w); }
+// runtime values the compiler cannot fold
+int I(int v) { return v + int(seq[0]); }
+uint U(uint v) { return v + seq[0]; }
+float F(float v) { return v + float(seq[0]); }
+
+void main() {
+    int a = I(7), b = I(-3);
+    check(a / b == -2);            // truncation toward zero
+    check(a % I(3) == 1);
+    check((a << 2) == 28);
+    check((I(-8) >> 1) == -4);     // arithmetic shift
+    check((U(0x80000000u) >> 4) == 0x08000000u);
+    uint u = U(5);
+    check(u - U(6) == 0xffffffffu);
+    check(~a == -8);
+    check((a & 3) == 3 && (a | 8) == 15 && (a ^ 5) == 2);
+    float x = F(-7.5);
+    check(feq(mod(x, 2.0), 0.5));  // GLSL mod is x - y*floor(x/y)
+    check(feq(fract(F(-1.25)), 0.75));
+    check(floor(F(-0.5)) == -1.0 && ceil(F(-0.5)) == 0.0 && trunc(F(-1.7)) == -1.0);
+    check(roundEven(F(2.5)) == 2.0 && roundEven(F(3.5)) == 4.0);
+    check(feq(clamp(F(5.0), 0.0, 1.0), 1.0));
+    check(feq(mix(F(0.0), 10.0, 0.25), 2.5));
+    check(step(F(1.0), 0.5) == 0.0 && step(F(0.5), 1.0) == 1.0);
+    check(feq(smoothstep(F(0.0), 1.0, 0.5), 0.5));
+    check(sign(F(-3.0)) == -1.0 && sign(I(-3)) == -1);
+    check(feq(inversesqrt(F(4.0)), 0.5));
+    check(feq(atan(F(1.0), F(1.0)), 0.785398163));
+    check(feq(radians(F(180.0)), 3.14159265) && feq(degrees(F(3.14159265)), 180.0));
+    check(feq(pow(F(2.0), 10.0), 1024.0) && feq(exp2(F(3.0)), 8.0) && feq(log2(F(8.0)), 3.0));
+    check(min(I(3), I(-4)) == -4 && max(U(3), U(9)) == 9u);
+    float ip;
+    float fp = modf(F(3.75), ip);
+    check(feq(fp, 0.75) && ip == 3.0);
+    int e;
+    float m = frexp(F(8.0), e);
+    check(feq(m, 0.5) && e == 4);
+    check(feq(ldexp(F(0.75), I(2)), 3.0));
+    check(isnan(F(0.0) / F(0.0)) && isinf(F(1.0) / F(0.0)));
+    check(feq(fma(F(2.0), 3.0, 4.0), 10.0));
+}

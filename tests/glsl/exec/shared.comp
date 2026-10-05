@@ -1,0 +1,29 @@
+#version 450 core
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+layout(std430, binding = 2) buffer Acc { int total; uint maxv; int swapped; };
+shared uint partial[64];
+shared int counter;
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    if (lid == 0u) counter = 0;
+    partial[lid] = seq[lid];
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1) {
+        if (lid < stride) partial[lid] += partial[lid + stride];
+        barrier();
+    }
+    atomicAdd(counter, 1);
+    atomicAdd(total, int(lid));
+    atomicMax(maxv, lid);
+    barrier();
+    if (lid == 0u) {
+        int old = atomicCompSwap(swapped, 0, 42);
+        res[0] = 4u;
+        res[1] = partial[0] == 2016u ? 1u : 0u;   // sum 0..63
+        res[2] = counter == 64 ? 1u : 0u;
+        res[3] = old == 0 && swapped == 42 ? 1u : 0u;
+        res[4] = gl_WorkGroupSize.x == 64u ? 1u : 0u;
+    }
+}
