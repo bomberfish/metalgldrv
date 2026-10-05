@@ -1,0 +1,819 @@
+// Program linking: cross-stage validation, resource layout, reflection.
+#include <algorithm>
+#include <functional>
+
+#include "glsl/fold.h"
+#include "glsl/gl_enums.h"
+#include "glsl/program.h"
+#include "glsl/types.h"
+
+namespace glsl {
+
+// ---------------------------------------------------------------------------
+// Layout engine
+// ---------------------------------------------------------------------------
+uint32_t scalarSize(BT b) { return b == BT::Double ? 8 : 4; }
+
+static uint32_t roundUp(uint32_t v, uint32_t a) { return a ? (v + a - 1) / a * a : v; }
+
+TL computeLayout(const Type& t, Packing packing, bool rowMajor) {
+    bool s140 = packing != Packing::Std430;
+    auto L = std::make_shared<TypeLayout>();
+    if (!t.dims.empty()) {
+        TL e = computeLayout(t.elem(), packing, rowMajor);
+        uint32_t a = e->align;
+        if (s140) a = roundUp(a, 16);
+        L->align = a;
+        L->arrayStride = roundUp(e->size, a);
+        L->size = L->arrayStride * (uint32_t)std::max(t.dims[0], 0);
+        L->elem = e;
+        L->rowMajor = e->rowMajor;
+        L->matrixStride = e->matrixStride;
+        return L;
+    }
+    if (t.base == BT::Struct) {
+        uint32_t off = 0, maxA = 1;
+        for (auto& m : t.sdef->members) {
+            bool rm = m.q.layout.matrix ? m.q.layout.matrix == 2 : rowMajor;
+            TL ml = computeLayout(m.type, packing, rm);
+            uint32_t a = ml->align;
+            if (m.q.layout.align > 0) a = std::max(a, (uint32_t)m.q.layout.align);
+            if (m.q.layout.offset >= 0) off = (uint32_t)m.q.layout.offset;
+            off = roundUp(off, a);
+            L->offsets.push_back(off);
+            L->members.push_back(ml);
+            off += ml->size;
+            maxA = std::max(maxA, a);
+        }
+        if (s140) maxA = roundUp(maxA, 16);
+        L->align = maxA;
+        L->size = roundUp(off, maxA);
+        return L;
+    }
+    uint32_t N = scalarSize(t.base);
+    if (t.cols) {
+        // matrix = array of column (or row) vectors
+        int vecLen = rowMajor ? t.cols : t.vec;
+        int count = rowMajor ? t.vec : t.cols;
+        uint32_t va = vecLen == 2 ? 2 * N : 4 * N;
+        if (s140) va = roundUp(va, 16);
+        L->align = va;
+        L->matrixStride = va;
+        L->rowMajor = rowMajor;
+        L->size = va * count;
+        return L;
+    }
+    if (t.isOpaque()) { L->size = 8; L->align = 8; return L; }
+    int n = t.vec;
+    L->align = n == 1 ? N : n == 2 ? 2 * N : 4 * N;
+    L->size = n * N;
+    return L;
+}
+
+TL computeBlockLayout(const StructDef& sd, Packing packing, bool rowMajor) {
+    Type t;
+    t.base = BT::Struct;
+    t.sdef = const_cast<StructDef*>(&sd);
+    TL L = computeLayout(t, packing, rowMajor);
+    return L;
+}
+
+std::string varyingKey(const Variable* v, Stage stage) {
+    switch (v->builtin) {
+        case BuiltinVar::FrontColor:
+        case BuiltinVar::FragColorIn: return "c0";
+        case BuiltinVar::FrontSecondaryColor:
+        case BuiltinVar::SecondaryColorIn: return "c1";
+        case BuiltinVar::BackColor: return "bc0";
+        case BuiltinVar::BackSecondaryColor: return "bc1";
+        case BuiltinVar::TexCoord: return "tc";
+        case BuiltinVar::FogFragCoord: return "fog";
+        default: break;
+    }
+    if (v->block && !v->block->blockQ.hasLayout) return "b_" + v->block->name;
+    if (v->block && v->block->blockQ.layout.location >= 0) return "l" + std::to_string(v->block->blockQ.layout.location);
+    if (v->block) return "b_" + v->block->name;
+    if (v->q.layout.location >= 0) {
+        std::string k = "l" + std::to_string(v->q.layout.location);
+        if (v->q.layout.component > 0) k += "c" + std::to_string(v->q.layout.component);
+        return k;
+    }
+    return "n_" + v->name;
+}
+
+// ---------------------------------------------------------------------------
+// AST walking
+// ---------------------------------------------------------------------------
+namespace {
+
+struct Walker {
+    std::function<void(const Expr*)> onExpr;
+    std::function<void(const Stmt*)> onStmt;
+    void expr(const Expr* e) {
+        if (!e) return;
+        onExpr(e);
+        for (auto* a : e->args) expr(a);
+    }
+    void stmt(const Stmt* s) {
+        if (!s) return;
+        if (onStmt) onStmt(s);
+        for (auto* b : s->body) stmt(b);
+        expr(s->expr);
+        stmt(s->init);
+        expr(s->cond);
+        stmt(s->condDecl);
+        expr(s->incr);
+        stmt(s->then);
+        stmt(s->els);
+        for (auto* v : s->vars) expr(v->init);
+    }
+};
+
+const Variable* findBuiltinVar(const Shader& sh, const char* name) {
+    for (auto& v : sh.vars)
+        if (v.name == name && v.global) return &v;
+    return nullptr;
+}
+
+class Linker {
+public:
+    explicit Linker(const LinkInput& in) : in_(in) {}
+    LinkResult run();
+
+private:
+    const LinkInput& in_;
+    std::shared_ptr<LinkedProgram> prog_;
+    LinkResult res_;
+    bool ok_ = true;
+
+    void error(const std::string& m) {
+        ok_ = false;
+        res_.infoLog += "error: " + m + "\n";
+    }
+    void collectStage(Stage s);
+    void assignAttributes();
+    void assignFragOutputs();
+    void assignUniforms();
+    void addUniformEntries(const std::string& name, const Type& t, TL L, uint32_t off, int blockIndex, uint32_t stageMask,
+                           bool topLevelSsbo, int topArraySize, uint32_t topArrayStride, int& location,
+                           std::set<int>& usedLocs, const Qualifiers* q);
+    void checkVaryings();
+    void stageMetadata();
+};
+
+void Linker::collectStage(Stage s) {
+    StageCode& sc = prog_->stages[(int)s];
+    // definitions
+    for (auto& sh : sc.shaders)
+        for (auto* f : sh->functions)
+            if (f->body) {
+                if (sc.defs.count(f->mangled)) {
+                    error("function '" + f->name + "' is defined multiple times");
+                    continue;
+                }
+                sc.defs[f->mangled] = f;
+                if (f->name == "main") {
+                    if (sc.main) error("multiple definitions of main()");
+                    sc.main = f;
+                    sc.primary = sh.get();
+                }
+            }
+    if (!sc.main) {
+        error(std::string("missing main() in ") +
+              (s == Stage::Vertex ? "vertex" : s == Stage::Fragment ? "fragment" : s == Stage::Compute ? "compute" : s == Stage::Geometry ? "geometry" : "tessellation") +
+              " shader");
+        return;
+    }
+    // stage layouts merged across objects
+    for (auto& sh : sc.shaders) {
+        auto merge = [](Layout& d, const Layout& l) {
+            for (int i = 0; i < 3; i++) if (l.localSize[i] >= 0) d.localSize[i] = l.localSize[i];
+            if (l.maxVertices >= 0) d.maxVertices = l.maxVertices;
+            if (l.invocations >= 0) d.invocations = l.invocations;
+            if (l.vertices >= 0) d.vertices = l.vertices;
+            if (l.primitive) d.primitive = l.primitive;
+            if (l.spacing) d.spacing = l.spacing;
+            if (l.order) d.order = l.order;
+            if (l.pointMode) d.pointMode = true;
+            if (l.earlyFragmentTests) d.earlyFragmentTests = true;
+        };
+        merge(sc.inLayout, sh->inLayout);
+        merge(sc.outLayout, sh->outLayout);
+    }
+    // reachability
+    std::vector<const Function*> work{sc.main};
+    sc.reachable.insert(sc.main);
+    Walker w;
+    w.onStmt = [&](const Stmt* st) {
+        if (st->kind == SK::Discard) sc.usesDiscard = true;
+    };
+    w.onExpr = [&](const Expr* e) {
+        if (e->kind == EK::Var && e->var->global) sc.used.insert(e->var);
+        if (e->kind == EK::Call) {
+            auto it = sc.defs.find(e->fn->mangled);
+            if (it == sc.defs.end()) {
+                error("function '" + e->fn->name + "' is used but not defined");
+                return;
+            }
+            if (!sc.reachable.count(it->second)) {
+                sc.reachable.insert(it->second);
+                work.push_back(it->second);
+            }
+        }
+        if (e->kind == EK::Builtin && e->fn->name == "ftransform") {
+            for (auto& sh : sc.shaders) {
+                if (auto* v = findBuiltinVar(*sh, "gl_ModelViewProjectionMatrix")) sc.used.insert(v);
+                if (auto* v = findBuiltinVar(*sh, "gl_Vertex")) sc.used.insert(v);
+            }
+        }
+    };
+    // global initializers run unconditionally
+    std::set<std::string> seen;
+    for (auto& sh : sc.shaders)
+        for (auto& g : sh->globals)
+            if (g.kind == GlobalDecl::Var && !seen.count(g.var->name)) {
+                seen.insert(g.var->name);
+                sc.globals.push_back(g.var);
+                if (g.var->init) w.expr(g.var->init);
+            }
+    while (!work.empty()) {
+        const Function* f = work.back();
+        work.pop_back();
+        w.stmt(f->body);
+    }
+    for (auto* v : sc.used) {
+        sc.usedNames.insert(v->name);
+        if (v->builtin == BuiltinVar::FragDepth && v->written) sc.writesFragDepth = true;
+        if (v->builtin == BuiltinVar::ClipVertex)
+            for (auto& sh : sc.shaders)
+                if (auto* cp = findBuiltinVar(*sh, "gl_ClipPlane")) sc.usedNames.insert(cp->name);
+    }
+    // gl_ClipPlane referenced through gl_ClipVertex
+    if (sc.usedNames.count("gl_ClipPlane"))
+        for (auto& sh : sc.shaders)
+            if (auto* cp = findBuiltinVar(*sh, "gl_ClipPlane")) sc.used.insert(cp);
+}
+
+static bool isCompatAttrib(BuiltinVar b) {
+    return b == BuiltinVar::Vertex || b == BuiltinVar::Normal || b == BuiltinVar::Color || b == BuiltinVar::SecondaryColor ||
+           b == BuiltinVar::MultiTexCoord || b == BuiltinVar::FogCoord;
+}
+
+static int locationsFor(const Type& t) {
+    int per = 1;
+    Type b = t.stripArrays();
+    if (b.cols) per = b.cols * ((b.base == BT::Double && b.vec > 2) ? 2 : 1);
+    else if (b.base == BT::Double && b.vec > 2) per = 2;
+    return per * t.totalArrayElements();
+}
+
+void Linker::assignAttributes() {
+    StageCode& sc = prog_->stages[(int)Stage::Vertex];
+    if (!sc.main) return;
+    std::vector<const Variable*> attrs;
+    for (auto* v : sc.used)
+        if (v->q.storage == Storage::In && v->global && (v->builtin == BuiltinVar::None || isCompatAttrib(v->builtin)))
+            attrs.push_back(v);
+    std::sort(attrs.begin(), attrs.end(), [](const Variable* a, const Variable* b) {
+        // compat attributes after user attributes; otherwise declaration order
+        bool ca = a->builtin != BuiltinVar::None, cb = b->builtin != BuiltinVar::None;
+        if (ca != cb) return !ca;
+        return a->id < b->id;
+    });
+    std::vector<bool> taken(32, false);
+    std::vector<std::pair<const Variable*, int>> assigned;
+    auto mark = [&](int loc, int n, const std::string& name) {
+        for (int i = loc; i < loc + n; i++) {
+            if (i >= 32) { error("attribute '" + name + "' location out of range"); return; }
+            if (taken[i]) error("attribute '" + name + "' location " + std::to_string(i) + " overlaps another attribute");
+            taken[i] = true;
+        }
+    };
+    std::vector<const Variable*> pending;
+    for (auto* v : attrs) {
+        int n = locationsFor(v->type);
+        int loc = -1;
+        if (v->q.layout.location >= 0) loc = v->q.layout.location;
+        else if (in_.attribBindings.count(v->name)) loc = in_.attribBindings.at(v->name);
+        if (loc >= 0) {
+            mark(loc, n, v->name);
+            assigned.push_back({v, loc});
+        } else {
+            pending.push_back(v);
+        }
+    }
+    for (auto* v : pending) {
+        int n = locationsFor(v->type);
+        int loc = -1;
+        for (int i = 0; i + n <= 32 && loc < 0; i++) {
+            bool free = true;
+            for (int k = i; k < i + n; k++) if (taken[k]) free = false;
+            if (free) loc = i;
+        }
+        if (loc < 0) { error("too many vertex attributes"); return; }
+        mark(loc, n, v->name);
+        assigned.push_back({v, loc});
+    }
+    for (auto& [v, loc] : assigned) {
+        Attribute a;
+        a.name = v->name;
+        a.type = glTypeEnum(v->type);
+        a.arraySize = v->type.isArray() ? v->type.dims[0] : 1;
+        a.location = loc;
+        a.locationsUsed = locationsFor(v->type);
+        prog_->refl.attributes.push_back(a);
+        prog_->attribLocations[v->name] = loc;
+    }
+}
+
+void Linker::assignFragOutputs() {
+    StageCode& sc = prog_->stages[(int)Stage::Fragment];
+    if (!sc.main) return;
+    std::vector<const Variable*> outs;
+    for (auto* v : sc.globals)
+        if (v->q.storage == Storage::Out && v->builtin == BuiltinVar::None) outs.push_back(v);
+    std::set<std::pair<int, int>> taken;
+    std::vector<const Variable*> pending;
+    for (auto* v : outs) {
+        int loc = -1, idx = 0;
+        if (v->q.layout.location >= 0) { loc = v->q.layout.location; idx = std::max(0, v->q.layout.index); }
+        else if (in_.fragDataBindings.count(v->name)) {
+            loc = in_.fragDataBindings.at(v->name);
+            if (in_.fragDataIndices.count(v->name)) idx = in_.fragDataIndices.at(v->name);
+        }
+        if (loc < 0) { pending.push_back(v); continue; }
+        int n = v->type.isArray() ? v->type.dims[0] : 1;
+        for (int i = 0; i < n; i++) {
+            if (taken.count({loc + i, idx})) error("fragment output '" + v->name + "' location overlaps another output");
+            taken.insert({loc + i, idx});
+        }
+        prog_->fragOutputs[v->name] = {loc, idx};
+    }
+    for (auto* v : pending) {
+        int n = v->type.isArray() ? v->type.dims[0] : 1;
+        int loc = 0;
+        for (;; loc++) {
+            bool free = true;
+            for (int i = 0; i < n; i++) if (taken.count({loc + i, 0})) free = false;
+            if (free) break;
+        }
+        for (int i = 0; i < n; i++) taken.insert({loc + i, 0});
+        prog_->fragOutputs[v->name] = {loc, 0};
+    }
+    for (auto* v : outs) {
+        auto [loc, idx] = prog_->fragOutputs[v->name];
+        FragOutput o;
+        o.name = v->name;
+        o.type = glTypeEnum(v->type);
+        o.arraySize = v->type.isArray() ? v->type.dims[0] : 1;
+        o.location = loc;
+        o.index = idx;
+        prog_->refl.fragOutputs.push_back(o);
+    }
+}
+
+void Linker::addUniformEntries(const std::string& name, const Type& t, TL L, uint32_t off, int blockIndex,
+                               uint32_t stageMask, bool ssbo, int topArraySize, uint32_t topArrayStride, int& location,
+                               std::set<int>& usedLocs, const Qualifiers* q) {
+    auto& refl = prog_->refl;
+    if (t.base == BT::Struct && t.dims.empty()) {
+        for (size_t i = 0; i < t.sdef->members.size(); i++)
+            addUniformEntries(name + "." + t.sdef->members[i].name, t.sdef->members[i].type, L->members[i], off + L->offsets[i],
+                              blockIndex, stageMask, ssbo, topArraySize, topArrayStride, location, usedLocs, nullptr);
+        return;
+    }
+    Type et = t.elem();
+    bool elemIsAggregate = !t.dims.empty() && (et.base == BT::Struct || !et.dims.empty());
+    if (!t.dims.empty() && elemIsAggregate) {
+        int n = t.dims[0];
+        if (ssbo && n == 0) n = 1;
+        if (ssbo && topArraySize >= 0 && et.base == BT::Struct && topArrayStride == L->arrayStride) n = 1;  // top-level struct arrays: element 0 only
+        for (int i = 0; i < n; i++)
+            addUniformEntries(name + "[" + std::to_string(i) + "]", et, L->elem, off + i * L->arrayStride, blockIndex, stageMask,
+                              ssbo, topArraySize, topArrayStride, location, usedLocs, nullptr);
+        return;
+    }
+    if (ssbo) {
+        BufferVariable bv;
+        bv.name = t.dims.empty() ? name : name + "[0]";
+        bv.type = glTypeEnum(t);
+        bv.arraySize = t.dims.empty() ? 1 : t.dims[0];
+        bv.blockIndex = blockIndex;
+        bv.offset = (int)off;
+        bv.arrayStride = t.dims.empty() ? 0 : (int)L->arrayStride;
+        Type st = t.stripArrays();
+        bv.matrixStride = st.cols ? (int)(t.dims.empty() ? L->matrixStride : L->elem->matrixStride) : 0;
+        bv.rowMajor = st.cols && (t.dims.empty() ? L->rowMajor : L->elem->rowMajor);
+        bv.topLevelArraySize = topArraySize < 0 ? 1 : topArraySize;
+        bv.topLevelArrayStride = (int)topArrayStride;
+        refl.storageBlocks[blockIndex].activeUniforms.push_back((int)refl.bufferVariables.size());
+        refl.bufferVariables.push_back(bv);
+        return;
+    }
+    Uniform u;
+    u.name = t.dims.empty() ? name : name + "[0]";
+    u.type = glTypeEnum(t);
+    u.arraySize = t.dims.empty() ? 1 : t.dims[0];
+    u.blockIndex = blockIndex;
+    u.offset = (int)off;
+    u.arrayStride = t.dims.empty() ? 0 : (int)L->arrayStride;
+    Type st = t.stripArrays();
+    if (st.cols) {
+        u.matrixStride = (int)(t.dims.empty() ? L->matrixStride : L->elem->matrixStride);
+        u.rowMajor = t.dims.empty() ? L->rowMajor : L->elem->rowMajor;
+    }
+    u.stageMask = stageMask;
+    if (blockIndex < 0) {
+        if (name.compare(0, 3, "gl_") == 0) {
+            u.location = -1;
+        } else {
+            int n = u.arraySize;
+            if (q && q->layout.location >= 0) {
+                u.location = q->layout.location;
+            } else {
+                int loc = location;
+                for (;;) {
+                    bool free = true;
+                    for (int i = 0; i < n; i++) if (usedLocs.count(loc + i)) free = false;
+                    if (free) break;
+                    loc++;
+                }
+                u.location = loc;
+                location = loc + n;
+            }
+            for (int i = 0; i < n; i++) usedLocs.insert(u.location + i);
+        }
+    } else {
+        refl.uniformBlocks[blockIndex].activeUniforms.push_back((int)refl.uniforms.size());
+    }
+    refl.uniforms.push_back(u);
+}
+
+void Linker::assignUniforms() {
+    auto& refl = prog_->refl;
+    // Gather used uniform-ish variables across stages, merged by name.
+    struct Entry { const Variable* v; uint32_t mask; };
+    std::vector<Entry> defaults, opaques;
+    std::map<std::string, Entry> blockVars;  // key -> first variable
+    std::vector<std::string> blockOrder;
+    std::map<std::string, size_t> defIdx, opIdx;
+    for (int s = 0; s < (int)Stage::Count; s++) {
+        StageCode& sc = prog_->stages[s];
+        if (!sc.main) continue;
+        for (auto* v : sc.globals) {
+            (void)v;
+        }
+        std::vector<const Variable*> used(sc.used.begin(), sc.used.end());
+        std::sort(used.begin(), used.end(), [](const Variable* a, const Variable* b) { return a->id < b->id; });
+        for (auto* v : used) {
+            if (v->block && (v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer)) {
+                std::string key = std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name;
+                if (!blockVars.count(key)) { blockVars[key] = {v, 0u}; blockOrder.push_back(key); }
+                blockVars[key].mask |= 1u << s;
+                continue;
+            }
+            if (v->q.storage != Storage::Uniform) continue;
+            if (v->builtin == BuiltinVar::DepthRange) continue;  // fed from MGLSys
+            bool opq = v->type.containsOpaque();
+            auto& idx = opq ? opIdx : defIdx;
+            auto& vec = opq ? opaques : defaults;
+            auto it = idx.find(v->name);
+            if (it == idx.end()) {
+                idx[v->name] = vec.size();
+                vec.push_back({v, 1u << s});
+            } else {
+                Entry& e = vec[it->second];
+                if (e.v->type != v->type) {
+                    // structs from different stages are distinct objects; compare spelling
+                    if (e.v->type.str() != v->type.str()) error("uniform '" + v->name + "' declared with different types in different stages");
+                }
+                e.mask |= 1u << s;
+            }
+        }
+    }
+    int slot = 0;
+    std::set<int> usedLocs;
+    // explicit locations reserve first
+    for (auto& e : defaults)
+        if (e.v->q.layout.location >= 0)
+            for (int i = 0; i < std::max(1, e.v->type.totalArrayElements()); i++) usedLocs.insert(e.v->q.layout.location + i);
+    for (auto& e : opaques)
+        if (e.v->q.layout.location >= 0)
+            for (int i = 0; i < std::max(1, e.v->type.totalArrayElements()); i++) usedLocs.insert(e.v->q.layout.location + i);
+    int location = 0;
+
+    // --- default block ---------------------------------------------------
+    uint32_t off = 0;
+    if (!defaults.empty()) {
+        prog_->defaultSlot = slot;
+        refl.slots.push_back({SlotKind::DefaultUniforms, 0});
+        slot++;
+    }
+    for (auto& e : defaults) {
+        TL L = computeLayout(e.v->type, Packing::Std430, e.v->q.layout.matrix == 2);
+        off = roundUp(off, L->align);
+        prog_->defaultOffsets[e.v->name] = off;
+        addUniformEntries(e.v->name, e.v->type, L, off, -1, e.mask, false, -1, 0, location, usedLocs, &e.v->q);
+        off += L->size;
+    }
+    refl.defaultUniformSize = roundUp(off, 16);
+
+    // --- blocks ---------------------------------------------------------------
+    std::vector<std::string> ubos, ssbos;
+    for (auto& k : blockOrder) (k[0] == 'U' ? ubos : ssbos).push_back(k);
+    auto doBlocks = [&](std::vector<std::string>& keys, bool storage) {
+        for (auto& key : keys) {
+            const Variable* v = blockVars[key].v;
+            uint32_t mask = blockVars[key].mask;
+            const StructDef& sd = *v->block;
+            Packing pk = sd.blockQ.layout.packing == Packing::Std430 ? Packing::Std430 : Packing::Std140;
+            bool rm = sd.blockQ.layout.matrix == 2;
+            BlockBinding bb;
+            bb.storage = storage;
+            bb.packing = pk;
+            bb.rowMajor = rm;
+            bb.layout = computeBlockLayout(sd, pk, rm);
+            int n = v->type.isArray() ? v->type.dims[0] : 1;
+            bb.count = n;
+            auto& list = storage ? refl.storageBlocks : refl.uniformBlocks;
+            bb.firstBlock = (int)list.size();
+            bb.slot = slot;
+            slot += n;
+            for (int i = 0; i < n; i++) {
+                Block b;
+                b.name = v->type.isArray() ? sd.name + "[" + std::to_string(i) + "]" : sd.name;
+                b.binding = std::max(0, sd.blockQ.layout.binding) + i;
+                b.dataSize = bb.layout->size;
+                b.slot = bb.slot + i;
+                b.stageMask = mask;
+                list.push_back(b);
+                refl.slots.push_back({storage ? SlotKind::Ssbo : SlotKind::Ubo, (uint32_t)(bb.firstBlock + i)});
+            }
+            // members
+            std::string prefix = sd.instanceName.empty() ? "" : sd.name + ".";
+            for (size_t m = 0; m < sd.members.size(); m++) {
+                const Member& mem = sd.members[m];
+                int top = mem.type.isArray() ? mem.type.dims[0] : -1;
+                uint32_t topStride = mem.type.isArray() ? bb.layout->members[m]->arrayStride : 0;
+                if (storage) {
+                    addUniformEntries(prefix + mem.name, mem.type, bb.layout->members[m], bb.layout->offsets[m], bb.firstBlock, mask,
+                                      true, top < 0 ? 1 : top, topStride, location, usedLocs, nullptr);
+                } else {
+                    addUniformEntries(prefix + mem.name, mem.type, bb.layout->members[m], bb.layout->offsets[m], bb.firstBlock, mask,
+                                      false, -1, 0, location, usedLocs, nullptr);
+                }
+            }
+            // remaining blocks of an array share the member list
+            for (int i = 1; i < n; i++) list[bb.firstBlock + i].activeUniforms = list[bb.firstBlock].activeUniforms;
+            if (storage) {
+                // GL_BUFFER_DATA_SIZE for runtime arrays counts one element
+                if (!sd.members.empty() && sd.members.back().type.isArray() && sd.members.back().type.dims[0] == 0) {
+                    uint32_t extra = bb.layout->members.back()->arrayStride;
+                    for (int i = 0; i < n; i++) list[bb.firstBlock + i].dataSize = roundUp(bb.layout->offsets.back() + extra, bb.layout->align);
+                }
+            }
+            prog_->blocks[key] = bb;
+        }
+    };
+    doBlocks(ubos, false);
+    doBlocks(ssbos, true);
+    // SSBO size slots
+    for (auto& key : ssbos) {
+        BlockBinding& bb = prog_->blocks[key];
+        bb.sizeSlot = slot;
+        for (int i = 0; i < bb.count; i++) {
+            refl.storageBlocks[bb.firstBlock + i].sizeSlot = slot;
+            refl.slots.push_back({SlotKind::BufferSize, (uint32_t)(bb.firstBlock + i)});
+            slot++;
+        }
+    }
+
+    // --- opaque uniforms --------------------------------------------------------
+    std::map<int, int> acbByBinding;
+    std::map<int, uint32_t> acNextOffset;
+    for (auto& e : opaques) {
+        const Variable* v = e.v;
+        Type bt = v->type.stripArrays();
+        if (bt.base == BT::Struct) {
+            error("opaque types inside structures are not supported ('" + v->name + "')");
+            continue;
+        }
+        int n = std::max(1, v->type.totalArrayElements());
+        if (v->type.dims.size() > 1) error("arrays of arrays of opaque types are not supported ('" + v->name + "')");
+        OpaqueBinding ob;
+        ob.type = bt;
+        ob.count = n;
+        ob.memory = v->q.memory;
+        Uniform u;
+        u.name = v->type.isArray() ? v->name + "[0]" : v->name;
+        u.type = glTypeEnum(bt);
+        u.arraySize = v->type.isArray() ? v->type.dims[0] : 1;
+        u.stageMask = e.mask;
+        u.binding = std::max(0, v->q.layout.binding);
+        if (v->q.layout.location >= 0) u.location = v->q.layout.location;
+        else {
+            int loc = location;
+            for (;;) {
+                bool free = true;
+                for (int i = 0; i < n; i++) if (usedLocs.count(loc + i)) free = false;
+                if (free) break;
+                loc++;
+            }
+            u.location = loc;
+            location = loc + n;
+        }
+        for (int i = 0; i < n; i++) usedLocs.insert(u.location + i);
+        int uidx = (int)refl.uniforms.size();
+        ob.uniformIndex = uidx;
+        if (bt.base == BT::Sampler) {
+            ob.kind = SlotKind::Texture;
+            ob.slot = slot;
+            u.slot = slot;
+            for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::Texture, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
+            slot += n;
+            ob.samplerSlot = slot;
+            for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::Sampler, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
+            slot += n;
+        } else if (bt.base == BT::Image) {
+            ob.kind = SlotKind::Image;
+            ob.slot = slot;
+            u.slot = slot;
+            for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::Image, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
+            slot += n;
+        } else {  // atomic_uint
+            ob.kind = SlotKind::AtomicCounter;
+            int binding = u.binding;
+            uint32_t aoff = v->q.layout.offset >= 0 ? (uint32_t)v->q.layout.offset : acNextOffset[binding];
+            acNextOffset[binding] = aoff + 4 * n;
+            if (!acbByBinding.count(binding)) {
+                acbByBinding[binding] = (int)refl.atomicCounterBuffers.size();
+                AtomicCounterBuffer acb;
+                acb.binding = binding;
+                acb.dataSize = 0;
+                acb.slot = -1;
+                acb.stageMask = 0;
+                refl.atomicCounterBuffers.push_back(acb);
+            }
+            int ai = acbByBinding[binding];
+            auto& acb = refl.atomicCounterBuffers[ai];
+            acb.dataSize = std::max(acb.dataSize, aoff + 4 * n);
+            acb.activeUniforms.push_back(uidx);
+            acb.stageMask |= e.mask;
+            ob.acbIndex = ai;
+            ob.acOffset = aoff;
+            u.offset = (int)aoff;
+            u.arrayStride = v->type.isArray() ? 4 : 0;
+            u.atomicCounterBufferIndex = ai;
+        }
+        refl.uniforms.push_back(u);
+        prog_->opaque[v->name] = ob;
+    }
+    for (auto& acb : refl.atomicCounterBuffers) {
+        acb.slot = slot++;
+        refl.slots.push_back({SlotKind::AtomicCounter, (uint32_t)(&acb - &refl.atomicCounterBuffers[0])});
+    }
+    for (auto& [name, ob] : prog_->opaque)
+        if (ob.kind == SlotKind::AtomicCounter) ob.slot = refl.atomicCounterBuffers[ob.acbIndex].slot;
+}
+
+void Linker::checkVaryings() {
+    // Find the last pre-rasterization stage and verify fragment inputs.
+    Stage pre = Stage::Count;
+    for (Stage s : {Stage::Geometry, Stage::TessEval, Stage::Vertex})
+        if (prog_->stages[(int)s].main) { pre = s; break; }
+    const StageCode& fs = prog_->stages[(int)Stage::Fragment];
+    if (pre == Stage::Count) return;
+    const StageCode& ps = prog_->stages[(int)pre];
+    std::map<std::string, const Variable*> outs;
+    for (auto* v : ps.globals)
+        if (v->q.storage == Storage::Out && v->builtin == BuiltinVar::None) outs[varyingKey(v, pre)] = v;
+    if (!fs.main) return;
+    for (auto* v : fs.globals) {
+        if (v->q.storage != Storage::In || v->builtin != BuiltinVar::None) continue;
+        if (!fs.used.count(v)) continue;
+        auto it = outs.find(varyingKey(v, Stage::Fragment));
+        if (it == outs.end()) {
+            if (!in_.separable) res_.infoLog += "warning: fragment input '" + v->name + "' is not written by the previous stage\n";
+            continue;
+        }
+        Type a = it->second->type, b = v->type;
+        if (pre != Stage::Vertex && !a.dims.empty()) a = a.elem();
+        if (a.str() != b.str() && !(a.base == BT::Struct && b.base == BT::Struct && a.sdef->name == b.sdef->name))
+            error("type mismatch for varying '" + v->name + "' ('" + a.str() + "' vs '" + b.str() + "')");
+    }
+}
+
+void Linker::stageMetadata() {
+    auto& r = prog_->refl;
+    r.stageMask = prog_->stageMask;
+    if (auto& cs = prog_->stages[(int)Stage::Compute]; cs.main) {
+        for (int i = 0; i < 3; i++) r.localSize[i] = std::max(1, cs.inLayout.localSize[i]);
+        if (cs.inLayout.localSize[0] < 0 && cs.inLayout.localSize[1] < 0 && cs.inLayout.localSize[2] < 0)
+            error("compute shader does not declare a local size");
+    }
+    if (auto& gs = prog_->stages[(int)Stage::Geometry]; gs.main) {
+        r.gsInputPrimitive = gs.inLayout.primitive;
+        r.gsOutputPrimitive = gs.outLayout.primitive;
+        r.gsMaxVertices = gs.outLayout.maxVertices;
+        r.gsInvocations = std::max(1, gs.inLayout.invocations);
+        if (!r.gsInputPrimitive) error("geometry shader does not declare an input primitive type");
+        if (!r.gsOutputPrimitive) error("geometry shader does not declare an output primitive type");
+        if (r.gsMaxVertices < 0) error("geometry shader does not declare max_vertices");
+    }
+    if (auto& tc = prog_->stages[(int)Stage::TessControl]; tc.main) r.tcsOutputVertices = tc.outLayout.vertices;
+    if (auto& te = prog_->stages[(int)Stage::TessEval]; te.main) {
+        r.tesPrimitiveMode = te.inLayout.primitive;
+        r.tesSpacing = te.inLayout.spacing ? te.inLayout.spacing : gl::EQUAL;
+        r.tesOrder = te.inLayout.order ? te.inLayout.order : gl::CCW;
+        r.tesPointMode = te.inLayout.pointMode;
+        if (!r.tesPrimitiveMode) error("tessellation evaluation shader does not declare a primitive mode");
+    }
+    if (auto& fs = prog_->stages[(int)Stage::Fragment]; fs.main) {
+        r.usesFragDepth = fs.writesFragDepth;
+        r.earlyFragmentTests = fs.inLayout.earlyFragmentTests;
+        r.usesDiscard = fs.usesDiscard;
+    }
+    // fp64 usage
+    for (auto& sc : prog_->stages)
+        for (auto& sh : sc.shaders)
+            for (auto& e : sh->exprs)
+                if (e.type.base == BT::Double) r.usesFp64 = true;
+    // transform feedback varyings (reflection only)
+    Stage pre = Stage::Count;
+    for (Stage s : {Stage::Geometry, Stage::TessEval, Stage::Vertex})
+        if (prog_->stages[(int)s].main) { pre = s; break; }
+    if (pre != Stage::Count && !in_.xfbVaryings.empty()) {
+        const StageCode& ps = prog_->stages[(int)pre];
+        int buffer = 0, offset = 0;
+        for (auto& name : in_.xfbVaryings) {
+            if (name == "gl_NextBuffer") { buffer++; offset = 0; continue; }
+            if (name.compare(0, 14, "gl_SkipComponents") == 0) { offset += 4 * std::atoi(name.c_str() + 17); continue; }
+            std::string base = name;
+            int elem = -1;
+            if (auto lb = name.find('['); lb != std::string::npos) {
+                base = name.substr(0, lb);
+                elem = std::atoi(name.c_str() + lb + 1);
+            }
+            const Variable* found = nullptr;
+            for (auto* v : ps.globals) if (v->name == base && v->q.storage == Storage::Out) found = v;
+            if (!found)
+                for (auto& sh : ps.shaders)
+                    for (auto& v : sh->vars)
+                        if (v.global && v.name == base && v.q.storage == Storage::Out) found = &v;
+            if (!found) { error("transform feedback varying '" + name + "' is not an output of the last vertex stage"); continue; }
+            Type t = found->type;
+            if (elem >= 0) t = t.elem();
+            XfbVarying x;
+            x.name = name;
+            x.type = glTypeEnum(t);
+            x.arraySize = t.isArray() ? t.dims[0] : 1;
+            x.buffer = buffer;
+            x.offset = offset;
+            r.xfbVaryings.push_back(x);
+            int comps = t.stripArrays().components() * (t.stripArrays().base == BT::Double ? 2 : 1) * std::max(1, t.totalArrayElements());
+            offset += 4 * comps;
+            if (!in_.xfbInterleaved) { buffer++; offset = 0; }
+        }
+    }
+}
+
+LinkResult Linker::run() {
+    prog_ = std::make_shared<LinkedProgram>();
+    prog_->separable = in_.separable;
+    for (auto& sh : in_.shaders) {
+        if (!sh) { error("attempt to link an uncompiled shader"); continue; }
+        prog_->stages[(int)sh->stage].shaders.push_back(sh);
+        prog_->stageMask |= 1u << (int)sh->stage;
+    }
+    if (!prog_->stageMask) error("no shaders attached");
+    if ((prog_->stageMask & (1u << (int)Stage::Compute)) && (prog_->stageMask & ~(1u << (int)Stage::Compute)))
+        error("a compute shader cannot be linked with other shader stages");
+    if ((prog_->stageMask & (1u << (int)Stage::TessEval)) == 0 && (prog_->stageMask & (1u << (int)Stage::TessControl)))
+        error("tessellation control shader requires a tessellation evaluation shader");
+    if (!in_.separable && (prog_->stageMask & ~(1u << (int)Stage::Compute)) && !(prog_->stageMask & (1u << (int)Stage::Vertex)))
+        error("program has no vertex shader");
+    for (int s = 0; s < (int)Stage::Count && ok_; s++)
+        if (!prog_->stages[s].shaders.empty()) collectStage((Stage)s);
+    if (ok_) {
+        assignAttributes();
+        assignFragOutputs();
+        assignUniforms();
+        checkVaryings();
+        stageMetadata();
+    }
+    // names produced by the stage feeding the rasterizer (used by the FS emitter to drop unmatched inputs)
+    if (ok_) {
+        res_.reflection = prog_->refl;
+        res_.program = prog_;
+    }
+    return std::move(res_);
+}
+
+}  // namespace
+
+LinkResult link(const LinkInput& input) {
+    Linker l(input);
+    return l.run();
+}
+
+}  // namespace glsl

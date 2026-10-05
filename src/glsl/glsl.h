@@ -251,7 +251,8 @@ struct alignas(16) MGLSys {
     float alphaRef;                        // compat alpha test
     uint32_t alphaFunc;                    // compat alpha test (GL_ALWAYS -> disabled)
     float minSampleShading;
-    uint32_t pad[2];
+    float renderTargetHeight;              // height of the bound framebuffer (layout(origin_upper_left) gl_FragCoord)
+    uint32_t pad1;
     float currentAttrib[32][4];            // glVertexAttrib* values for disabled arrays
 };
 

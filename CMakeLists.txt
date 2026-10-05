@@ -40,4 +40,5 @@ set_target_properties(metalgldrv PROPERTIES
 option(MGL_BUILD_TESTS "Build host tests" ON)
 if(MGL_BUILD_TESTS AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   add_subdirectory(tests)
+  add_subdirectory(tools)
 endif()
