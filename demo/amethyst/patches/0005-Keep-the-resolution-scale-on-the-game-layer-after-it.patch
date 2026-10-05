@@ -1,0 +1,44 @@
+From aa7c8d88f699374d81a2357ee1777c173062777b Mon Sep 17 00:00:00 2001
+From: bomberfish <me@bomberfish.ca>
+Date: Mon, 5 Oct 2026 17:46:03 -0400
+Subject: [PATCH 5/5] Keep the resolution scale on the game layer after it
+ joins a window
+
+---
+ Natives/GameSurfaceView.m | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/Natives/GameSurfaceView.m b/Natives/GameSurfaceView.m
+index 1815e36..e90c167 100644
+--- a/Natives/GameSurfaceView.m
++++ b/Natives/GameSurfaceView.m
+@@ -6,6 +6,8 @@
+ @interface GameSurfaceView()
+ @end
+ 
++#include "environ.h"
++
+ @implementation GameSurfaceView
+ 
+ - (id)initWithFrame:(CGRect)frame {
+@@ -16,6 +18,17 @@ - (id)initWithFrame:(CGRect)frame {
+     return self;
+ }
+ 
++// UIKit resets a view-backed layer's contentsScale to the screen scale when the view
++// joins a window, discarding the resolution scale set at creation. Renderers that size
++// their drawable from the layer (e.g. metalgldrv) then render at the wrong size until
++// updateSavedResolution runs again (e.g. after returning from the background).
++- (void)didMoveToWindow {
++    [super didMoveToWindow];
++    if (self.window && resolutionScale > 0) {
++        self.layer.contentsScale = self.window.screen.scale * resolutionScale;
++    }
++}
++
+ + (Class)layerClass {
+     if ([[PLProfiles resolveKeyForCurrentProfile:@"renderer"] hasPrefix:@"libOSMesa"]) {
+         return CALayer.class;
+-- 
+2.54.0 (Apple Git-157)
+
