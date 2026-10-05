@@ -1,0 +1,39 @@
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+bool feq(float a, float b) { return abs(a - b) <= 1e-4 * max(1.0, abs(b)); }
+bool veq(vec4 a, vec4 b) { return feq(a.x, b.x) && feq(a.y, b.y) && feq(a.z, b.z) && feq(a.w, b.w); }
+// runtime values the compiler cannot fold
+int I(int v) { return v + int(seq[0]); }
+uint U(uint v) { return v + seq[0]; }
+float F(float v) { return v + float(seq[0]); }
+
+struct S { vec2 a; float b; };
+void main() {
+    vec4 p = vec4(F(1.0), 2.0, 3.0, 4.0);
+    check(vec3(p) == vec3(1.0, 2.0, 3.0));
+    check(vec2(p.zw) == vec2(3.0, 4.0));
+    check(ivec2(vec2(F(-1.7), 2.9)) == ivec2(-1, 2));
+    check(bvec2(vec2(F(0.0), 2.0)) == bvec2(false, true));
+    check(uvec2(ivec2(I(3), I(4))) == uvec2(3u, 4u));
+    mat3 m = mat3(p.xy, p.z, p.w, p.x, vec3(9.0), 8.0);
+    check(m[0] == vec3(1.0, 2.0, 3.0) && m[1] == vec3(4.0, 1.0, 9.0) && m[2] == vec3(9.0, 9.0, 8.0));
+    mat2 m2 = mat2(p);
+    check(m2[1] == vec2(3.0, 4.0));
+    float arr[3] = { F(1.0), 2.0, 3.0 };
+    check(arr[2] == 3.0);
+    S s = { vec2(F(1.0)), 5.0 };
+    check(s.b == 5.0 && s.a.y == 1.0);
+    S t = S(vec2(2.0), F(3.0));
+    check(t.a.x == 2.0);
+    float f = float(I(7));
+    int fi = int(F(-2.9));
+    check(f == 7.0 && fi == -2);
+    check(float(true) == 1.0 && int(F(1.0) > 0.0) == 1);
+    vec4 sc = vec4(F(2.0));
+    check(sc == vec4(2.0));
+    check(vec4(1.0, vec2(F(2.0), 3.0), 4.0) == vec4(1.0, 2.0, 3.0, 4.0));
+}

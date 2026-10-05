@@ -1,0 +1,62 @@
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+bool feq(float a, float b) { return abs(a - b) <= 1e-4 * max(1.0, abs(b)); }
+bool veq(vec4 a, vec4 b) { return feq(a.x, b.x) && feq(a.y, b.y) && feq(a.z, b.z) && feq(a.w, b.w); }
+// runtime values the compiler cannot fold
+int I(int v) { return v + int(seq[0]); }
+uint U(uint v) { return v + seq[0]; }
+float F(float v) { return v + float(seq[0]); }
+
+struct P { vec2 a; int b[2]; };
+void outs(out float x, inout vec2 y, out int z[2]) { x = 3.0; y *= 2.0; z[0] = 5; z[1] = 6; }
+P mk(int v) { P p; p.a = vec2(float(v)); p.b[0] = v; p.b[1] = -v; return p; }
+float[3] arr3(float v) { return float[3](v, v + 1.0, v + 2.0); }
+void modArr(float a[3]) { a[0] = 100.0; }
+int fact(int n) { int r = 1; for (int i = 2; i <= n; i++) r *= i; return r; }
+void main() {
+    vec4 v = vec4(F(1.0), 2.0, 3.0, 4.0);
+    int zz[2];
+    outs(v.w, v.yz, zz);
+    check(v == vec4(1.0, 4.0, 6.0, 3.0) && zz[1] == 6);
+    float a[3] = arr3(F(1.0));
+    float b[3] = a;
+    b[0] = 9.0;
+    check(a[0] == 1.0 && b[0] == 9.0);       // value semantics
+    modArr(a);
+    check(a[0] == 1.0);                      // in parameters are copies
+    P p = mk(I(4));
+    P q = p;
+    q.b[1] = 0;
+    check(p.b[1] == -4 && q.b[1] == 0 && p != q);
+    check(p == mk(4));
+    check(fact(I(5)) == 120);
+    check(a.length() == 3);
+    int sw = 0;
+    switch (I(2)) {
+        case 1: sw += 1;
+        case 2: sw += 2;
+        case 3: sw += 4; break;
+        default: sw += 8;
+    }
+    check(sw == 6);
+    int loops = 0;
+    for (int i = 0; i < 10; i++) { if (i % 2 == 0) continue; if (i > 7) break; loops++; }
+    check(loops == 4);
+    int dw = 0;
+    do { dw++; } while (dw < I(3));
+    check(dw == 3);
+    vec3 sw3 = v.wzy;
+    sw3.xz = sw3.zx;
+    check(sw3 == vec3(4.0, 6.0, 3.0));
+    float s = F(2.0);
+    check(s.xx == vec2(2.0));
+    bool t = I(1) > 0 ? true : false;
+    check(t);
+    int ci = 0;
+    int r = (ci++, ci++, ci);
+    check(r == 2);
+}

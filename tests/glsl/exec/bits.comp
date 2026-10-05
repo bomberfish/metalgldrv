@@ -1,0 +1,43 @@
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+bool feq(float a, float b) { return abs(a - b) <= 1e-4 * max(1.0, abs(b)); }
+bool veq(vec4 a, vec4 b) { return feq(a.x, b.x) && feq(a.y, b.y) && feq(a.z, b.z) && feq(a.w, b.w); }
+// runtime values the compiler cannot fold
+int I(int v) { return v + int(seq[0]); }
+uint U(uint v) { return v + seq[0]; }
+float F(float v) { return v + float(seq[0]); }
+
+void main() {
+    uint x = U(0xF0u);
+    check(bitfieldExtract(x, 4, 4) == 0xFu);
+    check(bitfieldExtract(I(-16), 4, 4) == -1);         // signed extract sign-extends
+    check(bitfieldInsert(U(0u), U(5u), 4, 3) == 0x50u);
+    check(bitfieldReverse(U(1u)) == 0x80000000u);
+    check(bitCount(U(0xFFu)) == 8 && bitCount(I(-1)) == 32);
+    check(findLSB(U(8u)) == 3 && findLSB(U(0u)) == -1);
+    check(findMSB(U(8u)) == 3 && findMSB(I(-1)) == -1 && findMSB(I(-2)) == 0 && findMSB(I(0)) == -1);
+    uint carry;
+    uint s = uaddCarry(U(0xFFFFFFFFu), U(2u), carry);
+    check(s == 1u && carry == 1u);
+    uint borrow;
+    uint d = usubBorrow(U(1u), U(2u), borrow);
+    check(d == 0xFFFFFFFFu && borrow == 1u);
+    uint hi, lo;
+    umulExtended(U(0x80000000u), U(4u), hi, lo);
+    check(hi == 2u && lo == 0u);
+    int ihi, ilo;
+    imulExtended(I(-1), I(2), ihi, ilo);
+    check(ihi == -1 && ilo == -2);
+    check(packUnorm4x8(vec4(F(1.0), 0.0, 1.0, 0.0)) == 0x00FF00FFu);
+    check(packHalf2x16(vec2(F(1.0), 2.0)) == 0x40003C00u);
+    check(unpackHalf2x16(U(0x40003C00u)) == vec2(1.0, 2.0));
+    check(floatBitsToUint(F(1.0)) == 0x3F800000u && intBitsToFloat(I(0x40000000)) == 2.0);
+    uvec2 v = uvec2(U(1u), U(2u)) << uvec2(1u, 2u);
+    check(v == uvec2(2u, 8u));
+    ivec3 iv = ivec3(I(1), I(2), I(3)) * 2 + 1;
+    check(iv == ivec3(3, 5, 7));
+}
