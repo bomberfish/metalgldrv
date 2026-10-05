@@ -21,6 +21,8 @@ for f in sorted(os.listdir(d)):
 ok = fail = 0
 for base, files in sorted(groups.items()):
     args = [glslc, "-q"]
+    if base.startswith("fp64"):
+        args.append("--no-validate")  # needs the fp64 runtime library (fp64_msl.inc) to link
     for f in files:
         args += ["-S", STAGES[os.path.splitext(f)[1]], os.path.join(d, f)]
     r = subprocess.run(args, capture_output=True, text=True)

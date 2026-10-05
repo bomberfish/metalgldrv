@@ -72,7 +72,7 @@ private:
     static std::string scalarName(BT b) {
         switch (b) {
             case BT::Float: return "float";
-            case BT::Double: return "mgl_f64";
+            case BT::Double: return "ulong";
             case BT::Int: return "int";
             case BT::UInt: return "uint";
             case BT::Bool: return "bool";
@@ -81,7 +81,6 @@ private:
     }
     static std::string vecName(BT b, int n) {
         if (n == 1) return scalarName(b);
-        if (b == BT::Double) return "mgl_f64v" + std::to_string(n);
         return scalarName(b) + std::to_string(n);
     }
     std::string structName(const StructDef* sd) { return (sd->isBlock ? "B_" : "S_") + sd->name; }
@@ -121,7 +120,7 @@ private:
             default: break;
         }
         if (t.cols) {
-            if (t.base == BT::Double) return "mgl_f64m" + std::to_string(t.cols) + "x" + std::to_string(t.vec);
+            if (t.base == BT::Double) return "mgl_dmat<" + std::to_string(t.cols) + ", " + std::to_string(t.vec) + ">";
             return "float" + std::to_string(t.cols) + "x" + std::to_string(t.vec);
         }
         return vecName(t.base, t.vec);
@@ -131,8 +130,13 @@ private:
     std::string scalarLit(BT b, const Scalar& s) {
         char buf[64];
         switch (b) {
-            case BT::Float:
             case BT::Double: {
+                uint64_t bits;
+                std::memcpy(&bits, &s.f, 8);
+                std::snprintf(buf, sizeof buf, "0x%016llXul", (unsigned long long)bits);
+                return buf;
+            }
+            case BT::Float: {
                 double v = s.f;
                 if (std::isnan(v)) return "NAN";
                 if (std::isinf(v)) return v > 0 ? "INFINITY" : "(-INFINITY)";
@@ -165,13 +169,14 @@ private:
             return r + "}";
         }
         if (t.cols) {
-            std::string r = mt(t) + "(";
+            bool d = t.base == BT::Double;
+            std::string r = mt(t) + (d ? "{{" : "(");
             for (int c = 0; c < t.cols; c++) {
                 r += (c ? ", " : "") + vecName(t.base, t.vec) + "(";
                 for (int k = 0; k < t.vec; k++) r += (k ? ", " : "") + scalarLit(t.base, cv.c[i++]);
                 r += ")";
             }
-            return r + ")";
+            return r + (d ? "}}" : ")");
         }
         if (t.vec > 1) {
             std::string r = mt(t) + "(";
@@ -180,6 +185,38 @@ private:
         }
         return scalarLit(t.base, cv.c[i++]);
     }
+
+    // Base-type conversion of a same-shaped value (scalar, vector or matrix). Doubles go through the fp64 library.
+    std::string conv(const std::string& s, const Type& from, const Type& to) {
+        if (from.base == to.base) return s;
+        if (to.base == BT::Double) {
+            if (to.cols) return "mgl_dmat_from_float(" + (from.base == BT::Float ? s : mt(from.withBase(BT::Float)) + "(" + s + ")") + ")";
+            switch (from.base) {
+                case BT::Float: return "mgl_f64_from_float(" + s + ")";
+                case BT::Int: return "mgl_f64_from_int(" + s + ")";
+                case BT::UInt: return "mgl_f64_from_uint(" + s + ")";
+                case BT::Bool: return "mgl_f64_from_bool(" + s + ")";
+                default: fail("bad conversion to double");
+            }
+        }
+        if (from.base == BT::Double) {
+            if (from.cols) return conv("mgl_dmat_to_float(" + s + ")", from.withBase(BT::Float), to);
+            switch (to.base) {
+                case BT::Float: return "mgl_f64_to_float(" + s + ")";
+                case BT::Int: return "mgl_f64_to_int(" + s + ")";
+                case BT::UInt: return "mgl_f64_to_uint(" + s + ")";
+                case BT::Bool: return "mgl_f64_to_bool(" + s + ")";
+                default: fail("bad conversion from double");
+            }
+        }
+        return mt(to) + "(" + s + ")";
+    }
+    std::string f64one(const Type& t) {
+        std::string one = "0x3FF0000000000000ul";
+        return t.isVector() ? vecName(BT::Double, t.vec) + "(" + one + ")" : one;
+    }
+    std::string binaryF64(Op op, std::string a, const Type& ta, std::string b, const Type& tb);
+    std::string builtinF64(const Expr* e);
 
     // ---- temporaries -------------------------------------------------------------
     std::string newTemp(const Type& t) {
@@ -257,6 +294,17 @@ private:
     void collectStructs(std::vector<const StructDef*>& order);
     void emitArgs(std::string& o);
     void flatten(const Type& t, const std::string& acc, std::vector<std::pair<Type, std::string>>& leaves);
+    // double vectors travel as one flat uint2 varying per component
+    static void splitDoubleLeaves(std::vector<std::pair<Type, std::string>>& leaves) {
+        std::vector<std::pair<Type, std::string>> out;
+        for (auto& [t, acc] : leaves) {
+            if (t.base == BT::Double && t.isVector())
+                for (int c = 0; c < t.vec; c++) out.push_back({Type::scalar(BT::Double), acc + "." + kSwz[c]});
+            else
+                out.push_back({t, acc});
+        }
+        leaves.swap(out);
+    }
     std::string interpAttr(const Qualifiers& q, const Type& leaf);
 };
 
@@ -385,9 +433,9 @@ std::string Emitter::loaderFor(const Type& t, const TL& L) {
     } else if (t.cols) {
         uint32_t N = scalarSize(t.base);
         std::string col = vecName(t.base, t.vec);
-        body = "    return " + T + "(";
+        body = "    " + T + " r;\n";
         for (int c = 0; c < t.cols; c++) {
-            if (c) body += ", ";
+            body += "    r[" + std::to_string(c) + "] = ";
             if (!L->rowMajor) body += "mgl_ld_" + col + "(p, o + " + std::to_string(c * L->matrixStride) + "u)";
             else {
                 body += col + "(";
@@ -395,8 +443,9 @@ std::string Emitter::loaderFor(const Type& t, const TL& L) {
                     body += (r ? ", " : "") + std::string("mgl_ld_") + scalarName(t.base) + "(p, o + " + std::to_string(r * L->matrixStride + c * N) + "u)";
                 body += ")";
             }
+            body += ";\n";
         }
-        body += ");\n";
+        body += "    return r;\n";
     } else {
         fail("cannot load type '" + t.str() + "' from a buffer");
     }
@@ -444,7 +493,6 @@ std::string Emitter::storerFor(const Type& t, const TL& L) {
 std::string Emitter::loadAcc(const Acc& a) {
     if (a.blockArray) fail("cannot use an array of blocks as a value");
     if (a.compStride) {
-        if (a.type.base != BT::Float) fail("row-major double matrices are not supported yet");
         return "mgl_ldcs_" + mt(a.type) + "(" + a.ptr + ", " + a.off + ", " + std::to_string(a.compStride) + "u)";
     }
     return loaderFor(a.type, a.layout) + "(" + a.ptr + ", " + a.off + ")";
@@ -453,7 +501,6 @@ std::string Emitter::loadAcc(const Acc& a) {
 std::string Emitter::storeAcc(const Acc& a, const std::string& v) {
     if (!a.device) fail("cannot write to a uniform");
     if (a.compStride) {
-        if (a.type.base != BT::Float) fail("row-major double matrices are not supported yet");
         return "mgl_stcs_" + mt(a.type) + "(" + a.ptr + ", " + a.off + ", " + std::to_string(a.compStride) + "u, " + v + ")";
     }
     return storerFor(a.type, a.layout) + "(" + a.ptr + ", " + a.off + ", " + v + ")";
@@ -485,8 +532,45 @@ bool Emitter::addressable(const Expr* e) {
 // ===========================================================================
 // Expressions
 // ===========================================================================
+std::string Emitter::binaryF64(Op op, std::string a, const Type& ta, std::string b, const Type& tb) {
+    bool ma = ta.isMatrix(), mb = tb.isMatrix();
+    if (ma || mb) {
+        switch (op) {
+            case Op::Add: return (ma && mb ? "mgl_dmat_add(" : "mgl_dmat_adds(") + a + ", " + b + ")";
+            case Op::Sub: return (ma && mb ? "mgl_dmat_sub(" : "mgl_dmat_subs(") + a + ", " + b + ")";
+            case Op::Div: return (ma && mb ? "mgl_dmat_div(" : "mgl_dmat_divs(") + a + ", " + b + ")";
+            case Op::Mul:
+                if (ma && mb) return "mgl_dmat_mm(" + a + ", " + b + ")";
+                if (ma && tb.isVector()) return "mgl_dmat_mv(" + a + ", " + b + ")";
+                if (mb && ta.isVector()) return "mgl_dmat_vm(" + a + ", " + b + ")";
+                return "mgl_dmat_muls(" + a + ", " + b + ")";
+            case Op::Eq: needEq_ = true; return "mgl_eq(" + a + ", " + b + ")";
+            case Op::Ne: needEq_ = true; return "(!mgl_eq(" + a + ", " + b + "))";
+            default: fail("invalid double matrix operation");
+        }
+    }
+    if (ta.isScalar() && tb.isVector()) a = vecName(BT::Double, tb.vec) + "(" + a + ")";
+    if (tb.isScalar() && ta.isVector()) b = vecName(BT::Double, ta.vec) + "(" + b + ")";
+    bool vec = ta.isVector() || tb.isVector();
+    switch (op) {
+        case Op::Add: return "mgl_f64_add(" + a + ", " + b + ")";
+        case Op::Sub: return "mgl_f64_sub(" + a + ", " + b + ")";
+        case Op::Mul: return "mgl_f64_mul(" + a + ", " + b + ")";
+        case Op::Div: return "mgl_f64_div(" + a + ", " + b + ")";
+        case Op::Lt: return "mgl_f64_lt(" + a + ", " + b + ")";
+        case Op::Gt: return "mgl_f64_gt(" + a + ", " + b + ")";
+        case Op::Le: return "mgl_f64_le(" + a + ", " + b + ")";
+        case Op::Ge: return "mgl_f64_ge(" + a + ", " + b + ")";
+        case Op::Eq: return vec ? "all(mgl_f64_eq(" + a + ", " + b + "))" : "mgl_f64_eq(" + a + ", " + b + ")";
+        case Op::Ne: return vec ? "(!all(mgl_f64_eq(" + a + ", " + b + ")))" : "mgl_f64_ne(" + a + ", " + b + ")";
+        default: fail("invalid operation on doubles");
+    }
+}
+
 std::string Emitter::binary(Op op, const std::string& a, const Type& ta, const std::string& b, const Type& tb, const Type& rt) {
     bool ma = ta.isMatrix(), mb = tb.isMatrix();
+    if ((ta.base == BT::Double || tb.base == BT::Double) && op != Op::LogAnd && op != Op::LogOr && op != Op::LogXor)
+        return binaryF64(op, a, ta, b, tb);
     switch (op) {
         case Op::Add:
             if (ma != mb) return "mgl_madd(" + a + ", " + b + ")";
@@ -567,7 +651,8 @@ std::string Emitter::assign(const Expr* e) {
     }
     Op bop = compoundBase(e->op);
     if (!buf) {
-        bool expand = l->type.isMatrix() || r->type.isMatrix() || (bop == Op::Mul && l->type.isVector() && r->type.isMatrix());
+        bool expand = l->type.isMatrix() || r->type.isMatrix() || l->type.base == BT::Double ||
+                      (bop == Op::Mul && l->type.isVector() && r->type.isMatrix());
         if (!expand) {
             static const std::map<Op, const char*> s = {{Op::Add, "+="}, {Op::Sub, "-="}, {Op::Mul, "*="}, {Op::Div, "/="},
                                                         {Op::Mod, "%="}, {Op::Shl, "<<="}, {Op::Shr, ">>="}, {Op::BitAnd, "&="},
@@ -585,6 +670,13 @@ std::string Emitter::incdec(const Expr* e) {
     const Expr* a = e->args[0];
     bool inc = e->op == Op::PreInc || e->op == Op::PostInc;
     bool pre = e->op == Op::PreInc || e->op == Op::PreDec;
+    if (a->type.base == BT::Double) {
+        std::string fn = inc ? "mgl_f64_add(" : "mgl_f64_sub(";
+        std::string t = newTemp(a->type);
+        std::string cur = ex(a);
+        if (pre) return "(" + t + " = " + fn + cur + ", " + f64one(a->type) + "), " + storeTo(a, t) + ", " + t + ")";
+        return "(" + t + " = " + cur + ", " + storeTo(a, fn + t + ", " + f64one(a->type) + ")") + ", " + t + ")";
+    }
     if (!isBufferRooted(a)) return pre ? "(" + std::string(inc ? "++" : "--") + ex(a) + ")" : "(" + ex(a) + (inc ? "++" : "--") + ")";
     std::string t = newTemp(a->type);
     std::string one = mt(a->type) + "(1)";
@@ -647,6 +739,7 @@ std::string Emitter::ex(const Expr* e) {
             const Expr* a = e->args[0];
             switch (e->op) {
                 case Op::Neg:
+                    if (a->type.base == BT::Double) return (a->type.isMatrix() ? "mgl_dmat_neg(" : "mgl_f64_neg(") + ex(a) + ")";
                     if (a->type.isMatrix()) return "mgl_mneg(" + ex(a) + ")";
                     return "(-" + ex(a) + ")";
                 case Op::Plus: return ex(a);
@@ -697,25 +790,30 @@ std::string Emitter::ctor(const Expr* e) {
         if (a->type.isVector()) s += ".x";
         else if (a->type.isMatrix()) s += "[0][0]";
         if (a->type.base == T.base && a->type.isScalar()) return s;
-        return sname + "(" + s + ")";
+        return conv(s, a->type.scalarType(), T);
     }
     int n = T.components();
     if (args.size() == 1) {
         const Expr* a = args[0];
         const Type& at = a->type;
+        std::string CR = std::to_string(T.cols) + ", " + std::to_string(T.vec);
         if (at.isScalar()) {
-            if (T.isMatrix()) return "mgl_mdiag<" + sname + ", " + std::to_string(T.cols) + ", " + std::to_string(T.vec) + ">(" + sname + "(" + ex(a) + "))";
-            return mt(T) + "(" + ex(a) + ")";
+            std::string sc = conv(ex(a), at, T.scalarType());
+            if (T.isMatrix()) {
+                if (T.base == BT::Double) return "mgl_dmat_diag<" + CR + ">(" + sc + ")";
+                return "mgl_mdiag<" + sname + ", " + CR + ">(" + sc + ")";
+            }
+            return mt(T) + "(" + sc + ")";
         }
         if (T.isVector() && at.isVector()) {
-            if (at.vec == T.vec) return mt(T) + "(" + ex(a) + ")";
-            if (at.vec > T.vec) return mt(T) + "(" + ex(a) + "." + std::string(kSwz, T.vec) + ")";
+            if (at.vec == T.vec) return at.base == T.base ? ex(a) : conv(ex(a), at, T);
+            if (at.vec > T.vec) return conv(ex(a) + "." + std::string(kSwz, T.vec), Type::vector(at.base, T.vec), T);
         }
         if (T.isMatrix() && at.isMatrix()) {
-            if (at.cols == T.cols && at.vec == T.vec) return mt(T) + "(" + ex(a) + ")";
-            std::string src = ex(a);
-            if (at.base != T.base) src = mt(at.withBase(T.base)) + "(" + src + ")";
-            return "mgl_mresize<" + sname + ", " + std::to_string(T.cols) + ", " + std::to_string(T.vec) + ">(" + src + ")";
+            std::string src = conv(ex(a), at, at.withBase(T.base));
+            if (at.cols == T.cols && at.vec == T.vec) return src;
+            if (T.base == BT::Double) return "mgl_dmat_resize<" + CR + ">(" + src + ")";
+            return "mgl_mresize<" + sname + ", " + CR + ">(" + src + ")";
         }
     }
     bool anyMat = false;
@@ -732,7 +830,9 @@ std::string Emitter::ctor(const Expr* e) {
             int take = std::min(at.components(), n - used);
             std::string s = ex(args[i]);
             if (at.isVector() && take < at.vec) s += "." + std::string(kSwz, take);
-            r += (i ? ", " : "") + vecName(T.base, take) + "(" + s + ")";
+            Type part = take == 1 ? at.scalarType() : Type::vector(at.base, take);
+            Type tpart = take == 1 ? T.scalarType() : Type::vector(T.base, take);
+            r += (i ? ", " : "") + (at.base == T.base ? s : conv(s, part, tpart));
             used += take;
         }
         return r + ")";
@@ -741,9 +841,10 @@ std::string Emitter::ctor(const Expr* e) {
         bool cols = true;
         for (auto* a : args) if (!(a->type.isVector() && a->type.vec == T.vec)) cols = false;
         if (cols) {
-            std::string r = mt(T) + "(";
-            for (size_t i = 0; i < args.size(); i++) r += (i ? ", " : "") + vecName(T.base, T.vec) + "(" + ex(args[i]) + ")";
-            return r + ")";
+            bool d = T.base == BT::Double;
+            std::string r = mt(T) + (d ? "{{" : "(");
+            for (size_t i = 0; i < args.size(); i++) r += (i ? ", " : "") + conv(ex(args[i]), args[i]->type, T.column());
+            return r + (d ? "}}" : ")");
         }
     }
     // general: flatten components
@@ -758,18 +859,23 @@ std::string Emitter::ctor(const Expr* e) {
     }
     if ((int)comps.size() < n) fail("not enough constructor components");
     std::string r;
+    std::vector<BT> compBase;
+    for (auto* a : args)
+        for (int k = 0; k < a->type.components(); k++) compBase.push_back(a->type.base);
+    auto cc = [&](int k) { return conv(comps[k], Type::scalar(compBase[k]), T.scalarType()); };
     if (T.isVector()) {
         r = mt(T) + "(";
-        for (int k = 0; k < n; k++) r += (k ? ", " : "") + sname + "(" + comps[k] + ")";
+        for (int k = 0; k < n; k++) r += (k ? ", " : "") + cc(k);
         r += ")";
     } else {
-        r = mt(T) + "(";
+        bool d = T.base == BT::Double;
+        r = mt(T) + (d ? "{{" : "(");
         for (int c = 0; c < T.cols; c++) {
             r += (c ? ", " : "") + vecName(T.base, T.vec) + "(";
-            for (int k = 0; k < T.vec; k++) r += (k ? ", " : "") + sname + "(" + comps[c * T.vec + k] + ")";
+            for (int k = 0; k < T.vec; k++) r += (k ? ", " : "") + cc(c * T.vec + k);
             r += ")";
         }
-        r += ")";
+        r += d ? "}}" : ")";
     }
     (void)total;
     return pre.empty() ? r : "(" + pre + r + ")";
@@ -893,6 +999,9 @@ std::string Emitter::callBuiltin(const Expr* e) {
     };
     if (n.compare(0, 7, "texture") == 0 || n.compare(0, 6, "shadow") == 0 || n.compare(0, 10, "texelFetch") == 0)
         return textureFn(e, n);
+    bool anyDouble = rt.stripArrays().base == BT::Double;
+    for (auto* x : A) anyDouble |= x->type.stripArrays().base == BT::Double;
+    if (anyDouble) return builtinF64(e);
     if (n.compare(0, 5, "image") == 0) return imageFn(e, n);
     static const std::unordered_map<std::string, const char*> direct = {
         {"sin", "sin"}, {"cos", "cos"}, {"tan", "tan"}, {"asin", "asin"}, {"acos", "acos"}, {"sinh", "sinh"}, {"cosh", "cosh"},
@@ -1021,6 +1130,48 @@ std::string Emitter::callBuiltin(const Expr* e) {
     if (n == "EmitVertex" || n == "EndPrimitive" || n == "EmitStreamVertex" || n == "EndStreamPrimitive")
         fail("geometry shaders are not supported yet");
     fail("builtin function '" + n + "' is not supported yet");
+}
+
+std::string Emitter::builtinF64(const Expr* e) {
+    const std::string& n = e->fn->name;
+    const auto& A = e->args;
+    const Type& rt = e->type;
+    auto a = [&](size_t i) { return ex(A[i]); };
+    auto bc = [&](size_t i) {
+        std::string s = ex(A[i]);
+        if (rt.isVector() && A[i]->type.isScalar()) return vecName(A[i]->type.base, rt.vec) + "(" + s + ")";
+        return s;
+    };
+    auto call = [&](const std::string& f, bool broadcast) {
+        std::string r = f + "(";
+        for (size_t i = 0; i < A.size(); i++) r += (i ? ", " : "") + (broadcast ? bc(i) : a(i));
+        return r + ")";
+    };
+    static const std::set<std::string> direct = {"abs", "sign", "floor", "ceil", "trunc", "round", "roundEven", "fract", "sqrt",
+                                                 "inversesqrt", "isnan", "isinf", "dot", "length", "distance", "normalize",
+                                                 "cross", "faceforward", "reflect", "refract", "fma"};
+    if (direct.count(n)) return call("mgl_f64_" + n, false);
+    if (n == "mod" || n == "min" || n == "max" || n == "clamp" || n == "step" || n == "smoothstep") return call("mgl_f64_" + n, true);
+    if (n == "mix") {
+        if (A[2]->type.base == BT::Bool) return "select(" + a(0) + ", " + a(1) + ", " + a(2) + ")";
+        return call("mgl_f64_mix", true);
+    }
+    if (n == "frexp" || n == "modf" || n == "ldexp") {
+        const Builtin* bi = e->fn->builtin;
+        return withOuts("mgl_f64_" + n, e, bi->paramOut, bi->params, rt, [&](size_t, const Expr* x) { return ex(x); });
+    }
+    static const std::map<std::string, std::string> rel = {{"lessThan", "lt"}, {"lessThanEqual", "le"}, {"greaterThan", "gt"},
+                                                           {"greaterThanEqual", "ge"}, {"equal", "eq"}, {"notEqual", "ne"}};
+    if (auto it = rel.find(n); it != rel.end()) return "mgl_f64_" + it->second + "(" + a(0) + ", " + a(1) + ")";
+    if (n == "packDouble2x32") return "mgl_f64_pack2x32(" + a(0) + ")";
+    if (n == "unpackDouble2x32") return "mgl_f64_unpack2x32(" + a(0) + ")";
+    if (n == "transpose") return "mgl_dmat_transpose(" + a(0) + ")";
+    if (n == "determinant") return "mgl_dmat_det(" + a(0) + ")";
+    if (n == "inverse") return "mgl_dmat_inverse(" + a(0) + ")";
+    if (n == "outerProduct") return "mgl_dmat_outer(" + a(0) + ", " + a(1) + ")";
+    if (n == "matrixCompMult") return "mgl_dmat_mcm(" + a(0) + ", " + a(1) + ")";
+    if (n == "uaddCarry" || n == "any" || n == "all") return call(n, false);
+    fail("builtin '" + n + "' is not supported for double arguments");
 }
 
 // Legacy texture function names -> (modern name, legacy vec4 shadow result)
@@ -1612,6 +1763,7 @@ void Emitter::emitStage(Stage s, std::string& o) {
 
     o += "namespace " + ns_ + " {\n";
     if (needEq_) o += "using ::mgl_eq;\n";
+    if (needEq_ && P.refl.usesFp64) o += "// mgl_eq_f64_overloads\n";
     o += structs;
     for (auto* sd : needEq_ ? order : std::vector<const StructDef*>{}) {
         // equality helper for structs (used by == on aggregates)
@@ -1645,7 +1797,24 @@ void Emitter::emitStage(Stage s, std::string& o) {
             flatten(v->type, "g." + varName(v), leaves);
             for (auto& [lt, acc] : leaves) {
                 Type at = lt;
-                if (at.base == BT::Double) at.base = BT::Float;
+                if (at.base == BT::Double) {
+                    // 64-bit attributes are fetched as raw uint pairs; dvec3/dvec4 span two locations.
+                    std::string L0 = std::to_string(loc), L1 = std::to_string(loc + 1);
+                    int n = at.vec;
+                    if (n <= 2) {
+                        inS += "    uint" + std::to_string(2 * n) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
+                        copyIn += "    " + acc + " = as_type<" + vecName(BT::Double, n) + ">(in.a" + L0 + ");\n";
+                        loc++;
+                    } else {
+                        inS += "    uint4 a" + L0 + " [[attribute(" + L0 + ")]];\n";
+                        inS += "    uint" + std::to_string(2 * (n - 2)) + " a" + L1 + " [[attribute(" + L1 + ")]];\n";
+                        copyIn += "    " + acc + " = " + vecName(BT::Double, n) + "(as_type<ulong2>(in.a" + L0 + "), as_type<" +
+                                  vecName(BT::Double, n - 2) + ">(in.a" + L1 + "));\n";
+                        loc += 2;
+                    }
+                    anyIn = true;
+                    continue;
+                }
                 if (at.base == BT::Bool) fail("boolean vertex attributes are not allowed");
                 inS += "    " + vecName(at.base, at.vec) + " a" + std::to_string(loc) + " [[attribute(" + std::to_string(loc) + ")]];\n";
                 copyIn += "    " + acc + " = " + mt(lt) + "(in.a" + std::to_string(loc) + ");\n";
@@ -1658,7 +1827,7 @@ void Emitter::emitStage(Stage s, std::string& o) {
         auto posV = biByKind.count(BuiltinVar::Position) ? biByKind[BuiltinVar::Position] : nullptr;
         outS += std::string("    float4 mgl_pos [[position") + (posV && posV->q.invariant ? ", invariant" : "") + "]];\n";
         outS += "    float mgl_psize [[point_size]];\n";
-        copyOut += "    o.mgl_pos = g.bi_gl_Position;\n    o.mgl_pos.y = -o.mgl_pos.y;\n";
+        copyOut += "    o.mgl_pos = g.bi_gl_Position;\n    if ((sys.flags & 4u) == 0u) o.mgl_pos.y = -o.mgl_pos.y;\n";
         copyOut += "    if (sys.depthMode == 0u) o.mgl_pos.z = (o.mgl_pos.z + o.mgl_pos.w) * 0.5f;\n";
         if (biByKind.count(BuiltinVar::PointSize))
             copyOut += "    o.mgl_psize = (sys.flags & 1u) != 0u ? g.bi_gl_PointSize : sys.pointSize;\n";
@@ -1699,12 +1868,18 @@ void Emitter::emitStage(Stage s, std::string& o) {
             std::string key = varyingKey(v, s);
             std::vector<std::pair<Type, std::string>> leaves;
             flatten(v->type, "g." + varName(v), leaves);
+            splitDoubleLeaves(leaves);
             for (size_t i = 0; i < leaves.size(); i++) {
                 std::string nm = key + "_" + std::to_string(i);
                 if (names.count(nm)) continue;
                 names.insert(nm);
                 Type lt = leaves[i].first;
                 if (lt.base == BT::Bool) fail("boolean varyings are not allowed");
+                if (lt.base == BT::Double) {
+                    outS += "    uint2 " + nm + " [[user(" + nm + ")]];\n";
+                    copyOut += "    o." + nm + " = as_type<uint2>(" + leaves[i].second + ");\n";
+                    continue;
+                }
                 outS += "    " + mt(lt) + " " + nm + " [[user(" + nm + ")]];\n";
                 copyOut += "    o." + nm + " = " + leaves[i].second + ";\n";
             }
@@ -1746,6 +1921,7 @@ void Emitter::emitStage(Stage s, std::string& o) {
             std::string key = varyingKey(v, s);
             std::vector<std::pair<Type, std::string>> leaves;
             flatten(v->type, "g." + varName(v), leaves);
+            splitDoubleLeaves(leaves);
             const Qualifiers& q = v->q;
             for (size_t i = 0; i < leaves.size(); i++) {
                 std::string nm = key + "_" + std::to_string(i);
@@ -1767,6 +1943,12 @@ void Emitter::emitStage(Stage s, std::string& o) {
                         int mi = v->block->findMember(mn);
                         if (mi >= 0) lq = v->block->members[mi].q;
                     }
+                }
+                if (lt.base == BT::Double) {
+                    inS += "    uint2 " + nm + " [[user(" + nm + "), flat]];\n";
+                    copyIn += "    " + leaves[i].second + " = as_type<ulong>(in." + nm + ");\n";
+                    anyIn = true;
+                    continue;
                 }
                 inS += "    " + mt(lt) + " " + nm + " [[user(" + nm + ")" + interpAttr(lq, lt) + "]];\n";
                 copyIn += "    " + leaves[i].second + " = in." + nm + ";\n";

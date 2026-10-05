@@ -10,6 +10,142 @@ namespace glsl {
 
 namespace {
 
+#if __has_include(<fp64_msl.inc>)
+const char* const kFp64Library =
+#include <fp64_msl.inc>
+    ;
+#else
+const char* const kFp64Library = "// fp64 library (fp64_msl.inc) not available in this build\n";
+#endif
+
+// Double matrices: C columns of vec<ulong, R>; all arithmetic via the mgl_f64_* library.
+const char* const kDmatHelpers = R"DMAT(template <int C, int R>
+struct mgl_dmat {
+    vec<ulong, R> c[C];
+    thread vec<ulong, R>& operator[](int i) thread { return c[i]; }
+    const thread vec<ulong, R>& operator[](int i) const thread { return c[i]; }
+    threadgroup vec<ulong, R>& operator[](int i) threadgroup { return c[i]; }
+    const threadgroup vec<ulong, R>& operator[](int i) const threadgroup { return c[i]; }
+    device vec<ulong, R>& operator[](int i) device { return c[i]; }
+    const device vec<ulong, R>& operator[](int i) const device { return c[i]; }
+    const constant vec<ulong, R>& operator[](int i) const constant { return c[i]; }
+};
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_add(mgl_dmat<C, R> a, mgl_dmat<C, R> b) { for (int i = 0; i < C; i++) a[i] = mgl_f64_add(a[i], b[i]); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_sub(mgl_dmat<C, R> a, mgl_dmat<C, R> b) { for (int i = 0; i < C; i++) a[i] = mgl_f64_sub(a[i], b[i]); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_div(mgl_dmat<C, R> a, mgl_dmat<C, R> b) { for (int i = 0; i < C; i++) a[i] = mgl_f64_div(a[i], b[i]); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_mcm(mgl_dmat<C, R> a, mgl_dmat<C, R> b) { for (int i = 0; i < C; i++) a[i] = mgl_f64_mul(a[i], b[i]); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_adds(mgl_dmat<C, R> a, ulong s) { for (int i = 0; i < C; i++) a[i] = mgl_f64_add(a[i], vec<ulong, R>(s)); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_adds(ulong s, mgl_dmat<C, R> a) { return mgl_dmat_adds(a, s); }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_subs(mgl_dmat<C, R> a, ulong s) { for (int i = 0; i < C; i++) a[i] = mgl_f64_sub(a[i], vec<ulong, R>(s)); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_subs(ulong s, mgl_dmat<C, R> a) { for (int i = 0; i < C; i++) a[i] = mgl_f64_sub(vec<ulong, R>(s), a[i]); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_muls(mgl_dmat<C, R> a, ulong s) { for (int i = 0; i < C; i++) a[i] = mgl_f64_mul(a[i], vec<ulong, R>(s)); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_muls(ulong s, mgl_dmat<C, R> a) { return mgl_dmat_muls(a, s); }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_divs(mgl_dmat<C, R> a, ulong s) { for (int i = 0; i < C; i++) a[i] = mgl_f64_div(a[i], vec<ulong, R>(s)); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_divs(ulong s, mgl_dmat<C, R> a) { for (int i = 0; i < C; i++) a[i] = mgl_f64_div(vec<ulong, R>(s), a[i]); return a; }
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_neg(mgl_dmat<C, R> a) { for (int i = 0; i < C; i++) a[i] = mgl_f64_neg(a[i]); return a; }
+template <int C, int R> inline vec<ulong, R> mgl_dmat_mv(mgl_dmat<C, R> m, vec<ulong, C> v) {
+    vec<ulong, R> r = mgl_f64_mul(m[0], vec<ulong, R>(v[0]));
+    for (int i = 1; i < C; i++) r = mgl_f64_fma(m[i], vec<ulong, R>(v[i]), r);
+    return r;
+}
+template <int C, int R> inline vec<ulong, C> mgl_dmat_vm(vec<ulong, R> v, mgl_dmat<C, R> m) {
+    vec<ulong, C> r;
+    for (int i = 0; i < C; i++) r[i] = mgl_f64_dot(v, m[i]);
+    return r;
+}
+template <int C, int R, int C2> inline mgl_dmat<C2, R> mgl_dmat_mm(mgl_dmat<C, R> a, mgl_dmat<C2, C> b) {
+    mgl_dmat<C2, R> r;
+    for (int j = 0; j < C2; j++) r[j] = mgl_dmat_mv(a, b[j]);
+    return r;
+}
+template <int C, int R> inline mgl_dmat<R, C> mgl_dmat_transpose(mgl_dmat<C, R> m) {
+    mgl_dmat<R, C> r;
+    for (int c = 0; c < C; c++)
+        for (int k = 0; k < R; k++) r[k][c] = m[c][k];
+    return r;
+}
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_outer(vec<ulong, R> c, vec<ulong, C> r) {
+    mgl_dmat<C, R> m;
+    for (int i = 0; i < C; i++) m[i] = mgl_f64_mul(c, vec<ulong, R>(r[i]));
+    return m;
+}
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_diag(ulong s) {
+    mgl_dmat<C, R> m;
+    for (int c = 0; c < C; c++)
+        for (int k = 0; k < R; k++) m[c][k] = c == k ? s : 0ul;
+    return m;
+}
+template <int C, int R, int C2, int R2> inline mgl_dmat<C, R> mgl_dmat_resize(mgl_dmat<C2, R2> s) {
+    mgl_dmat<C, R> m;
+    for (int c = 0; c < C; c++)
+        for (int k = 0; k < R; k++) m[c][k] = (c < C2 && k < R2) ? s[c][k] : (c == k ? 0x3FF0000000000000ul : 0ul);
+    return m;
+}
+template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_from_float(matrix<float, C, R> f) {
+    mgl_dmat<C, R> m;
+    for (int c = 0; c < C; c++) m[c] = mgl_f64_from_float(f[c]);
+    return m;
+}
+template <int C, int R> inline matrix<float, C, R> mgl_dmat_to_float(mgl_dmat<C, R> d) {
+    matrix<float, C, R> m;
+    for (int c = 0; c < C; c++) m[c] = mgl_f64_to_float(d[c]);
+    return m;
+}
+template <int C, int R> inline bool mgl_eq(mgl_dmat<C, R> a, mgl_dmat<C, R> b) {
+    for (int i = 0; i < C; i++)
+        if (!all(mgl_f64_eq(a[i], b[i]))) return false;
+    return true;
+}
+// LU decomposition with partial pivoting (determinant / inverse of square double matrices)
+template <int N> inline ulong mgl_dmat_det(mgl_dmat<N, N> m) {
+    ulong a[N][N];
+    for (int c = 0; c < N; c++)
+        for (int r = 0; r < N; r++) a[r][c] = m[c][r];
+    ulong det = 0x3FF0000000000000ul;
+    for (int k = 0; k < N; k++) {
+        int p = k;
+        for (int r = k + 1; r < N; r++)
+            if (mgl_f64_gt(mgl_f64_abs(a[r][k]), mgl_f64_abs(a[p][k]))) p = r;
+        if (p != k) {
+            for (int c = 0; c < N; c++) { ulong t = a[k][c]; a[k][c] = a[p][c]; a[p][c] = t; }
+            det = mgl_f64_neg(det);
+        }
+        if (mgl_f64_eq(a[k][k], 0ul)) return 0ul;
+        det = mgl_f64_mul(det, a[k][k]);
+        for (int r = k + 1; r < N; r++) {
+            ulong f = mgl_f64_div(a[r][k], a[k][k]);
+            for (int c = k; c < N; c++) a[r][c] = mgl_f64_sub(a[r][c], mgl_f64_mul(f, a[k][c]));
+        }
+    }
+    return det;
+}
+template <int N> inline mgl_dmat<N, N> mgl_dmat_inverse(mgl_dmat<N, N> m) {
+    ulong a[N][2 * N];
+    for (int r = 0; r < N; r++)
+        for (int c = 0; c < N; c++) {
+            a[r][c] = m[c][r];
+            a[r][N + c] = r == c ? 0x3FF0000000000000ul : 0ul;
+        }
+    for (int k = 0; k < N; k++) {
+        int p = k;
+        for (int r = k + 1; r < N; r++)
+            if (mgl_f64_gt(mgl_f64_abs(a[r][k]), mgl_f64_abs(a[p][k]))) p = r;
+        for (int c = 0; c < 2 * N; c++) { ulong t = a[k][c]; a[k][c] = a[p][c]; a[p][c] = t; }
+        ulong inv = mgl_f64_div(0x3FF0000000000000ul, a[k][k]);
+        for (int c = 0; c < 2 * N; c++) a[k][c] = mgl_f64_mul(a[k][c], inv);
+        for (int r = 0; r < N; r++) {
+            if (r == k) continue;
+            ulong f = a[r][k];
+            for (int c = 0; c < 2 * N; c++) a[r][c] = mgl_f64_sub(a[r][c], mgl_f64_mul(f, a[k][c]));
+        }
+    }
+    mgl_dmat<N, N> out;
+    for (int c = 0; c < N; c++)
+        for (int r = 0; r < N; r++) out[c][r] = a[r][N + c];
+    return out;
+}
+)DMAT";
+
 struct Chunk {
     std::vector<std::string> symbols;  // identifiers that pull this chunk in
     std::string code;
@@ -17,49 +153,9 @@ struct Chunk {
 
 std::vector<Chunk> buildChunks() {
     std::vector<Chunk> c;
-    // --- fp64 stub ------------------------------------------------------------------
-    c.push_back({{"mgl_f64", "mgl_f64v2", "mgl_f64v3", "mgl_f64v4", "mgl_f64m2x2", "mgl_f64m2x3", "mgl_f64m2x4", "mgl_f64m3x2",
-                  "mgl_f64m3x3", "mgl_f64m3x4", "mgl_f64m4x2", "mgl_f64m4x3", "mgl_f64m4x4", "mgl_f64_from_bits", "mgl_f64_to_bits",
-                  "mgl_pack_f64", "mgl_unpack_f64"},
-                 R"(// fp64 stub: doubles use float precision until the soft-float library lands; buffer layout stays binary64.
-typedef float mgl_f64;
-typedef float2 mgl_f64v2;
-typedef float3 mgl_f64v3;
-typedef float4 mgl_f64v4;
-typedef float2x2 mgl_f64m2x2;
-typedef float2x3 mgl_f64m2x3;
-typedef float2x4 mgl_f64m2x4;
-typedef float3x2 mgl_f64m3x2;
-typedef float3x3 mgl_f64m3x3;
-typedef float3x4 mgl_f64m3x4;
-typedef float4x2 mgl_f64m4x2;
-typedef float4x3 mgl_f64m4x3;
-typedef float4x4 mgl_f64m4x4;
-inline float mgl_f64_from_bits(uint2 b) {
-    uint hi = b.y, lo = b.x;
-    uint sign = hi & 0x80000000u;
-    int e = int((hi >> 20) & 0x7ffu);
-    uint mant = ((hi & 0xfffffu) << 3) | (lo >> 29);
-    if (e == 0) return as_type<float>(sign);
-    if (e == 0x7ff) return as_type<float>(sign | 0x7f800000u | (mant != 0u ? 0x400000u : 0u));
-    int fe = e - 1023 + 127;
-    if (fe >= 255) return as_type<float>(sign | 0x7f800000u);
-    if (fe <= 0) return as_type<float>(sign);
-    return as_type<float>(sign | (uint(fe) << 23) | mant);
-}
-inline uint2 mgl_f64_to_bits(float f) {
-    uint u = as_type<uint>(f);
-    uint sign = u & 0x80000000u;
-    int e = int((u >> 23) & 0xffu);
-    uint m = u & 0x7fffffu;
-    if (e == 0) return uint2(0u, sign);
-    if (e == 255) return uint2(0u, sign | 0x7ff00000u | (m != 0u ? 0x80000u : 0u));
-    uint de = uint(e - 127 + 1023);
-    return uint2(m << 29, sign | (de << 20) | (m >> 3));
-}
-inline mgl_f64 mgl_pack_f64(uint2 v) { return mgl_f64_from_bits(v); }
-inline uint2 mgl_unpack_f64(mgl_f64 v) { return mgl_f64_to_bits(v); }
-)"});
+    // --- fp64 (soft-float library from the runtime + matrix helpers composed on it) ---------
+    // The library is generated from src/glsl/runtime/fp64.metal by the build as a string literal.
+    c.push_back({{"mgl_f64_lib"}, kFp64Library});
     // --- arrays ---------------------------------------------------------------------
     c.push_back({{"mgl_array"}, R"(template <typename T, int N>
 struct mgl_array {
@@ -89,6 +185,31 @@ struct mgl_array {
         c.push_back({{"mgl_st_" + T}, "inline void mgl_st_" + T + "(device uchar* p, uint o, " + T + " v) { *(device " + ST + "*)(p + o) = " +
                                           ST + "(as_type<" + CV + ">(v)); }\n"});
     }
+    {
+        std::string code;
+        for (const char* as : {"constant", "device const", "threadgroup const"})
+            code += std::string("inline ulong mgl_ld_ulong(") + as + " uchar* p, uint o) { return as_type<ulong>(*(" + as + " uint2*)(p + o)); }\n";
+        c.push_back({{"mgl_ld_ulong"}, code});
+        c.push_back({{"mgl_st_ulong"}, "inline void mgl_st_ulong(device uchar* p, uint o, ulong v) { *(device uint2*)(p + o) = as_type<uint2>(v); }\n"});
+        for (int n = 2; n <= 4; n++) {
+            std::string V = "ulong" + std::to_string(n), args, N = std::to_string(n);
+            for (int i = 0; i < n; i++) args += std::string(i ? ", " : "") + "mgl_ld_ulong(p, o + " + std::to_string(8 * i) + "u)";
+            c.push_back({{"mgl_ld_" + V}, "template <typename P> inline " + V + " mgl_ld_" + V + "(P p, uint o) { return " + V + "(" + args + "); }\n"});
+            c.push_back({{"mgl_st_" + V}, "inline void mgl_st_" + V + "(device uchar* p, uint o, " + V + " v) { for (int i = 0; i < " + N +
+                                              "; i++) mgl_st_ulong(p, o + 8u * uint(i), v[i]); }\n"});
+            std::string sargs;
+            for (int i = 0; i < n; i++) sargs += std::string(i ? ", " : "") + "mgl_ld_ulong(p, o + " + std::to_string(i) + " * s)";
+            c.push_back({{"mgl_ldcs_" + V}, "template <typename P> inline " + V + " mgl_ldcs_" + V + "(P p, uint o, uint s) { return " + V + "(" + sargs + "); }\n"});
+            c.push_back({{"mgl_stcs_" + V}, "inline void mgl_stcs_" + V + "(device uchar* p, uint o, uint s, " + V + " v) { for (int i = 0; i < " + N +
+                                                "; i++) mgl_st_ulong(p, o + i * s, v[i]); }\n"});
+        }
+    }
+    c.push_back({{"mgl_dmat"}, kDmatHelpers});
+    c.push_back({{"mgl_eq_f64_overloads"}, R"(inline bool mgl_eq(ulong a, ulong b) { return mgl_f64_eq(a, b); }
+inline bool mgl_eq(ulong2 a, ulong2 b) { return all(mgl_f64_eq(a, b)); }
+inline bool mgl_eq(ulong3 a, ulong3 b) { return all(mgl_f64_eq(a, b)); }
+inline bool mgl_eq(ulong4 a, ulong4 b) { return all(mgl_f64_eq(a, b)); }
+)"});
     const LT bools[] = {{"bool", "uint", "uint"}, {"bool2", "uint2", "uint2"}, {"bool3", "packed_uint3", "uint3"}, {"bool4", "uint4", "uint4"}};
     for (auto& l : bools) {
         std::string T = l.T, ST = l.ST, U = l.CV;
@@ -99,17 +220,6 @@ struct mgl_array {
         c.push_back({{"mgl_st_" + T}, "inline void mgl_st_" + T + "(device uchar* p, uint o, " + T + " v) { *(device " + ST + "*)(p + o) = " + ST +
                                           "(select(" + U + "(0u), " + U + "(1u), v)); }\n"});
     }
-    c.push_back({{"mgl_ld_mgl_f64", "mgl_ld_mgl_f64v2", "mgl_ld_mgl_f64v3", "mgl_ld_mgl_f64v4"}, R"(inline mgl_f64 mgl_ld_mgl_f64(constant uchar* p, uint o) { return mgl_f64_from_bits(*(constant uint2*)(p + o)); }
-inline mgl_f64 mgl_ld_mgl_f64(device const uchar* p, uint o) { return mgl_f64_from_bits(*(device const uint2*)(p + o)); }
-template <typename P> inline mgl_f64v2 mgl_ld_mgl_f64v2(P p, uint o) { return mgl_f64v2(mgl_ld_mgl_f64(p, o), mgl_ld_mgl_f64(p, o + 8)); }
-template <typename P> inline mgl_f64v3 mgl_ld_mgl_f64v3(P p, uint o) { return mgl_f64v3(mgl_ld_mgl_f64(p, o), mgl_ld_mgl_f64(p, o + 8), mgl_ld_mgl_f64(p, o + 16)); }
-template <typename P> inline mgl_f64v4 mgl_ld_mgl_f64v4(P p, uint o) { return mgl_f64v4(mgl_ld_mgl_f64(p, o), mgl_ld_mgl_f64(p, o + 8), mgl_ld_mgl_f64(p, o + 16), mgl_ld_mgl_f64(p, o + 24)); }
-)"});
-    c.push_back({{"mgl_st_mgl_f64", "mgl_st_mgl_f64v2", "mgl_st_mgl_f64v3", "mgl_st_mgl_f64v4"}, R"(inline void mgl_st_mgl_f64(device uchar* p, uint o, mgl_f64 v) { *(device uint2*)(p + o) = mgl_f64_to_bits(v); }
-inline void mgl_st_mgl_f64v2(device uchar* p, uint o, mgl_f64v2 v) { for (int i = 0; i < 2; i++) mgl_st_mgl_f64(p, o + 8 * i, v[i]); }
-inline void mgl_st_mgl_f64v3(device uchar* p, uint o, mgl_f64v3 v) { for (int i = 0; i < 3; i++) mgl_st_mgl_f64(p, o + 8 * i, v[i]); }
-inline void mgl_st_mgl_f64v4(device uchar* p, uint o, mgl_f64v4 v) { for (int i = 0; i < 4; i++) mgl_st_mgl_f64(p, o + 8 * i, v[i]); }
-)"});
     for (int n = 2; n <= 4; n++) {
         std::string V = "float" + std::to_string(n), N = std::to_string(n);
         std::string args;
@@ -289,6 +399,8 @@ std::string buildMSLPrelude(const std::string& body) {
     static const std::vector<Chunk> chunks = buildChunks();
     std::set<std::string> idents;
     collectIdents(body, idents);
+    for (auto& id : std::set<std::string>(idents))
+        if (id.compare(0, 8, "mgl_f64_") == 0 || id.compare(0, 8, "mgl_dmat") == 0) idents.insert("mgl_f64_lib");
     std::vector<bool> use(chunks.size(), false);
     // fixpoint: chunks can reference other chunks' symbols
     bool changed = true;
