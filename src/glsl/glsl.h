@@ -255,4 +255,41 @@ struct alignas(16) MGLSys {
     float currentAttrib[32][4];            // glVertexAttrib* values for disabled arrays
 };
 
+// Per-draw description for pipelines without stage_in (PipelineKind::MeshGeometry,
+// Tessellation, XfbCapture), bound at argument-table index kBufStageIO.
+// Vertex attribute formats for manual fetch come from VariantKey::attribs.
+struct alignas(16) MGLDrawInfo {
+    uint64_t vertexBuffer[16];    // GPU address of vertex binding b (binding offset applied)
+    uint32_t vertexStride[16];
+    uint32_t vertexDivisor[16];   // 0 = per vertex
+    uint64_t indexBuffer;         // 0 = non-indexed (vertex id = firstVertex + i)
+    uint32_t indexType;           // 0 none, 2 = uint16, 4 = uint32 (u8 is widened by the runtime)
+    uint32_t count;               // index/vertex count of the draw
+    int32_t baseVertex;
+    uint32_t baseInstance;
+    uint32_t firstVertex;
+    uint32_t instanceCount;
+    uint32_t primitiveCount;      // input primitives per instance (after topology decomposition)
+    uint32_t primitiveMode;       // GL mode of the draw (lists after runtime expansion of fans/loops)
+    uint32_t verticesPerPrimitive;// 1,2,3,4 (lines adj),6 (tris adj), patch size for GL_PATCHES
+    uint32_t patchVertices;
+    // transform feedback
+    uint64_t xfbBuffer[4];        // GPU address (binding offset applied)
+    uint32_t xfbStride[4];        // bytes per captured vertex in each buffer
+    uint32_t xfbCapacity[4];      // max vertices that fit in each buffer
+    uint32_t xfbVertexBase;       // vertices already written by earlier draws in this xfb session
+    uint32_t pad0;
+    // tessellation scratch (allocated by the runtime, sized from Reflection)
+    uint64_t tcsVertexOut;        // patchCount * tcsOutputVertices * tcsVertexOutBytes
+    uint64_t tcsPatchOut;         // patchCount * tcsPatchOutBytes (includes tess levels first: outer[4], inner[2] floats)
+    uint64_t counters;            // device atomic counters (primitives generated/written)
+};
+
+// Additional reflection for multi-pass pipelines (filled by the linker).
+struct MultiPassInfo {
+    uint32_t tcsVertexOutBytes = 0;
+    uint32_t tcsPatchOutBytes = 0;
+    uint32_t xfbStride[4] = {0, 0, 0, 0};
+};
+
 }  // namespace glsl

@@ -638,6 +638,294 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
 }
 
 // ---------------------------------------------------------------------------
+// multi-pass pipelines (GS-on-mesh, tessellation, transform feedback capture)
+// ---------------------------------------------------------------------------
+namespace {
+
+// Vertices per primitive of a list topology.
+int listVerts(GLenum mode, int patchVerts) {
+    switch (mode) {
+    case GL_POINTS: return 1;
+    case GL_LINES: return 2;
+    case GL_TRIANGLES: return 3;
+    case GL_LINES_ADJACENCY: return 4;
+    case GL_TRIANGLES_ADJACENCY: return 6;
+    case GL_PATCHES: return patchVerts;
+    default: return 3;
+    }
+}
+
+GLenum listModeFor(GLenum mode) {
+    switch (mode) {
+    case GL_POINTS: return GL_POINTS;
+    case GL_LINES: case GL_LINE_STRIP: case GL_LINE_LOOP: return GL_LINES;
+    case GL_LINES_ADJACENCY: case GL_LINE_STRIP_ADJACENCY: return GL_LINES_ADJACENCY;
+    case GL_TRIANGLES_ADJACENCY: case GL_TRIANGLE_STRIP_ADJACENCY: return GL_TRIANGLES_ADJACENCY;
+    case GL_PATCHES: return GL_PATCHES;
+    default: return GL_TRIANGLES;
+    }
+}
+
+// Decomposes any topology into a list of vertex ids following GL's primitive
+// decomposition rules (strip parity, fans, loops, adjacency, restart).
+// `ids` are draw-relative vertex ids (index values for indexed draws).
+void decomposeToList(Context* ctx, const DrawParams& d, const uint8_t* src, std::vector<uint32_t>& out) {
+    auto get = [&](size_t i) -> uint32_t { return src ? readIndex(src, d.indexType, i) : (uint32_t)(d.first + i); };
+    bool restart = src && (ctx->primitiveRestart || ctx->primitiveRestartFixed);
+    uint32_t restartIdx = ctx->primitiveRestartFixed ? (d.indexType == GL_UNSIGNED_BYTE ? 0xff : d.indexType == GL_UNSIGNED_SHORT ? 0xffff : 0xffffffffu)
+                                                      : ctx->primitiveRestartIndex;
+    std::vector<std::pair<size_t, size_t>> runs;
+    size_t start = 0;
+    for (size_t i = 0; i < (size_t)d.count; i++)
+        if (restart && get(i) == restartIdx) {
+            runs.push_back({start, i});
+            start = i + 1;
+        }
+    runs.push_back({start, (size_t)d.count});
+    for (auto [b, e] : runs) {
+        size_t n = e - b;
+        auto v = [&](size_t i) { return get(b + i); };
+        switch (d.mode) {
+        case GL_POINTS: for (size_t i = 0; i < n; i++) out.push_back(v(i)); break;
+        case GL_LINES: for (size_t i = 0; i + 1 < n; i += 2) out.insert(out.end(), {v(i), v(i + 1)}); break;
+        case GL_LINE_STRIP: for (size_t i = 0; i + 1 < n; i++) out.insert(out.end(), {v(i), v(i + 1)}); break;
+        case GL_LINE_LOOP:
+            if (n < 2) break;
+            for (size_t i = 0; i + 1 < n; i++) out.insert(out.end(), {v(i), v(i + 1)});
+            out.insert(out.end(), {v(n - 1), v(0)});
+            break;
+        case GL_TRIANGLES: for (size_t i = 0; i + 2 < n; i += 3) out.insert(out.end(), {v(i), v(i + 1), v(i + 2)}); break;
+        case GL_TRIANGLE_STRIP:
+            for (size_t i = 0; i + 2 < n; i++) {
+                if (i & 1) out.insert(out.end(), {v(i + 1), v(i), v(i + 2)});
+                else out.insert(out.end(), {v(i), v(i + 1), v(i + 2)});
+            }
+            break;
+        case GL_TRIANGLE_FAN: case GL_POLYGON:
+            for (size_t i = 1; i + 1 < n; i++) out.insert(out.end(), {v(i), v(i + 1), v(0)});
+            break;
+        case GL_QUADS:
+            for (size_t q = 0; q + 3 < n; q += 4) out.insert(out.end(), {v(q), v(q + 1), v(q + 3), v(q + 1), v(q + 2), v(q + 3)});
+            break;
+        case GL_QUAD_STRIP:
+            for (size_t q = 0; q + 3 < n; q += 2) out.insert(out.end(), {v(q), v(q + 1), v(q + 3), v(q), v(q + 3), v(q + 2)});
+            break;
+        case GL_LINES_ADJACENCY: for (size_t i = 0; i + 3 < n; i += 4) out.insert(out.end(), {v(i), v(i + 1), v(i + 2), v(i + 3)}); break;
+        case GL_LINE_STRIP_ADJACENCY: for (size_t i = 0; i + 3 < n; i++) out.insert(out.end(), {v(i), v(i + 1), v(i + 2), v(i + 3)}); break;
+        case GL_TRIANGLES_ADJACENCY: for (size_t i = 0; i + 5 < n; i += 6) for (int k = 0; k < 6; k++) out.push_back(v(i + k)); break;
+        case GL_TRIANGLE_STRIP_ADJACENCY: {
+            // GL 4.6 table 10.1: triangle i of a strip with adjacency.
+            if (n < 6) break;
+            size_t tris = (n - 4) / 2;
+            for (size_t i = 0; i < tris; i++) {
+                uint32_t p[6];
+                if (tris == 1) {
+                    p[0] = v(0); p[1] = v(1); p[2] = v(2); p[3] = v(5); p[4] = v(4); p[5] = v(3);
+                } else if (i == 0) {
+                    p[0] = v(0); p[1] = v(1); p[2] = v(2); p[3] = v(6); p[4] = v(4); p[5] = v(3);
+                } else if (i == tris - 1) {
+                    if (i & 1) { p[0] = v(2 * i + 2); p[1] = v(2 * i - 2); p[2] = v(2 * i); p[3] = v(2 * i + 3); p[4] = v(2 * i + 4); p[5] = v(2 * i + 5); }
+                    else { p[0] = v(2 * i); p[1] = v(2 * i - 2); p[2] = v(2 * i + 2); p[3] = v(2 * i + 5); p[4] = v(2 * i + 4); p[5] = v(2 * i + 3); }
+                } else {
+                    if (i & 1) { p[0] = v(2 * i + 2); p[1] = v(2 * i - 2); p[2] = v(2 * i); p[3] = v(2 * i + 3); p[4] = v(2 * i + 4); p[5] = v(2 * i + 6); }
+                    else { p[0] = v(2 * i); p[1] = v(2 * i - 2); p[2] = v(2 * i + 2); p[3] = v(2 * i + 6); p[4] = v(2 * i + 4); p[5] = v(2 * i + 3); }
+                }
+                out.insert(out.end(), p, p + 6);
+            }
+            break;
+        }
+        case GL_PATCHES: {
+            int pv = ctx->patchVertices;
+            for (size_t i = 0; i + pv <= n; i += pv)
+                for (int k = 0; k < pv; k++) out.push_back(v(i + k));
+            break;
+        }
+        }
+    }
+}
+
+// Fills VariantKey::attribs (manual vertex fetch) from the bound VAO.
+void fillVertexFetch(Context* ctx, ProgramObj* prog, glsl::VariantKey& vk) {
+    VertexArray* vao = ctx->vao.get();
+    for (const auto& a : prog->refl.attributes) {
+        int nloc = std::max(1, a.locationsUsed);
+        for (int k = 0; k < nloc; k++) {
+            int loc = a.location + k;
+            if (loc < 0 || loc >= kMaxVertexAttribs) continue;
+            glsl::VertexFetch& f = vk.attribs[loc];
+            const VertexAttrib& va = vao->attribs[loc];
+            const VertexBinding& vb = vao->bindings[va.binding];
+            f.enabled = va.enabled && vb.buffer && vb.buffer->mtl;
+            if (!f.enabled) continue;
+            f.glType = va.type;
+            f.size = va.size == GL_BGRA ? 5 : (uint8_t)va.size;
+            f.normalized = va.normalized;
+            f.integer = va.integer;
+            f.isDouble = va.isLong;
+            f.binding = (uint8_t)va.binding;
+            f.relativeOffset = va.relativeOffset;
+        }
+    }
+}
+
+}  // namespace
+
+// Runs a draw through a multi-pass pipeline. Returns false if unsupported.
+static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d, glsl::VariantKey vk, bool xfbCapture) {
+    const glsl::Reflection& refl = prog->refl;
+    if (d.indirect) {
+        static bool warned = false;
+        if (!warned) MGL_WARN("indirect draws with geometry/tessellation/transform feedback not supported yet");
+        warned = true;
+        return false;
+    }
+    // --- primitive list ---
+    Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
+    const uint8_t* src = nullptr;
+    if (d.indexed) {
+        if (ib) {
+            if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+            src = ib->cpu + (size_t)d.indices;
+        } else {
+            src = (const uint8_t*)d.indices;
+        }
+    }
+    GLenum listMode = listModeFor(d.mode);
+    int vpp = listVerts(listMode, ctx->patchVertices);
+    std::vector<uint32_t> ids;
+    decomposeToList(ctx, d, src, ids);
+    uint32_t prims = (uint32_t)(ids.size() / vpp);
+    if (!prims) return true;
+    UploadAlloc idxUp = ctx->upload(ids.size() * 4, 16);
+    memcpy(idxUp.cpu, ids.data(), ids.size() * 4);
+
+    fillVertexFetch(ctx, prog, vk);
+    vk.primitive = (uint8_t)listMode;
+    ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
+    if (!var || !var->ok) return true;
+
+    // --- draw info ---
+    UploadAlloc di = ctx->upload(sizeof(glsl::MGLDrawInfo), 16);
+    glsl::MGLDrawInfo* info = (glsl::MGLDrawInfo*)di.cpu;
+    memset(info, 0, sizeof *info);
+    uint64_t serial = ctx->serial();
+    VertexArray* vao = ctx->vao.get();
+    for (int b = 0; b < kMaxVertexBindings; b++) {
+        const VertexBinding& vb = vao->bindings[b];
+        if (vb.buffer && vb.buffer->mtl) {
+            info->vertexBuffer[b] = vb.buffer->gpuAddress() + vb.offset;
+            vb.buffer->lastUse = serial;
+        }
+        info->vertexStride[b] = vb.stride;
+        info->vertexDivisor[b] = vb.divisor;
+    }
+    info->indexBuffer = idxUp.gpu;  // always a 32-bit list of vertex ids (base vertex not yet applied)
+    info->indexType = 4;
+    info->count = (uint32_t)ids.size();
+    info->baseVertex = d.indexed ? d.baseVertex : 0;
+    info->baseInstance = d.baseInstance;
+    info->firstVertex = 0;
+    info->instanceCount = d.instances;
+    info->primitiveCount = prims;
+    info->primitiveMode = listMode;
+    info->verticesPerPrimitive = vpp;
+    info->patchVertices = ctx->patchVertices;
+    TransformFeedbackObj* x = ctx->xfb.get();
+    if (xfbCapture) {
+        for (int i = 0; i < kMaxXfbBuffers; i++) {
+            auto& bb = x->buffers[i];
+            if (!bb.buffer || !bb.buffer->mtl) continue;
+            uint32_t stride = prog->refl.xfbVaryings.empty() ? 0 : 0;
+            (void)stride;
+            info->xfbBuffer[i] = bb.buffer->gpuAddress() + bb.offset;
+            GLsizeiptr range = bb.size ? bb.size : bb.buffer->size - bb.offset;
+            info->xfbCapacity[i] = (uint32_t)std::max<GLsizeiptr>(0, range);  // bytes; shader divides by its stride
+            bb.buffer->lastUse = bb.buffer->lastGpuWrite = serial;
+        }
+        info->xfbVertexBase = (uint32_t)x->verticesWritten;
+    }
+    UploadAlloc counters = ctx->upload(64, 16);
+    memset(counters.cpu, 0, 64);
+    info->counters = counters.gpu;
+
+    uint64_t argAddr = buildArguments(ctx, prog, false);
+    uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
+
+    // --- tessellation pass 1: VS+TCS compute ---
+    if (vk.kind == glsl::PipelineKind::Tessellation) {
+        const glsl::EntryPoint* k = var->entry(glsl::EntryPoint::Kernel);
+        if (!k) return false;
+        size_t vbytes = (size_t)prims * d.instances * std::max(1, refl.tcsOutputVertices) * 256;  // generous; refined by MultiPassInfo
+        size_t pbytes = (size_t)prims * d.instances * 512;
+        id<MTLBuffer> vout = ctx->dev->newBuffer(vbytes);
+        id<MTLBuffer> pout = ctx->dev->newBuffer(pbytes);
+        ctx->dev->releaseAfter(vout, serial);
+        ctx->dev->releaseAfter(pout, serial);
+        info->tcsVertexOut = vout.gpuAddress;
+        info->tcsPatchOut = pout.gpuAddress;
+        id<MTLComputePipelineState> cps = ctx->pipelines_->computePipeline(var);
+        if (!cps) return true;
+        id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
+        [ce setComputePipelineState:cps];
+        [ctx->computeArgTable setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+        [ctx->computeArgTable setAddress:sysAddr atIndex:glsl::kBufSys];
+        [ctx->computeArgTable setAddress:di.gpu atIndex:glsl::kBufStageIO];
+        [ce dispatchThreadgroups:MTLSizeMake(prims, d.instances, 1)
+            threadsPerThreadgroup:MTLSizeMake(k->threadsPerThreadgroup[0], k->threadsPerThreadgroup[1], k->threadsPerThreadgroup[2])];
+        ctx->endEncoder();
+    }
+    // --- transform feedback only (no GS/tess): VS as compute writing captured vertices ---
+    if (vk.kind == glsl::PipelineKind::XfbCapture) {
+        const glsl::EntryPoint* k = var->entry(glsl::EntryPoint::Kernel);
+        id<MTLComputePipelineState> cps = k ? ctx->pipelines_->computePipeline(var) : nil;
+        if (!cps) return true;
+        id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
+        [ce setComputePipelineState:cps];
+        [ctx->computeArgTable setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+        [ctx->computeArgTable setAddress:sysAddr atIndex:glsl::kBufSys];
+        [ctx->computeArgTable setAddress:di.gpu atIndex:glsl::kBufStageIO];
+        uint32_t total = (uint32_t)ids.size() * d.instances;
+        uint32_t tg = std::max(1, k->threadsPerThreadgroup[0]);
+        [ce dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        x->verticesWritten += total;
+        return true;  // rasterization (if enabled) is handled by the caller's classic draw
+    }
+    // --- mesh pass (GS or TES[+GS]) ---
+    const glsl::EntryPoint* ms = var->entry(glsl::EntryPoint::Mesh);
+    const glsl::EntryPoint* os = var->entry(glsl::EntryPoint::Object);
+    if (!ms) return false;
+    id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
+    if (!e) return true;
+    RenderPipelineKey key;
+    key.variant = var;
+    fillColorKey(ctx, key, refl);
+    key.rasterEnabled = !ctx->rasterizerDiscard;
+    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    if (!pso) return true;
+    if (ctx->enc.pipeline != pso) {
+        [e setRenderPipelineState:pso];
+        ctx->enc.pipeline = pso;
+    }
+    applyDynamicState(ctx, e, refl.gsOutputPrimitive ? refl.gsOutputPrimitive : GL_TRIANGLES);
+    id<MTL4ArgumentTable> table = ctx->renderArgTable;
+    [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+    [table setAddress:sysAddr atIndex:glsl::kBufSys];
+    [table setAddress:di.gpu atIndex:glsl::kBufStageIO];
+    mglQueryNotifyDraw(ctx, d.mode, ids.size(), d.instances);
+    MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
+    if (os) {
+        MTLSize objTG = MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2]);
+        [e drawMeshThreadgroups:MTLSizeMake(prims, d.instances, 1) threadsPerObjectThreadgroup:objTG threadsPerMeshThreadgroup:meshTG];
+    } else {
+        int invocations = std::max(1, refl.gsInvocations);
+        [e drawMeshThreadgroups:MTLSizeMake(prims, d.instances, invocations) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+            threadsPerMeshThreadgroup:meshTG];
+    }
+    if (xfbCapture) x->verticesWritten += ids.size() * d.instances;  // refined by GS output counters later
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // main draw
 // ---------------------------------------------------------------------------
 static bool validateDraw(Context* ctx, GLenum mode) {
@@ -710,13 +998,18 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     vk.primitive = (uint8_t)d.mode;
     vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
     vk.rasterDiscard = ctx->rasterizerDiscard;
+    bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     if (vk.kind != glsl::PipelineKind::Classic) {
-        static bool warned = false;
-        if (!warned) MGL_WARN("geometry/tessellation pipelines not implemented yet; skipping draws");
-        warned = true;
+        executeMultiPass(ctx, prog, d, vk, xfbActive);
         return;
     }
-    if (ctx->rasterizerDiscard && !(ctx->xfb && ctx->xfb->active && !ctx->xfb->paused)) return;
+    if (xfbActive) {
+        glsl::VariantKey xk = vk;
+        xk.kind = glsl::PipelineKind::XfbCapture;
+        executeMultiPass(ctx, prog, d, xk, true);
+        if (ctx->rasterizerDiscard) return;
+    }
+    if (ctx->rasterizerDiscard) return;
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
     if (!var || !var->ok) return;
     // Cull FRONT_AND_BACK discards all polygons.
