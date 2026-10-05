@@ -71,9 +71,13 @@ def resolve(path, root, kind, stack, missing):
             out.append(line)
             continue
         inc = m.group(1)
-        if kind == "sodium":
+        if kind in ("sodium", "minecraft"):
             ns, _, rel = inc.partition(":")
-            target = os.path.join(root, "include", rel) if ns == "sodium" else None
+            target = None
+            if ns == kind:
+                target = os.path.join(root, "include", rel)
+            elif ns == "minecraft" and MC_INCLUDE:
+                target = os.path.join(MC_INCLUDE, rel)
         else:
             target = os.path.join(root, inc.lstrip("/")) if inc.startswith("/") else os.path.join(os.path.dirname(path), inc)
         if not target or not os.path.exists(target):
@@ -95,6 +99,10 @@ def inject(src, defines, decls=()):
         return "\n".join(ins + lines)
     return "\n".join(lines[: vi + 1] + ins + lines[vi + 1:])
 
+
+MC_INCLUDE = os.path.expanduser("~/metalgldrv-deps/corpus/minecraft/assets/minecraft/shaders/include")
+if not os.path.isdir(MC_INCLUDE):
+    MC_INCLUDE = None
 
 PHASES = {0: "ok", 1: "compile", 3: "link", 4: "msl", 5: "metal"}
 
@@ -173,6 +181,33 @@ def main():
                         if os.path.exists(base + ".fsh"):
                             stages.append(("frag", inject(resolve(base + ".fsh", root, "sodium", set(), missing), v)))
                         work.append((os.path.basename(base) + "#" + str(vi), stages))
+    elif mode == "minecraft":
+        base_defs = ["PORTAL_LAYERS 15", "OIT_TRANSMITTANCE_TARGET_COUNT 2", "OIT_NUMBER_OF_DEPTH_BINS 8"]
+        # define sets the game actually compiles (normal, cutout, lighting variants, OIT passes)
+        variants = [base_defs + v for v in [[], ["ALPHA_CUTOUT 0.1"], ["PER_FACE_LIGHTING", "APPLY_TEXTURE_MATRIX", "GLINT"],
+                                            ["EMISSIVE", "NO_OVERLAY", "NO_CARDINAL_LIGHTING"],
+                                            ["OIT", "OIT_ALPHA_ONLY", "OIT_TRANSMITTANCE"], ["OIT", "OIT_ACCUMULATE"]]]
+        dummy_vs = "#version 330\nlayout(location = 0) in vec3 Position;\nvoid main() { gl_Position = vec4(Position, 1.0); }\n"
+        for sub in ("core", "post"):
+            d = os.path.join(root, sub)
+            for f in sorted(os.listdir(d)):
+                if not f.endswith(".fsh") and not (f.endswith(".vsh") and not os.path.exists(os.path.join(d, f[:-4] + ".fsh"))):
+                    continue
+                base = os.path.join(d, f[:-4])
+                for vi, v in enumerate(variants):
+                    if f.startswith("oit_"):
+                        v = base_defs + (["OIT", "OIT_DEPTH_BOUNDS"] if "depth_bounds" in f else ["OIT"]) if vi == 0 else None
+                        if v is None:
+                            continue
+                    missing = set()
+                    stages = []
+                    if os.path.exists(base + ".vsh"):
+                        stages.append(("vert", inject(resolve(base + ".vsh", root, "minecraft", set(), missing), v)))
+                    else:
+                        stages.append(("vert", dummy_vs))
+                    if os.path.exists(base + ".fsh"):
+                        stages.append(("frag", inject(resolve(base + ".fsh", root, "minecraft", set(), missing), v)))
+                    work.append((sub + "/" + os.path.basename(base) + "#" + str(vi), stages))
     elif mode == "files":
         ext_map = {".vert": "vert", ".frag": "frag", ".comp": "comp", ".vsh": "vert", ".fsh": "frag", ".csh": "comp"}
         for d, _, fs in os.walk(root):
