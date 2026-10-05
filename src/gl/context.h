@@ -256,6 +256,10 @@ public:
     // Submits the command buffer. present: drawable to present after it.
     void flush(id<CAMetalDrawable> present = nil);
     void finish();
+    // Submits the open command buffer if it is the one recorded under `serial`.
+    void flushIfPending(uint64_t serial) {
+        if (cb_ && serial_ == serial) flush();
+    }
     UploadAlloc upload(size_t size, size_t align = 256);
     id<MTL4ArgumentTable> renderArgTable, computeArgTable;
 

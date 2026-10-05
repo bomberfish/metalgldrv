@@ -600,6 +600,8 @@ EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglSwapBuffers(EGLDisplay dpy, EGLSurface s
         ctx->flush();
         return EGL_TRUE;
     }
+    // Don't touch the drawable / GPU while backgrounded.
+    Device::get()->waitForeground();
     @autoreleasepool {
         Surface* surf = s->surf.get();
         ctx->applyClearNow();

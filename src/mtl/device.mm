@@ -1,4 +1,8 @@
 #import "mtl/device.h"
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+#endif
 #import <QuartzCore/CAMetalLayer.h>
 #include "util/log.h"
 
@@ -52,6 +56,14 @@ bool Device::init() {
         }
         [queue addResidencySet:residency];
 
+#if TARGET_OS_IPHONE
+        // Park GL threads while backgrounded (submissions would fail and lose work).
+        NSNotificationCenter* nc = NSNotificationCenter.defaultCenter;
+        [nc addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:nil
+                    usingBlock:^(NSNotification*) { this->setBackground(true); }];
+        [nc addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:nil
+                    usingBlock:^(NSNotification*) { this->setBackground(false); }];
+#endif
         caps.hasFamilyApple9 = [mtl supportsFamily:MTLGPUFamilyApple9];
         caps.bcCompression = mtl.supportsBCTextureCompression;
         caps.maxThreadsPerThreadgroup = (uint32_t)mtl.maxThreadsPerThreadgroup.width;
@@ -136,8 +148,24 @@ id<MTL4CommandAllocator> Device::acquireAllocator() {
 
 id<MTL4CommandBuffer> Device::newCommandBuffer() { return [mtl newCommandBuffer]; }
 
+void Device::setBackground(bool bg) {
+    {
+        std::lock_guard<std::mutex> g(bgMutex_);
+        background_ = bg;
+    }
+    MGL_INFO("app %s", bg ? "entered background: parking GPU submissions" : "returned to foreground");
+    bgCv_.notify_all();
+}
+
+void Device::waitForeground() {
+    if (!background_.load()) return;
+    std::unique_lock<std::mutex> lk(bgMutex_);
+    bgCv_.wait(lk, [&] { return !background_.load(); });
+}
+
 void Device::submit(id<MTL4CommandBuffer> cb, id<MTL4CommandAllocator> alloc, uint64_t serial,
                     id<CAMetalDrawable> drawable) {
+    waitForeground();
     MTL4CommitOptions* opts = [MTL4CommitOptions new];
     [opts addFeedbackHandler:^(id<MTL4CommitFeedback> fb) {
         this->markComplete(serial, fb.error, fb.GPUStartTime, fb.GPUEndTime);

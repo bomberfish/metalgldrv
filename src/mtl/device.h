@@ -2,6 +2,7 @@
 #pragma once
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <condition_variable>
@@ -54,6 +55,13 @@ public:
     id<MTL4CommandAllocator> acquireAllocator();
     id<MTL4CommandBuffer> newCommandBuffer();
 
+    // --- app lifecycle (iOS) --------------------------------------------------
+    // GPU work is not permitted while the app is in the background; GL threads
+    // park here (at submits / swaps) until the app returns to the foreground.
+    void waitForeground();
+    bool inBackground() const { return background_.load(); }
+    void setBackground(bool bg);
+
     // --- residency ----------------------------------------------------------
     void makeResident(id<MTLAllocation> a);
     // Removes from residency and drops the reference once the GPU is done with `serial`.
@@ -77,6 +85,9 @@ private:
 
     std::mutex mutex_;
     std::condition_variable cv_;
+    std::atomic<bool> background_{false};
+    std::mutex bgMutex_;
+    std::condition_variable bgCv_;
     uint64_t nextSerial_ = 1;
     uint64_t watermark_ = 0;              // all serials <= watermark_ are complete
     std::set<uint64_t> completedAbove_;   // completed serials > watermark_

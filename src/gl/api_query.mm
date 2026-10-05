@@ -352,8 +352,10 @@ API GLsync APIENTRY glFenceSync(GLenum condition, GLbitfield flags) {
     if (condition != GL_SYNC_GPU_COMMANDS_COMPLETE) return ctx->setError(GL_INVALID_ENUM), nullptr;
     if (flags) return ctx->setError(GL_INVALID_VALUE), nullptr;
     Ref<SyncObj> s = new SyncObj();
+    // No flush here: the fence completes with the command buffer being recorded,
+    // which is submitted by a later flush (glClientWaitSync with
+    // SYNC_FLUSH_COMMANDS_BIT / a timeout, glFlush, or the next swap).
     s->serial = ctx->serial();
-    ctx->flush();
     std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
     ctx->share->syncs[s.get()] = s;
     return (GLsync)s.get();
@@ -391,7 +393,8 @@ API GLenum APIENTRY glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 tim
         return GL_WAIT_FAILED;
     }
     if (s->signaled()) return GL_ALREADY_SIGNALED;
-    if (timeout == 0) return GL_TIMEOUT_EXPIRED;
+    if ((flags & GL_SYNC_FLUSH_COMMANDS_BIT) || timeout > 0) ctx->flushIfPending(s->serial);
+    if (timeout == 0) return s->signaled() ? GL_ALREADY_SIGNALED : GL_TIMEOUT_EXPIRED;
     ctx->waitForResource(s->serial);
     return s->signaled() ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
 }
