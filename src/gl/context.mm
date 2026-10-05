@@ -573,10 +573,21 @@ Surface::~Surface() {
     if (depthStencil) d->releaseAfter(depthStencil, lastUse);
 }
 
+// Window surfaces follow the layer's bounds * contentsScale (like ANGLE): apps such
+// as Amethyst express render resolution through contentsScale.
 void Surface::syncSizeFromLayer() {
     if (!layer) return;
-    CGSize s = layer.drawableSize;
-    resize((int)s.width, (int)s.height);
+    CGSize b = layer.bounds.size;
+    CGFloat sc = layer.contentsScale;
+    int w = (int)lround(b.width * sc), h = (int)lround(b.height * sc);
+    if (w <= 0 || h <= 0) {
+        CGSize d = layer.drawableSize;
+        w = (int)d.width;
+        h = (int)d.height;
+    } else if ((int)layer.drawableSize.width != w || (int)layer.drawableSize.height != h) {
+        layer.drawableSize = CGSizeMake(w, h);
+    }
+    resize(w, h);
 }
 
 bool Surface::resize(int w, int h) {

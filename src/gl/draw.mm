@@ -10,7 +10,7 @@ using namespace mgl;
 
 GLenum framebufferStatus(Context* ctx, Framebuffer* fb);
 bool mglCheckDrawConditional(Context* ctx);
-void mglCompatPrepareDraw(Context* ctx, ProgramObj* prog);  // compat.mm (fixed-function state uniforms)
+ProgramObj* mglCompatPrepareDraw(Context* ctx, ProgramObj* prog);  // compat.mm (fixed-function emulation + gl_* uniforms)
 bool mglXfbPrepareDraw(Context* ctx, GLenum mode, uint64_t vertices);  // api_xfb.mm
 void mglQueryNotifyDraw(Context* ctx, GLenum mode, uint64_t vertices, uint64_t instances);  // api_query.mm
 
@@ -347,8 +347,8 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     s->drawID = drawID;
     s->firstVertex = first;
     s->sampleMask = ctx->sampleMaskEnabled ? ctx->sampleMaskValue : ~0u;
-    s->alphaRef = 0;
-    s->alphaFunc = GL_ALWAYS;
+    s->alphaRef = ctx->compatAlphaRef;
+    s->alphaFunc = ctx->compatAlphaFunc;
     s->minSampleShading = ctx->sampleShading ? ctx->minSampleShading : 0;
     s->renderTargetHeight = (float)ctx->curPass.height;
     memcpy(s->currentAttrib, ctx->currentAttrib, sizeof(float) * 4 * kMaxVertexAttribs);
@@ -998,14 +998,9 @@ static bool validateDraw(Context* ctx, GLenum mode) {
 
 static void executeDraw(Context* ctx, const DrawParams& d) {
     ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
-    if (!prog) {
-        // Compatibility profile without a program: fixed-function emulation.
-        mglCompatPrepareDraw(ctx, nullptr);
-        prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
-        if (!prog) return;
-    } else if (!ctx->coreProfile) {
-        mglCompatPrepareDraw(ctx, prog);
-    }
+    // Compatibility profile: fixed-function emulation (prog == null) and gl_* state uniforms.
+    if (!ctx->coreProfile) prog = mglCompatPrepareDraw(ctx, prog);
+    if (!prog) return;
     if (!prog->linked) return;
     if (!mglCheckDrawConditional(ctx)) return;
     if (d.count <= 0 && !d.indirect) return;
@@ -1125,6 +1120,14 @@ API void APIENTRY glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GL
     d.count = count;
     d.instances = instancecount;
     d.baseInstance = baseinstance;
+    draw(ctx, d);
+}
+
+void mglDrawArraysInternal(Context* ctx, GLenum mode, GLint first, GLsizei count) {
+    DrawParams d;
+    d.mode = mode;
+    d.first = first;
+    d.count = count;
     draw(ctx, d);
 }
 

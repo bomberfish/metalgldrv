@@ -229,6 +229,10 @@ public:
     GLenum conditionalRenderMode = 0;
     Ref<Query> conditionalQuery;
 
+    struct CompatState* compat = nullptr;
+    GLenum compatAlphaFunc = GL_ALWAYS;  // legacy alpha test, applied by compat fragment shaders
+    float compatAlphaRef = 0;  // compatibility-profile fixed-function state (compat.mm)
+
     // ---- object helpers ----
     Texture* boundTexture(GLenum target);         // active unit
     Texture* texForUnit(int unit, int targetIdx);

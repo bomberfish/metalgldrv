@@ -25,6 +25,18 @@ void logf(int level, const char* fmt, ...) {
     va_end(ap);
     static const char* tags[] = {"E", "W", "I", "D", "T"};
     fprintf(stderr, "[metalgldrv %s] %s\n", tags[level], buf);
+    // MGL_LOG_FILE=<path> (or "documents" for $HOME/Documents/metalgldrv.log)
+    static FILE* lf = [] () -> FILE* {
+        const char* p = getenv("MGL_LOG_FILE");
+        if (!p || !*p) return nullptr;
+        std::string path = p;
+        if (path == "documents") path = std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/metalgldrv.log";
+        return fopen(path.c_str(), "w");
+    }();
+    if (lf) {
+        fprintf(lf, "[%s] %s\n", tags[level], buf);
+        fflush(lf);
+    }
     os_log_type_t t = level == LOG_ERROR ? OS_LOG_TYPE_ERROR : level == LOG_WARN ? OS_LOG_TYPE_DEFAULT : OS_LOG_TYPE_INFO;
     os_log_with_type(mglLog(), t, "[%{public}s] %{public}s", tags[level], buf);
 }

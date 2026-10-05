@@ -25,7 +25,7 @@ static glsl::Stage stageForType(GLenum type, bool* ok) {
 }
 
 // Rebuilds derived per-program state after a successful link.
-static void setupLinkedProgram(ProgramObj* p) {
+void setupLinkedProgram(ProgramObj* p) {
     const glsl::Reflection& r = p->refl;
     p->uniformData.assign(std::max<uint32_t>(r.defaultUniformSize, 16), 0);
     p->locations.clear();

@@ -610,13 +610,11 @@ EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglSwapBuffers(EGLDisplay dpy, EGLSurface s
         } else {
             ctx->flush();
         }
-        // Pick up layer size changes for the next frame.
+        // Pick up layer size / scale changes for the next frame.
         if (surf->layer) {
-            CGSize sz = surf->layer.drawableSize;
-            if ((int)sz.width != surf->width || (int)sz.height != surf->height) {
-                surf->resize((int)sz.width, (int)sz.height);
-                ctx->passDirty = true;
-            }
+            int ow = surf->width, oh = surf->height;
+            surf->syncSizeFromLayer();
+            if (surf->width != ow || surf->height != oh) ctx->passDirty = true;
         }
     }
     return EGL_TRUE;
