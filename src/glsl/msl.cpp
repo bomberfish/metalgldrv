@@ -2202,7 +2202,10 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                     continue;
                 }
                 declaredLoc[loc] = lt;
-                inS += "    " + vecName(lt.base, n) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
+                BT declBase = lt.base;
+                if (loc < 32 && (K.attribSignFlip >> loc & 1) && (lt.base == BT::Int || lt.base == BT::UInt))
+                    declBase = lt.base == BT::Int ? BT::UInt : BT::Int;
+                inS += "    " + vecName(declBase, n) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
                 code += "    " + a + " = " + mt(lt) + "(in.a" + L0 + ");\n";
                 loc++;
                 anyIn = true;
@@ -2344,13 +2347,21 @@ void Emitter::emitClassicVS(std::string& o) {
     StageInfo& si = si_[(int)Stage::Vertex];
     std::string inS;
     bool anyIn = false;
-    std::string copyIn = vsInputs(true, inS, anyIn, "g.");
+    std::string copyIn;
+    if (K.manualFetch) {
+        bool any = false;
+        std::string dummy;
+        copyIn = "    uint mgl_vinst = mgl_iid - mgl_bi;\n" + vsInputs(false, dummy, any, "g.");
+    } else {
+        copyIn = vsInputs(true, inS, anyIn, "g.");
+    }
     RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, true);
     o += "struct In {\n" + inS + "};\nstruct Out {\n" + ro.vertexStruct + "};\n}  // namespace vs\n\n";
     std::string e = "vertex vs::Out mgl_vs(";
     if (anyIn) e += "vs::In in [[stage_in]], ";
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint mgl_vid [[vertex_id]], uint mgl_iid [[instance_id]]";
     e += ", uint mgl_bi [[base_instance]]";
+    if (K.manualFetch) e += ", constant MGLDrawInfo& D [[buffer(22)]]";
     if (si.bi.count(BuiltinVar::BaseVertex)) e += ", uint mgl_bv [[base_vertex]]";
     e += ") {\n    vs::G g = {};\n    g.A = &A;\n    g.sys = &sys;\n";
     e += copyIn;

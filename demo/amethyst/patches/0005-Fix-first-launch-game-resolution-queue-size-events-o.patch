@@ -1,7 +1,7 @@
 From 09ee153ceacf661f4020eca484003001a5746d96 Mon Sep 17 00:00:00 2001
 From: bomberfish <me@bomberfish.ca>
 Date: Mon, 5 Oct 2026 17:46:03 -0400
-Subject: [PATCH 5/5] Fix first-launch game resolution (queue size events on
+Subject: [PATCH 5/7] Fix first-launch game resolution (queue size events on
  input ready; use the view's screen scale)
 
 ---

@@ -91,6 +91,11 @@ public:
     // texture buffer views referencing this buffer get invalidated on rename
     uint32_t generation = 0;
     uint64_t contentVersion = 0;  // bumped on every CPU/GPU write path (derived-data caches)
+    // Flat-shading provoking-vertex emulation: the whole index buffer with every
+    // triangle/line rotated (draw.mm, prepareRotatedIndices).
+    id<MTLBuffer> rotated = nil;
+    uint64_t rotatedVersion = 0, rotatedGpuWrite = 0, rotatedLastUse = 0;
+    uint32_t rotatedLayout = 0;  // index size | vertices per primitive | phase
 
     uint64_t gpuAddress() const { return mtl ? mtl.gpuAddress : 0; }
 };

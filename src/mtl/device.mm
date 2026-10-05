@@ -5,6 +5,7 @@
 #endif
 #import <QuartzCore/CAMetalLayer.h>
 #include "util/log.h"
+#include "util/stats.h"
 
 namespace mgl {
 
@@ -181,7 +182,21 @@ void Device::submit(id<MTL4CommandBuffer> cb, id<MTL4CommandAllocator> alloc, ui
     [queue commit:cbs count:1 options:opts];
     if (drawable) {
         [queue signalDrawable:drawable];
-        [drawable present];
+        // ProMotion keeps a CAMetalLayer at 60 Hz unless presents ask for a shorter
+        // frame duration; request the screen's maximum rate (METALGLDRV_MAX_FPS caps it).
+        static const double minDuration = [] {
+            double fps = 0;
+#if TARGET_OS_IPHONE
+            fps = (double)UIScreen.mainScreen.maximumFramesPerSecond;
+#endif
+            if (const char* e = getenv("METALGLDRV_MAX_FPS")) fps = atof(e);
+            if (fps > 0) MGL_INFO("presenting at up to %.0f fps", fps);
+            return fps > 0 ? 1.0 / fps : 0.0;
+        }();
+        if (minDuration > 0)
+            [drawable presentAfterMinimumDuration:minDuration];
+        else
+            [drawable present];
     }
     if (alloc) inflightAllocators_.push_back({serial, alloc});
 }
@@ -228,6 +243,7 @@ void Device::collect() {
 
 id<MTLBuffer> Device::newBuffer(size_t size, MTLResourceOptions opts) {
     if (size == 0) size = 16;
+    if (g_statsEnabled) statAddCaller("newBuffer KB", __builtin_return_address(0), size >> 10);
     id<MTLBuffer> b = [mtl newBufferWithLength:size options:opts | MTLResourceHazardTrackingModeUntracked];
     if (b) makeResident(b);
     return b;

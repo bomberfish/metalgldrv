@@ -369,11 +369,46 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     return sa.gpu;
 }
 
+// Buffer-backed vertex layouts Metal's fetch can't express (attribute offsets or strides
+// not 4-byte aligned) are pulled by the vertex shader itself (VariantKey::manualFetch).
+// Client arrays still go through the CPU repack path.
+static bool wantManualFetch(Context* ctx) {
+    VertexArray* vao = ctx->vao.get();
+    if (!vao) return false;
+    bool unaligned = false;
+    for (int l = 0; l < kMaxVertexAttribs; l++) {
+        const VertexAttrib& va = vao->attribs[l];
+        if (!va.enabled) continue;
+        if (va.clientPointer) return false;
+        const VertexBinding& vb = vao->bindings[va.binding];
+        if ((vb.stride & 3) || (vb.offset & 3) || (va.relativeOffset & 3)) unaligned = true;
+    }
+    return unaligned;
+}
+
 // Builds the render pipeline key & binds vertex buffers. Returns false if the draw must be skipped.
 static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& key, id<MTL4ArgumentTable> table, const DrawParams& d,
                              uint32_t minIndex, uint32_t maxIndex) {
     VertexArray* vao = ctx->vao.get();
     uint64_t serial = ctx->serial();
+    if (key.variant && key.variant->manualFetch) {
+        // Attributes are fetched in the shader: bind the vertex buffers through MGLDrawInfo.
+        UploadAlloc di = ctx->upload(sizeof(glsl::MGLDrawInfo), 16);
+        glsl::MGLDrawInfo* info = (glsl::MGLDrawInfo*)di.cpu;
+        memset(info, 0, sizeof *info);
+        for (int b = 0; b < kMaxVertexBindings; b++) {
+            const VertexBinding& vb = vao->bindings[b];
+            if (vb.buffer && vb.buffer->mtl) {
+                info->vertexBuffer[b] = vb.buffer->gpuAddress() + vb.offset;
+                vb.buffer->lastUse = serial;
+            }
+            info->vertexStride[b] = vb.stride;
+            info->vertexDivisor[b] = vb.divisor;
+        }
+        info->baseInstance = d.baseInstance;
+        [table setAddress:di.gpu atIndex:glsl::kBufStageIO];
+        return true;
+    }
     bool needCurrent = false;
     uint32_t bindingUsed = 0;
     for (const auto& a : prog->refl.attributes) {
@@ -593,6 +628,7 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
             // client arrays and Metal-incompatible (unaligned) layouts are repacked from a vertex range
             if (va.clientPointer || (vb.stride & 3) || (vb.offset & 3) || (va.relativeOffset & 3)) needCpuMinMax = true;
         }
+    if (needCpuMinMax && wantManualFetch(ctx)) needCpuMinMax = false;  // no CPU-side vertex range needed
     bool restart = ctx->primitiveRestart || ctx->primitiveRestartFixed;
     uint32_t restartIdx = ctx->primitiveRestartFixed ? (d.indexType == GL_UNSIGNED_BYTE ? 0xff : d.indexType == GL_UNSIGNED_SHORT ? 0xffff : 0xffffffffu)
                                                       : ctx->primitiveRestartIndex;
@@ -818,6 +854,31 @@ void decomposeToList(Context* ctx, const DrawParams& d, const uint8_t* src, std:
     }
 }
 
+// Locations where integer vertex data of one signedness feeds an input of the other.
+static uint32_t attribSignFlip(Context* ctx, ProgramObj* prog) {
+    VertexArray* vao = ctx->vao.get();
+    if (!vao) return 0;
+    uint32_t mask = 0;
+    for (const auto& a : prog->refl.attributes) {
+        TypeShape ts = typeShape(a.type);
+        if (a.location < 0 || (ts.base != BaseType::Int && ts.base != BaseType::UInt)) continue;
+        for (int k = 0; k < std::max(1, a.locationsUsed); k++) {
+            int loc = a.location + k;
+            if (loc >= kMaxVertexAttribs) break;
+            const VertexAttrib& va = vao->attribs[loc];
+            if (!va.enabled) continue;
+            bool srcSigned;
+            switch (va.type) {
+            case GL_BYTE: case GL_SHORT: case GL_INT: srcSigned = true; break;
+            case GL_UNSIGNED_BYTE: case GL_UNSIGNED_SHORT: case GL_UNSIGNED_INT: srcSigned = false; break;
+            default: continue;
+            }
+            if (srcSigned != (ts.base == BaseType::Int)) mask |= 1u << loc;
+        }
+    }
+    return mask;
+}
+
 // Fills VariantKey::attribs (manual vertex fetch) from the bound VAO.
 void fillVertexFetch(Context* ctx, ProgramObj* prog, glsl::VariantKey& vk) {
     VertexArray* vao = ctx->vao.get();
@@ -1015,6 +1076,59 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     return true;
 }
 
+// Fast path for indexed triangle/line lists from a buffer: rotate the whole index buffer
+// once (per content version) and draw from the same offset in the rotated copy. This
+// serves every draw into a shared index buffer (Sodium) with one allocation.
+static bool rotatedWholeBuffer(Context* ctx, const DrawParams& d, IndexInfo& out) {
+    Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
+    if (!ib || !ib->mtl || (d.mode != GL_TRIANGLES && d.mode != GL_LINES)) return false;
+    if (d.indexType != GL_UNSIGNED_SHORT && d.indexType != GL_UNSIGNED_INT) return false;
+    if (ctx->primitiveRestart || ctx->primitiveRestartFixed) return false;
+    if (ib->mapped && (ib->mapAccess & GL_MAP_PERSISTENT_BIT) && (ib->mapAccess & GL_MAP_WRITE_BIT)) return false;
+    size_t isz = indexSize(d.indexType);
+    size_t off = (size_t)d.indices;
+    if (off % isz || off + (size_t)d.count * isz > (size_t)ib->size) return false;
+    uint32_t vpp = d.mode == GL_TRIANGLES ? 3 : 2;
+    uint32_t phase = (uint32_t)((off / isz) % vpp);
+    uint32_t layout = (uint32_t)isz | vpp << 8 | phase << 16;
+    if (!ib->rotated || ib->rotatedVersion != ib->contentVersion || ib->rotatedGpuWrite != ib->lastGpuWrite ||
+        ib->rotatedLayout != layout || ib->rotated.length < (NSUInteger)ib->size) {
+        if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+        if (ib->rotated) ctx->dev->releaseAfter(ib->rotated, ib->rotatedLastUse);
+        ib->rotated = ctx->dev->newBuffer((size_t)ib->size);
+        if (!ib->rotated) return false;
+        uint8_t* dst = (uint8_t*)ib->rotated.contents;
+        memcpy(dst, ib->cpu, (size_t)ib->size);
+        size_t n = (size_t)ib->size / isz;
+        auto rot = [&](auto* v) {
+            for (size_t i = phase; i + vpp <= n; i += vpp) {
+                if (vpp == 3) {
+                    auto a = v[i], b = v[i + 1], c = v[i + 2];
+                    v[i] = c;  // rotation keeps the winding
+                    v[i + 1] = a;
+                    v[i + 2] = b;
+                } else {
+                    std::swap(v[i], v[i + 1]);
+                }
+            }
+        };
+        if (isz == 2) rot((uint16_t*)dst);
+        else rot((uint32_t*)dst);
+        ib->rotatedVersion = ib->contentVersion;
+        ib->rotatedGpuWrite = ib->lastGpuWrite;
+        ib->rotatedLayout = layout;
+    }
+    ib->rotatedLastUse = ctx->serial();
+    out = IndexInfo();
+    out.prim = vpp == 2 ? MTLPrimitiveTypeLine : MTLPrimitiveTypeTriangle;
+    out.type = isz == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+    out.count = (uint32_t)(d.count / vpp * vpp);
+    out.generated = true;
+    out.addr = ib->rotated.gpuAddress + off;
+    out.length = out.count * isz;
+    return true;
+}
+
 // Builds (or reuses from cache) a rotated 32-bit index list for flat shading.
 static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& out, uint32_t* minIdx, uint32_t* maxIdx) {
     Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
@@ -1085,10 +1199,13 @@ static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& 
         id<MTLBuffer> buf = ctx->dev->newBuffer(ids.size() * 4);
         memcpy(buf.contents, ids.data(), ids.size() * 4);
         out.addr = buf.gpuAddress;
-        if (cache.size() > 512) {
+        static std::unordered_map<Context*, size_t> cacheBytes;
+        if (cache.size() > 512 || cacheBytes[ctx] > (32u << 20)) {
             for (auto& [k, e] : cache) ctx->dev->releaseAfter(e.buffer, ctx->serial());
             cache.clear();
+            cacheBytes[ctx] = 0;
         }
+        cacheBytes[ctx] += ids.size() * 4;
         cache[key] = {out, *minIdx, *maxIdx, buf};
     } else {
         UploadAlloc u = ctx->upload(ids.size() * 4, 16);
@@ -1179,6 +1296,9 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         if (ctx->rasterizerDiscard) return;
     }
     if (ctx->rasterizerDiscard) return;
+    vk.manualFetch = wantManualFetch(ctx);
+    if (vk.manualFetch) fillVertexFetch(ctx, prog, vk);
+    else vk.attribSignFlip = attribSignFlip(ctx, prog);
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
     if (!var || !var->ok) return;
     // Cull FRONT_AND_BACK discards all polygons.
@@ -1191,7 +1311,17 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     bool rotate = refl.usesFlatShading && ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION && !d.indirect &&
                   d.mode != GL_POINTS && d.mode != GL_PATCHES;
     if (rotate) {
-        if (!prepareRotatedIndices(ctx, d, ii, &minIdx, &maxIdx)) return;
+        // The vertex range is only needed for CPU-side vertex copies (client arrays / repacks).
+        bool needRange = false;
+        if (!vk.manualFetch)
+            for (int l = 0; l < kMaxVertexAttribs; l++) {
+                const VertexAttrib& va = ctx->vao->attribs[l];
+                if (!va.enabled) continue;
+                const VertexBinding& vb = ctx->vao->bindings[va.binding];
+                if (va.clientPointer || (vb.stride & 3) || (vb.offset & 3) || (va.relativeOffset & 3)) needRange = true;
+            }
+        if (needRange || !rotatedWholeBuffer(ctx, d, ii))
+            if (!prepareRotatedIndices(ctx, d, ii, &minIdx, &maxIdx)) return;
     } else if (!d.indirect && !prepareIndices(ctx, d, ii, &minIdx, &maxIdx)) {
         return;
     }
@@ -1215,7 +1345,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     // Vertex data read on the CPU (client arrays, Metal-incompatible layouts that get
     // repacked) must be synchronized *before* encoding starts: a GPU wait flushes the
     // command buffer, which would end the render encoder and retire upload memory.
-    if (ctx->vao) {
+    if (ctx->vao && !vk.manualFetch) {
         for (int l = 0; l < kMaxVertexAttribs; l++) {
             const VertexAttrib& va = ctx->vao->attribs[l];
             if (!va.enabled) continue;

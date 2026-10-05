@@ -1,10 +1,13 @@
 #pragma once
+#include <cstdint>
 // Lightweight counters for diagnosing driver behavior in the field (METALGLDRV_STATS=1).
 namespace mgl {
 extern bool g_statsEnabled;
 // Counts an event attributed to the calling function (resolved with dladdr).
 void statCaller(const char* event, void* returnAddress);
 void statCount(const char* event);
+// Adds `amount` to a counter attributed to the caller.
+void statAddCaller(const char* event, void* returnAddress, uint64_t amount);
 // Logs and resets the counters at most every 5 seconds.
 void statMaybeReport();
 }  // namespace mgl

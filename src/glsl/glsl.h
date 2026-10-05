@@ -235,6 +235,12 @@ struct VariantKey {
     uint8_t primitive = 0;     // input GL primitive mode for GS/tess paths
     bool flatshadeLastVertex = true;
     bool rasterDiscard = false;
+    // Classic path: locations whose int/uint input is fed integer data of the other
+    // signedness (GL allows it, Metal attribute formats don't); declared flipped + cast.
+    uint32_t attribSignFlip = 0;
+    // Classic path: pull vertex attributes from MGLDrawInfo (buffer 22, formats in
+    // `attribs`) instead of [[stage_in]]; used for layouts Metal's vertex fetch rejects.
+    bool manualFetch = false;
 };
 
 struct EntryPoint {

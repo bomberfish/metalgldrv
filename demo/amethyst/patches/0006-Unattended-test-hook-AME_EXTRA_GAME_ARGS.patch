@@ -1,0 +1,31 @@
+From e98003d8edad3aac25d46128980b0a09ababa724 Mon Sep 17 00:00:00 2001
+From: bomberfish <me@bomberfish.ca>
+Date: Mon, 5 Oct 2026 18:31:01 -0400
+Subject: [PATCH 6/7] Unattended test hook: AME_EXTRA_GAME_ARGS
+
+---
+ JavaApp/src/launcher/net/kdt/pojavlaunch/Tools.java | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/JavaApp/src/launcher/net/kdt/pojavlaunch/Tools.java b/JavaApp/src/launcher/net/kdt/pojavlaunch/Tools.java
+index c1c9b21..e45095f 100644
+--- a/JavaApp/src/launcher/net/kdt/pojavlaunch/Tools.java
++++ b/JavaApp/src/launcher/net/kdt/pojavlaunch/Tools.java
+@@ -54,6 +54,14 @@ public final class Tools {
+ 
+     public static void launchMinecraft(MinecraftAccount profile, final JMinecraftVersionList.Version versionInfo) throws Throwable {
+         String[] launchArgs = getMinecraftArgs(profile, versionInfo);
++        // Unattended testing (metalgldrv demo): '|'-separated extra game arguments,
++        // e.g. AME_EXTRA_GAME_ARGS="--quickPlaySingleplayer|New World".
++        String extraGameArgs = System.getenv("AME_EXTRA_GAME_ARGS");
++        if (extraGameArgs != null && !extraGameArgs.isEmpty()) {
++            List<String> all = new ArrayList<>(Arrays.asList(launchArgs));
++            all.addAll(Arrays.asList(extraGameArgs.split("\\|")));
++            launchArgs = all.toArray(new String[0]);
++        }
+         // System.out.println("Minecraft Args: " + Arrays.toString(launchArgs));
+ 
+         final String launchClassPath = generateLaunchClassPath(versionInfo);
+-- 
+2.54.0 (Apple Git-157)
+

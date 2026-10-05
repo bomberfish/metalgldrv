@@ -16,6 +16,9 @@
 #include "gl/internal_shaders.h"
 #include "gl/procs.h"
 #include "util/log.h"
+#import <ImageIO/ImageIO.h>
+#include <chrono>
+#include <vector>
 
 #define EGLAPI_EXPORT extern "C" __attribute__((visibility("default")))
 
@@ -590,6 +593,62 @@ EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglQueryContext(EGLDisplay dpy, EGLContext 
     return EGL_TRUE;
 }
 
+// METALGLDRV_CAPTURE=<seconds>: periodically saves the default framebuffer to
+// $HOME/Documents/metalgldrv-frame.png (field debugging without screen access).
+static void maybeCaptureFrame(Surface* surf) {
+    static const double every = [] { const char* e = getenv("METALGLDRV_CAPTURE"); return e ? atof(e) : 0.0; }();
+    if (every <= 0) return;
+    static auto last = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration<double>(now - last).count() < every) return;
+    last = now;
+    int w = surf->width, h = surf->height;
+    if (w <= 0 || h <= 0) return;
+    GLint readFb = 0, packBuf = 0, align = 4, rowLen = 0, skipP = 0, skipR = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFb);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuf);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &align);
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &rowLen);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS, &skipP);
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &skipR);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    std::vector<uint8_t> px((size_t)w * h * 4);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFb);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuf);
+    glPixelStorei(GL_PACK_ALIGNMENT, align);
+    glPixelStorei(GL_PACK_ROW_LENGTH, rowLen);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, skipP);
+    glPixelStorei(GL_PACK_SKIP_ROWS, skipR);
+    // GL rows are bottom-up; flip and force opaque.
+    std::vector<uint8_t> img(px.size());
+    for (int y = 0; y < h; y++) {
+        uint8_t* d = &img[(size_t)(h - 1 - y) * w * 4];
+        memcpy(d, &px[(size_t)y * w * 4], (size_t)w * 4);
+        for (int x = 0; x < w; x++) d[x * 4 + 3] = 255;
+    }
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef bc = CGBitmapContextCreate(img.data(), w, h, 8, (size_t)w * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGImageRef im = bc ? CGBitmapContextCreateImage(bc) : nullptr;
+    std::string path = std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/metalgldrv-frame.png";
+    NSURL* url = [NSURL fileURLWithPath:@(path.c_str())];
+    CGImageDestinationRef dst = im ? CGImageDestinationCreateWithURL((__bridge CFURLRef)url, CFSTR("public.png"), 1, nullptr) : nullptr;
+    if (dst) {
+        CGImageDestinationAddImage(dst, im, nullptr);
+        CGImageDestinationFinalize(dst);
+        CFRelease(dst);
+        MGL_INFO("captured frame %dx%d -> %s", w, h, path.c_str());
+    }
+    if (im) CGImageRelease(im);
+    if (bc) CGContextRelease(bc);
+    CGColorSpaceRelease(cs);
+}
+
 EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     if (!validDisplay(dpy)) return EGL_FALSE;
     EGLSurfaceImpl* s = surfaceFromHandle(surface);
@@ -604,6 +663,7 @@ EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglSwapBuffers(EGLDisplay dpy, EGLSurface s
     Device::get()->waitForeground();
     @autoreleasepool {
         Surface* surf = s->surf.get();
+        maybeCaptureFrame(surf);
         ctx->applyClearNow();
         id<CAMetalDrawable> drawable = [surf->layer nextDrawable];
         if (drawable) {

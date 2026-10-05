@@ -3,6 +3,7 @@
 #include <cmath>
 #include <mutex>
 #include "util/log.h"
+#include "util/stats.h"
 
 namespace mgl {
 
@@ -125,6 +126,7 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
     if (fmt->srgb || t->needsFormatView || fmt->kind == FmtKind::DepthStencil) usage |= MTLTextureUsagePixelFormatView;
     td.usage = usage;
     id<MTLTexture> nt = [ctx->dev->mtl newTextureWithDescriptor:td];
+    if (nt && g_statsEnabled) statAddCaller("newTexture KB", __builtin_return_address(0), nt.allocatedSize >> 10);
     if (!nt) {
         MGL_ERR("texture allocation failed (%dx%dx%d, %d levels, fmt %d)", w, h, d, levels, (int)fmt->mtl);
         return false;

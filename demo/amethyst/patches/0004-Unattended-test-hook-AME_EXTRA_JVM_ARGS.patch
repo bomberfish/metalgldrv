@@ -1,7 +1,7 @@
 From 4fd2f4a4c115d37f1cf2e92752ab6df9078bb0e4 Mon Sep 17 00:00:00 2001
 From: bomberfish <me@bomberfish.ca>
 Date: Mon, 5 Oct 2026 17:34:17 -0400
-Subject: [PATCH 4/5] Unattended test hook: AME_EXTRA_JVM_ARGS
+Subject: [PATCH 4/7] Unattended test hook: AME_EXTRA_JVM_ARGS
 
 ---
  Natives/JavaLauncher.m | 4 ++++

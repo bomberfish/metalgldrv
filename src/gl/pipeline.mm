@@ -19,13 +19,16 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     h = hashBytes(&key.primitive, sizeof key.primitive, h);
     h = hashBytes(&key.flatshadeLastVertex, 1, h);
     h = hashBytes(&key.rasterDiscard, 1, h);
-    if (key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute)
+    h = hashBytes(&key.attribSignFlip, sizeof key.attribSignFlip, h);
+    h = hashBytes(&key.manualFetch, 1, h);
+    if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch)
         h = hashBytes(key.attribs, sizeof key.attribs, h);
     auto it = prog->variants.find(h);
     if (it != prog->variants.end()) return it->second.get();
     auto v = std::make_shared<ProgramVariant>();
     static std::atomic<uint64_t> nextUid{1};
     v->uid = nextUid++;
+    v->manualFetch = key.manualFetch;
     if (!prog->program) {
         v->error = "program not linked";
     } else {

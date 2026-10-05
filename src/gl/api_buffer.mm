@@ -10,6 +10,7 @@ namespace mgl {
 
 Buffer::~Buffer() {
     if (mtl) Device::get()->releaseAfter(mtl, lastUse);
+    if (rotated) Device::get()->releaseAfter(rotated, rotatedLastUse);
     free(mapShadow);
 }
 
