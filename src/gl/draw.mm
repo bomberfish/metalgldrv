@@ -1212,6 +1212,22 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     }
     if (!d.indirect && (d.indexed || ii.generated) && ii.count == 0) return;
 
+    // Vertex data read on the CPU (client arrays, Metal-incompatible layouts that get
+    // repacked) must be synchronized *before* encoding starts: a GPU wait flushes the
+    // command buffer, which would end the render encoder and retire upload memory.
+    if (ctx->vao) {
+        for (int l = 0; l < kMaxVertexAttribs; l++) {
+            const VertexAttrib& va = ctx->vao->attribs[l];
+            if (!va.enabled) continue;
+            const VertexBinding& vb = ctx->vao->bindings[va.binding];
+            bool cpuRead = (vb.stride & 3) || (vb.offset & 3) || (va.relativeOffset & 3);
+            Buffer* b = vb.buffer.get();
+            if (cpuRead && b && b->lastGpuWrite && !ctx->dev->isComplete(b->lastGpuWrite)) ctx->waitForResource(b->lastGpuWrite);
+        }
+    }
+    // Resolving bindings can allocate/migrate texture storage (a copy that ends the render
+    // pass), so build the argument buffer before acquiring the render encoder.
+    uint64_t argAddr = buildArguments(ctx, prog, false);
     id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
     if (!e) return;
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
@@ -1221,6 +1237,11 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     key.rasterEnabled = !ctx->rasterizerDiscard;
     key.topologyClass = (uint8_t)MTLPrimitiveTopologyClassUnspecified;  // point size is always written; only layered rendering needs a class
     if (!setupVertexInput(ctx, prog, key, table, d, minIdx, maxIdx)) return;
+    if (ctx->renderEnc != e) {
+        // Should not happen (see above); never encode into an ended encoder.
+        MGL_ERR("render encoder changed during draw setup; dropping draw");
+        return;
+    }
     id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
     if (!pso) return;
     if (ctx->enc.pipeline != pso) {
@@ -1228,7 +1249,6 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         ctx->enc.pipeline = pso;
     }
     applyDynamicState(ctx, e, d.mode);
-    uint64_t argAddr = buildArguments(ctx, prog, false);
     [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
     [table setAddress:buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first) atIndex:glsl::kBufSys];
     mglQueryNotifyDraw(ctx, d.mode, d.indirect ? 0 : (d.indexed || ii.generated ? (d.indexed ? d.count : d.count) : d.count), d.instances);
