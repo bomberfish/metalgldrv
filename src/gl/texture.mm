@@ -7,7 +7,15 @@
 namespace mgl {
 
 Texture::~Texture() {
+    dropViews();
     if (mtl) Device::get()->releaseAfter(mtl, std::max(lastUse, lastGpuWrite));
+}
+
+void Texture::dropViews() {
+    Device* d = Device::get();
+    uint64_t s = std::max(lastUse, lastGpuWrite);
+    for (auto& [k, v] : views) d->retainUntil(v, s);
+    views.clear();
 }
 
 Renderbuffer::~Renderbuffer() {
@@ -149,7 +157,7 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
     t->storageLayers = layers;
     t->storageLevels = levels;
     t->storageDirty = false;
-    t->views.clear();
+    t->dropViews();
     t->lastUse = ctx->serial();
     return true;
 }

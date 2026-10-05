@@ -3,6 +3,7 @@
 #include "gl/internal_shaders.h"
 #include "gl/pipeline.h"
 #include "util/log.h"
+#include "util/stats.h"
 
 namespace mgl {
 
@@ -316,6 +317,8 @@ UploadAlloc Context::upload(size_t size, size_t align) {
 }
 
 void Context::flush(id<CAMetalDrawable> present) {
+    MGL_STAT_CALLER("flush");
+    statMaybeReport();
     if (pendingClear.any()) applyClearNow();
     if (!cb_) {
         if (present) {
@@ -346,6 +349,7 @@ void Context::flush(id<CAMetalDrawable> present) {
 }
 
 void Context::finish() {
+    MGL_STAT_CALLER("finish");
     uint64_t s = cb_ ? serial_ : 0;
     flush();
     if (s) dev->waitFor(s);
@@ -354,6 +358,7 @@ void Context::finish() {
 
 void Context::waitForResource(uint64_t lastUse) {
     if (lastUse == 0) return;
+    MGL_STAT_CALLER("gpu-wait");
     if (cb_ && lastUse == serial_) flush();
     dev->waitFor(lastUse);
 }
@@ -451,6 +456,7 @@ bool Context::resolvePass(PassDesc& p) {
 }
 
 void Context::beginPass() {
+    MGL_STAT("render-pass");
     PassDesc p;
     if (!resolvePass(p)) {
         passOpen = false;

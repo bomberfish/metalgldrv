@@ -4,6 +4,7 @@
 #include "gl/gltypes.h"
 #include "gl/pipeline.h"
 #include "util/log.h"
+#include "util/stats.h"
 
 using namespace mgl;
 #define API extern "C" __attribute__((visibility("default")))
@@ -997,6 +998,7 @@ static bool validateDraw(Context* ctx, GLenum mode) {
 }
 
 static void executeDraw(Context* ctx, const DrawParams& d) {
+    MGL_STAT("draw");
     ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
     // Compatibility profile: fixed-function emulation (prog == null) and gl_* state uniforms.
     if (!ctx->coreProfile) prog = mglCompatPrepareDraw(ctx, prog);

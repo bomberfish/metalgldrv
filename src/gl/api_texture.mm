@@ -613,18 +613,18 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
         if (v[0] < 0) return ctx->setError(GL_INVALID_VALUE);
         if ((rect || ms) && v[0] != 0) return ctx->setError(GL_INVALID_OPERATION);
         t->baseLevel = (int)v[0];
-        t->views.clear();
+        t->dropViews();
         if (!t->immutable) t->storageDirty = t->storageDirty || !t->levels[0][0].defined();
         break;
     case GL_TEXTURE_MAX_LEVEL:
         if (v[0] < 0) return ctx->setError(GL_INVALID_VALUE);
         t->maxLevel = (int)v[0];
-        t->views.clear();
+        t->dropViews();
         break;
     case GL_TEXTURE_SWIZZLE_R: case GL_TEXTURE_SWIZZLE_G: case GL_TEXTURE_SWIZZLE_B: case GL_TEXTURE_SWIZZLE_A:
         if (e != GL_RED && e != GL_GREEN && e != GL_BLUE && e != GL_ALPHA && e != GL_ZERO && e != GL_ONE) return ctx->setError(GL_INVALID_ENUM);
         t->swizzle[pname - GL_TEXTURE_SWIZZLE_R] = e;
-        t->views.clear();
+        t->dropViews();
         break;
     case GL_TEXTURE_SWIZZLE_RGBA:
         for (int k = 0; k < 4; k++) {
@@ -632,17 +632,17 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
             if (s != GL_RED && s != GL_GREEN && s != GL_BLUE && s != GL_ALPHA && s != GL_ZERO && s != GL_ONE) return ctx->setError(GL_INVALID_ENUM);
         }
         for (int k = 0; k < 4; k++) t->swizzle[k] = (GLenum)v[k];
-        t->views.clear();
+        t->dropViews();
         break;
     case GL_DEPTH_STENCIL_TEXTURE_MODE:
         if (e != GL_DEPTH_COMPONENT && e != GL_STENCIL_INDEX) return ctx->setError(GL_INVALID_ENUM);
         t->depthStencilMode = e;
-        t->views.clear();
+        t->dropViews();
         break;
     case GL_TEXTURE_SRGB_DECODE_EXT:
         if (e != GL_DECODE_EXT && e != GL_SKIP_DECODE_EXT) return ctx->setError(GL_INVALID_ENUM);
         t->srgbDecode = e;
-        t->views.clear();
+        t->dropViews();
         break;
     case GL_GENERATE_MIPMAP:
         if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM);

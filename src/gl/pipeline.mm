@@ -1,4 +1,5 @@
 #import "gl/pipeline.h"
+#include <atomic>
 #include "gl/context.h"
 #include "util/log.h"
 
@@ -23,6 +24,8 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     auto it = prog->variants.find(h);
     if (it != prog->variants.end()) return it->second.get();
     auto v = std::make_shared<ProgramVariant>();
+    static std::atomic<uint64_t> nextUid{1};
+    v->uid = nextUid++;
     if (!prog->program) {
         v->error = "program not linked";
     } else {
@@ -56,8 +59,13 @@ static MTL4LibraryFunctionDescriptor* fn(id<MTLLibrary> lib, const std::string& 
     return f;
 }
 
-id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey& key) {
+id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey& keyIn) {
+    RenderPipelineKey key = keyIn;
+    key.variantUid = key.variant->uid;
+    const ProgramVariant* vptr = key.variant;
+    key.variant = nullptr;
     std::string k((const char*)&key, sizeof key);
+    key.variant = vptr;
     auto it = render_.find(k);
     if (it != render_.end()) return it->second;
     const ProgramVariant* v = key.variant;

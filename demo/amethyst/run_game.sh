@@ -12,7 +12,7 @@ PROFILE_NAME="${1:-Fabulously Optimized}"
 SECONDS_TO_RUN="${2:-120}"
 OUT="${OUT:-$HERE/../../build/game-run}"
 mkdir -p "$OUT"
-ENV_JSON=$(python3 -c "import json,os,sys; print(json.dumps({'AME_AUTOLAUNCH_PROFILE': sys.argv[1], 'AME_FORCE_RENDERER': os.environ.get('AME_FORCE_RENDERER','libmetalgldrv.dylib'), 'MGL_LOG': os.environ.get('MGL_LOG','2'), 'MGL_LOG_FILE': 'documents'}))" "$PROFILE_NAME")
+ENV_JSON=$(python3 -c "import json,os,sys; e=json.loads(os.environ.get('EXTRA_ENV','{}')); print(json.dumps({**e, 'AME_AUTOLAUNCH_PROFILE': sys.argv[1], 'AME_FORCE_RENDERER': os.environ.get('AME_FORCE_RENDERER','libmetalgldrv.dylib'), 'MGL_LOG': os.environ.get('MGL_LOG','2'), 'MGL_LOG_FILE': 'documents'}))" "$PROFILE_NAME")
 echo "== launching $BUNDLE suspended ($PROFILE_NAME)"
 xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --start-stopped \
     --environment-variables "$ENV_JSON" --json-output "$OUT/launch.json" "$BUNDLE" >/dev/null || exit 1

@@ -177,6 +177,10 @@ public:
     };
     std::unordered_map<ViewKey, id<MTLTexture>, ViewKeyHash> views;
 
+    // Drops cached views, keeping them alive until in-flight GPU work that may
+    // reference them (by MTLResourceID) has completed.
+    void dropViews();
+
     const TexImageLevel& level(int l, int face = 0) const { return levels[face][l]; }
     const TexImageLevel& baseImage() const { return levels[0][std::min(std::max(baseLevel, 0), kMaxLevels - 1)]; }
     bool isCube() const { return target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_CUBE_MAP_ARRAY; }

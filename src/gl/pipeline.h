@@ -15,6 +15,7 @@ class Context;
 enum : uint32_t { kBufCurrentAttribs = 30 };
 
 struct ProgramVariant {
+    uint64_t uid = 0;  // unique for the process lifetime (pipeline cache key; pointers get reused)
     glsl::MSLOutput msl;
     id<MTLLibrary> lib = nil;
     bool ok = false;
@@ -44,7 +45,8 @@ struct BlendKey {
     uint8_t enabled = 0, srcRGB = 0, dstRGB = 0, srcA = 0, dstA = 0, eqRGB = 0, eqA = 0, writeMask = 0;
 };
 struct RenderPipelineKey {
-    const ProgramVariant* variant = nullptr;
+    uint64_t variantUid = 0;
+    const ProgramVariant* variant = nullptr;  // not part of the hashed identity
     uint32_t colorFormats[8] = {};
     BlendKey blend[8];
     VertexAttribKey attribs[16];
