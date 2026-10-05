@@ -73,7 +73,8 @@ struct Layout {
     int xfbBuffer = -1, xfbOffset = -1, xfbStride = -1;
     Packing packing = Packing::None;
     int matrix = 0;           // 0 unspecified, 1 column_major, 2 row_major
-    uint32_t primitive = 0;   // GS in/out primitive, tess primitive (GL enum)
+    static constexpr uint32_t kNoPrimitive = 0xFFFFFFFFu;
+    uint32_t primitive = kNoPrimitive;  // GS in/out primitive, tess primitive (GL enum; GL_POINTS == 0)
     uint32_t spacing = 0, order = 0;
     bool pointMode = false;
     bool originUpperLeft = false, pixelCenterInteger = false, earlyFragmentTests = false;

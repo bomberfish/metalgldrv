@@ -127,7 +127,66 @@ static int runDraw(const char* vsPath, const char* fsPath, const float tri[6], u
     }
 }
 
+struct PipelineArgs {
+    std::vector<std::pair<Stage, std::string>> files;
+    std::vector<float> verts;
+    int vpp = 3;
+    int instances = 1;
+    std::vector<std::string> xfb;
+    bool xfbSeparate = false;
+    float defaultOuter[4] = {1, 1, 1, 1}, defaultInner[2] = {1, 1};
+    bool dump = false;
+    int expectPrims = -1;
+};
+int runPipeline(const PipelineArgs& pa);
+int runTessCheck(bool verbose);
+
+static std::vector<float> parseFloats(const std::string& s) {
+    std::vector<float> v;
+    size_t p = 0;
+    while (p < s.size()) {
+        size_t q = s.find(',', p);
+        if (q == std::string::npos) q = s.size();
+        v.push_back(std::stof(s.substr(p, q - p)));
+        p = q + 1;
+    }
+    return v;
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--tesscheck")) return runTessCheck(argc > 2 && !strcmp(argv[2], "-v"));
+    if (argc >= 2 && !strcmp(argv[1], "--pipeline")) {
+        PipelineArgs pa;
+        pa.verts = {-1, -1, 3, -1, -1, 3};
+        for (int i = 2; i < argc; i++) {
+            std::string a = argv[i];
+            auto next = [&]() { return std::string(i + 1 < argc ? argv[++i] : ""); };
+            if (a == "--verts") pa.verts = parseFloats(next());
+            else if (a == "--vpp") pa.vpp = std::stoi(next());
+            else if (a == "--inst") pa.instances = std::stoi(next());
+            else if (a == "--xfb") {
+                std::string v = next();
+                size_t p = 0;
+                while (p <= v.size()) {
+                    size_t q = v.find(',', p);
+                    if (q == std::string::npos) q = v.size();
+                    if (q > p) pa.xfb.push_back(v.substr(p, q - p));
+                    p = q + 1;
+                }
+            } else if (a == "--xfb-separate") pa.xfbSeparate = true;
+            else if (a == "--outer") { auto f = parseFloats(next()); for (size_t k = 0; k < 4 && k < f.size(); k++) pa.defaultOuter[k] = f[k]; }
+            else if (a == "--inner") { auto f = parseFloats(next()); for (size_t k = 0; k < 2 && k < f.size(); k++) pa.defaultInner[k] = f[k]; }
+            else if (a == "--expect-prims") pa.expectPrims = std::stoi(next());
+            else if (a == "--dump") pa.dump = true;
+            else {
+                std::string ext = a.substr(a.rfind('.') + 1);
+                Stage st = ext == "vert" ? Stage::Vertex : ext == "tesc" ? Stage::TessControl : ext == "tese" ? Stage::TessEval
+                         : ext == "geom" ? Stage::Geometry : Stage::Fragment;
+                pa.files.push_back({st, a});
+            }
+        }
+        return runPipeline(pa);
+    }
     if (argc < 2) {
         fprintf(stderr, "usage: glslrun test.comp [--groups N] [--dump]\n"
                         "       glslrun --draw a.vert a.frag [--tri x0,y0,x1,y1,x2,y2] [--flags N] [--dump]\n");

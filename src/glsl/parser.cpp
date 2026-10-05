@@ -49,6 +49,8 @@ bool Expr::isLvalue() const { return exprIsLvalue(this); }
 
 namespace {
 
+int primitiveVertexCount(uint32_t prim);
+
 struct ParseError {};
 
 struct Sym {
@@ -441,7 +443,7 @@ void Parser::parseLayout(Qualifiers& q) {
     }
 }
 
-static int primitiveVertexCount(uint32_t prim) {
+int primitiveVertexCount(uint32_t prim) {
     switch (prim) {
         case gl::POINTS: return 1;
         case gl::LINES: return 2;
@@ -469,7 +471,7 @@ void Parser::applyStageLayout(const Qualifiers& q) {
     if (L.maxVertices >= 0) T.maxVertices = L.maxVertices;
     if (L.invocations >= 0) T.invocations = L.invocations;
     if (L.vertices >= 0) T.vertices = L.vertices;
-    if (L.primitive) T.primitive = L.primitive;
+    if (L.primitive != Layout::kNoPrimitive) T.primitive = L.primitive;
     if (L.spacing) T.spacing = L.spacing;
     if (L.order) T.order = L.order;
     if (L.pointMode) T.pointMode = true;
@@ -490,7 +492,7 @@ void Parser::applyStageLayout(const Qualifiers& q) {
             s->var->constVal = cv;
         }
     }
-    if (q.storage == Storage::In && sh_.stage == Stage::Geometry && L.primitive) {
+    if (q.storage == Storage::In && sh_.stage == Stage::Geometry && L.primitive != Layout::kNoPrimitive) {
         // size gl_in and unsized input arrays
         int n = primitiveVertexCount(L.primitive);
         for (auto& sc : scopes_)
@@ -680,6 +682,14 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
         t.dims = nd.dims;
     }
     expect(";");
+    if (!t.dims.empty() && t.dims[0] == 0) {
+        if (sh_.stage == Stage::Geometry && q.storage == Storage::In && sh_.inLayout.primitive != Layout::kNoPrimitive)
+            t.dims[0] = primitiveVertexCount(sh_.inLayout.primitive);
+        else if ((sh_.stage == Stage::TessControl || sh_.stage == Stage::TessEval) && q.storage == Storage::In && !q.patch)
+            t.dims[0] = 32;
+        else if (sh_.stage == Stage::TessControl && q.storage == Storage::Out && !q.patch && sh_.outLayout.vertices > 0)
+            t.dims[0] = sh_.outLayout.vertices;
+    }
     if (blockName == "gl_PerVertex" && !preamble_) {
         // Redeclaration of a builtin block: members map onto the existing builtins.
         if (!inst.empty() && inst != "gl_in" && inst != "gl_out") fail("invalid gl_PerVertex redeclaration");
@@ -791,7 +801,7 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             if (v->type.isArray() && v->type.dims[0] == 0 && init->type.isArray()) v->type.dims[0] = init->type.dims[0];
             init = convert(init, v->type, "initializer");
             v->init = init;
-            if (q.storage == Storage::Const && init->cv) v->constVal = init->cv;
+            if ((q.storage == Storage::Const || q.storage == Storage::Uniform) && init->cv) v->constVal = init->cv;
             if (q.storage == Storage::Const && !init->cv && v->type.isNumeric() && !preamble_) {
                 // non-constant initializer for const: allowed as a read-only variable (GLSL < 4.20 forbids it)
             }
@@ -800,7 +810,7 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
         }
         // implicit storage for shared/in/out arrays sized by layout
         if (global && sh_.stage == Stage::Geometry && q.storage == Storage::In && !t.dims.empty() && t.dims[0] == 0 &&
-            sh_.inLayout.primitive)
+            sh_.inLayout.primitive != Layout::kNoPrimitive)
             v->type.dims[0] = primitiveVertexCount(sh_.inLayout.primitive);
         if (global && sh_.stage == Stage::TessControl && q.storage == Storage::Out && !q.patch && !t.dims.empty() &&
             t.dims[0] == 0 && sh_.outLayout.vertices > 0)

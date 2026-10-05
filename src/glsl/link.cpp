@@ -1,5 +1,6 @@
 // Program linking: cross-stage validation, resource layout, reflection.
 #include <algorithm>
+#include <cstring>
 #include <functional>
 
 #include "glsl/fold.h"
@@ -8,6 +9,8 @@
 #include "glsl/types.h"
 
 namespace glsl {
+
+std::string fillMultipassRecords(const LinkedProgram& prog, MultiPassInfo& mp);  // msl.cpp
 
 // ---------------------------------------------------------------------------
 // Layout engine
@@ -158,6 +161,7 @@ private:
                            bool topLevelSsbo, int topArraySize, uint32_t topArrayStride, int& location,
                            std::set<int>& usedLocs, const Qualifiers* q);
     void checkVaryings();
+    void writeInit(const Type& t, const TL& L, const ConstVal& cv, size_t& ci, uint8_t* dst);
     void stageMetadata();
 };
 
@@ -191,7 +195,7 @@ void Linker::collectStage(Stage s) {
             if (l.maxVertices >= 0) d.maxVertices = l.maxVertices;
             if (l.invocations >= 0) d.invocations = l.invocations;
             if (l.vertices >= 0) d.vertices = l.vertices;
-            if (l.primitive) d.primitive = l.primitive;
+            if (l.primitive != Layout::kNoPrimitive) d.primitive = l.primitive;
             if (l.spacing) d.spacing = l.spacing;
             if (l.order) d.order = l.order;
             if (l.pointMode) d.pointMode = true;
@@ -280,23 +284,43 @@ void Linker::assignAttributes() {
         if (ca != cb) return !ca;
         return a->id < b->id;
     });
-    std::vector<bool> taken(32, false);
+    // taken: 0 free, 1 user attribute, 2 compatibility attribute (may alias user attributes, as in NVIDIA's GL)
+    std::vector<int> taken(32, 0);
     std::vector<std::pair<const Variable*, int>> assigned;
-    auto mark = [&](int loc, int n, const std::string& name) {
+    auto mark = [&](int loc, int n, const std::string& name, int kind) {
         for (int i = loc; i < loc + n; i++) {
             if (i >= 32) { error("attribute '" + name + "' location out of range"); return; }
-            if (taken[i]) error("attribute '" + name + "' location " + std::to_string(i) + " overlaps another attribute");
-            taken[i] = true;
+            if (taken[i] == kind || (taken[i] && kind == 1 && taken[i] != 2))
+                error("attribute '" + name + "' location " + std::to_string(i) + " overlaps another attribute");
+            if (!taken[i] || kind == 1) taken[i] = kind;
         }
     };
+    auto compatLocation = [](const Variable* v) -> int {
+        switch (v->builtin) {
+            case BuiltinVar::Vertex: return 0;
+            case BuiltinVar::Normal: return 2;
+            case BuiltinVar::Color: return 3;
+            case BuiltinVar::SecondaryColor: return 4;
+            case BuiltinVar::FogCoord: return 5;
+            case BuiltinVar::MultiTexCoord: return 8 + (v->name.back() - '0');
+            default: return -1;
+        }
+    };
+    for (auto* v : attrs) {
+        int cl = compatLocation(v);
+        if (cl < 0) continue;
+        mark(cl, 1, v->name, 2);
+        assigned.push_back({v, cl});
+    }
     std::vector<const Variable*> pending;
     for (auto* v : attrs) {
+        if (compatLocation(v) >= 0) continue;
         int n = locationsFor(v->type);
         int loc = -1;
         if (v->q.layout.location >= 0) loc = v->q.layout.location;
         else if (in_.attribBindings.count(v->name)) loc = in_.attribBindings.at(v->name);
         if (loc >= 0) {
-            mark(loc, n, v->name);
+            mark(loc, n, v->name, 1);
             assigned.push_back({v, loc});
         } else {
             pending.push_back(v);
@@ -311,7 +335,7 @@ void Linker::assignAttributes() {
             if (free) loc = i;
         }
         if (loc < 0) { error("too many vertex attributes"); return; }
-        mark(loc, n, v->name);
+        mark(loc, n, v->name, 1);
         assigned.push_back({v, loc});
     }
     for (auto& [v, loc] : assigned) {
@@ -449,6 +473,39 @@ void Linker::addUniformEntries(const std::string& name, const Type& t, TL L, uin
     refl.uniforms.push_back(u);
 }
 
+static void writeScalarBytes(BT b, const Scalar& sc, uint8_t* dst) {
+    switch (b) {
+        case BT::Float: { float f = (float)sc.f; std::memcpy(dst, &f, 4); break; }
+        case BT::Double: std::memcpy(dst, &sc.f, 8); break;
+        case BT::Int: { int32_t i = (int32_t)sc.i; std::memcpy(dst, &i, 4); break; }
+        case BT::UInt: { uint32_t u = (uint32_t)sc.u; std::memcpy(dst, &u, 4); break; }
+        case BT::Bool: { uint32_t u = sc.b ? 1u : 0u; std::memcpy(dst, &u, 4); break; }
+        default: break;
+    }
+}
+
+void Linker::writeInit(const Type& t, const TL& L, const ConstVal& cv, size_t& ci, uint8_t* dst) {
+    if (!t.dims.empty()) {
+        for (int i = 0; i < t.dims[0]; i++) writeInit(t.elem(), L->elem, cv, ci, dst + i * L->arrayStride);
+        return;
+    }
+    if (t.base == BT::Struct) {
+        for (size_t m = 0; m < t.sdef->members.size(); m++) writeInit(t.sdef->members[m].type, L->members[m], cv, ci, dst + L->offsets[m]);
+        return;
+    }
+    uint32_t N = scalarSize(t.base);
+    if (t.cols) {
+        for (int c = 0; c < t.cols; c++)
+            for (int r = 0; r < t.vec; r++) {
+                if (ci >= cv.c.size()) return;
+                uint32_t o = L->rowMajor ? r * L->matrixStride + c * N : c * L->matrixStride + r * N;
+                writeScalarBytes(t.base, cv.c[ci++], dst + o);
+            }
+        return;
+    }
+    for (int k = 0; k < t.vec && ci < cv.c.size(); k++) writeScalarBytes(t.base, cv.c[ci++], dst + k * N);
+}
+
 void Linker::assignUniforms() {
     auto& refl = prog_->refl;
     // Gather used uniform-ish variables across stages, merged by name.
@@ -517,6 +574,13 @@ void Linker::assignUniforms() {
         off += L->size;
     }
     refl.defaultUniformSize = roundUp(off, 16);
+    refl.defaultUniformInit.assign(refl.defaultUniformSize, 0);
+    for (auto& e : defaults) {
+        if (!e.v->constVal) continue;
+        TL L = computeLayout(e.v->type, Packing::Std430, e.v->q.layout.matrix == 2);
+        size_t ci = 0;
+        writeInit(e.v->type, L, *e.v->constVal, ci, refl.defaultUniformInit.data() + prog_->defaultOffsets[e.v->name]);
+    }
 
     // --- blocks ---------------------------------------------------------------
     std::vector<std::string> ubos, ssbos;
@@ -712,17 +776,18 @@ void Linker::stageMetadata() {
             error("compute shader does not declare a local size");
     }
     if (auto& gs = prog_->stages[(int)Stage::Geometry]; gs.main) {
-        r.gsInputPrimitive = gs.inLayout.primitive;
-        r.gsOutputPrimitive = gs.outLayout.primitive;
+        bool inSet = gs.inLayout.primitive != Layout::kNoPrimitive, outSet = gs.outLayout.primitive != Layout::kNoPrimitive;
+        r.gsInputPrimitive = inSet ? gs.inLayout.primitive : 0;
+        r.gsOutputPrimitive = outSet ? gs.outLayout.primitive : 0;
         r.gsMaxVertices = gs.outLayout.maxVertices;
         r.gsInvocations = std::max(1, gs.inLayout.invocations);
-        if (!r.gsInputPrimitive) error("geometry shader does not declare an input primitive type");
-        if (!r.gsOutputPrimitive) error("geometry shader does not declare an output primitive type");
+        if (!inSet) error("geometry shader does not declare an input primitive type");
+        if (!outSet) error("geometry shader does not declare an output primitive type");
         if (r.gsMaxVertices < 0) error("geometry shader does not declare max_vertices");
     }
     if (auto& tc = prog_->stages[(int)Stage::TessControl]; tc.main) r.tcsOutputVertices = tc.outLayout.vertices;
     if (auto& te = prog_->stages[(int)Stage::TessEval]; te.main) {
-        r.tesPrimitiveMode = te.inLayout.primitive;
+        r.tesPrimitiveMode = te.inLayout.primitive != Layout::kNoPrimitive ? te.inLayout.primitive : 0;
         r.tesSpacing = te.inLayout.spacing ? te.inLayout.spacing : gl::EQUAL;
         r.tesOrder = te.inLayout.order ? te.inLayout.order : gl::CCW;
         r.tesPointMode = te.inLayout.pointMode;
@@ -738,42 +803,148 @@ void Linker::stageMetadata() {
         for (auto& sh : sc.shaders)
             for (auto& e : sh->exprs)
                 if (e.type.base == BT::Double) r.usesFp64 = true;
-    // transform feedback varyings (reflection only)
+    // transform feedback
     Stage pre = Stage::Count;
-    for (Stage s : {Stage::Geometry, Stage::TessEval, Stage::Vertex})
-        if (prog_->stages[(int)s].main) { pre = s; break; }
-    if (pre != Stage::Count && !in_.xfbVaryings.empty()) {
+    for (Stage st : {Stage::Geometry, Stage::TessEval, Stage::Vertex})
+        if (prog_->stages[(int)st].main) { pre = st; break; }
+    auto& mp = r.multipass;
+    auto compSize = [](const Type& t) {
+        Type b = t.stripArrays();
+        int comps = b.base == BT::Struct ? 0 : b.components();
+        if (b.base == BT::Struct)
+            for (auto& m : b.sdef->members) comps += m.type.stripArrays().components() * std::max(1, m.type.totalArrayElements());
+        return comps * (b.base == BT::Double ? 8 : 4) * std::max(1, t.totalArrayElements());
+    };
+    if (pre != Stage::Count) {
         const StageCode& ps = prog_->stages[(int)pre];
-        int buffer = 0, offset = 0;
-        for (auto& name : in_.xfbVaryings) {
-            if (name == "gl_NextBuffer") { buffer++; offset = 0; continue; }
-            if (name.compare(0, 14, "gl_SkipComponents") == 0) { offset += 4 * std::atoi(name.c_str() + 17); continue; }
-            std::string base = name;
-            int elem = -1;
-            if (auto lb = name.find('['); lb != std::string::npos) {
-                base = name.substr(0, lb);
-                elem = std::atoi(name.c_str() + lb + 1);
+        // enhanced layouts: xfb_offset qualifiers take precedence over glTransformFeedbackVaryings
+        bool qualified = false;
+        int stageBuffer = std::max(0, ps.outLayout.xfbBuffer);
+        uint32_t ends[4] = {0, 0, 0, 0};
+        int explicitStride[4] = {-1, -1, -1, -1};
+        if (ps.outLayout.xfbStride > 0) explicitStride[stageBuffer] = ps.outLayout.xfbStride;
+        for (auto* v : ps.globals) {
+            if (v->q.storage != Storage::Out) continue;
+            int vb = v->q.layout.xfbBuffer >= 0 ? v->q.layout.xfbBuffer : (v->block && v->block->blockQ.layout.xfbBuffer >= 0 ? v->block->blockQ.layout.xfbBuffer : stageBuffer);
+            if (v->q.layout.xfbStride > 0 && vb < 4) explicitStride[vb] = v->q.layout.xfbStride;
+            auto addQ = [&](const std::string& name, const Type& t, int buffer, int offset) {
+                if (buffer < 0 || buffer > 3) { error("xfb_buffer out of range"); return; }
+                XfbVarying x;
+                x.name = name;
+                x.type = glTypeEnum(t);
+                x.arraySize = t.isArray() ? t.dims[0] : 1;
+                x.buffer = buffer;
+                x.offset = offset;
+                r.xfbVaryings.push_back(x);
+                ends[buffer] = std::max<uint32_t>(ends[buffer], offset + compSize(t));
+                qualified = true;
+            };
+            if (v->block) {
+                int boff = v->block->blockQ.layout.xfbOffset;
+                int cur = boff;
+                for (auto& m : v->block->members) {
+                    int mo = m.q.layout.xfbOffset >= 0 ? m.q.layout.xfbOffset : (boff >= 0 ? cur : -1);
+                    if (mo >= 0) {
+                        addQ(v->anonBlock ? m.name : v->block->name + "." + m.name, m.type, vb, mo);
+                        cur = mo + compSize(m.type);
+                    }
+                }
+            } else if (v->q.layout.xfbOffset >= 0) {
+                addQ(v->name, v->type, vb, v->q.layout.xfbOffset);
             }
-            const Variable* found = nullptr;
-            for (auto* v : ps.globals) if (v->name == base && v->q.storage == Storage::Out) found = v;
-            if (!found)
-                for (auto& sh : ps.shaders)
-                    for (auto& v : sh->vars)
-                        if (v.global && v.name == base && v.q.storage == Storage::Out) found = &v;
-            if (!found) { error("transform feedback varying '" + name + "' is not an output of the last vertex stage"); continue; }
-            Type t = found->type;
-            if (elem >= 0) t = t.elem();
-            XfbVarying x;
-            x.name = name;
-            x.type = glTypeEnum(t);
-            x.arraySize = t.isArray() ? t.dims[0] : 1;
-            x.buffer = buffer;
-            x.offset = offset;
-            r.xfbVaryings.push_back(x);
-            int comps = t.stripArrays().components() * (t.stripArrays().base == BT::Double ? 2 : 1) * std::max(1, t.totalArrayElements());
-            offset += 4 * comps;
-            if (!in_.xfbInterleaved) { buffer++; offset = 0; }
         }
+        if (qualified) {
+            for (int b = 0; b < 4; b++) {
+                if (!ends[b] && explicitStride[b] < 0) continue;
+                mp.xfbBufferMask |= 1u << b;
+                mp.xfbStride[b] = explicitStride[b] > 0 ? (uint32_t)explicitStride[b] : roundUp(ends[b], 4);
+            }
+        } else if (!in_.xfbVaryings.empty()) {
+            int buffer = 0, offset = 0;
+            auto closeBuffer = [&]() {
+                if (offset > 0 || (in_.xfbInterleaved && buffer == 0)) {
+                    mp.xfbBufferMask |= 1u << buffer;
+                    mp.xfbStride[buffer] = std::max<uint32_t>(mp.xfbStride[buffer], (uint32_t)offset);
+                }
+            };
+            for (auto& name : in_.xfbVaryings) {
+                if (name == "gl_NextBuffer") {
+                    closeBuffer();
+                    buffer++;
+                    offset = 0;
+                    if (buffer > 3) { error("too many transform feedback buffers"); break; }
+                    continue;
+                }
+                if (name.compare(0, 17, "gl_SkipComponents") == 0) { offset += 4 * std::atoi(name.c_str() + 17); continue; }
+                std::string base = name;
+                int elem = -1;
+                if (auto lb = name.find('['); lb != std::string::npos) {
+                    base = name.substr(0, lb);
+                    elem = std::atoi(name.c_str() + lb + 1);
+                }
+                std::string member;
+                if (auto dot = base.find('.'); dot != std::string::npos) {
+                    member = base.substr(dot + 1);
+                    base = base.substr(0, dot);
+                }
+                Type t;
+                bool found = false;
+                for (auto& sh : ps.shaders)
+                    for (auto& v : sh->vars) {
+                        if (found || !v.global || v.q.storage != Storage::Out) continue;
+                        if (member.empty() && v.name == base && !v.anonBlock) { t = v.type; found = true; }
+                        else if (member.empty() && v.anonBlock && v.block->findMember(base) >= 0) {
+                            t = v.block->members[v.block->findMember(base)].type;
+                            found = true;
+                        } else if (!member.empty() && v.block && v.block->name == base && v.block->findMember(member) >= 0) {
+                            t = v.block->members[v.block->findMember(member)].type;
+                            found = true;
+                        }
+                    }
+                if (!found) { error("transform feedback varying '" + name + "' is not an output of the last vertex stage"); continue; }
+                if (elem >= 0) {
+                    if (!t.isArray() || elem >= t.dims[0]) { error("transform feedback varying '" + name + "' index out of range"); continue; }
+                    t = t.elem();
+                }
+                if (t.stripArrays().base == BT::Double && (offset & 7)) offset = (offset + 7) & ~7;
+                XfbVarying x;
+                x.name = name;
+                x.type = glTypeEnum(t);
+                x.arraySize = t.isArray() ? t.dims[0] : 1;
+                x.buffer = buffer;
+                x.offset = offset;
+                r.xfbVaryings.push_back(x);
+                offset += compSize(t);
+                if (!in_.xfbInterleaved) {
+                    closeBuffer();
+                    buffer++;
+                    offset = 0;
+                    if (buffer > 4) { error("too many transform feedback buffers"); break; }
+                }
+            }
+            if (in_.xfbInterleaved || offset > 0) closeBuffer();
+        }
+        // flags
+        const StageCode& fs = prog_->stages[(int)Stage::Fragment];
+        for (auto* v : fs.used) {
+            if (v->q.storage != Storage::In || v->builtin != BuiltinVar::None) continue;
+            Type b = v->type.stripArrays();
+            bool flat = v->q.interp == Interp::Flat || b.base == BT::Int || b.base == BT::UInt || b.base == BT::Double;
+            if (v->block)
+                for (auto& m : v->block->members) {
+                    Type mb = m.type.stripArrays();
+                    flat |= m.q.interp == Interp::Flat || mb.base == BT::Int || mb.base == BT::UInt || mb.base == BT::Double;
+                }
+            if (flat) r.usesFlatShading = true;
+        }
+        for (auto* v : ps.used) {
+            if (v->builtin == BuiltinVar::Layer && v->q.storage == Storage::Out && v->written) r.writesLayer = true;
+            if (v->builtin == BuiltinVar::ViewportIndex && v->q.storage == Storage::Out && v->written) r.writesViewportIndex = true;
+        }
+    }
+    if (ok_) {
+        std::string err = fillMultipassRecords(*prog_, mp);
+        if (!err.empty()) res_.infoLog += "warning: " + err + "\n";
     }
 }
 

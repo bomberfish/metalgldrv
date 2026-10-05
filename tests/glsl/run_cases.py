@@ -12,7 +12,7 @@ import sys
 glslc = sys.argv[1]
 d = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else os.path.join(os.path.dirname(__file__), "cases")
 verbose = "-v" in sys.argv
-STAGES = {".vert": "vert", ".frag": "frag", ".comp": "comp", ".geom": "geom", ".tesc": "tesc", ".tese": "tese"}
+STAGES = {".vert": "vert", ".tesc": "tesc", ".tese": "tese", ".geom": "geom", ".frag": "frag", ".comp": "comp"}
 groups = {}
 for f in sorted(os.listdir(d)):
     base, ext = os.path.splitext(f)
@@ -21,8 +21,6 @@ for f in sorted(os.listdir(d)):
 ok = fail = 0
 for base, files in sorted(groups.items()):
     args = [glslc, "-q"]
-    if base.startswith("fp64"):
-        args.append("--no-validate")  # needs the fp64 runtime library (fp64_msl.inc) to link
     for f in files:
         args += ["-S", STAGES[os.path.splitext(f)[1]], os.path.join(d, f)]
     r = subprocess.run(args, capture_output=True, text=True)

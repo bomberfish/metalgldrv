@@ -633,6 +633,10 @@ out vec4 gl_TexCoord[];
 out float gl_FogFragCoord;
 )";
 
+const char* kPerVertexInTess = R"(
+in gl_PerVertex { vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8]; float gl_CullDistance[8]; } gl_in[];
+)";
+
 const char* kTessControlPreamble = R"(
 in int gl_PatchVerticesIn;
 in int gl_PrimitiveID;
@@ -705,8 +709,8 @@ const std::string& builtinPreamble(Stage stage) {
             std::string p = kCommonPreamble;
             switch ((Stage)s) {
                 case Stage::Vertex: p += kVertexPreamble; break;
-                case Stage::TessControl: p += kPerVertexIn; p += kTessControlPreamble; break;
-                case Stage::TessEval: p += kPerVertexIn; p += kTessEvalPreamble; break;
+                case Stage::TessControl: p += kPerVertexInTess; p += kTessControlPreamble; break;
+                case Stage::TessEval: p += kPerVertexInTess; p += kTessEvalPreamble; break;
                 case Stage::Geometry: p += kPerVertexIn; p += kGeometryPreamble; break;
                 case Stage::Fragment: p += kFragmentPreamble; break;
                 case Stage::Compute: p += kComputePreamble; break;

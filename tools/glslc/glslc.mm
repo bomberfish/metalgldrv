@@ -66,6 +66,11 @@ static void printReflection(const Reflection& r) {
     for (size_t i = 0; i < r.slots.size(); i++)
         printf("slot %zu: %s index=%u element=%u target=0x%x\n", i, slotKindName(r.slots[i].kind), r.slots[i].index, r.slots[i].element,
                r.slots[i].textureTarget);
+    printf("multipass: tcsVertexOutBytes=%u tcsPatchOutBytes=%u xfbStride=%u,%u,%u,%u mask=%x flat=%d layer=%d vpi=%d\n",
+           r.multipass.tcsVertexOutBytes, r.multipass.tcsPatchOutBytes, r.multipass.xfbStride[0], r.multipass.xfbStride[1],
+           r.multipass.xfbStride[2], r.multipass.xfbStride[3], r.multipass.xfbBufferMask, r.usesFlatShading, r.writesLayer,
+           r.writesViewportIndex);
+    for (auto& x : r.xfbVaryings) printf("xfb %s type=0x%x size=%d buffer=%d offset=%d\n", x.name.c_str(), x.type, x.arraySize, x.buffer, x.offset);
     printf("defaultUniformSize=%u localSize=%d,%d,%d fp64=%d discard=%d\n", r.defaultUniformSize, r.localSize[0], r.localSize[1],
            r.localSize[2], r.usesFp64, r.usesDiscard);
 }
@@ -89,8 +94,10 @@ bool validateMSL(const std::string& src, std::string& err) {
 
 int main(int argc, char** argv) {
     std::vector<std::pair<Stage, std::string>> inputs;
+    std::vector<std::string> xfbNames;
+    bool xfbSeparate = false;
     std::string mslOut;
-    bool validate = true, quiet = false, compileOnly = false, timing = false;
+    bool validate = true, quiet = false, compileOnly = false, timing = false, xfb = false;
     auto now = [] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     double t0 = 0, tc = 0;
     for (int i = 1; i < argc; i++) {
@@ -105,9 +112,23 @@ int main(int argc, char** argv) {
         else if (a == "-q") quiet = true;
         else if (a == "--compile-only") compileOnly = true;
         else if (a == "--time") timing = true;
+        else if (a == "--xfb" && i + 1 < argc) {
+            // comma separated varying names for glTransformFeedbackVaryings (interleaved)
+            xfb = true;
+            std::string v = argv[++i];
+            size_t p = 0;
+            while (p <= v.size()) {
+                size_t q = v.find(',', p);
+                if (q == std::string::npos) q = v.size();
+                if (q > p) xfbNames.push_back(v.substr(p, q - p));
+                p = q + 1;
+            }
+        } else if (a == "--xfb-separate") xfbSeparate = true;
         else { fprintf(stderr, "usage: glslc -S <stage> <file> ... [--msl out] [--no-validate] [-q]\n"); return 2; }
     }
     LinkInput li;
+    li.xfbVaryings = xfbNames;
+    li.xfbInterleaved = !xfbSeparate;
     for (auto& [st, path] : inputs) {
         std::ifstream f(path);
         if (!f) { fprintf(stderr, "cannot read %s\n", path.c_str()); return 2; }
@@ -128,7 +149,11 @@ int main(int argc, char** argv) {
     if (!lr.program) { fprintf(stderr, "link FAILED\n"); return 3; }
     if (!quiet) printReflection(lr.reflection);
     VariantKey key;
-    key.kind = (lr.reflection.stageMask & (1u << (int)Stage::Compute)) ? PipelineKind::Compute : PipelineKind::Classic;
+    uint32_t sm = lr.reflection.stageMask;
+    key.kind = (sm & (1u << (int)Stage::Compute)) ? PipelineKind::Compute
+             : (sm & (1u << (int)Stage::TessEval)) ? PipelineKind::Tessellation
+             : (sm & (1u << (int)Stage::Geometry)) ? PipelineKind::MeshGeometry
+             : xfb ? PipelineKind::XfbCapture : PipelineKind::Classic;
     t0 = now();
     MSLOutput mo = generateMSL(*lr.program, key);
     double tm = now() - t0;
