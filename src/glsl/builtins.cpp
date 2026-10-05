@@ -291,7 +291,10 @@ void addTextureFunctions(Ctx& c) {
                 const Type gP = vecT(BT::Float, cd + (arr ? 1 : 0));
                 if (sh) {
                     c.add("textureGather", Type::vector(BT::Float, 4), {T, gP, F});
-                    if (!cube) c.add("textureGatherOffset", Type::vector(BT::Float, 4), {T, gP, F, Type::vector(BT::Int, 2)});
+                    if (!cube) {
+                        c.add("textureGatherOffset", Type::vector(BT::Float, 4), {T, gP, F, Type::vector(BT::Int, 2)});
+                        c.add("textureGatherOffsets", Type::vector(BT::Float, 4), {T, gP, F, Type::vector(BT::Int, 2).arrayOf(4)});
+                    }
                 } else {
                     c.add("textureGather", G4, {T, gP});
                     c.add("textureGather", G4, {T, gP, I});

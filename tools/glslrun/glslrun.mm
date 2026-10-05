@@ -153,6 +153,115 @@ static std::vector<float> parseFloats(const std::string& s) {
     return v;
 }
 
+// Test textures with known contents for Texture/Sampler/Image slots (compute mode).
+//   float 2D:     RGBA32Float 4x4 with 3 mips, texel(level L, x, y) = (x, y, L, 100L + x + 4y)
+//   int/uint 2D:  RGBA32Sint/Uint 4x4 (1 mip), texel = (x, y, 0, x + 4y)
+//   2D array:     RGBA32Float 4x4x2, texel = (x, y, layer, x + 4y + 16 layer)
+//   3D:           RGBA32Float 4x4x2, texel = (x, y, z, x + 4y + 16z)
+//   2D shadow:    Depth32Float 4x4, depth = (x + 4y) / 16, compare LEQUAL
+//   buffer:       RGBA32Float 16 texels, texel i = (i, 2i, 3i, 4i)
+//   image2D:      RGBA32Float 4x4 = (x, y, 0, 1); uimage2D/iimage2D: R32Uint/R32Sint 4x4 = x + 4y
+// Samplers: nearest, clamp to edge, nearest mip.
+static uint64_t testTexture(id<MTLDevice> dev, uint32_t glType, bool sampler, std::vector<id>& keep) {
+    auto fill = [&](id<MTLTexture> t, int w, int h, int d, int level, int comps, auto fn) {
+        for (int z = 0; z < d; z++) {
+            std::vector<uint32_t> px(w * h * comps);
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    for (int c = 0; c < comps; c++) px[(y * w + x) * comps + c] = fn(x, y, z, c);
+            if (t.textureType == MTLTextureType2DArray)
+                [t replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:z withBytes:px.data() bytesPerRow:w * comps * 4 bytesPerImage:0];
+            else
+                [t replaceRegion:MTLRegionMake3D(0, 0, z, w, h, 1) mipmapLevel:level slice:0 withBytes:px.data() bytesPerRow:w * comps * 4 bytesPerImage:w * h * comps * 4];
+        }
+    };
+    auto F = [](float f) { uint32_t u; memcpy(&u, &f, 4); return u; };
+    MTLTextureDescriptor* td = [MTLTextureDescriptor new];
+    td.storageMode = MTLStorageModeShared;
+    td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    td.width = 4;
+    td.height = 4;
+    id<MTLTexture> t = nil;
+    switch (glType) {
+        case 0x8B5E: case 0x8B63: {  // sampler2D, sampler2DRect
+            td.pixelFormat = MTLPixelFormatRGBA32Float;
+            td.mipmapLevelCount = glType == 0x8B5E ? 3 : 1;
+            t = [dev newTextureWithDescriptor:td];
+            for (int L = 0; L < (int)td.mipmapLevelCount; L++)
+                fill(t, 4 >> L, 4 >> L, 1, L, 4, [&](int x, int y, int, int c) { float v[4] = {(float)x, (float)y, (float)L, (float)(100 * L + x + 4 * y)}; return F(v[c]); });
+            break;
+        }
+        case 0x8DCA: case 0x8DD2: {  // isampler2D, usampler2D
+            td.pixelFormat = glType == 0x8DCA ? MTLPixelFormatRGBA32Sint : MTLPixelFormatRGBA32Uint;
+            t = [dev newTextureWithDescriptor:td];
+            fill(t, 4, 4, 1, 0, 4, [&](int x, int y, int, int c) { uint32_t v[4] = {(uint32_t)x, (uint32_t)y, 0, (uint32_t)(x + 4 * y)}; return v[c]; });
+            break;
+        }
+        case 0x8DC1: {  // sampler2DArray
+            td.textureType = MTLTextureType2DArray;
+            td.arrayLength = 2;
+            td.pixelFormat = MTLPixelFormatRGBA32Float;
+            t = [dev newTextureWithDescriptor:td];
+            fill(t, 4, 4, 2, 0, 4, [&](int x, int y, int z, int c) { float v[4] = {(float)x, (float)y, (float)z, (float)(x + 4 * y + 16 * z)}; return F(v[c]); });
+            break;
+        }
+        case 0x8B5F: {  // sampler3D
+            td.textureType = MTLTextureType3D;
+            td.depth = 2;
+            td.pixelFormat = MTLPixelFormatRGBA32Float;
+            t = [dev newTextureWithDescriptor:td];
+            fill(t, 4, 4, 2, 0, 4, [&](int x, int y, int z, int c) { float v[4] = {(float)x, (float)y, (float)z, (float)(x + 4 * y + 16 * z)}; return F(v[c]); });
+            break;
+        }
+        case 0x8B62: {  // sampler2DShadow
+            td.pixelFormat = MTLPixelFormatDepth32Float;
+            td.usage = MTLTextureUsageShaderRead;
+            t = [dev newTextureWithDescriptor:td];
+            fill(t, 4, 4, 1, 0, 1, [&](int x, int y, int, int) { return F((x + 4 * y) / 16.0f); });
+            break;
+        }
+        case 0x8DC2: {  // samplerBuffer
+            td.textureType = MTLTextureTypeTextureBuffer;
+            td.pixelFormat = MTLPixelFormatRGBA32Float;
+            td.width = 16;
+            td.height = 1;
+            id<MTLBuffer> b = [dev newBufferWithLength:16 * 16 options:MTLResourceStorageModeShared];
+            float* f = (float*)b.contents;
+            for (int i = 0; i < 16; i++) { f[4 * i] = i; f[4 * i + 1] = 2 * i; f[4 * i + 2] = 3 * i; f[4 * i + 3] = 4 * i; }
+            t = [b newTextureWithDescriptor:td offset:0 bytesPerRow:256];
+            keep.push_back(b);
+            break;
+        }
+        case 0x904D: {  // image2D
+            td.pixelFormat = MTLPixelFormatRGBA32Float;
+            t = [dev newTextureWithDescriptor:td];
+            fill(t, 4, 4, 1, 0, 4, [&](int x, int y, int, int c) { float v[4] = {(float)x, (float)y, 0, 1}; return F(v[c]); });
+            break;
+        }
+        case 0x9063: case 0x9058: {  // uimage2D, iimage2D
+            td.pixelFormat = glType == 0x9063 ? MTLPixelFormatR32Uint : MTLPixelFormatR32Sint;
+            td.usage |= MTLTextureUsageShaderAtomic;
+            t = [dev newTextureWithDescriptor:td];
+            fill(t, 4, 4, 1, 0, 1, [&](int x, int y, int, int) { return (uint32_t)(x + 4 * y); });
+            break;
+        }
+        default:
+            fprintf(stderr, "glslrun: no test texture for GL type 0x%x\n", glType);
+            return 0;
+    }
+    keep.push_back(t);
+    if (!sampler) return t.gpuResourceID._impl;
+    MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
+    sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterNearest;
+    sd.mipFilter = MTLSamplerMipFilterNearest;
+    sd.sAddressMode = sd.tAddressMode = sd.rAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.supportArgumentBuffers = YES;
+    if (glType == 0x8B62) sd.compareFunction = MTLCompareFunctionLessEqual;
+    id<MTLSamplerState> ss = [dev newSamplerStateWithDescriptor:sd];
+    keep.push_back(ss);
+    return ss.gpuResourceID._impl;
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && !strcmp(argv[1], "--tesscheck")) return runTessCheck(argc > 2 && !strcmp(argv[2], "-v"));
     if (argc >= 2 && !strcmp(argv[1], "--pipeline")) {
@@ -253,9 +362,13 @@ int main(int argc, char** argv) {
         id<MTLBuffer> args = [dev newBufferWithLength:std::max<size_t>(8, r.slots.size() * 8) options:MTLResourceStorageModeShared];
         uint64_t* slots = (uint64_t*)args.contents;
         std::vector<id<MTLBuffer>> keep;
+        std::vector<id> keepTex;
         for (size_t i = 0; i < r.slots.size(); i++) {
             const Slot& s = r.slots[i];
             switch (s.kind) {
+                case SlotKind::Texture: slots[i] = testTexture(dev, r.uniforms[s.index].type, false, keepTex); break;
+                case SlotKind::Sampler: slots[i] = testTexture(dev, r.uniforms[s.index].type, true, keepTex); break;
+                case SlotKind::Image: slots[i] = testTexture(dev, r.uniforms[s.index].type, false, keepTex); break;
                 case SlotKind::DefaultUniforms: slots[i] = defaults.gpuAddress; break;
                 case SlotKind::Ubo: slots[i] = ubo.gpuAddress; break;
                 case SlotKind::Ssbo: slots[i] = ssbo[std::min(7, r.storageBlocks[s.index].binding)].gpuAddress; break;
@@ -287,6 +400,8 @@ int main(int argc, char** argv) {
         [enc useResource:defaults usage:MTLResourceUsageRead];
         [enc useResource:acb usage:MTLResourceUsageRead | MTLResourceUsageWrite];
         for (auto b : keep) [enc useResource:b usage:MTLResourceUsageRead];
+        for (id x : keepTex)
+            if ([x conformsToProtocol:@protocol(MTLResource)]) [enc useResource:(id<MTLResource>)x usage:MTLResourceUsageRead | MTLResourceUsageWrite];
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(r.localSize[0], r.localSize[1], r.localSize[2])];
         [enc endEncoding];

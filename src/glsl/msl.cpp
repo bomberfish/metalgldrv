@@ -1430,7 +1430,29 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         if (sh) refZ = ex(A[ai++]);
         std::string offset;
         if (isOffset) {
-            if (name == "textureGatherOffsets") fail("textureGatherOffsets is not supported yet");
+            if (name == "textureGatherOffsets") {
+                // each result texel k is texel i0j0 (.w) of the footprint selected by offsets[k]
+                const Expr* offs = A[ai++];
+                if (!offs->cv) fail("textureGatherOffsets offsets must be a constant expression");
+                int compIdx2 = 0;
+                if (!sh && ai < A.size()) {
+                    if (!A[ai]->cv) fail("textureGather component must be a constant expression");
+                    compIdx2 = (int)A[ai]->cv->c[0].i;
+                }
+                std::string r = "float4(";
+                if (T.sampled == BT::Int) r = "int4(";
+                if (T.sampled == BT::UInt) r = "uint4(";
+                for (int k = 0; k < 4; k++) {
+                    std::string o2 = "int2(" + std::to_string((int)offs->cv->c[2 * k].i) + ", " + std::to_string((int)offs->cv->c[2 * k + 1].i) + ")";
+                    std::string args = smp + ", " + coord;
+                    if (!layer.empty()) args += ", " + layer;
+                    if (sh) args += ", " + ex(A[2]);
+                    args += ", " + o2;
+                    if (!sh) args += std::string(", component::") + kSwz[compIdx2];
+                    r += (k ? ", " : "") + tex + (sh ? ".gather_compare(" : ".gather(") + args + ").w";
+                }
+                return finish(r + ")");
+            }
             offset = ex(A[ai++]);
         }
         int compIdx = 0;
@@ -1510,16 +1532,28 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     if (T.ms) sample = "uint(" + ex(A[ai++]) + ")";
     std::string loc = coord + (layer.empty() ? "" : ", " + layer);
     if (n == "imageLoad") return finish(tex + ".read(" + loc + (sample.empty() ? "" : ", " + sample) + ")");
+    // read_write textures need fence() so the invocation sees its own writes (GLSL guarantees this)
+    const Expr* imgRoot = A[0];
+    while (imgRoot->kind == EK::Index) imgRoot = imgRoot->args[0];
+    uint8_t imgMem = imgRoot->kind == EK::Var ? imgRoot->var->q.memory : 0;
+    bool rw = !(imgMem & (MemReadOnly | MemWriteOnly));
     if (n == "imageStore") {
         if (T.ms) fail("imageStore to multisample images is not supported");
-        return finish(tex + ".write(" + ex(A[ai]) + ", " + loc + ")");
+        std::string w = tex + ".write(" + ex(A[ai]) + ", " + loc + ")";
+        if (rw) w = "(" + w + ", " + tex + ".fence())";
+        return finish(w);
     }
     std::string S = scalarName(T.sampled);
     std::string V = vecName(T.sampled, 4);
     if (T.sampled == BT::Float) fail("float image atomics are not supported by Metal");
+    auto fenced = [&](const std::string& v) {
+        if (!rw) return finish(v);
+        std::string t = newTempS(S);
+        return finish("(" + t + " = " + v + ", " + tex + ".fence(), " + t + ")");
+    };
     if (n == "imageAtomicCompSwap") {
-        if (layer.empty()) return finish("mgl_img_cas(" + tex + ", " + coord + ", " + S + "(" + ex(A[ai]) + "), " + S + "(" + ex(A[ai + 1]) + "))");
-        return finish("mgl_img_cas_a(" + tex + ", " + coord + ", " + layer + ", " + S + "(" + ex(A[ai]) + "), " + S + "(" + ex(A[ai + 1]) + "))");
+        if (layer.empty()) return fenced("mgl_img_cas(" + tex + ", " + coord + ", " + S + "(" + ex(A[ai]) + "), " + S + "(" + ex(A[ai + 1]) + "))");
+        return fenced("mgl_img_cas_a(" + tex + ", " + coord + ", " + layer + ", " + S + "(" + ex(A[ai]) + "), " + S + "(" + ex(A[ai + 1]) + "))");
     }
     static const std::map<std::string, std::string> ops = {
         {"imageAtomicAdd", "atomic_fetch_add"}, {"imageAtomicMin", "atomic_fetch_min"}, {"imageAtomicMax", "atomic_fetch_max"},
@@ -1527,7 +1561,7 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
         {"imageAtomicExchange", "atomic_exchange"}};
     auto it = ops.find(n);
     if (it == ops.end()) fail("image function '" + n + "' is not supported");
-    return finish(tex + "." + it->second + "(" + loc + ", " + V + "(" + ex(A[ai]) + ")).x");
+    return fenced(tex + "." + it->second + "(" + loc + ", " + V + "(" + ex(A[ai]) + ")).x");
 }
 
 // ===========================================================================
@@ -2239,8 +2273,13 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
         perPrim("uint", "mgl_layer", "render_target_array_index", "uint(" + g + "bi_gl_Layer)");
     if (si.bi.count(BuiltinVar::ViewportIndex) && si.bi[BuiltinVar::ViewportIndex]->q.storage == Storage::Out)
         perPrim("uint", "mgl_vp", "viewport_array_index", "uint(" + g + "bi_gl_ViewportIndex)");
+    const StageCode& fsc = P.stages[(int)Stage::Fragment];
+    bool fsClip = fsc.main && fsc.usedNames.count("gl_ClipDistance");
+    bool fsCull = fsc.main && fsc.usedNames.count("gl_CullDistance");
     for (auto& f : fields) {
-        if (f.key == "pos" || f.key == "psize" || f.key == "clipd" || f.key == "culld" || f.key == "clipv") continue;
+        if (f.key == "pos" || f.key == "psize" || f.key == "clipv") continue;
+        if (f.key == "clipd" && !fsClip) continue;
+        if (f.key == "culld" && !fsCull) continue;
         if (f.type.base == BT::Bool) fail("boolean varyings are not allowed");
         std::string a = acc(f, g);
         if (f.type.base == BT::Double) {
@@ -2428,6 +2467,22 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             case BuiltinVar::HelperInvocation:
                 copyIn += "    g.bi_" + v->name + " = simd_is_helper_thread();\n";
                 break;
+            case BuiltinVar::ClipDistance:
+            case BuiltinVar::CullDistance: {
+                std::string key = v->builtin == BuiltinVar::ClipDistance ? "clipd" : "culld";
+                int n = v->type.isArray() ? v->type.dims[0] : 1;
+                for (int i = 0; i < n; i++) {
+                    std::string nm = key + "_" + std::to_string(i);
+                    if (haveVsOutputs_ && !fragInputsAvailable_.count(nm)) {
+                        copyIn += "    g.bi_" + v->name + "[" + std::to_string(i) + "] = 0.0f;\n";
+                        continue;
+                    }
+                    inS += "    float " + nm + " [[user(" + nm + ")]];\n";
+                    copyIn += "    g.bi_" + v->name + "[" + std::to_string(i) + "] = in." + nm + ";\n";
+                    anyIn = true;
+                }
+                break;
+            }
             default: break;
         }
     }
