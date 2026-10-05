@@ -13,7 +13,7 @@
 
 namespace glsl {
 
-extern const char* const kMSLPrelude;
+std::string buildMSLPrelude(const std::string& body);
 
 namespace {
 
@@ -64,6 +64,7 @@ private:
     std::set<std::string> fragInputsAvailable_;  // from the vertex stage
     bool haveVsOutputs_ = false;
     bool hasShared_ = false;
+    bool needEq_ = false;
 
     [[noreturn]] void fail(const std::string& m) { throw EmitError{m}; }
 
@@ -512,9 +513,11 @@ std::string Emitter::binary(Op op, const std::string& a, const Type& ta, const s
         case Op::Ge: return "(" + a + " >= " + b + ")";
         case Op::Eq:
             if (ta.isScalar()) return "(" + a + " == " + b + ")";
+            needEq_ = true;
             return "mgl_eq(" + a + ", " + b + ")";
         case Op::Ne:
             if (ta.isScalar()) return "(" + a + " != " + b + ")";
+            needEq_ = true;
             return "(!mgl_eq(" + a + ", " + b + "))";
         default: fail("internal: bad binary op");
     }
@@ -1524,6 +1527,7 @@ void Emitter::emitStage(Stage s, std::string& o) {
     sc_ = &P.stages[(int)s];
     helpers_.clear();
     helperByKey_.clear();
+    needEq_ = false;
     fnNames_.clear();
     tempN_ = 0;
     static const char* nsNames[] = {"vs", "tcs", "tes", "gs", "fs", "cs"};
@@ -1606,9 +1610,10 @@ void Emitter::emitStage(Stage s, std::string& o) {
     for (auto& t : temps_) init += "        " + t + "\n";
     init += initBody + "    }\n";
 
-    o += "namespace " + ns_ + " {\nusing ::mgl_eq;\n";
+    o += "namespace " + ns_ + " {\n";
+    if (needEq_) o += "using ::mgl_eq;\n";
     o += structs;
-    for (auto* sd : order) {
+    for (auto* sd : needEq_ ? order : std::vector<const StructDef*>{}) {
         // equality helper for structs (used by == on aggregates)
         std::string n = structName(sd);
         o += "inline bool mgl_eq(" + n + " a, " + n + " b) { return true";
@@ -1933,12 +1938,11 @@ MSLOutput Emitter::run() {
         uint32_t m = P.stageMask;
         if (m & ((1u << (int)Stage::Geometry) | (1u << (int)Stage::TessControl) | (1u << (int)Stage::TessEval)))
             fail("geometry and tessellation shaders are not supported yet");
-        std::string o = kMSLPrelude;
-        o += "\n";
+        std::string o;
         emitArgs(o);
         for (Stage s : {Stage::Vertex, Stage::Fragment, Stage::Compute})
             if (P.stages[(int)s].main) emitStage(s, o);
-        out_.source = std::move(o);
+        out_.source = buildMSLPrelude(o) + "\n" + o;
     } catch (EmitError& e) {
         out_.error = e.msg;
         out_.source.clear();

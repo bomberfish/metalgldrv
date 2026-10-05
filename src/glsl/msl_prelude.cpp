@@ -1,17 +1,27 @@
-// MSL prelude shared by every generated shader.
+// MSL prelude, emitted on demand: each chunk is included only when the generated
+// shader references one of the symbols it defines (Metal front-end time is
+// dominated by parsing, so unused helpers cost real compile time).
+#include <regex>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace glsl {
 
-extern const char* const kMSLPrelude;
+namespace {
 
-const char* const kMSLPrelude = R"MSL(#include <metal_stdlib>
-using namespace metal;
+struct Chunk {
+    std::vector<std::string> symbols;  // identifiers that pull this chunk in
+    std::string code;
+};
 
-// ---------------------------------------------------------------------------
-// fp64 stub: doubles are emulated with float precision until the soft-float
-// library lands. Buffer layout stays IEEE binary64.
-// ---------------------------------------------------------------------------
+std::vector<Chunk> buildChunks() {
+    std::vector<Chunk> c;
+    // --- fp64 stub ------------------------------------------------------------------
+    c.push_back({{"mgl_f64", "mgl_f64v2", "mgl_f64v3", "mgl_f64v4", "mgl_f64m2x2", "mgl_f64m2x3", "mgl_f64m2x4", "mgl_f64m3x2",
+                  "mgl_f64m3x3", "mgl_f64m3x4", "mgl_f64m4x2", "mgl_f64m4x3", "mgl_f64m4x4", "mgl_f64_from_bits", "mgl_f64_to_bits",
+                  "mgl_pack_f64", "mgl_unpack_f64"},
+                 R"(// fp64 stub: doubles use float precision until the soft-float library lands; buffer layout stays binary64.
 typedef float mgl_f64;
 typedef float2 mgl_f64v2;
 typedef float3 mgl_f64v3;
@@ -25,7 +35,6 @@ typedef float3x4 mgl_f64m3x4;
 typedef float4x2 mgl_f64m4x2;
 typedef float4x3 mgl_f64m4x3;
 typedef float4x4 mgl_f64m4x4;
-
 inline float mgl_f64_from_bits(uint2 b) {
     uint hi = b.y, lo = b.x;
     uint sign = hi & 0x80000000u;
@@ -50,11 +59,9 @@ inline uint2 mgl_f64_to_bits(float f) {
 }
 inline mgl_f64 mgl_pack_f64(uint2 v) { return mgl_f64_from_bits(v); }
 inline uint2 mgl_unpack_f64(mgl_f64 v) { return mgl_f64_to_bits(v); }
-
-// ---------------------------------------------------------------------------
-// GLSL arrays have value semantics
-// ---------------------------------------------------------------------------
-template <typename T, int N>
+)"});
+    // --- arrays ---------------------------------------------------------------------
+    c.push_back({{"mgl_array"}, R"(template <typename T, int N>
 struct mgl_array {
     T e[N];
     thread T& operator[](int i) thread { return e[i]; }
@@ -65,91 +72,82 @@ struct mgl_array {
     const device T& operator[](int i) const device { return e[i]; }
     const constant T& operator[](int i) const constant { return e[i]; }
 };
-
-// ---------------------------------------------------------------------------
-// Byte-offset buffer access (std140 / std430 / default uniform block)
-// ---------------------------------------------------------------------------
-// All buffer accesses go through uint-typed storage so that differently-typed
-// views of the same memory (common in GL: raw uint[] + typed struct) are not
-// reordered by type-based alias analysis.
-#define MGL_LDST(T, ST, CV)                                                                                    \
-    inline T mgl_ld_##T(constant uchar* p, uint o) { return as_type<T>(CV(*(constant ST*)(p + o))); }        \
-    inline T mgl_ld_##T(device const uchar* p, uint o) { return as_type<T>(CV(*(device const ST*)(p + o))); } \
-    inline T mgl_ld_##T(threadgroup const uchar* p, uint o) { return as_type<T>(CV(*(threadgroup const ST*)(p + o))); } \
-    inline void mgl_st_##T(device uchar* p, uint o, T v) { *(device ST*)(p + o) = ST(as_type<CV>(v)); }
-MGL_LDST(float, uint, uint)
-MGL_LDST(float2, uint2, uint2)
-MGL_LDST(float3, packed_uint3, uint3)
-MGL_LDST(float4, uint4, uint4)
-MGL_LDST(int, uint, uint)
-MGL_LDST(int2, uint2, uint2)
-MGL_LDST(int3, packed_uint3, uint3)
-MGL_LDST(int4, uint4, uint4)
-MGL_LDST(uint, uint, uint)
-MGL_LDST(uint2, uint2, uint2)
-MGL_LDST(uint3, packed_uint3, uint3)
-MGL_LDST(uint4, uint4, uint4)
-
-#define MGL_LDST_BOOL(T, U, PU)                                                                                \
-    inline T mgl_ld_##T(constant uchar* p, uint o) { return U(*(constant PU*)(p + o)) != U(0u); }               \
-    inline T mgl_ld_##T(device const uchar* p, uint o) { return U(*(device const PU*)(p + o)) != U(0u); }        \
-    inline void mgl_st_##T(device uchar* p, uint o, T v) { *(device PU*)(p + o) = PU(select(U(0u), U(1u), v)); }
-MGL_LDST_BOOL(bool, uint, uint)
-MGL_LDST_BOOL(bool2, uint2, uint2)
-MGL_LDST_BOOL(bool3, uint3, packed_uint3)
-MGL_LDST_BOOL(bool4, uint4, uint4)
-
-#define MGL_LDST_F64(AS)                                                                                       \
-    inline mgl_f64 mgl_ld_mgl_f64(AS const uchar* p, uint o) { return mgl_f64_from_bits(*(AS const uint2*)(p + o)); } \
-    inline mgl_f64v2 mgl_ld_mgl_f64v2(AS const uchar* p, uint o) { return mgl_f64v2(mgl_ld_mgl_f64(p, o), mgl_ld_mgl_f64(p, o + 8)); } \
-    inline mgl_f64v3 mgl_ld_mgl_f64v3(AS const uchar* p, uint o) { return mgl_f64v3(mgl_ld_mgl_f64(p, o), mgl_ld_mgl_f64(p, o + 8), mgl_ld_mgl_f64(p, o + 16)); } \
-    inline mgl_f64v4 mgl_ld_mgl_f64v4(AS const uchar* p, uint o) { return mgl_f64v4(mgl_ld_mgl_f64(p, o), mgl_ld_mgl_f64(p, o + 8), mgl_ld_mgl_f64(p, o + 16), mgl_ld_mgl_f64(p, o + 24)); }
-MGL_LDST_F64(constant)
-MGL_LDST_F64(device)
-inline void mgl_st_mgl_f64(device uchar* p, uint o, mgl_f64 v) { *(device uint2*)(p + o) = mgl_f64_to_bits(v); }
+)"});
+    // --- buffer access: all through uint storage (alias-safe across typed views) ----------
+    struct LT { const char* T; const char* ST; const char* CV; };
+    const LT lts[] = {{"float", "uint", "uint"},   {"float2", "uint2", "uint2"}, {"float3", "packed_uint3", "uint3"},
+                      {"float4", "uint4", "uint4"}, {"int", "uint", "uint"},      {"int2", "uint2", "uint2"},
+                      {"int3", "packed_uint3", "uint3"}, {"int4", "uint4", "uint4"}, {"uint", "uint", "uint"},
+                      {"uint2", "uint2", "uint2"}, {"uint3", "packed_uint3", "uint3"}, {"uint4", "uint4", "uint4"}};
+    for (auto& l : lts) {
+        std::string T = l.T, ST = l.ST, CV = l.CV;
+        std::string code;
+        for (const char* as : {"constant", "device const", "threadgroup const"})
+            code += "inline " + T + " mgl_ld_" + T + "(" + as + " uchar* p, uint o) { return as_type<" + T + ">(" + CV + "(*(" + as +
+                    " " + ST + "*)(p + o))); }\n";
+        c.push_back({{"mgl_ld_" + T}, code});
+        c.push_back({{"mgl_st_" + T}, "inline void mgl_st_" + T + "(device uchar* p, uint o, " + T + " v) { *(device " + ST + "*)(p + o) = " +
+                                          ST + "(as_type<" + CV + ">(v)); }\n"});
+    }
+    const LT bools[] = {{"bool", "uint", "uint"}, {"bool2", "uint2", "uint2"}, {"bool3", "packed_uint3", "uint3"}, {"bool4", "uint4", "uint4"}};
+    for (auto& l : bools) {
+        std::string T = l.T, ST = l.ST, U = l.CV;
+        std::string code;
+        for (const char* as : {"constant", "device const"})
+            code += "inline " + T + " mgl_ld_" + T + "(" + as + " uchar* p, uint o) { return " + U + "(*(" + as + " " + ST + "*)(p + o)) != " + U + "(0u); }\n";
+        c.push_back({{"mgl_ld_" + T}, code});
+        c.push_back({{"mgl_st_" + T}, "inline void mgl_st_" + T + "(device uchar* p, uint o, " + T + " v) { *(device " + ST + "*)(p + o) = " + ST +
+                                          "(select(" + U + "(0u), " + U + "(1u), v)); }\n"});
+    }
+    c.push_back({{"mgl_ld_mgl_f64", "mgl_ld_mgl_f64v2", "mgl_ld_mgl_f64v3", "mgl_ld_mgl_f64v4"}, R"(inline mgl_f64 mgl_ld_mgl_f64(constant uchar* p, uint o) { return mgl_f64_from_bits(*(constant uint2*)(p + o)); }
+inline mgl_f64 mgl_ld_mgl_f64(device const uchar* p, uint o) { return mgl_f64_from_bits(*(device const uint2*)(p + o)); }
+template <typename P> inline mgl_f64v2 mgl_ld_mgl_f64v2(P p, uint o) { return mgl_f64v2(mgl_ld_mgl_f64(p, o), mgl_ld_mgl_f64(p, o + 8)); }
+template <typename P> inline mgl_f64v3 mgl_ld_mgl_f64v3(P p, uint o) { return mgl_f64v3(mgl_ld_mgl_f64(p, o), mgl_ld_mgl_f64(p, o + 8), mgl_ld_mgl_f64(p, o + 16)); }
+template <typename P> inline mgl_f64v4 mgl_ld_mgl_f64v4(P p, uint o) { return mgl_f64v4(mgl_ld_mgl_f64(p, o), mgl_ld_mgl_f64(p, o + 8), mgl_ld_mgl_f64(p, o + 16), mgl_ld_mgl_f64(p, o + 24)); }
+)"});
+    c.push_back({{"mgl_st_mgl_f64", "mgl_st_mgl_f64v2", "mgl_st_mgl_f64v3", "mgl_st_mgl_f64v4"}, R"(inline void mgl_st_mgl_f64(device uchar* p, uint o, mgl_f64 v) { *(device uint2*)(p + o) = mgl_f64_to_bits(v); }
 inline void mgl_st_mgl_f64v2(device uchar* p, uint o, mgl_f64v2 v) { for (int i = 0; i < 2; i++) mgl_st_mgl_f64(p, o + 8 * i, v[i]); }
 inline void mgl_st_mgl_f64v3(device uchar* p, uint o, mgl_f64v3 v) { for (int i = 0; i < 3; i++) mgl_st_mgl_f64(p, o + 8 * i, v[i]); }
 inline void mgl_st_mgl_f64v4(device uchar* p, uint o, mgl_f64v4 v) { for (int i = 0; i < 4; i++) mgl_st_mgl_f64(p, o + 8 * i, v[i]); }
-
-// strided vectors (columns of row-major matrices)
-#define MGL_LDST_STRIDED(S, V2, V3, V4)                                                                       \
-    template <typename P> V2 mgl_ldcs_##V2(P p, uint o, uint s) { return V2(mgl_ld_##S(p, o), mgl_ld_##S(p, o + s)); } \
-    template <typename P> V3 mgl_ldcs_##V3(P p, uint o, uint s) { return V3(mgl_ld_##S(p, o), mgl_ld_##S(p, o + s), mgl_ld_##S(p, o + 2 * s)); } \
-    template <typename P> V4 mgl_ldcs_##V4(P p, uint o, uint s) { return V4(mgl_ld_##S(p, o), mgl_ld_##S(p, o + s), mgl_ld_##S(p, o + 2 * s), mgl_ld_##S(p, o + 3 * s)); } \
-    inline void mgl_stcs_##V2(device uchar* p, uint o, uint s, V2 v) { for (int i = 0; i < 2; i++) mgl_st_##S(p, o + i * s, v[i]); } \
-    inline void mgl_stcs_##V3(device uchar* p, uint o, uint s, V3 v) { for (int i = 0; i < 3; i++) mgl_st_##S(p, o + i * s, v[i]); } \
-    inline void mgl_stcs_##V4(device uchar* p, uint o, uint s, V4 v) { for (int i = 0; i < 4; i++) mgl_st_##S(p, o + i * s, v[i]); }
-MGL_LDST_STRIDED(float, float2, float3, float4)
-
-// ---------------------------------------------------------------------------
-// GLSL builtin helpers
-// ---------------------------------------------------------------------------
-template <typename T> inline T mgl_mod(T x, T y) { return x - y * floor(x / y); }
-template <typename T> inline T mgl_isign(T x) { return select(T(0), T(1), x > T(0)) - select(T(0), T(1), x < T(0)); }
-
-template <typename T, int C, int R> inline matrix<T, C, R> mgl_mcm(matrix<T, C, R> a, matrix<T, C, R> b) {
+)"});
+    for (int n = 2; n <= 4; n++) {
+        std::string V = "float" + std::to_string(n), N = std::to_string(n);
+        std::string args;
+        for (int i = 0; i < n; i++) args += std::string(i ? ", " : "") + "mgl_ld_float(p, o + " + std::to_string(i) + " * s)";
+        c.push_back({{"mgl_ldcs_" + V}, "template <typename P> inline " + V + " mgl_ldcs_" + V + "(P p, uint o, uint s) { return " + V + "(" + args + "); }\n"});
+        c.push_back({{"mgl_stcs_" + V}, "inline void mgl_stcs_" + V + "(device uchar* p, uint o, uint s, " + V + " v) { for (int i = 0; i < " + N +
+                                            "; i++) mgl_st_float(p, o + i * s, v[i]); }\n"});
+    }
+    // --- math helpers -------------------------------------------------------------------
+    c.push_back({{"mgl_mod"}, "template <typename T> inline T mgl_mod(T x, T y) { return x - y * floor(x / y); }\n"});
+    c.push_back({{"mgl_isign"}, "template <typename T> inline T mgl_isign(T x) { return select(T(0), T(1), x > T(0)) - select(T(0), T(1), x < T(0)); }\n"});
+    c.push_back({{"mgl_mcm"}, R"(template <typename T, int C, int R> inline matrix<T, C, R> mgl_mcm(matrix<T, C, R> a, matrix<T, C, R> b) {
     matrix<T, C, R> r;
     for (int i = 0; i < C; i++) r[i] = a[i] * b[i];
     return r;
 }
-template <typename T, int C, int R> inline matrix<T, C, R> mgl_outer(vec<T, R> c, vec<T, C> r) {
+)"});
+    c.push_back({{"mgl_outer"}, R"(template <typename T, int C, int R> inline matrix<T, C, R> mgl_outer(vec<T, R> c, vec<T, C> r) {
     matrix<T, C, R> m;
     for (int i = 0; i < C; i++) m[i] = c * r[i];
     return m;
 }
-template <typename T, int C, int R> inline matrix<T, C, R> mgl_mdiag(T s) {
+)"});
+    c.push_back({{"mgl_mdiag"}, R"(template <typename T, int C, int R> inline matrix<T, C, R> mgl_mdiag(T s) {
     matrix<T, C, R> m;
     for (int c = 0; c < C; c++)
         for (int r = 0; r < R; r++) m[c][r] = c == r ? s : T(0);
     return m;
 }
-template <typename T, int C, int R, int C2, int R2> inline matrix<T, C, R> mgl_mresize(matrix<T, C2, R2> s) {
+)"});
+    c.push_back({{"mgl_mresize"}, R"(template <typename T, int C, int R, int C2, int R2> inline matrix<T, C, R> mgl_mresize(matrix<T, C2, R2> s) {
     matrix<T, C, R> m;
     for (int c = 0; c < C; c++)
         for (int r = 0; r < R; r++) m[c][r] = (c < C2 && r < R2) ? s[c][r] : (c == r ? T(1) : T(0));
     return m;
 }
-template <typename T, int C, int R> inline matrix<T, C, R> mgl_madd(matrix<T, C, R> m, T s) { for (int i = 0; i < C; i++) m[i] += s; return m; }
+)"});
+    c.push_back({{"mgl_madd", "mgl_msub", "mgl_mdiv", "mgl_mneg"}, R"(template <typename T, int C, int R> inline matrix<T, C, R> mgl_madd(matrix<T, C, R> m, T s) { for (int i = 0; i < C; i++) m[i] += s; return m; }
 template <typename T, int C, int R> inline matrix<T, C, R> mgl_madd(T s, matrix<T, C, R> m) { for (int i = 0; i < C; i++) m[i] += s; return m; }
 template <typename T, int C, int R> inline matrix<T, C, R> mgl_msub(matrix<T, C, R> m, T s) { for (int i = 0; i < C; i++) m[i] -= s; return m; }
 template <typename T, int C, int R> inline matrix<T, C, R> mgl_msub(T s, matrix<T, C, R> m) { for (int i = 0; i < C; i++) m[i] = s - m[i]; return m; }
@@ -157,8 +155,8 @@ template <typename T, int C, int R> inline matrix<T, C, R> mgl_mdiv(matrix<T, C,
 template <typename T, int C, int R> inline matrix<T, C, R> mgl_mdiv(T s, matrix<T, C, R> m) { for (int i = 0; i < C; i++) m[i] = s / m[i]; return m; }
 template <typename T, int C, int R> inline matrix<T, C, R> mgl_mdiv(matrix<T, C, R> a, matrix<T, C, R> b) { for (int i = 0; i < C; i++) a[i] /= b[i]; return a; }
 template <typename T, int C, int R> inline matrix<T, C, R> mgl_mneg(matrix<T, C, R> m) { for (int i = 0; i < C; i++) m[i] = -m[i]; return m; }
-
-inline float2x2 mgl_inverse(float2x2 m) {
+)"});
+    c.push_back({{"mgl_inverse"}, R"(inline float2x2 mgl_inverse(float2x2 m) {
     float d = m[0][0] * m[1][1] - m[0][1] * m[1][0];
     return float2x2(float2(m[1][1], -m[0][1]), float2(-m[1][0], m[0][0])) * (1.0f / d);
 }
@@ -185,8 +183,8 @@ inline float4x4 mgl_inverse(float4x4 m) {
         float4(a10 * b10 - a11 * b08 + a13 * b06, a01 * b08 - a00 * b10 - a03 * b06, a30 * b04 - a31 * b02 + a33 * b00, a21 * b02 - a20 * b04 - a23 * b00) * id,
         float4(a11 * b07 - a10 * b09 - a12 * b06, a00 * b09 - a01 * b07 + a02 * b06, a31 * b01 - a30 * b03 - a32 * b00, a20 * b03 - a21 * b01 + a22 * b00) * id);
 }
-
-template <typename T> inline bool mgl_eq(T a, T b) { return a == b; }
+)"});
+    c.push_back({{"mgl_eq"}, R"(template <typename T> inline bool mgl_eq(T a, T b) { return a == b; }
 template <typename T, int N> inline bool mgl_eq(vec<T, N> a, vec<T, N> b) { return all(a == b); }
 template <typename T, int C, int R> inline bool mgl_eq(matrix<T, C, R> a, matrix<T, C, R> b) {
     for (int i = 0; i < C; i++)
@@ -198,38 +196,26 @@ template <typename T, int N> inline bool mgl_eq(mgl_array<T, N> a, mgl_array<T, 
         if (!mgl_eq(a[i], b[i])) return false;
     return true;
 }
-
-inline int mgl_findLSB(uint x) { return x == 0u ? -1 : int(ctz(x)); }
+)"});
+    c.push_back({{"mgl_findLSB", "mgl_findMSB"}, R"(inline int mgl_findLSB(uint x) { return x == 0u ? -1 : int(ctz(x)); }
 inline int mgl_findLSB(int x) { return mgl_findLSB(uint(x)); }
 inline int mgl_findMSB(uint x) { return x == 0u ? -1 : 31 - int(clz(x)); }
 inline int mgl_findMSB(int x) { return mgl_findMSB(x < 0 ? ~uint(x) : uint(x)); }
 template <typename T, int N> inline vec<int, N> mgl_findLSB(vec<T, N> v) { vec<int, N> r; for (int i = 0; i < N; i++) r[i] = mgl_findLSB(v[i]); return r; }
 template <typename T, int N> inline vec<int, N> mgl_findMSB(vec<T, N> v) { vec<int, N> r; for (int i = 0; i < N; i++) r[i] = mgl_findMSB(v[i]); return r; }
-template <typename T> inline T mgl_uaddCarry(T x, T y, thread T& c) { T r = x + y; c = select(T(0u), T(1u), r < x); return r; }
+)"});
+    c.push_back({{"mgl_uaddCarry", "mgl_usubBorrow", "mgl_mulExtended"}, R"(template <typename T> inline T mgl_uaddCarry(T x, T y, thread T& c) { T r = x + y; c = select(T(0u), T(1u), r < x); return r; }
 template <typename T> inline T mgl_usubBorrow(T x, T y, thread T& b) { b = select(T(0u), T(1u), x < y); return x - y; }
 template <typename T> inline void mgl_mulExtended(T x, T y, thread T& msb, thread T& lsb) { msb = mulhi(x, y); lsb = x * y; }
-
-#define MGL_ATOMICS(AS)                                                                                         \
-    inline int mgl_atomic_cas(AS atomic_int* p, int c, int v) {                                                  \
-        int e = c;                                                                                               \
-        while (!atomic_compare_exchange_weak_explicit(p, &e, v, memory_order_relaxed, memory_order_relaxed)) {  \
-            if (e != c) break;                                                                                   \
-            e = c;                                                                                               \
-        }                                                                                                        \
-        return e;                                                                                                \
-    }                                                                                                            \
-    inline uint mgl_atomic_cas(AS atomic_uint* p, uint c, uint v) {                                              \
-        uint e = c;                                                                                              \
-        while (!atomic_compare_exchange_weak_explicit(p, &e, v, memory_order_relaxed, memory_order_relaxed)) {  \
-            if (e != c) break;                                                                                   \
-            e = c;                                                                                               \
-        }                                                                                                        \
-        return e;                                                                                                \
-    }
-MGL_ATOMICS(device)
-MGL_ATOMICS(threadgroup)
-
-template <typename Tex, typename C, typename T> inline T mgl_img_cas(Tex t, C coord, T cmp, T v) {
+)"});
+    std::string cas;
+    for (const char* as : {"device", "threadgroup"})
+        for (const char* t : {"int", "uint"})
+            cas += std::string("inline ") + t + " mgl_atomic_cas(" + as + " atomic_" + t + "* p, " + t + " c, " + t + " v) {\n    " + t +
+                   " e = c;\n    while (!atomic_compare_exchange_weak_explicit(p, &e, v, memory_order_relaxed, memory_order_relaxed)) {\n"
+                   "        if (e != c) break;\n        e = c;\n    }\n    return e;\n}\n";
+    c.push_back({{"mgl_atomic_cas"}, cas});
+    c.push_back({{"mgl_img_cas", "mgl_img_cas_a"}, R"(template <typename Tex, typename C, typename T> inline T mgl_img_cas(Tex t, C coord, T cmp, T v) {
     vec<T, 4> e = vec<T, 4>(cmp);
     while (!t.atomic_compare_exchange_weak(coord, &e, vec<T, 4>(v))) {
         if (e.x != cmp) break;
@@ -245,8 +231,8 @@ template <typename Tex, typename C, typename T> inline T mgl_img_cas_a(Tex t, C 
     }
     return e.x;
 }
-
-inline bool mgl_alpha_pass(float a, uint func, float ref) {
+)"});
+    c.push_back({{"mgl_alpha_pass"}, R"(inline bool mgl_alpha_pass(float a, uint func, float ref) {
     switch (func) {
         case 0x0200u: return false;
         case 0x0201u: return a < ref;
@@ -258,8 +244,11 @@ inline bool mgl_alpha_pass(float a, uint func, float ref) {
         default: return true;
     }
 }
+)"});
+    return c;
+}
 
-// Runtime system values (mirrors glsl::MGLSys)
+const char* kSysStruct = R"(// Runtime system values (mirrors glsl::MGLSys)
 struct MGLSys {
     float depthRangeNear, depthRangeFar;
     uint depthMode;
@@ -277,6 +266,50 @@ struct MGLSys {
     uint pad1;
     float4 currentAttrib[32];
 };
-)MSL";
+)";
+
+void collectIdents(const std::string& s, std::set<std::string>& out) {
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        char ch = s[i];
+        if (ch == 'm' && s.compare(i, 4, "mgl_") == 0 && (i == 0 || !(std::isalnum((unsigned char)s[i - 1]) || s[i - 1] == '_'))) {
+            size_t j = i;
+            while (j < n && (std::isalnum((unsigned char)s[j]) || s[j] == '_')) j++;
+            out.insert(s.substr(i, j - i));
+            i = j;
+        } else {
+            i++;
+        }
+    }
+}
+
+}  // namespace
+
+std::string buildMSLPrelude(const std::string& body) {
+    static const std::vector<Chunk> chunks = buildChunks();
+    std::set<std::string> idents;
+    collectIdents(body, idents);
+    std::vector<bool> use(chunks.size(), false);
+    // fixpoint: chunks can reference other chunks' symbols
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t i = 0; i < chunks.size(); i++) {
+            if (use[i]) continue;
+            for (auto& sym : chunks[i].symbols)
+                if (idents.count(sym)) {
+                    use[i] = true;
+                    changed = true;
+                    collectIdents(chunks[i].code, idents);
+                    break;
+                }
+        }
+    }
+    std::string out = "#include <metal_stdlib>\nusing namespace metal;\n\n";
+    for (size_t i = 0; i < chunks.size(); i++)
+        if (use[i]) out += chunks[i].code;
+    out += kSysStruct;
+    return out;
+}
 
 }  // namespace glsl

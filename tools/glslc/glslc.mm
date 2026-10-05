@@ -5,6 +5,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -89,7 +90,9 @@ bool validateMSL(const std::string& src, std::string& err) {
 int main(int argc, char** argv) {
     std::vector<std::pair<Stage, std::string>> inputs;
     std::string mslOut;
-    bool validate = true, quiet = false, compileOnly = false;
+    bool validate = true, quiet = false, compileOnly = false, timing = false;
+    auto now = [] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+    double t0 = 0, tc = 0;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-S" && i + 2 < argc) {
@@ -101,6 +104,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-validate") validate = false;
         else if (a == "-q") quiet = true;
         else if (a == "--compile-only") compileOnly = true;
+        else if (a == "--time") timing = true;
         else { fprintf(stderr, "usage: glslc -S <stage> <file> ... [--msl out] [--no-validate] [-q]\n"); return 2; }
     }
     LinkInput li;
@@ -109,32 +113,47 @@ int main(int argc, char** argv) {
         if (!f) { fprintf(stderr, "cannot read %s\n", path.c_str()); return 2; }
         std::stringstream ss;
         ss << f.rdbuf();
+        t0 = now();
         CompileResult cr = compile(st, {ss.str()});
+        tc += now() - t0;
         if (!cr.infoLog.empty()) fprintf(stderr, "%s: %s", path.c_str(), cr.infoLog.c_str());
         if (!cr.shader) { fprintf(stderr, "%s: compile FAILED\n", path.c_str()); return 1; }
         li.shaders.push_back(cr.shader);
     }
     if (compileOnly) return 0;
+    t0 = now();
     LinkResult lr = link(li);
+    double tl = now() - t0;
     if (!lr.infoLog.empty()) fprintf(stderr, "link: %s", lr.infoLog.c_str());
     if (!lr.program) { fprintf(stderr, "link FAILED\n"); return 3; }
     if (!quiet) printReflection(lr.reflection);
     VariantKey key;
     key.kind = (lr.reflection.stageMask & (1u << (int)Stage::Compute)) ? PipelineKind::Compute : PipelineKind::Classic;
+    t0 = now();
     MSLOutput mo = generateMSL(*lr.program, key);
+    double tm = now() - t0;
     if (!mo.error.empty()) { fprintf(stderr, "msl: %s\n", mo.error.c_str()); return 4; }
     if (!quiet) printf("== msl ==\n%s\n", mo.source.c_str());
     if (!mslOut.empty()) {
         std::ofstream f(mslOut);
         f << mo.source;
     }
+    double tv = 0;
     if (validate) {
         std::string err;
+        if (getenv("MGL_REPEAT")) for (int i = 0; i < atoi(getenv("MGL_REPEAT")); i++) {
+            t0 = now();
+            validateMSL(mo.source + "\n// " + std::to_string(i) + "\n", err);
+            fprintf(stderr, "warm metal compile %.2f ms\n", now() - t0);
+        }
+        t0 = now();
         if (!validateMSL(mo.source, err)) {
             fprintf(stderr, "metal validation FAILED:\n%s\n", err.c_str());
             return 5;
         }
+        tv = now() - t0;
         if (!quiet) printf("== metal validation OK ==\n");
     }
+    if (timing) fprintf(stderr, "time: compile %.2f ms, link %.2f ms, msl %.2f ms (%zu bytes), metal %.2f ms\n", tc, tl, tm, mo.source.size(), tv);
     return 0;
 }
