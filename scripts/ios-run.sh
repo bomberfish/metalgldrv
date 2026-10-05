@@ -1,12 +1,12 @@
 #!/bin/bash
 # Build the iOS driver + test runner, sign, install on the connected device and
 # run with console output. Usage: scripts/ios-run.sh [test-filter...]
-# Env: MGL_DEVICE (UDID), MGL_PROFILE (provisioning profile path), MGL_IDENTITY
+# Env: MGL_DEVICE (UDID), METALGLDRV_PROFILE (provisioning profile path), MGL_IDENTITY
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build-ios"
 DEVICE="${MGL_DEVICE:-00008142-001538391E80C01C}"
-PROFILE="${MGL_PROFILE:-$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/d069a67f-97c7-453a-8012-9ed70ad39456.mobileprovision}"
+PROFILE="${METALGLDRV_PROFILE:-$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/d069a67f-97c7-453a-8012-9ed70ad39456.mobileprovision}"
 IDENTITY="${MGL_IDENTITY:-Apple Development: hariz@bomberfish.ca (6W8DD89D7N)}"
 BUNDLE_ID="${MGL_BUNDLE_ID:-ca.bomberfish.mglrunner}"
 APP="$BUILD/MGLRunner.app"
@@ -56,4 +56,4 @@ codesign -f -s "$IDENTITY" --entitlements "$TMP/ent.plist" "$APP" >/dev/null
 xcrun devicectl device install app --device "$DEVICE" "$APP" >/dev/null
 echo "== running on device $DEVICE"
 xcrun devicectl device process launch --device "$DEVICE" --console --terminate-existing \
-  --environment-variables '{"MGL_LOG":"2"}' "$BUNDLE_ID" "$@" 2>&1 | grep -v "^Waiting\|^Launched\|^$"
+  --environment-variables '{"METALGLDRV_LOG":"2"}' "$BUNDLE_ID" "$@" 2>&1 | grep -v "^Waiting\|^Launched\|^$"

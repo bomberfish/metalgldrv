@@ -308,7 +308,7 @@ int runTessCheck(bool verbose) {
         NSError* err = nil;
         MTLCompileOptions* opts = [MTLCompileOptions new];
         opts.languageVersion = MTLLanguageVersion4_0;
-        opts.mathMode = getenv("MGL_FAST") ? MTLMathModeFast : MTLMathModeSafe;
+        opts.mathMode = getenv("METALGLDRV_FAST") ? MTLMathModeFast : MTLMathModeSafe;
         id<MTLLibrary> lib = [dev newLibraryWithSource:@(src.c_str()) options:opts error:&err];
         if (!check(lib, err, "compile")) return 5;
         id<MTLComputePipelineState> cps = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"tesscheck"] error:&err];

@@ -1,6 +1,8 @@
 // Draw calls, compute dispatch, memory barriers.
 #import "gl/texture.h"
 #include <cmath>
+#include <string>
+#include <unordered_map>
 #include "gl/gltypes.h"
 #include "gl/pipeline.h"
 #include "util/log.h"
@@ -324,6 +326,15 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             memcpy(&v, &rid, 8);
             break;
         }
+        case glsl::SlotKind::SubroutineIndices: {
+            const glsl::StageSubroutines& ss = r.subroutines[std::min<uint32_t>(s.index, (uint32_t)glsl::Stage::Count - 1)];
+            int n = std::max(1, ss.numLocations);
+            UploadAlloc u = ctx->upload(n * 4, 16);
+            const auto& sel = ctx->subroutineSelection[std::min<uint32_t>(s.index, (uint32_t)glsl::Stage::Count - 1)];
+            for (int k = 0; k < n; k++) ((uint32_t*)u.cpu)[k] = k < (int)sel.size() ? sel[k] : 0xffffffffu;
+            v = u.gpu;
+            break;
+        }
         case glsl::SlotKind::SystemValues:
         case glsl::SlotKind::XfbBuffer:
             break;
@@ -352,6 +363,8 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     s->alphaFunc = ctx->compatAlphaFunc;
     s->minSampleShading = ctx->sampleShading ? ctx->minSampleShading : 0;
     s->renderTargetHeight = (float)ctx->curPass.height;
+    memcpy(s->tessDefaultOuter, ctx->patchDefaultOuter, sizeof s->tessDefaultOuter);
+    memcpy(s->tessDefaultInner, ctx->patchDefaultInner, sizeof s->tessDefaultInner);
     memcpy(s->currentAttrib, ctx->currentAttrib, sizeof(float) * 4 * kMaxVertexAttribs);
     return sa.gpu;
 }
@@ -896,8 +909,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         for (int i = 0; i < kMaxXfbBuffers; i++) {
             auto& bb = x->buffers[i];
             if (!bb.buffer || !bb.buffer->mtl) continue;
-            uint32_t stride = prog->refl.xfbVaryings.empty() ? 0 : 0;
-            (void)stride;
+            info->xfbStride[i] = refl.multipass.xfbStride[i];
             info->xfbBuffer[i] = bb.buffer->gpuAddress() + bb.offset;
             GLsizeiptr range = bb.size ? bb.size : bb.buffer->size - bb.offset;
             info->xfbCapacity[i] = (uint32_t)std::max<GLsizeiptr>(0, range);  // bytes; shader divides by its stride
@@ -916,8 +928,9 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     if (vk.kind == glsl::PipelineKind::Tessellation) {
         const glsl::EntryPoint* k = var->entry(glsl::EntryPoint::Kernel);
         if (!k) return false;
-        size_t vbytes = (size_t)prims * d.instances * std::max(1, refl.tcsOutputVertices) * 256;  // generous; refined by MultiPassInfo
-        size_t pbytes = (size_t)prims * d.instances * 512;
+        int cpts = refl.multipass.tcsOutputVertices ? (int)refl.multipass.tcsOutputVertices : ctx->patchVertices;
+        size_t vbytes = (size_t)prims * d.instances * std::max(1, cpts) * std::max<uint32_t>(16, refl.multipass.tcsVertexOutBytes) + 16;
+        size_t pbytes = (size_t)prims * d.instances * std::max<uint32_t>(32, refl.multipass.tcsPatchOutBytes) + 16;
         id<MTLBuffer> vout = ctx->dev->newBuffer(vbytes);
         id<MTLBuffer> pout = ctx->dev->newBuffer(pbytes);
         ctx->dev->releaseAfter(vout, serial);
@@ -951,6 +964,21 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         x->verticesWritten += total;
         return true;  // rasterization (if enabled) is handled by the caller's classic draw
     }
+    // --- GS + transform feedback: a single-thread kernel walks primitives in GL order ---
+    if (xfbCapture && vk.kind == glsl::PipelineKind::MeshGeometry) {
+        if (var->entry(glsl::EntryPoint::Kernel)) {
+            id<MTLComputePipelineState> cps = ctx->pipelines_->computePipeline(var);
+            if (cps) {
+                id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
+                [ce setComputePipelineState:cps];
+                [ctx->computeArgTable setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+                [ctx->computeArgTable setAddress:sysAddr atIndex:glsl::kBufSys];
+                [ctx->computeArgTable setAddress:di.gpu atIndex:glsl::kBufStageIO];
+                [ce dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                ctx->endEncoder();
+            }
+        }
+    }
     // --- mesh pass (GS or TES[+GS]) ---
     const glsl::EntryPoint* ms = var->entry(glsl::EntryPoint::Mesh);
     const glsl::EntryPoint* os = var->entry(glsl::EntryPoint::Object);
@@ -982,7 +1010,91 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         [e drawMeshThreadgroups:MTLSizeMake(prims, d.instances, invocations) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
             threadsPerMeshThreadgroup:meshTG];
     }
-    if (xfbCapture) x->verticesWritten += ids.size() * d.instances;  // refined by GS output counters later
+    // GS output counts are only known on the GPU (MGLDrawInfo::counters); DrawTransformFeedback
+    // with GS-generated vertices is not tracked yet.
+    return true;
+}
+
+// Builds (or reuses from cache) a rotated 32-bit index list for flat shading.
+static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& out, uint32_t* minIdx, uint32_t* maxIdx) {
+    Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
+    const uint8_t* src = nullptr;
+    if (d.indexed) {
+        if (ib) {
+            if (!ib->mtl || (size_t)d.indices + (size_t)d.count * indexSize(d.indexType) > (size_t)ib->size) return false;
+            if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+            src = ib->cpu + (size_t)d.indices;
+        } else {
+            src = (const uint8_t*)d.indices;
+        }
+    }
+    // Cache key: only buffer-backed indices whose content can't change behind our back.
+    bool cacheable = ib && !(ib->mapped && (ib->mapAccess & GL_MAP_PERSISTENT_BIT) && (ib->mapAccess & GL_MAP_WRITE_BIT));
+    char key[96];
+    snprintf(key, sizeof key, "%p:%u:%llu:%zu:%d:%x:%x:%d:%u", (void*)ib, ib ? ib->generation : 0,
+             (unsigned long long)(ib ? ib->contentVersion : 0), (size_t)d.indices, d.count, d.indexType, d.mode, d.first,
+             ctx->primitiveRestart || ctx->primitiveRestartFixed ? ctx->primitiveRestartIndex : 0xdead);
+    struct RotEntry {
+        IndexInfo info;
+        uint32_t minIdx, maxIdx;
+        id<MTLBuffer> buffer;
+    };
+    static std::unordered_map<Context*, std::unordered_map<std::string, RotEntry>> caches;
+    auto& cache = caches[ctx];
+    if (cacheable) {
+        auto it = cache.find(key);
+        if (it != cache.end()) {
+            out = it->second.info;
+            *minIdx = it->second.minIdx;
+            *maxIdx = it->second.maxIdx;
+            return true;
+        }
+    }
+    std::vector<uint32_t> ids;
+    decomposeToList(ctx, d, src, ids);
+    GLenum lm = listModeFor(d.mode);
+    int vpp = listVerts(lm, ctx->patchVertices);
+    size_t prims = ids.size() / vpp;
+    ids.resize(prims * vpp);
+    uint32_t mn = UINT32_MAX, mx = 0;
+    for (size_t p = 0; p < prims; p++) {
+        uint32_t* v = &ids[p * vpp];
+        if (vpp == 3) {
+            uint32_t a = v[0], b = v[1], c = v[2];
+            v[0] = c;  // rotation keeps the winding
+            v[1] = a;
+            v[2] = b;
+        } else if (vpp == 2) {
+            std::swap(v[0], v[1]);
+        }
+        for (int k = 0; k < vpp; k++) {
+            mn = std::min(mn, v[k]);
+            mx = std::max(mx, v[k]);
+        }
+    }
+    out = IndexInfo();
+    out.prim = vpp == 2 ? MTLPrimitiveTypeLine : MTLPrimitiveTypeTriangle;
+    out.type = MTLIndexTypeUInt32;
+    out.count = (uint32_t)ids.size();
+    out.generated = true;
+    out.length = ids.size() * 4;
+    *minIdx = mn == UINT32_MAX ? 0 : mn + (d.indexed ? d.baseVertex : 0);
+    *maxIdx = mx + (d.indexed ? d.baseVertex : 0);
+    if (ids.empty()) return true;
+    if (cacheable) {
+        id<MTLBuffer> buf = ctx->dev->newBuffer(ids.size() * 4);
+        memcpy(buf.contents, ids.data(), ids.size() * 4);
+        out.addr = buf.gpuAddress;
+        if (cache.size() > 512) {
+            for (auto& [k, e] : cache) ctx->dev->releaseAfter(e.buffer, ctx->serial());
+            cache.clear();
+        }
+        cache[key] = {out, *minIdx, *maxIdx, buf};
+    } else {
+        UploadAlloc u = ctx->upload(ids.size() * 4, 16);
+        memcpy(u.cpu, ids.data(), ids.size() * 4);
+        out.addr = u.gpu;
+    }
     return true;
 }
 
@@ -1074,7 +1186,15 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
 
     IndexInfo ii;
     uint32_t minIdx = 0, maxIdx = 0;
-    if (!d.indirect && !prepareIndices(ctx, d, ii, &minIdx, &maxIdx)) return;
+    // GL's default provoking vertex is the LAST vertex; Metal uses the first. When the
+    // program has flat varyings, rotate every primitive so Metal's first is GL's last.
+    bool rotate = refl.usesFlatShading && ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION && !d.indirect &&
+                  d.mode != GL_POINTS && d.mode != GL_PATCHES;
+    if (rotate) {
+        if (!prepareRotatedIndices(ctx, d, ii, &minIdx, &maxIdx)) return;
+    } else if (!d.indirect && !prepareIndices(ctx, d, ii, &minIdx, &maxIdx)) {
+        return;
+    }
     if (d.indirect) {
         switch (d.mode) {
         case GL_POINTS: ii.prim = MTLPrimitiveTypePoint; break;

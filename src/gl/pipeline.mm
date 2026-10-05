@@ -37,12 +37,12 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
             v->lib = ctx_->dev->compileLibrary(@(v->msl.source.c_str()), &err);
             if (!v->lib) {
                 v->error = err ? err.UTF8String : "MSL compile failed";
-                if (g_logLevel >= LOG_DEBUG || envFlag("MGL_DUMP_FAILED_MSL", true))
+                if (g_logLevel >= LOG_DEBUG || envFlag("METALGLDRV_DUMP_FAILED_MSL", true))
                     MGL_ERR("MSL compile failed for program %u:\n%s\n---- source ----\n%s", prog->name, v->error.c_str(),
                             v->msl.source.c_str());
             } else {
                 v->ok = true;
-                if (envFlag("MGL_DUMP_MSL")) MGL_INFO("program %u MSL:\n%s", prog->name, v->msl.source.c_str());
+                if (envFlag("METALGLDRV_DUMP_MSL")) MGL_INFO("program %u MSL:\n%s", prog->name, v->msl.source.c_str());
             }
         }
     }

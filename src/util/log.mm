@@ -9,7 +9,7 @@
 #include "gl/stub_report.h"
 
 namespace mgl {
-int g_logLevel = envInt("MGL_LOG", LOG_INFO);
+int g_logLevel = envInt("METALGLDRV_LOG", LOG_INFO);
 
 static os_log_t mglLog() {
     static os_log_t l = os_log_create("ca.bomberfish.metalgldrv", "driver");
@@ -25,9 +25,9 @@ void logf(int level, const char* fmt, ...) {
     va_end(ap);
     static const char* tags[] = {"E", "W", "I", "D", "T"};
     fprintf(stderr, "[metalgldrv %s] %s\n", tags[level], buf);
-    // MGL_LOG_FILE=<path> (or "documents" for $HOME/Documents/metalgldrv.log)
+    // METALGLDRV_LOG_FILE=<path> (or "documents" for $HOME/Documents/metalgldrv.log)
     static FILE* lf = [] () -> FILE* {
-        const char* p = getenv("MGL_LOG_FILE");
+        const char* p = getenv("METALGLDRV_LOG_FILE");
         if (!p || !*p) return nullptr;
         std::string path = p;
         if (path == "documents") path = std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/metalgldrv.log";

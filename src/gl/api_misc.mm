@@ -318,7 +318,6 @@ API void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
     x->program = p;
     x->verticesWritten = 0;
     static bool warned = false;
-    if (!warned) MGL_WARN("transform feedback capture not implemented yet");
     warned = true;
 }
 

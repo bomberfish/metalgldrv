@@ -9,7 +9,7 @@
 #include "util/log.h"
 
 namespace mgl {
-bool g_statsEnabled = envFlag("MGL_STATS", false);
+bool g_statsEnabled = envFlag("METALGLDRV_STATS", false);
 static std::mutex g_m;
 static std::map<std::string, uint64_t> g_counts;
 static auto g_last = std::chrono::steady_clock::now();

@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
     double tv = 0;
     if (validate) {
         std::string err;
-        if (getenv("MGL_REPEAT")) for (int i = 0; i < atoi(getenv("MGL_REPEAT")); i++) {
+        if (getenv("METALGLDRV_REPEAT")) for (int i = 0; i < atoi(getenv("METALGLDRV_REPEAT")); i++) {
             t0 = now();
             validateMSL(mo.source + "\n// " + std::to_string(i) + "\n", err);
             fprintf(stderr, "warm metal compile %.2f ms\n", now() - t0);

@@ -28,6 +28,9 @@ static glsl::Stage stageForType(GLenum type, bool* ok) {
 void setupLinkedProgram(ProgramObj* p) {
     const glsl::Reflection& r = p->refl;
     p->uniformData.assign(std::max<uint32_t>(r.defaultUniformSize, 16), 0);
+    // Uniform initializers (`uniform float x = 1.0;`)
+    if (!r.defaultUniformInit.empty())
+        memcpy(p->uniformData.data(), r.defaultUniformInit.data(), std::min(r.defaultUniformInit.size(), p->uniformData.size()));
     p->locations.clear();
     int maxLoc = -1;
     for (size_t i = 0; i < r.uniforms.size(); i++) {
@@ -149,7 +152,7 @@ API void APIENTRY glCompileShader(GLuint shader) {
     s->infoLog = r.infoLog;
     if (!s->compiled) {
         MGL_DBG("shader %u compile failed:\n%s", shader, r.infoLog.c_str());
-        if (envFlag("MGL_DUMP_FAILED_GLSL")) {
+        if (envFlag("METALGLDRV_DUMP_FAILED_GLSL")) {
             std::string src;
             for (auto& x : s->sources) src += x;
             MGL_ERR("shader %u failed to compile:\n%s\n---- source ----\n%s", shader, r.infoLog.c_str(), src.c_str());
@@ -381,7 +384,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
     // Compile the common variant now so the MSL compile cost lands at link time, not mid-frame.
     uint32_t sm = p->refl.stageMask;
     bool multiPass = sm & ((1u << (int)glsl::Stage::Geometry) | (1u << (int)glsl::Stage::TessEval));
-    if (!multiPass && !envFlag("MGL_LAZY_COMPILE")) {
+    if (!multiPass && !envFlag("METALGLDRV_LAZY_COMPILE")) {
         glsl::VariantKey vk;
         vk.kind = (sm & (1u << (int)glsl::Stage::Compute)) ? glsl::PipelineKind::Compute : glsl::PipelineKind::Classic;
         ProgramVariant* v = ctx->pipelines_->variant(p, vk);
@@ -404,6 +407,17 @@ API void APIENTRY glUseProgram(GLuint program) {
     if (!p) return;
     if (!p->linked) return ctx->setError(GL_INVALID_OPERATION, "program not linked");
     ctx->program = p;
+    // Subroutine selections are reset when the current program changes (GL 4.6 §7.10).
+    for (int st = 0; st < (int)glsl::Stage::Count; st++) {
+        const auto& ss = p->refl.subroutines[st];
+        ctx->subroutineSelection[st].clear();
+        for (int l = 0; l < ss.numLocations; l++) {
+            uint32_t def = 0;
+            for (auto& u : ss.uniforms)
+                if (l >= u.location && l < u.location + u.arraySize && !u.compatible.empty()) def = u.compatible[0];
+            ctx->subroutineSelection[st].push_back(def);
+        }
+    }
 }
 
 API void APIENTRY glValidateProgram(GLuint program) {
@@ -1389,15 +1403,133 @@ API void APIENTRY glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize, 
     if (pp) copyLog(pp->infoLog, bufSize, length, infoLog);
 }
 
-// --- subroutines (ARB_shader_subroutine): no subroutines are ever active yet ---
-API GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype, const GLchar* name) { return -1; }
-API GLuint APIENTRY glGetSubroutineIndex(GLuint program, GLenum shadertype, const GLchar* name) { return GL_INVALID_INDEX; }
+// --- subroutines (ARB_shader_subroutine) ---
+static int stageIndexForShaderType(GLenum t) {
+    switch (t) {
+    case GL_VERTEX_SHADER: return (int)glsl::Stage::Vertex;
+    case GL_TESS_CONTROL_SHADER: return (int)glsl::Stage::TessControl;
+    case GL_TESS_EVALUATION_SHADER: return (int)glsl::Stage::TessEval;
+    case GL_GEOMETRY_SHADER: return (int)glsl::Stage::Geometry;
+    case GL_FRAGMENT_SHADER: return (int)glsl::Stage::Fragment;
+    case GL_COMPUTE_SHADER: return (int)glsl::Stage::Compute;
+    default: return -1;
+    }
+}
+
+static const glsl::StageSubroutines* stageSubs(Context* ctx, GLuint program, GLenum shadertype, ProgramObj** out) {
+    int st = stageIndexForShaderType(shadertype);
+    if (st < 0) {
+        ctx->setError(GL_INVALID_ENUM);
+        return nullptr;
+    }
+    ProgramObj* p = getProgram(ctx, program);
+    if (!p) return nullptr;
+    if (!p->linked) {
+        ctx->setError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+    if (out) *out = p;
+    return &p->refl.subroutines[st];
+}
+
+API GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype, const GLchar* name) {
+    MGL_CTX_RET(-1);
+    const glsl::StageSubroutines* ss = stageSubs(ctx, program, shadertype, nullptr);
+    if (!ss) return -1;
+    std::string n = name, base;
+    int elem;
+    bool had;
+    if (!parseArrayName(n, base, elem, had)) return -1;
+    for (auto& u : ss->uniforms)
+        if (u.name == n || (u.name == base && elem < u.arraySize)) return u.location + (u.name == n ? 0 : elem);
+    return -1;
+}
+
+API GLuint APIENTRY glGetSubroutineIndex(GLuint program, GLenum shadertype, const GLchar* name) {
+    MGL_CTX_RET(GL_INVALID_INDEX);
+    const glsl::StageSubroutines* ss = stageSubs(ctx, program, shadertype, nullptr);
+    if (!ss) return GL_INVALID_INDEX;
+    for (size_t i = 0; i < ss->functions.size(); i++)
+        if (ss->functions[i] == name) return (GLuint)i;
+    return GL_INVALID_INDEX;
+}
+
+API void APIENTRY glGetActiveSubroutineName(GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei* length, GLchar* name) {
+    MGL_CTX();
+    const glsl::StageSubroutines* ss = stageSubs(ctx, program, shadertype, nullptr);
+    if (!ss) return;
+    if (index >= ss->functions.size()) return ctx->setError(GL_INVALID_VALUE);
+    copyLog(ss->functions[index], bufSize, length, name);
+}
+
+API void APIENTRY glGetActiveSubroutineUniformName(GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei* length,
+                                                   GLchar* name) {
+    MGL_CTX();
+    const glsl::StageSubroutines* ss = stageSubs(ctx, program, shadertype, nullptr);
+    if (!ss) return;
+    if (index >= ss->uniforms.size()) return ctx->setError(GL_INVALID_VALUE);
+    copyLog(ss->uniforms[index].name, bufSize, length, name);
+}
+
+API void APIENTRY glGetActiveSubroutineUniformiv(GLuint program, GLenum shadertype, GLuint index, GLenum pname, GLint* values) {
+    MGL_CTX();
+    const glsl::StageSubroutines* ss = stageSubs(ctx, program, shadertype, nullptr);
+    if (!ss) return;
+    if (index >= ss->uniforms.size()) return ctx->setError(GL_INVALID_VALUE);
+    const auto& u = ss->uniforms[index];
+    switch (pname) {
+    case GL_NUM_COMPATIBLE_SUBROUTINES: *values = (GLint)u.compatible.size(); break;
+    case GL_COMPATIBLE_SUBROUTINES: for (size_t i = 0; i < u.compatible.size(); i++) values[i] = u.compatible[i]; break;
+    case GL_UNIFORM_SIZE: *values = u.arraySize; break;
+    case GL_UNIFORM_NAME_LENGTH: *values = (GLint)u.name.size() + 1; break;
+    default: ctx->setError(GL_INVALID_ENUM);
+    }
+}
+
 API void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GLuint* indices) {
     MGL_CTX();
-    if (count != 0) ctx->setError(GL_INVALID_VALUE);
+    int st = stageIndexForShaderType(shadertype);
+    if (st < 0) return ctx->setError(GL_INVALID_ENUM);
+    ProgramObj* p = ctx->activeProgramForStage((glsl::Stage)st);
+    if (!p) return ctx->setError(GL_INVALID_OPERATION);
+    const glsl::StageSubroutines& ss = p->refl.subroutines[st];
+    if (count != ss.numLocations) return ctx->setError(GL_INVALID_VALUE);
+    for (int i = 0; i < count; i++)
+        if (indices[i] >= ss.functions.size()) return ctx->setError(GL_INVALID_VALUE);
+    ctx->subroutineSelection[st].assign(indices, indices + count);
 }
+
 API void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuint* params) {
     MGL_CTX();
-    ctx->setError(GL_INVALID_VALUE);
+    int st = stageIndexForShaderType(shadertype);
+    if (st < 0) return ctx->setError(GL_INVALID_ENUM);
+    ProgramObj* p = ctx->activeProgramForStage((glsl::Stage)st);
+    if (!p) return ctx->setError(GL_INVALID_OPERATION);
+    if (location < 0 || location >= p->refl.subroutines[st].numLocations) return ctx->setError(GL_INVALID_VALUE);
+    const auto& sel = ctx->subroutineSelection[st];
+    *params = location < (int)sel.size() ? sel[location] : 0;
 }
-API void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname, GLint* values) { *values = 0; }
+
+API void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname, GLint* values) {
+    MGL_CTX();
+    const glsl::StageSubroutines* ss = stageSubs(ctx, program, shadertype, nullptr);
+    if (!ss) return;
+    switch (pname) {
+    case GL_ACTIVE_SUBROUTINE_UNIFORMS: *values = (GLint)ss->uniforms.size(); break;
+    case GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS: *values = ss->numLocations; break;
+    case GL_ACTIVE_SUBROUTINES: *values = (GLint)ss->functions.size(); break;
+    case GL_ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH: {
+        GLint m = 0;
+        for (auto& u : ss->uniforms) m = std::max<GLint>(m, (GLint)u.name.size() + 1);
+        *values = m;
+        break;
+    }
+    case GL_ACTIVE_SUBROUTINE_MAX_LENGTH: {
+        GLint m = 0;
+        for (auto& f : ss->functions) m = std::max<GLint>(m, (GLint)f.size() + 1);
+        *values = m;
+        break;
+    }
+    default: ctx->setError(GL_INVALID_ENUM);
+    }
+}

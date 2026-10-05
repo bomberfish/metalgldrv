@@ -90,6 +90,7 @@ public:
     uint8_t* mapShadow = nullptr;   // staging for non-persistent writes to busy buffers
     // texture buffer views referencing this buffer get invalidated on rename
     uint32_t generation = 0;
+    uint64_t contentVersion = 0;  // bumped on every CPU/GPU write path (derived-data caches)
 
     uint64_t gpuAddress() const { return mtl ? mtl.gpuAddress : 0; }
 };

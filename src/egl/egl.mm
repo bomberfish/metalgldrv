@@ -471,12 +471,12 @@ EGLAPI_EXPORT EGLContext EGLAPIENTRY eglCreateContext(EGLDisplay dpy, EGLConfig 
     clientVersion = major;
     // We always implement desktop GL 4.6. Profile selection:
     //  - explicit core request for >= 3.2 -> core profile
-    //  - otherwise compatibility (superset) unless MGL_PROFILE=core
+    //  - otherwise compatibility (superset) unless METALGLDRV_PROFILE=core
     bool core = false;
     if (t_egl.api == EGL_OPENGL_API && (major > 3 || (major == 3 && minor >= 2)) && profile != EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT &&
         (profile == EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT))
         core = true;
-    if (const char* p = getenv("MGL_PROFILE")) core = strcmp(p, "core") == 0;
+    if (const char* p = getenv("METALGLDRV_PROFILE")) core = strcmp(p, "core") == 0;
     if (t_egl.api == EGL_OPENGL_API && major > 4) return fail(EGL_BAD_MATCH, EGL_NO_CONTEXT);
     if (t_egl.api == EGL_OPENGL_API && major == 4 && minor > 6) return fail(EGL_BAD_MATCH, EGL_NO_CONTEXT);
 

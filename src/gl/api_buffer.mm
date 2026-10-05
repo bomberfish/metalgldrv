@@ -25,6 +25,7 @@ static bool allocStorage(Buffer* b, GLsizeiptr size) {
     }
     b->cpu = (uint8_t*)b->mtl.contents;
     b->size = size;
+    b->contentVersion++;
     b->lastUse = 0;
     b->lastGpuWrite = 0;
     b->generation++;
@@ -41,6 +42,7 @@ void syncBufferForCpuRead(Context* ctx, Buffer* b) {
 // Write `size` bytes at `offset` preserving GL ordering semantics.
 void writeBuffer(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, const void* data) {
     if (size <= 0) return;
+    b->contentVersion++;
     if (!busy(ctx, b)) {
         memcpy(b->cpu + offset, data, size);
         return;
@@ -381,6 +383,7 @@ static GLboolean unmap(Context* ctx, Buffer* b) {
         ctx->setError(GL_INVALID_OPERATION);
         return GL_FALSE;
     }
+    if (b->mapAccess & GL_MAP_WRITE_BIT) b->contentVersion++;
     if (b->mapShadow) {
         if (!(b->mapAccess & GL_MAP_FLUSH_EXPLICIT_BIT)) writeBuffer(ctx, b, b->mapOffset, b->mapLength, b->mapShadow);
         free(b->mapShadow);
@@ -475,6 +478,7 @@ static void copySubData(Context* ctx, Buffer* src, Buffer* dst, GLintptr ro, GLi
         return ctx->setError(GL_INVALID_OPERATION);
     if (src == dst && ((ro <= wo && wo < ro + size) || (wo <= ro && ro < wo + size))) return ctx->setError(GL_INVALID_VALUE);
     if (!size) return;
+    dst->contentVersion++;
     bool srcGpuWrite = src->lastGpuWrite && !ctx->dev->isComplete(src->lastGpuWrite);
     if (!srcGpuWrite && !busy(ctx, dst)) {
         memcpy(dst->cpu + wo, src->cpu + ro, size);

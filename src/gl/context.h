@@ -71,7 +71,7 @@ public:
     const FormatInfo* dsFmt = nullptr;
     Ref<Framebuffer> fb;  // the default framebuffer object (name 0)
     uint64_t lastUse = 0;
-    // MGL_UPSCALER=metalfx: the drawable is kept at native resolution and the
+    // METALGLDRV_UPSCALER=metalfx: the drawable is kept at native resolution and the
     // rendered image is upscaled with MetalFX's spatial scaler at present time.
     id upscaler = nil;               // id<MTL4FXSpatialScaler>
     id<MTLTexture> upscaled = nil;
@@ -235,6 +235,8 @@ public:
     Ref<Query> activeQueries[8][4];  // [query target index][index]
     GLenum conditionalRenderMode = 0;
     Ref<Query> conditionalQuery;
+
+    std::vector<uint32_t> subroutineSelection[(int)glsl::Stage::Count];  // glUniformSubroutinesuiv
 
     struct CompatState* compat = nullptr;
     GLenum compatAlphaFunc = GL_ALWAYS;  // legacy alpha test, applied by compat fragment shaders

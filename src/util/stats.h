@@ -1,5 +1,5 @@
 #pragma once
-// Lightweight counters for diagnosing driver behavior in the field (MGL_STATS=1).
+// Lightweight counters for diagnosing driver behavior in the field (METALGLDRV_STATS=1).
 namespace mgl {
 extern bool g_statsEnabled;
 // Counts an event attributed to the calling function (resolved with dladdr).
