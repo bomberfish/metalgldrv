@@ -1,0 +1,103 @@
+# metalgldrv architecture
+
+A standalone OpenGL 4.6 (core + compatibility) implementation on Metal 4, written
+from scratch with no third-party code. Primary consumer: the Amethyst iOS
+Minecraft launcher (LWJGL via EGL), targeting Sodium and Iris.
+
+```
+ app (LWJGL / GL)          EGL (src/egl)         GL frontend (src/gl)            Metal 4 (src/mtl + Metal.framework)
+ gl* entry points  ──────► eglCreateWindowSurface ──► Context state, objects ────► MTL4CommandQueue / Allocator / ArgumentTable
+                           CAMetalLayer                 draw/dispatch path          MTL4Compiler pipelines, residency set
+                                                        GLSL compiler (src/glsl) ─► MSL source per pipeline variant
+```
+
+## Layout
+| Path | Contents |
+|---|---|
+| `scripts/gen_glapi.py` | Generates `glapi.h`, weak stubs for every GL command, and the `*GetProcAddress` table from `registry/gl.xml`. Real implementations override the weak stubs at link time. |
+| `src/egl` | EGL 1.5 over `CAMetalLayer` (window) and offscreen (pbuffer) surfaces. |
+| `src/gl` | GL state machine, object model (`objects.h`), entry points (`api_*.mm`), draw path (`draw.mm`), internal shaders (clear/blit/present). |
+| `src/mtl` | Metal 4 device (`device.mm`), GL↔Metal formats and pixel transfer conversion (`formats.mm`). |
+| `src/glsl` | GLSL compiler: preprocessor → parser → semantic analysis → linker → MSL emitter. Public contract in `glsl.h`. |
+| `src/glsl/runtime/fp64.metal` | Soft double-precision MSL library (embedded into shaders that use doubles). |
+| `tests/host` | GL-level tests (run on macOS host and on the iPad through `tools/ios-runner`). |
+| `tests/fp64` | Bit-exact GPU validation of the fp64 library against host IEEE doubles. |
+| `demo/amethyst` | Patch set + build script for the Amethyst demo (Amethyst source lives outside the repo). |
+
+## Coordinate conventions
+* Every texture/renderbuffer stores GL row 0 in Metal row 0 (no data flipping
+  on upload/readback). Vertex-processing stages negate `position.y`, so GL window
+  y equals the Metal raster row: viewport/scissor rects pass through unchanged,
+  `gl_FragCoord.y` is the Metal position y, and the only flip happens once when
+  presenting the default framebuffer (`presentSurface`).
+* The y negation inverts orientation, so the runtime maps `GL_CCW` front faces to
+  `MTLWindingClockwise`.
+* Clip z is remapped from [-1,1] to [0,1] in the shader unless
+  `glClipControl(…, GL_ZERO_TO_ONE)`; `glDepthRange` maps onto `MTLViewport.znear/zfar`.
+
+## Command recording & synchronization (Metal 4)
+* One `MTL4CommandQueue` per process; each context records into a lazily begun
+  `MTL4CommandBuffer` with a recycled `MTL4CommandAllocator`.
+* Every command buffer reserves a **serial**; resources record the serial that
+  last used/wrote them. Completion is reported per serial by `MTL4CommitFeedback`
+  handlers (contexts may submit out of order), which also yields GPU timestamps
+  used for timer queries.
+* Metal 4 has no automatic hazard tracking. Every encoder starts with a
+  conservative `barrierAfterQueueStages:All` barrier, which gives GL's in-order
+  semantics; `glMemoryBarrier` maps to intra-encoder stage barriers.
+* CPU writes to buffers the GPU may still read either **rename** the storage
+  (small buffers; earlier draws keep the old `MTLBuffer`) or stage a GPU copy in
+  stream order (large buffers). Texture uploads always stage through the upload
+  ring and copy in stream order.
+* All resources live in one `MTLResidencySet` attached to the queue.
+* `glClear` is folded into render-pass load actions when nothing has been drawn
+  yet; otherwise (scissor/masks/mid-pass) a quad clear is drawn.
+
+## Binding model
+Each linked program owns an *argument buffer* of 8-byte slots (layout chosen by
+the linker, `glsl::Reflection::slots`): UBO/SSBO/atomic-counter GPU addresses,
+texture & sampler `MTLResourceID`s per sampler uniform (element), image views,
+the default-uniform-block address, SSBO sizes. Per draw the runtime fills a
+fresh slot array from current GL bindings (`buildArguments`). Argument-table
+buffer indices: 0 = slots, 1 = `MGLSys` (per-draw system values), 2..17 =
+vertex buffer bindings (stage_in with dynamic strides), 30 = current generic
+attribute values (constant step), 18..21 xfb, 22+ multi-pass scratch.
+
+## Pipelines
+`ProgramVariant` = MSL generated for a `glsl::VariantKey` (pipeline kind + data
+the shader must bake in). `RenderPipelineKey` adds vertex formats, attachment
+formats, blend state and sample count; depth/stencil formats are not part of
+Metal 4 pipelines. All compiled through `MTL4Compiler`.
+
+## Geometry shaders → mesh shaders (planned)
+`PipelineKind::MeshGeometry`: no object stage; the mesh grid has one threadgroup
+per (input primitive × instance × GS invocation). Threads fetch the primitive's
+vertices (manual vertex pulling; formats baked into the variant) and run the VS
+into threadgroup memory, then the GS body runs with `EmitVertex/EndPrimitive`
+appending to the mesh output (≤256 vertices / 512 primitives per threadgroup,
+which matches GL's limits); strips are converted to lists on the fly.
+`gl_Layer` and `gl_ViewportIndex` map to per-primitive mesh outputs.
+
+## Tessellation (planned, MoltenVK-style split without fixed function)
+Metal 4 dropped `drawPatches`, so the fixed-function tessellator isn't
+available. Following MoltenVK's stage decomposition: pass 1 is a compute kernel
+running VS + TCS per patch, writing control points, patch constants and tess
+levels to scratch buffers. Pass 2 is an object+mesh pipeline: the object stage
+reads levels and sizes the work; mesh threadgroups generate domain points and
+primitives with our own GL-rules tessellator (equal / fractional_even /
+fractional_odd spacing, triangles / quads / isolines, point_mode, cw/ccw) and
+run the TES per generated vertex.
+
+## fp64
+GLSL `double`/`dvecN` are `ulong`/`vec<ulong,N>` bit patterns in MSL; all
+arithmetic is via `mgl_f64_*` (correctly rounded add/sub/mul/div/sqrt/fma,
+subnormals supported). This follows metal-float64's idea of software IEEE
+emulation on the integer ALUs. Planned: move heavy ops into an
+`MTLDynamicLibrary`/binary functions to cut per-shader compile time.
+
+## Testing
+* `./build/tests/mgltest [filter]` – host GL tests (macOS, Metal 4).
+* `scripts/ios-run.sh [filter]` – same suite on the connected iPad (builds,
+  signs with the wildcard dev profile, installs, streams console output).
+* `./build/tests/fp64test` – fp64 bit-exactness.
+* `tools/glslc` / `tests/glsl` – compiler tests and real-world shader corpus.
