@@ -1,0 +1,108 @@
+From 09ee153ceacf661f4020eca484003001a5746d96 Mon Sep 17 00:00:00 2001
+From: bomberfish <me@bomberfish.ca>
+Date: Mon, 5 Oct 2026 17:46:03 -0400
+Subject: [PATCH 5/5] Fix first-launch game resolution (queue size events on
+ input ready; use the view's screen scale)
+
+---
+ Natives/GameSurfaceView.m       | 16 ++++++++++++++++
+ Natives/SurfaceViewController.m | 11 +++++++++++
+ Natives/input_bridge_v3.m       | 11 ++++++++---
+ 3 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/Natives/GameSurfaceView.m b/Natives/GameSurfaceView.m
+index 1815e36..3cbb8c9 100644
+--- a/Natives/GameSurfaceView.m
++++ b/Natives/GameSurfaceView.m
+@@ -6,6 +6,8 @@
+ @interface GameSurfaceView()
+ @end
+ 
++#include "environ.h"
++
+ @implementation GameSurfaceView
+ 
+ - (id)initWithFrame:(CGRect)frame {
+@@ -16,6 +18,20 @@ - (id)initWithFrame:(CGRect)frame {
+     return self;
+ }
+ 
++// UIKit drives the layer's contentsScale through contentScaleFactor (e.g. when the view
++// joins a window), discarding the resolution scale set at creation. Renderers that size
++// their drawable from the layer (e.g. metalgldrv) would then render at the wrong size
++// until updateSavedResolution runs again. Always apply the resolution scale.
++- (void)setContentScaleFactor:(CGFloat)factor {
++    CGFloat screen = self.window ? self.window.screen.scale : factor;
++    [super setContentScaleFactor:(resolutionScale > 0 ? screen * resolutionScale : factor)];
++}
++
++- (void)didMoveToWindow {
++    [super didMoveToWindow];
++    if (self.window) self.contentScaleFactor = self.window.screen.scale;
++}
++
+ + (Class)layerClass {
+     if ([[PLProfiles resolveKeyForCurrentProfile:@"renderer"] hasPrefix:@"libOSMesa"]) {
+         return CALayer.class;
+diff --git a/Natives/SurfaceViewController.m b/Natives/SurfaceViewController.m
+index d8dc313..390906e 100644
+--- a/Natives/SurfaceViewController.m
++++ b/Natives/SurfaceViewController.m
+@@ -274,6 +274,9 @@ - (void)viewDidLoad
+ - (void)viewDidAppear:(BOOL)animated {
+     [super viewDidAppear:animated];
+     [self setNeedsUpdateOfPrefersPointerLocked];
++    // UIKit resets the layer's contentsScale while installing the view; re-apply the
++    // resolution scale (same as returning from the background does).
++    [self updateSavedResolution];
+ }
+ 
+ - (void)updateAudioSettings {
+@@ -368,6 +371,11 @@ - (void)updateSavedResolution {
+             break;
+         }
+     }
++    // Early in launch the scene may still report a 1x screen; prefer the scale of the
++    // window/trait collection the game view actually lives in.
++    CGFloat viewScale = self.view.window.screen.scale;
++    if (viewScale <= 0) viewScale = self.view.traitCollection.displayScale;
++    if (viewScale > 0) self.screenScale = viewScale;
+ 
+     if (self.surfaceView.superview != nil) {
+         self.surfaceView.frame = self.surfaceView.superview.frame;
+@@ -387,6 +395,9 @@ - (void)updateSavedResolution {
+     if ((windowHeight % 2) != 0) {
+         --windowHeight;
+     }
++    NSLog(@"[Resolution] screenScale=%.2f resolutionScale=%.2f frame=%.0fx%.0f window=%dx%d layerScale=%.2f",
++          self.screenScale, resolutionScale, self.surfaceView.frame.size.width, self.surfaceView.frame.size.height,
++          windowWidth, windowHeight, self.surfaceView.layer.contentsScale);
+     CallbackBridge_nativeSendScreenSize(windowWidth, windowHeight);
+ }
+ 
+diff --git a/Natives/input_bridge_v3.m b/Natives/input_bridge_v3.m
+index a79ffa8..8c9b687 100644
+--- a/Natives/input_bridge_v3.m
++++ b/Natives/input_bridge_v3.m
+@@ -426,10 +426,15 @@ void CallbackBridge_nativeSetInputReady(BOOL inputReady) {
+     if (inputReady) {
+         if (GLFW_invoke_FramebufferSize) {
+             hackFix18LWJGL(GLFW_invoke_FramebufferSize);
+-            GLFW_invoke_FramebufferSize((void*) showingWindow, windowWidth, windowHeight);
+         }
+-        if (GLFW_invoke_WindowSize) {
+-            GLFW_invoke_FramebufferSize((void*) showingWindow, windowWidth, windowHeight);
++        if (isUseStackQueueCall) {
++            // Queue proper size events so the GLFW stub's internal window size is updated
++            // too (glfwGetFramebufferSize); the size may have changed since the JVM started.
++            sendData(EVENT_TYPE_FRAMEBUFFER_SIZE, windowWidth, windowHeight, 0, 0);
++            sendData(EVENT_TYPE_WINDOW_SIZE, windowWidth, windowHeight, 0, 0);
++        } else {
++            if (GLFW_invoke_FramebufferSize) GLFW_invoke_FramebufferSize((void*) showingWindow, windowWidth, windowHeight);
++            if (GLFW_invoke_WindowSize) GLFW_invoke_WindowSize((void*) showingWindow, windowWidth, windowHeight);
+         }
+     }
+ }
+-- 
+2.54.0 (Apple Git-157)
+
