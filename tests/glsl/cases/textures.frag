@@ -1,0 +1,38 @@
+#version 450 core
+uniform sampler1D t1;
+uniform sampler2D t2;
+uniform sampler3D t3;
+uniform samplerCube tc;
+uniform sampler2DArray t2a;
+uniform samplerCubeArray tca;
+uniform sampler2DShadow s2;
+uniform samplerCubeShadow sc;
+uniform sampler2DArrayShadow s2a;
+uniform isampler2D it2;
+uniform usampler3D ut3;
+uniform samplerBuffer tb;
+uniform sampler2DMS tms;
+uniform sampler2DRect trect;
+uniform sampler2D arr[3];
+in vec4 uv;
+out vec4 color;
+void main() {
+    vec4 c = texture(t1, uv.x) + texture(t2, uv.xy, 0.5) + texture(t3, uv.xyz) + texture(tc, uv.xyz);
+    c += texture(t2a, uv.xyz) + texture(tca, uv);
+    c += vec4(texture(s2, uv.xyz) + texture(sc, uv) + texture(s2a, uv));
+    c += vec4(texelFetch(it2, ivec2(uv.xy), 0)) + vec4(texelFetch(ut3, ivec3(1, 2, 3), 1));
+    c += texelFetch(tb, 7) + texelFetch(tms, ivec2(3), 2) + texture(trect, uv.xy * 100.0);
+    c += textureLod(t2, uv.xy, 2.0) + textureGrad(t2, uv.xy, vec2(0.1), vec2(0.2)) + textureOffset(t2, uv.xy, ivec2(1, -1));
+    c += textureProj(t2, uv.xyz) + textureProj(t2, uv) + textureGather(t2, uv.xy, 1) + textureGather(s2, uv.xy, 0.5);
+    c += textureLodOffset(t2, uv.xy, 1.0, ivec2(2)) + textureGradOffset(t3, uv.xyz, vec3(0.1), vec3(0.1), ivec3(1));
+    ivec2 sz = textureSize(t2, 0) + textureSize(trect) + textureSize(tms);
+    ivec3 sza = textureSize(t2a, 1);
+    int bs = textureSize(tb);
+    c.x += float(sz.x + sza.z + bs + textureQueryLevels(t2) + textureSamples(tms));
+    c.xy += textureQueryLod(t2, uv.xy);
+    for (int i = 0; i < 3; i++) c += texture(arr[i], uv.xy);
+    c += textureLod(s2, uv.xyz, 0.0) * vec4(1.0);
+    c += texelFetchOffset(t2, ivec2(4), 0, ivec2(1, 1));
+    c += vec4(texture(it2, uv.xy));
+    color = c;
+}

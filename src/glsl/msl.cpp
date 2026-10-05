@@ -888,7 +888,7 @@ std::string Emitter::callBuiltin(const Expr* e) {
         for (size_t i = 0; i < A.size(); i++) r += (i ? ", " : "") + a(i);
         return r + ")";
     };
-    if (n.compare(0, 7, "texture") == 0 || n.compare(0, 6, "shadow") == 0 || n.compare(0, 9, "texelFetch") == 0)
+    if (n.compare(0, 7, "texture") == 0 || n.compare(0, 6, "shadow") == 0 || n.compare(0, 10, "texelFetch") == 0)
         return textureFn(e, n);
     if (n.compare(0, 5, "image") == 0) return imageFn(e, n);
     static const std::unordered_map<std::string, const char*> direct = {

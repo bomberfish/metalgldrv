@@ -89,7 +89,7 @@ bool validateMSL(const std::string& src, std::string& err) {
 int main(int argc, char** argv) {
     std::vector<std::pair<Stage, std::string>> inputs;
     std::string mslOut;
-    bool validate = true, quiet = false;
+    bool validate = true, quiet = false, compileOnly = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-S" && i + 2 < argc) {
@@ -100,6 +100,7 @@ int main(int argc, char** argv) {
         } else if (a == "--msl" && i + 1 < argc) mslOut = argv[++i];
         else if (a == "--no-validate") validate = false;
         else if (a == "-q") quiet = true;
+        else if (a == "--compile-only") compileOnly = true;
         else { fprintf(stderr, "usage: glslc -S <stage> <file> ... [--msl out] [--no-validate] [-q]\n"); return 2; }
     }
     LinkInput li;
@@ -113,14 +114,15 @@ int main(int argc, char** argv) {
         if (!cr.shader) { fprintf(stderr, "%s: compile FAILED\n", path.c_str()); return 1; }
         li.shaders.push_back(cr.shader);
     }
+    if (compileOnly) return 0;
     LinkResult lr = link(li);
     if (!lr.infoLog.empty()) fprintf(stderr, "link: %s", lr.infoLog.c_str());
-    if (!lr.program) { fprintf(stderr, "link FAILED\n"); return 1; }
+    if (!lr.program) { fprintf(stderr, "link FAILED\n"); return 3; }
     if (!quiet) printReflection(lr.reflection);
     VariantKey key;
     key.kind = (lr.reflection.stageMask & (1u << (int)Stage::Compute)) ? PipelineKind::Compute : PipelineKind::Classic;
     MSLOutput mo = generateMSL(*lr.program, key);
-    if (!mo.error.empty()) { fprintf(stderr, "msl: %s\n", mo.error.c_str()); return 1; }
+    if (!mo.error.empty()) { fprintf(stderr, "msl: %s\n", mo.error.c_str()); return 4; }
     if (!quiet) printf("== msl ==\n%s\n", mo.source.c_str());
     if (!mslOut.empty()) {
         std::ofstream f(mslOut);
@@ -130,7 +132,7 @@ int main(int argc, char** argv) {
         std::string err;
         if (!validateMSL(mo.source, err)) {
             fprintf(stderr, "metal validation FAILED:\n%s\n", err.c_str());
-            return 1;
+            return 5;
         }
         if (!quiet) printf("== metal validation OK ==\n");
     }
