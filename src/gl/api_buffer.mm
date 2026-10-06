@@ -206,13 +206,16 @@ static void bindRange(Context* ctx, GLenum target, GLuint index, GLuint buffer, 
     if (!indexedTargetInfo(ctx, target, index, &ib, &generic)) return;
     Buffer* b = bufferForBind(ctx, buffer);
     if (b == (Buffer*)-1) return;
-    if (b && !whole) {
-        if (size <= 0 || offset < 0) return ctx->setError(GL_INVALID_VALUE);
+    bool unbind = !b;
+    if (!whole) {
+        // BindBufferRange: size is only checked with a buffer, the offset alignment always (as Mesa).
+        if (b && (size <= 0 || offset < 0)) return ctx->setError(GL_INVALID_VALUE);
         GLintptr align = target == GL_UNIFORM_BUFFER ? 16 : target == GL_SHADER_STORAGE_BUFFER ? 16 : 4;
         if (offset % align) return ctx->setError(GL_INVALID_VALUE, "unaligned buffer range offset");
-        if (target == GL_TRANSFORM_FEEDBACK_BUFFER && (size % 4)) return ctx->setError(GL_INVALID_VALUE);
+        if (b && target == GL_TRANSFORM_FEEDBACK_BUFFER && (size % 4)) return ctx->setError(GL_INVALID_VALUE);
     }
     *generic = b;
+    if (unbind) whole = true;  // unbinding resets start/size to 0
     if (target == GL_TRANSFORM_FEEDBACK_BUFFER) {
         auto& bb = ctx->xfb->buffers[index];
         bb.buffer = b;
@@ -232,7 +235,7 @@ API void APIENTRY glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
 
 API void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
     MGL_CTX();
-    bindRange(ctx, target, index, buffer, offset, size, buffer == 0);
+    bindRange(ctx, target, index, buffer, offset, size, false);
 }
 
 API void APIENTRY glBindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers) {
