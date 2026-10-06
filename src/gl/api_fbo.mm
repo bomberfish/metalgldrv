@@ -600,6 +600,24 @@ API void APIENTRY glGetNamedFramebufferParameteriv(GLuint framebuffer, GLenum pn
     getFbParameter(ctx, framebuffer ? ctx->framebuffers.get(framebuffer) : ctx->defaultFramebuffer(), pname, params);
 }
 
+API void APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat* val) {
+    MGL_CTX();
+    if (pname != GL_SAMPLE_POSITION) return ctx->setError(GL_INVALID_ENUM);
+    PassDesc p;
+    int samples = ctx->resolvePass(p) ? p.samples : 1;
+    if (index >= (GLuint)std::max(1, samples)) return ctx->setError(GL_INVALID_VALUE);
+    if (samples <= 1) {
+        val[0] = val[1] = 0.5f;
+        return;
+    }
+    // Metal's standard sample locations. Rendering keeps GL's row order (window y up =
+    // texture row up), so the within-pixel offsets carry over unchanged.
+    MTLSamplePosition pos[16];
+    [ctx->dev->mtl getDefaultSamplePositions:pos count:(NSUInteger)samples];
+    val[0] = pos[index].x;
+    val[1] = pos[index].y;
+}
+
 // --- draw / read buffers ---
 static bool validDefaultBuffer(GLenum b) {
     return b == GL_NONE || b == GL_BACK || b == GL_FRONT || b == GL_BACK_LEFT || b == GL_FRONT_LEFT || b == GL_LEFT ||

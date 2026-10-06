@@ -756,9 +756,10 @@ API void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei count, const GLu
         case GL_UNIFORM_SIZE: params[i] = u.arraySize; break;
         case GL_UNIFORM_NAME_LENGTH: params[i] = (GLint)u.name.size() + 1; break;
         case GL_UNIFORM_BLOCK_INDEX: params[i] = u.blockIndex; break;
-        case GL_UNIFORM_OFFSET: params[i] = u.blockIndex >= 0 ? u.offset : -1; break;
-        case GL_UNIFORM_ARRAY_STRIDE: params[i] = u.blockIndex >= 0 ? u.arrayStride : -1; break;
-        case GL_UNIFORM_MATRIX_STRIDE: params[i] = u.blockIndex >= 0 ? u.matrixStride : -1; break;
+        // Block members and atomic counters (offset within the counter buffer) have a layout.
+        case GL_UNIFORM_OFFSET: params[i] = u.blockIndex >= 0 || u.atomicCounterBufferIndex >= 0 ? u.offset : -1; break;
+        case GL_UNIFORM_ARRAY_STRIDE: params[i] = u.blockIndex >= 0 || u.atomicCounterBufferIndex >= 0 ? u.arrayStride : -1; break;
+        case GL_UNIFORM_MATRIX_STRIDE: params[i] = u.blockIndex >= 0 ? u.matrixStride : u.atomicCounterBufferIndex >= 0 ? 0 : -1; break;
         case GL_UNIFORM_IS_ROW_MAJOR: params[i] = u.rowMajor; break;
         case GL_UNIFORM_ATOMIC_COUNTER_BUFFER_INDEX: params[i] = u.atomicCounterBufferIndex; break;
         default: return ctx->setError(GL_INVALID_ENUM);

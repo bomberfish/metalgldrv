@@ -16,6 +16,16 @@
 
 namespace glsl {
 
+namespace {
+// Implementation limits (gl_Max* constants), for compile-time checks.
+enum : int {
+#define X(name, glenum, value) kLimit_##name = value,
+#include "glsl/limits.def"
+#undef X
+};
+constexpr int kMaxAtomicCounterBufferSize = kLimit_gl_MaxAtomicCounterBufferSize;
+}  // namespace
+
 bool exprIsLvalue(const Expr* e) {
     switch (e->kind) {
         case EK::Var: {
@@ -266,6 +276,7 @@ private:
     Expr* mkIndex(Expr* b, Expr* i, int ln);
     Expr* mkField(Expr* b, const std::string& name, int ln);
     Expr* mkCall(const std::string& name, std::vector<Expr*> args, int ln);
+    void checkImageDecl(const std::string& name, const Type& t, const Qualifiers& q);
     Expr* mkCtor(Type t, std::vector<Expr*> args, int ln);
     Expr* mkVarRef(const std::string& name, int ln);
     Expr* mkLiteral(const PPToken& t);
@@ -293,6 +304,12 @@ bool Parser::run(const PPResult& pp) {
         // the preamble's globals are not emitted as user globals
         sh_.globals.clear();
         push();  // user global scope
+        if (sh_.stage == Stage::Compute) {
+            auto ext = sh_.extensions.find("GL_ARB_compute_shader");
+            bool viaExt = ext != sh_.extensions.end() && ext->second != "disable";
+            if (sh_.es ? sh_.version < 310 : (sh_.version < 430 && !viaExt))
+                fail("compute shaders require GLSL 4.30 (or GL_ARB_compute_shader) / GLSL ES 3.10", 0);
+        }
         parseTokens(pp.tokens);
         finalize();
     } catch (ParseError&) {
@@ -612,6 +629,12 @@ void Parser::applyStageLayout(const Qualifiers& q) {
         return;
     }
     Layout& T = (q.storage == Storage::Out) ? sh_.outLayout : sh_.inLayout;
+    if (q.storage == Storage::In && sh_.stage == Stage::Compute && (L.localSize[0] >= 0 || L.localSize[1] >= 0 || L.localSize[2] >= 0)) {
+        // Every local size declaration in a shader must agree (unspecified components are 1).
+        bool declared = T.localSize[0] >= 0 || T.localSize[1] >= 0 || T.localSize[2] >= 0;
+        for (int i = 0; i < 3 && declared; i++)
+            if (std::max(1, T.localSize[i]) != std::max(1, L.localSize[i])) fail("conflicting local_size declarations");
+    }
     for (int i = 0; i < 3; i++) if (L.localSize[i] >= 0) T.localSize[i] = L.localSize[i];
     // GLSL 4.60 4.4: repeated stage layout declarations must agree
     if (L.maxVertices >= 0 && T.maxVertices >= 0 && L.maxVertices != T.maxVertices) fail("conflicting max_vertices declarations");
@@ -631,6 +654,13 @@ void Parser::applyStageLayout(const Qualifiers& q) {
     if (L.xfbBuffer >= 0) T.xfbBuffer = L.xfbBuffer;
     if (L.xfbStride >= 0) T.xfbStride = L.xfbStride;
     if (q.storage == Storage::In && sh_.stage == Stage::Compute && (L.localSize[0] >= 0 || L.localSize[1] >= 0 || L.localSize[2] >= 0)) {
+        static const int kMaxSize[3] = {1024, 1024, 64};  // GL_MAX_COMPUTE_WORK_GROUP_SIZE
+        int64_t total = 1;
+        for (int i = 0; i < 3; i++) {
+            if (L.localSize[i] == 0 || L.localSize[i] > kMaxSize[i]) fail("local_size exceeds GL_MAX_COMPUTE_WORK_GROUP_SIZE");
+            total *= std::max(1, T.localSize[i]);
+        }
+        if (total > 1024) fail("local size exceeds GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS");
         // update gl_WorkGroupSize constant
         Sym* s = &scopes_[0]["gl_WorkGroupSize"];
         if (s->var) {
@@ -814,7 +844,7 @@ void Parser::parseExternal() {
         expect(";");
         return;
     }
-    if (hasQ && peek().kind == PK::Ident && !isTypeName(peek().text) && isP("{", 1)) {
+    if (hasQ && peek().kind == PK::Ident && peek().text != "struct" && !isTypeName(peek().text) && isP("{", 1)) {
         parseBlock(q, nullptr);
         return;
     }
@@ -1018,6 +1048,17 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             }
         } else if (q.storage == Storage::Const && !preamble_) {
             fail("'" + name + "' : const variables must be initialized");
+        }
+        if (global && !preamble_ && sh_.stage == Stage::Compute && (q.storage == Storage::In || q.storage == Storage::Out))
+            fail("'" + name + "' : compute shaders cannot declare input or output variables");
+        if (v->type.stripArrays().base == BT::Image && !preamble_ && q.storage == Storage::Uniform) checkImageDecl(name, v->type, q);
+        if (v->type.stripArrays().base == BT::AtomicUint && !preamble_) {
+            if (!v->type.dims.empty() && v->type.dims[0] == 0) fail("'" + name + "' : atomic counter arrays must be explicitly sized");
+            if (q.layout.offset >= 0) {
+                if (q.layout.offset % 4) fail("'" + name + "' : atomic counter offset must be a multiple of 4");
+                int64_t end = (int64_t)q.layout.offset + 4 * std::max(1, v->type.totalArrayElements());
+                if (end > kMaxAtomicCounterBufferSize) fail("'" + name + "' : atomic counter offset exceeds GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE");
+            }
         }
         // implicit storage for shared/in/out arrays sized by layout
         if (global && sh_.stage == Stage::Geometry && q.storage == Storage::In && !t.dims.empty() && t.dims[0] == 0 &&
@@ -1651,6 +1692,14 @@ Expr* Parser::mkIndex(Expr* b, Expr* i, int ln) {
     else if (bt.isMatrix()) { rt = bt.column(); limit = bt.cols; }
     else if (bt.isVector()) { rt = bt.scalarType(); limit = bt.vec; }
     else fail("'[' : left of '[' is not an array, matrix or vector", ln);
+    if (sh_.es && sh_.version < 320 && !i->cv && bt.isArray()) {
+        // GLSL ES 3.10 §4.3.9 / §4.1.7.1: arrays of uniform/buffer blocks and of opaque types
+        // may only be indexed with constant integral expressions.
+        bool blockArray = b->kind == EK::Var && b->var->block &&
+                          (b->var->q.storage == Storage::Uniform || b->var->q.storage == Storage::Buffer);
+        if (blockArray || rt.base == BT::Sampler || rt.base == BT::Image)
+            fail("'[' : arrays of interface blocks and opaque types must be indexed with a constant expression in GLSL ES 3.10", ln);
+    }
     Expr* e = E(EK::Index, rt, ln);
     e->args = {b, i};
     if (i->cv) {
@@ -1961,6 +2010,34 @@ Function* Parser::builtinFn(const Builtin* b) {
     return f;
 }
 
+// Format layout qualifiers of image uniforms (GLSL 4.60 §4.4.6.2, GLSL ES 3.10 §4.4.7).
+void Parser::checkImageDecl(const std::string& name, const Type& t, const Qualifiers& q) {
+    const std::string& f = q.layout.format;
+    bool writeonly = q.memory & MemWriteOnly, readonly = q.memory & MemReadOnly;
+    if (f.empty()) {
+        if (!writeonly || sh_.es) fail("'" + name + "' : image variables not qualified writeonly must have a format layout qualifier");
+        return;
+    }
+    BT fb = f.size() > 2 && f.compare(f.size() - 2, 2, "ui") == 0 ? BT::UInt : f.back() == 'i' ? BT::Int : BT::Float;
+    const Type e = t.stripArrays();
+    if (fb != e.sampled) fail("'" + name + "' : format layout qualifier '" + f + "' does not match the image type");
+    if (sh_.es) {
+        bool esType = !e.ms && (e.dim == Dim::D2 || ((e.dim == Dim::D3 || e.dim == Dim::Cube) && !e.arrayed));
+        if (!esType) fail("'" + name + "' : image type '" + e.str() + "' is not available in GLSL ES 3.10");
+        static const std::unordered_set<std::string> esFormats = {"rgba32f", "rgba16f", "r32f", "rgba8", "rgba8_snorm", "rgba32i", "rgba16i",
+                                                                  "rgba8i", "r32i", "rgba32ui", "rgba16ui", "rgba8ui", "r32ui"};
+        if (!esFormats.count(f)) fail("'" + name + "' : format layout qualifier '" + f + "' is not supported in GLSL ES");
+        if (f != "r32f" && f != "r32i" && f != "r32ui" && !readonly && !writeonly)
+            fail("'" + name + "' : image variables must be qualified readonly or writeonly unless their format is r32f, r32i or r32ui");
+    }
+}
+
+// Image builtins respect the variable's memory qualifiers.
+static const Variable* imageRoot(const Expr* e) {
+    while (e && (e->kind == EK::Index || e->kind == EK::Field)) e = e->args[0];
+    return e && e->kind == EK::Var ? e->var : nullptr;
+}
+
 Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
     Sym* s = lookup(name);
     if (s && s->type) return mkCtor(Type{BT::Struct, 1, 0, Dim::None, false, false, false, BT::Float, s->type, {}}, args, ln);
@@ -2037,6 +2114,15 @@ Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
         ptypes = best.bi->params;
         outs = best.bi->paramOut;
         ret = best.bi->ret;
+    }
+    if (best.bi && name.compare(0, 5, "image") == 0 && !args.empty() && args[0]->type.base == BT::Image && name != "imageSize" &&
+        name != "imageSamples") {
+        if (const Variable* iv = imageRoot(args[0])) {
+            bool load = name == "imageLoad" || name.compare(0, 11, "imageAtomic") == 0;
+            bool store = name == "imageStore" || name.compare(0, 11, "imageAtomic") == 0;
+            if (load && (iv->q.memory & MemWriteOnly)) fail("'" + name + "' : cannot read from writeonly image '" + iv->name + "'", ln);
+            if (store && (iv->q.memory & MemReadOnly)) fail("'" + name + "' : cannot write to readonly image '" + iv->name + "'", ln);
+        }
     }
     for (size_t i = 0; i < args.size(); i++) {
         if (outs[i]) {

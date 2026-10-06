@@ -280,6 +280,13 @@ public:
     Framebuffer* passFb_ = nullptr;  // framebuffer the open pass was started for (stats only)
     bool passDirty = true;           // framebuffer binding/attachments changed
     PendingClear pendingClear;       // clears not yet applied (folded into next pass load action)
+    // Non-layered image bindings of a 3D texture slice go through a 2D copy (Metal has no 2D
+    // views of 3D textures); writable ones are copied back after the draw/dispatch.
+    struct ImageSliceWriteback {
+        id<MTLTexture> tmp, dst;
+        NSUInteger level, z;
+    };
+    std::vector<ImageSliceWriteback> imageWritebacks;
     uint64_t drawFbVersionSeen = 0;
     id<MTL4RenderCommandEncoder> renderEnc = nil;
     id<MTL4ComputeCommandEncoder> computeEnc = nil;

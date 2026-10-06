@@ -208,6 +208,15 @@ void Linker::collectStage(Stage s) {
             if (l.pointMode) d.pointMode = true;
             if (l.earlyFragmentTests) d.earlyFragmentTests = true;
         };
+        const Layout& l = sh->inLayout;
+        bool has = l.localSize[0] >= 0 || l.localSize[1] >= 0 || l.localSize[2] >= 0;
+        bool had = sc.inLayout.localSize[0] >= 0 || sc.inLayout.localSize[1] >= 0 || sc.inLayout.localSize[2] >= 0;
+        if (s == Stage::Compute && has && had)
+            for (int i = 0; i < 3; i++)
+                if (std::max(1, l.localSize[i]) != std::max(1, sc.inLayout.localSize[i])) {
+                    error("compute shaders declare conflicting local sizes");
+                    break;
+                }
         merge(sc.inLayout, sh->inLayout);
         merge(sc.outLayout, sh->outLayout);
     }
@@ -547,11 +556,21 @@ void Linker::assignUniforms() {
                 else if (blockVars[key].v->anonBlock != v->anonBlock)
                     // GLSL 4.60 §4.3.9: matched blocks must all have an instance name or all lack one
                     error("block '" + v->block->name + "' has an instance name in one stage but not in another");
+                else if (blockVars[key].v->block != v->block) {
+                    // Matched blocks need the same members: names, types and order (GLSL 4.60 §4.3.9).
+                    const auto& m0 = blockVars[key].v->block->members;
+                    const auto& m1 = v->block->members;
+                    bool same = m0.size() == m1.size();
+                    for (size_t i = 0; same && i < m0.size(); i++)
+                        same = m0[i].name == m1[i].name && m0[i].type.str() == m1[i].type.str() &&
+                               m0[i].type.dims == m1[i].type.dims;
+                    if (!same) error("block '" + v->block->name + "' is declared with different members in different stages");
+                }
                 blockVars[key].mask |= 1u << s;
                 continue;
             }
             if (v->q.storage != Storage::Uniform) continue;
-            if (v->builtin == BuiltinVar::DepthRange) continue;  // fed from MGLSys
+            if (v->builtin == BuiltinVar::DepthRange || v->builtin == BuiltinVar::NumSamples) continue;  // system values
             if (v->type.base == BT::Subroutine) continue;         // subroutine uniforms have their own interface
             bool opq = v->type.containsOpaque();
             bool aggregate = v->type.stripArrays().base == BT::Struct;
@@ -564,6 +583,8 @@ void Linker::assignUniforms() {
                     Entry& e = vec[it->second];
                     if (e.v->type != v->type && e.v->type.str() != v->type.str())
                         error("uniform '" + v->name + "' declared with different types in different stages");
+                    else if (v->type.stripArrays().base == BT::Image && e.v->q.layout.format != v->q.layout.format)
+                        error("image uniform '" + v->name + "' declared with different format qualifiers in different stages");
                     e.mask |= 1u << s;
                 }
             };
@@ -680,6 +701,7 @@ void Linker::assignUniforms() {
     // --- opaque uniforms --------------------------------------------------------
     std::map<int, int> acbByBinding;
     std::map<int, uint32_t> acNextOffset;
+    std::map<int, std::vector<std::pair<uint32_t, uint32_t>>> acRanges;  // binding -> [offset, end) of each counter
     // expand opaque leaves (struct members / arrays of structs) into individual uniforms named by their path
     struct OpaqueLeaf { const Variable* v; std::string path; Type type; uint32_t mask; bool explicitLoc; };
     std::vector<OpaqueLeaf> leaves;
@@ -712,7 +734,9 @@ void Linker::assignUniforms() {
         u.arraySize = lf.type.isArray() ? lf.type.dims[0] : 1;
         u.stageMask = lf.mask;
         u.binding = lf.explicitLoc ? std::max(0, v->q.layout.binding) : 0;
-        if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location;
+        // Atomic counters have no uniform location (GL 4.6 §7.6.1).
+        if (bt.base == BT::AtomicUint) u.location = -1;
+        else if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location;
         else {
             int loc = location;
             for (;;) {
@@ -724,7 +748,8 @@ void Linker::assignUniforms() {
             u.location = loc;
             location = loc + n;
         }
-        for (int i = 0; i < n; i++) usedLocs.insert(u.location + i);
+        if (u.location >= 0)
+            for (int i = 0; i < n; i++) usedLocs.insert(u.location + i);
         int uidx = (int)refl.uniforms.size();
         ob.uniformIndex = uidx;
         if (bt.base == BT::Sampler) {
@@ -747,6 +772,13 @@ void Linker::assignUniforms() {
             int binding = u.binding;
             uint32_t aoff = v->q.layout.offset >= 0 ? (uint32_t)v->q.layout.offset : acNextOffset[binding];
             acNextOffset[binding] = aoff + 4 * n;
+            // Distinct counters may not share storage (GLSL 4.60 §4.4.6.3).
+            for (auto [lo, hi] : acRanges[binding])
+                if (aoff < hi && lo < aoff + 4 * n) {
+                    error("atomic counter '" + lf.path + "' overlaps another counter at binding " + std::to_string(binding));
+                    break;
+                }
+            acRanges[binding].push_back({aoff, aoff + 4 * n});
             if (!acbByBinding.count(binding)) {
                 acbByBinding[binding] = (int)refl.atomicCounterBuffers.size();
                 AtomicCounterBuffer acb;
@@ -769,6 +801,32 @@ void Linker::assignUniforms() {
         }
         refl.uniforms.push_back(u);
         prog_->opaque[lf.path] = ob;
+    }
+    // Image uniform limits per stage and combined (GL 4.6 §7.6.1 / table 23.62).
+    {
+        enum : int {
+#define X(name, glenum, value) k_##name = value,
+#include "glsl/limits.def"
+#undef X
+        };
+        static const int stageMax[(int)Stage::Count] = {k_gl_MaxVertexImageUniforms, k_gl_MaxTessControlImageUniforms,
+                                                        k_gl_MaxTessEvaluationImageUniforms, k_gl_MaxGeometryImageUniforms,
+                                                        k_gl_MaxFragmentImageUniforms, k_gl_MaxComputeImageUniforms};
+        static const char* stageName[(int)Stage::Count] = {"vertex", "tessellation control", "tessellation evaluation",
+                                                           "geometry", "fragment", "compute"};
+        int perStage[(int)Stage::Count] = {}, combined = 0;
+        for (auto& lf : leaves) {
+            if (lf.type.stripArrays().base != BT::Image) continue;
+            int n = std::max(1, lf.type.totalArrayElements());
+            for (int s = 0; s < (int)Stage::Count; s++)
+                if (lf.mask & (1u << s)) perStage[s] += n, combined += n;
+        }
+        for (int s = 0; s < (int)Stage::Count; s++)
+            if (perStage[s] > stageMax[s])
+                error(std::string("too many image uniforms in the ") + stageName[s] + " shader (" + std::to_string(perStage[s]) + " > " +
+                      std::to_string(stageMax[s]) + ")");
+        if (combined > k_gl_MaxCombinedImageUniforms)
+            error("too many image uniforms in the program (" + std::to_string(combined) + " > " + std::to_string(k_gl_MaxCombinedImageUniforms) + ")");
     }
     // subroutines (per stage)
     for (int s = 0; s < (int)Stage::Count; s++) {

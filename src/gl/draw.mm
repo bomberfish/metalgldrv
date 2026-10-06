@@ -189,6 +189,56 @@ static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLen
 }
 
 // Fills the program's argument slots. Returns GPU address of the slot buffer.
+// GL 4.6 §8.26: an image unit is invalid when its level lies outside [base, max], when
+// it is the base level of a texture that is not base-complete, or another level of a
+// texture that is not mipmap-complete (Mesa's rule, which the CTS follows).
+static bool imageUnitValid(const ImageUnit& iu) {
+    const Texture* t = iu.tex.get();
+    if (t->target == GL_TEXTURE_BUFFER) return t->buffer && t->buffer->mtl;
+    if (t->viewParent) return true;
+    int maxLevel = t->immutable ? std::min(t->maxLevel, t->immutableLevels - 1) : t->maxLevel;
+    if (iu.level < t->baseLevel || iu.level > maxLevel) return false;
+    SamplerState ss = t->sampler;
+    ss.minFilter = iu.level == t->baseLevel ? GL_NEAREST : GL_NEAREST_MIPMAP_NEAREST;
+    int first = 0, last = 0;
+    if (!textureComplete(t, ss, &first, &last)) return false;
+    return iu.level <= last || t->samples > 0;
+}
+
+// One depth slice of a 3D texture as a standalone 2D texture (non-layered image binding).
+static id<MTLTexture> imageSliceCopy(Context* ctx, id<MTLTexture> src, MTLPixelFormat pf, NSUInteger level, int layer, bool writable) {
+    NSUInteger w = std::max<NSUInteger>(1, src.width >> level), h = std::max<NSUInteger>(1, src.height >> level);
+    NSUInteger depth = std::max<NSUInteger>(1, src.depth >> level);
+    if (layer < 0 || (NSUInteger)layer >= depth) return nil;
+    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:w height:h mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = src.usage | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> tmp = [ctx->dev->mtl newTextureWithDescriptor:td];
+    if (!tmp) return nil;
+    ctx->dev->makeResident(tmp);
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    [e copyFromTexture:src sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, layer) sourceSize:MTLSizeMake(w, h, 1)
+             toTexture:tmp destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    uint64_t serial = ctx->serial();
+    if (writable) ctx->imageWritebacks.push_back({tmp, src, level, (NSUInteger)layer});
+    ctx->dev->releaseAfter(tmp, serial);
+    return pf == tmp.pixelFormat ? tmp : [tmp newTextureViewWithPixelFormat:pf];
+}
+
+// Copies image slices written through imageSliceCopy() back into their 3D textures.
+static void flushImageWritebacks(Context* ctx) {
+    if (ctx->imageWritebacks.empty()) return;
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    [e barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    for (auto& wb : ctx->imageWritebacks)
+        [e copyFromTexture:wb.tmp sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                sourceSize:MTLSizeMake(wb.tmp.width, wb.tmp.height, 1) toTexture:wb.dst destinationSlice:0 destinationLevel:wb.level
+         destinationOrigin:MTLOriginMake(0, 0, wb.z)];
+    [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    ctx->imageWritebacks.clear();
+}
+
 static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) {
     const glsl::Reflection& r = prog->refl;
     size_t nslots = r.slots.size();
@@ -326,7 +376,7 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             int unit = std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1);
             ImageUnit& iu = ctx->imageUnits[unit];
             id<MTLTexture> view = nil;
-            if (iu.tex && ensureTextureStorage(ctx, iu.tex.get())) {
+            if (iu.tex && imageUnitValid(iu) && ensureTextureStorage(ctx, iu.tex.get())) {
                 Texture* t = iu.tex.get();
                 const FormatInfo* f = formatInfo(iu.format);
                 MTLPixelFormat pf = f ? f->mtl : t->mtl.pixelFormat;
@@ -346,14 +396,24 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                         vt = MTLTextureType2D;
                     }
                     if (pf != t->mtl.pixelFormat && !(t->mtl.usage & MTLTextureUsagePixelFormatView)) pf = t->mtl.pixelFormat;
-                    view = [t->mtl newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(std::min(iu.level, t->storageLevels - 1), 1) slices:sr];
+                    NSUInteger lvl = std::min(iu.level, t->storageLevels - 1);
+                    if (t->mtl.textureType == MTLTextureType3D && !iu.layered && vt == MTLTextureType2D) {
+                        view = imageSliceCopy(ctx, t->mtl, pf, lvl, iu.layer, iu.access != GL_READ_ONLY);
+                    } else {
+                        view = [t->mtl newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(lvl, 1) slices:sr];
+                    }
                     ctx->dev->retainUntil(view, serial);
                 }
                 t->lastUse = t->lastGpuWrite = serial;
             }
-            if (!view) view = dummyTexture(ctx, mtlTextureType(s.textureTarget, 0), FmtKind::Unorm);
-            MTLResourceID rid = view.gpuResourceID;
-            memcpy(&v, &rid, 8);
+            // Invalid image units (GL 4.6 §8.26) get a null texture: loads return zero and
+            // stores are dropped.
+            if (view) {
+                MTLResourceID rid = view.gpuResourceID;
+                memcpy(&v, &rid, 8);
+            } else {
+                v = 0;
+            }
             break;
         }
         case glsl::SlotKind::SubroutineIndices: {
@@ -383,7 +443,9 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     s->clipDistanceMask = ctx->clipDistanceMask;
     for (int k = 0; k < 4; k++) s->viewport[k] = ctx->viewport[0][k];
     s->pointSize = ctx->pointSize;
-    s->flags = (ctx->programPointSize ? 1u : 0u) | (ctx->pointSpriteOrigin == GL_LOWER_LEFT ? 2u : 0u) | (ctx->clipOrigin == GL_UPPER_LEFT ? 4u : 0u);
+    s->flags = (ctx->programPointSize ? 1u : 0u) | (ctx->pointSpriteOrigin == GL_LOWER_LEFT ? 2u : 0u) | (ctx->clipOrigin == GL_UPPER_LEFT ? 4u : 0u) |
+               (ctx->sampleCoverage && ctx->sampleCoverageInvert ? 8u : 0u);
+    s->sampleCoverage = ctx->sampleCoverage ? ctx->sampleCoverageValue : 1.0f;
     s->baseVertex = baseVertex;
     s->baseInstance = baseInstance;
     s->drawID = drawID;
@@ -1389,6 +1451,40 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         return true;
     }
 
+    // --- transform feedback captured by the rasterizing vertex shader (VariantKey::xfbInVertex):
+    // a non-indexed draw over the decomposed list, so side effects of the VS happen once ---
+    if (vk.kind == glsl::PipelineKind::Classic && vk.xfbInVertex) {
+        uint64_t generated[4] = {(uint64_t)s.prims * d.instances, 0, 0, 0};
+        mpXfbLimits(s, s.vpp);
+        mpUpload(s);
+        id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
+        if (!e) return true;
+        RenderPipelineKey key;
+        key.variant = var;
+        fillColorKey(ctx, key, refl);
+        key.rasterEnabled = true;
+        id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+        if (!pso) return true;
+        if (ctx->enc.pipeline != pso) {
+            [e setRenderPipelineState:pso];
+            ctx->enc.pipeline = pso;
+        }
+        applyDynamicState(ctx, e, s.listMode);
+        id<MTL4ArgumentTable> table = ctx->renderArgTable;
+        [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
+        [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
+        [table setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
+        if (ctx->enc.fsTableSplit) {
+            [e setArgumentTable:table atStages:MTLRenderStageFragment];
+            ctx->enc.fsTableSplit = false;
+        }
+        mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts are added by the caller
+        MTLPrimitiveType prim = s.listMode == GL_POINTS ? MTLPrimitiveTypePoint : s.listMode == GL_LINES ? MTLPrimitiveTypeLine
+                                                                                                           : MTLPrimitiveTypeTriangle;
+        [e drawPrimitives:prim vertexStart:0 vertexCount:s.ids.size() instanceCount:d.instances baseInstance:0];
+        mpFinishCounts(s, generated, s.vpp, false);
+        return true;
+    }
     // --- tessellation pass 1: VS+TCS compute ---
     if (vk.kind == glsl::PipelineKind::Tessellation) {
         if (!mpTessControl(s)) { retire(); return false; }
@@ -1667,6 +1763,18 @@ static bool validateDraw(Context* ctx, GLenum mode) {
     return true;
 }
 
+// Whether the vertex shader may write memory (SSBOs, images, atomic counters).
+static bool vertexSideEffects(const glsl::Reflection& r) {
+    const uint32_t vs = 1u << (int)glsl::Stage::Vertex;
+    for (const auto& b : r.storageBlocks)
+        if (b.stageMask & vs) return true;
+    for (const auto& a : r.atomicCounterBuffers)
+        if (a.stageMask & vs) return true;
+    for (const auto& s : r.slots)
+        if (s.kind == glsl::SlotKind::Image && s.index < r.uniforms.size() && (r.uniforms[s.index].stageMask & vs)) return true;
+    return false;
+}
+
 static bool programHasSideEffects(const glsl::Reflection& r) {
     if (!r.storageBlocks.empty() || !r.atomicCounterBuffers.empty()) return true;
     for (auto& sl : r.slots)
@@ -1674,7 +1782,13 @@ static bool programHasSideEffects(const glsl::Reflection& r) {
     return false;
 }
 
+static void executeDrawImpl(Context* ctx, const DrawParams& d);
 static void executeDraw(Context* ctx, const DrawParams& d) {
+    executeDrawImpl(ctx, d);
+    flushImageWritebacks(ctx);
+}
+
+static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     MGL_STAT("draw");
     ProgramObj* prog = mglPipelineDrawProgram(ctx);
     // Compatibility profile: fixed-function emulation (prog == null) and gl_* state uniforms.
@@ -1693,6 +1807,8 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     vk.primitive = (uint8_t)d.mode;
     vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
     vk.rasterDiscard = ctx->rasterizerDiscard;
+    vk.sampleShading = ctx->sampleShading && ctx->minSampleShading > 0;
+    vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     bool primQueries = mglQueryPrimitivesActive(ctx);
     if (vk.kind != glsl::PipelineKind::Classic) {
@@ -1712,6 +1828,13 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     if (primQueries && !d.indirect) {
         uint64_t n = d.count;
         mglQueryAddPrimitives(ctx, 0, mglPrimitivesFor(d.mode, n) * (uint64_t)std::max(0, d.instances), 0, false, false);
+    }
+    if (xfbActive && !ctx->rasterizerDiscard && !d.indirect && vertexSideEffects(refl)) {
+        // Capture from the rasterizing vertex shader so its side effects happen once.
+        glsl::VariantKey xk = vk;
+        xk.xfbInVertex = true;
+        executeMultiPass(ctx, prog, d, xk, true);
+        return;
     }
     if (xfbActive) {
         glsl::VariantKey xk = vk;
@@ -2175,6 +2298,7 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
         return ctx->setError(GL_INVALID_OPERATION, "no compute program");
     if (gx > 65535 || gy > 65535 || gz > 65535) return ctx->setError(GL_INVALID_VALUE);
     if (!indirect && (!gx || !gy || !gz)) return;
+    if (!mglCheckDrawConditional(ctx)) return;  // conditional rendering covers compute dispatches too
     glsl::VariantKey vk;
     vk.kind = glsl::PipelineKind::Compute;
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
@@ -2196,6 +2320,7 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
     // GL requires explicit glMemoryBarrier for incoherent accesses, but keep dispatches ordered
     // against each other (cheap within one encoder).
     [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    flushImageWritebacks(ctx);
 }
 
 API void APIENTRY glDispatchCompute(GLuint x, GLuint y, GLuint z) {

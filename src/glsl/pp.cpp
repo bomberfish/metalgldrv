@@ -61,6 +61,18 @@ const std::vector<std::string>& supportedExtensions() {
     return exts;
 }
 
+// Extensions only meaningful to OpenGL ES Shading Language shaders (accepted by a GL
+// context through GL_ARB_ES3_1_compatibility); their functionality is core in desktop GLSL.
+const std::vector<std::string>& supportedESExtensions() {
+    static const std::vector<std::string> exts = {
+        "GL_OES_sample_variables",
+        "GL_OES_shader_multisample_interpolation",
+        "GL_OES_shader_image_atomic",
+        "GL_OES_texture_storage_multisample_2d_array",
+    };
+    return exts;
+}
+
 namespace {
 
 struct Line {
@@ -646,6 +658,10 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
         if (name != "all") {
             auto& exts = supportedExtensions();
             bool known = std::find(exts.begin(), exts.end(), name) != exts.end();
+            if (!known && res_.es) {
+                auto& es = supportedESExtensions();
+                known = std::find(es.begin(), es.end(), name) != es.end();
+            }
             if (!known && beh == "require") { error(line, "extension '" + name + "' is not supported"); return; }
             if (!known) warn(line, "extension '" + name + "' is not supported");
         }
@@ -703,6 +719,8 @@ PPResult Preprocessor::run(const std::vector<std::string>& sources) {
             // still accept compat if asked: nothing
         }
         for (auto& e : supportedExtensions()) define(e, "1");
+        if (res_.es)
+            for (auto& e : supportedESExtensions()) define(e, "1");
         (void)stage_;
     };
 

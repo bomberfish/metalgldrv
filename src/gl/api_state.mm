@@ -654,7 +654,8 @@ static void doClear(Context* ctx, bool color, int colorDB, const float* fval, co
     // Load-action path: only when no draws happened yet in this pass (or no pass open).
     // Fold into the next pass's load action when nothing has been drawn into this
     // framebuffer yet (no open pass, or the open pass belongs to another framebuffer).
-    bool canFold = !scissored && fullMasks && (!ctx->passOpen || ctx->passFb_ != fb);
+    // (An open pass whose attachments no longer match the framebuffer will not be reused.)
+    bool canFold = !scissored && fullMasks && (!ctx->passOpen || ctx->passFb_ != fb || !(p == ctx->curPass));
     if (canFold) {
         auto& pc = ctx->pendingClear;
         for (int i = 0; i < kMaxDrawBuffers; i++) {

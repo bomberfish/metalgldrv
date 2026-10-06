@@ -284,11 +284,16 @@ private:
         if (v->q.storage == Storage::Shared) return true;
         bool perThread = v->builtin == BuiltinVar::InvocationID || v->builtin == BuiltinVar::PrimitiveID ||
                          v->builtin == BuiltinVar::PatchVerticesIn || v->builtin == BuiltinVar::TessCoord ||
-                         v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange;
+                         v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange ||
+                         v->builtin == BuiltinVar::NumSamples;
         if (perThread) return false;
         if (stage_ == Stage::TessControl) return v->q.storage == Storage::In || v->q.storage == Storage::Out;
         if (stage_ == Stage::TessEval) return v->q.storage == Storage::In;
         return false;
+    }
+    bool rootInThreadgroup(const Expr* e) const {
+        while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
+        return e->kind == EK::Var && inThreadgroup(e->var);
     }
     std::string varName(const Variable* v) {
         if (v->builtin != BuiltinVar::None) return (inThreadgroup(v) ? "S->bi_" : "bi_") + v->name;
@@ -302,7 +307,7 @@ private:
     bool isDefaultUniform(const Variable* v) {
         return v->global && v->q.storage == Storage::Uniform && !v->block &&
                (!v->type.containsOpaque() || v->type.stripArrays().base == BT::Struct) && v->type.base != BT::Subroutine &&
-               v->builtin != BuiltinVar::DepthRange;
+               v->builtin != BuiltinVar::DepthRange && v->builtin != BuiltinVar::NumSamples;
     }
     const BlockBinding* blockOf(const Variable* v) {
         if (!v->block || !(v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer)) return nullptr;
@@ -413,6 +418,7 @@ private:
     void emitTesXfb(std::string& o);
     void emitXfb(std::string& o);
     void emitGeometryXfb(std::string& o, bool fromTes);
+    std::string xfbVertexStores();
     void captureWords(Stage st, const std::string& g, std::vector<std::tuple<int, uint32_t, std::string>>& out);
 
     void collectStructs(std::vector<const StructDef*>& order);
@@ -829,6 +835,7 @@ std::string Emitter::ex(const Expr* e) {
                 const Variable* v = e->var;
                 if (v->builtin == BuiltinVar::DepthRange)
                     return "S_gl_DepthRangeParameters{sys->depthRangeNear, sys->depthRangeFar, sys->depthRangeFar - sys->depthRangeNear}";
+                if (v->builtin == BuiltinVar::NumSamples) return "int(get_num_samples())";
                 if (v->builtin == BuiltinVar::WorkGroupSize) {
                     const auto& r = P->refl;
                     return "uint3(" + std::to_string(r.localSize[0]) + "u, " + std::to_string(r.localSize[1]) + "u, " +
@@ -845,6 +852,11 @@ std::string Emitter::ex(const Expr* e) {
             const Expr* b = e->args[0];
             std::string idx = ex(e->args[1]);
             if (b->type.isOpaque() || b->type.stripArrays().isOpaque()) fail("opaque array used as a value");
+            if (b->type.isVector() && !b->type.isArray() && rootInThreadgroup(b)) {
+                // Address the component as a scalar so concurrent invocations writing different
+                // components of one shared vector don't race through a whole-vector store.
+                return "((threadgroup " + scalarName(b->type.base) + "*)&(" + ex(b) + "))[" + idx + "]";
+            }
             return ex(b) + "[" + idx + "]";
         }
         case EK::Swizzle: {
@@ -1455,7 +1467,20 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     if (name == "texelFetch" || name == "texelFetchOffset") {
         std::string P = ex(A[1]);
         bool off = name == "texelFetchOffset";
-        if (off) P = "(" + P + " + " + ex(A.back()) + ")";
+        if (off) {
+            // Arrayed textures: the offset applies to the coordinates, not the layer.
+            const Type& Pt = A[1]->type;
+            int pn = Pt.isScalar() ? 1 : Pt.vec;
+            const Type& Ot = A.back()->type;
+            int on = Ot.isScalar() ? 1 : Ot.vec;
+            std::string o = ex(A.back());
+            if (on < pn) {
+                o = vecName(BT::Int, pn) + "(" + o;
+                for (int i = on; i < pn; i++) o += ", 0";
+                o += ")";
+            }
+            P = "(" + P + " + " + o + ")";
+        }
         std::string r;
         if (T.ms) {
             std::string s = "uint(" + ex(A[2]) + ")";
@@ -2026,7 +2051,7 @@ void Emitter::prepareStage(Stage s) {
     std::vector<const Variable*> cand;
     for (auto* v : sc_->used) {
         if (v->builtin == BuiltinVar::None || v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange ||
-            v->builtin == BuiltinVar::WorkGroupSize || v->q.storage == Storage::Const || v->q.storage == Storage::Uniform)
+            v->builtin == BuiltinVar::NumSamples || v->builtin == BuiltinVar::WorkGroupSize || v->q.storage == Storage::Const || v->q.storage == Storage::Uniform)
             continue;
         cand.push_back(v);
     }
@@ -2504,6 +2529,22 @@ void Emitter::emitClassicVS(std::string& o) {
     }
     RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, true);
     o += "struct In {\n" + inS + "};\nstruct Out {\n" + ro.vertexStruct + "};\n}  // namespace vs\n\n";
+    if (K.xfbInVertex) {
+        // Transform feedback with vertex shader side effects: the vertex shader runs once per
+        // vertex of the decomposed primitive list (non-indexed draw) and captures its outputs
+        // itself, so its side effects happen exactly once.
+        std::string e = "vertex vs::Out mgl_vs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], "
+                        "constant MGLDrawInfo& D [[buffer(22)]], uint mgl_lv [[vertex_id]], uint mgl_li [[instance_id]]) {\n";
+        e += "    uint mgl_t = mgl_li * D.count + mgl_lv;\n";
+        e += indentBy(runVS("g", "D.indexBuffer[mgl_lv] + uint(D.baseVertex)", "mgl_li"), 4);
+        e += xfbVertexStores();
+        e += "    vs::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
+        entries_ += e;
+        fragInputsAvailable_ = ro.names;
+        haveVsOutputs_ = true;
+        out_.entryPoints.push_back({"mgl_vs", Stage::Vertex, EntryPoint::Vertex});
+        return;
+    }
     // Rasterizer discard: Metal needs a void vertex function when rasterization is disabled.
     std::string e = K.rasterDiscard ? "vertex void mgl_vs(" : "vertex vs::Out mgl_vs(";
     if (anyIn) e += "vs::In in [[stage_in]], ";
@@ -2564,6 +2605,15 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     auto& biByKind = si.bi;
     std::string inS = "struct In {\n", outS = "struct Out {\n", copyIn, copyOut, params;
     bool anyIn = false, anyOut = false;
+    // Per-sample shading: forced by the state (GL_SAMPLE_SHADING), by gl_SampleID /
+    // gl_SamplePosition, or by sample-qualified inputs. Metal runs a fragment function at
+    // sample rate when it takes [[sample_id]].
+    bool perSample = K.sampleShading || biByKind.count(BuiltinVar::SampleID) || biByKind.count(BuiltinVar::SamplePosition);
+    bool haveSid = false;
+    auto needSid = [&]() {
+        if (!haveSid) params += ", uint mgl_sid [[sample_id]]";
+        haveSid = true;
+    };
     std::vector<const Variable*> ins;
     for (auto* v : sc_->globals)
         if (v->q.storage == Storage::In && v->builtin == BuiltinVar::None) ins.push_back(v);
@@ -2603,10 +2653,17 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 anyIn = true;
                 continue;
             }
+            // Sample shading evaluates every interpolated input at the invocation's sample.
+            if (K.sampleShading && lq.interp != Interp::Flat) lq.sample = true, lq.centroid = false;
+            if (lq.sample && lq.interp != Interp::Flat) perSample = true;
             if (interpVars.count(v) && lt.base == BT::Float && lq.interp != Interp::Flat) {
                 std::string mode = lq.interp == Interp::NoPerspective ? "no_perspective" : "perspective";
                 inS += "    interpolant<" + mt(lt) + ", interpolation::" + mode + "> " + nm + " [[user(" + nm + ")]];\n";
                 std::string at = lq.centroid ? "interpolate_at_centroid()" : "interpolate_at_center()";
+                if (lq.sample) {
+                    needSid();
+                    at = "interpolate_at_sample(mgl_sid)";
+                }
                 copyIn += "    " + leaves[i].second + " = in." + nm + "." + at + ";\n";
                 interpLeaf_[leaves[i].second.substr(2)] = nm;  // strip "g."
                 anyIn = true;
@@ -2636,17 +2693,22 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 copyIn += "    g.bi_" + v->name + " = float2(mgl_pc.x, (sys.flags & 2u) != 0u ? mgl_pc.y : 1.0f - mgl_pc.y);\n";
                 break;
             case BuiltinVar::SampleID:
-                params += ", uint mgl_sid [[sample_id]]";
+                needSid();
                 copyIn += "    g.bi_" + v->name + " = int(mgl_sid);\n";
                 break;
             case BuiltinVar::SamplePosition:
-                if (!biByKind.count(BuiltinVar::SampleID)) params += ", uint mgl_sid [[sample_id]]";
-                params += ", float4 mgl_fc2 [[position]]";
-                copyIn += "    g.bi_" + v->name + " = fract(mgl_fc2.xy);\n";
+                needSid();
+                copyIn += "    g.bi_" + v->name + " = get_sample_position(mgl_sid);\n";
                 break;
             case BuiltinVar::SampleMaskIn:
                 params += ", uint mgl_smi [[sample_mask]]";
-                copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi);\n";
+                // With per-sample shading each invocation covers only its own sample.
+                if (perSample) {
+                    needSid();
+                    copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi & (1u << mgl_sid));\n";
+                } else {
+                    copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi);\n";
+                }
                 break;
             case BuiltinVar::PrimitiveID:
                 if (meshInput) {
@@ -2688,6 +2750,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             default: break;
         }
     }
+    if (K.sampleShading) needSid();
     bool fragDepth = biByKind.count(BuiltinVar::FragDepth) && sc_->writesFragDepth;
     if (fragDepth && !biByKind.count(BuiltinVar::FragCoord)) params += ", float4 mgl_fc [[position]]";
     if (fragDepth) copyIn += "    g.bi_gl_FragDepth = mgl_fc.z;\n";
@@ -2740,9 +2803,12 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
         copyOut += "    o.mgl_depth = g.bi_gl_FragDepth;\n";
         anyOut = true;
     }
-    if (biByKind.count(BuiltinVar::SampleMask)) {
+    if (biByKind.count(BuiltinVar::SampleMask) || K.sampleMask) {
+        // gl_SampleMask and GL_SAMPLE_MASK only apply to multisample framebuffers.
+        std::string m = biByKind.count(BuiltinVar::SampleMask) ? "uint(g.bi_gl_SampleMask[0])" : "0xffffffffu";
+        if (K.sampleMask) m = "(" + m + " & sys.sampleMask & mgl_coverage_mask(sys.sampleCoverage, (sys.flags & 8u) != 0u))";
         outS += "    uint mgl_mask [[sample_mask]];\n";
-        copyOut += "    o.mgl_mask = uint(g.bi_gl_SampleMask[0]);\n";
+        copyOut += "    o.mgl_mask = get_num_samples() > 1u ? " + m + " : 0xffffffffu;\n";
         anyOut = true;
     }
     outS += "};\n";
@@ -2784,7 +2850,11 @@ void Emitter::emitCS(std::string& o) {
             case BuiltinVar::WorkGroupID: e += "    g.bi_" + v->name + " = mgl_wid;\n"; break;
             case BuiltinVar::LocalInvocationID: e += "    g.bi_" + v->name + " = mgl_lid;\n"; break;
             case BuiltinVar::GlobalInvocationID: e += "    g.bi_" + v->name + " = mgl_gid;\n"; break;
-            case BuiltinVar::LocalInvocationIndex: e += "    g.bi_" + v->name + " = mgl_lidx;\n"; break;
+            case BuiltinVar::LocalInvocationIndex:
+                // GL's linearization of the local id (z * X * Y + y * X + x).
+                e += "    g.bi_" + v->name + " = (mgl_lid.z * " + std::to_string(r.localSize[1]) + "u + mgl_lid.y) * " +
+                     std::to_string(r.localSize[0]) + "u + mgl_lid.x;\n";
+                break;
             default: break;
         }
     }
@@ -3273,6 +3343,20 @@ void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tupl
     }
 }
 
+// Transform feedback capture of the vertex shader outputs in `g` for list position mgl_t
+// (instance-major) of the decomposed primitive list described by D. Primitives past
+// D.xfbPrimLimit[0] (the CPU-computed buffer capacity) are not recorded.
+std::string Emitter::xfbVertexStores() {
+    const MultiPassInfo& mp = RF(lastPreRaster()).multipass;
+    std::string e = "    uint vpp = max(D.verticesPerPrimitive, 1u);\n    if (mgl_t / vpp < D.xfbPrimLimit[0]) {\n";
+    e += "        uint vtx = D.xfbVertexBase + mgl_t;\n";
+    std::vector<std::tuple<int, uint32_t, std::string>> words;
+    captureWords(Stage::Vertex, "g.", words);
+    for (auto& [b, off, w] : words)
+        e += "        mgl_st_uint(D.xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " + std::to_string(off) + "u, " + w + ");\n";
+    e += "    }\n";
+    return e;
+}
 
 void Emitter::emitXfb(std::string& o) {
     const Reflection& R = RF(lastPreRaster());
@@ -3296,13 +3380,7 @@ void Emitter::emitXfb(std::string& o) {
     e += "    uint mgl_total = D.count * D.instanceCount;\n    if (mgl_t >= mgl_total) return;\n";
     e += "    uint mgl_pos = mgl_t % D.count, mgl_ii = mgl_t / D.count;\n";
     e += indentBy(runVS("g", "D.indexBuffer[mgl_pos] + uint(D.baseVertex)", "mgl_ii"), 4);
-    e += "    uint vpp = max(D.verticesPerPrimitive, 1u);\n    if (mgl_t / vpp >= D.xfbPrimLimit[0]) return;\n";
-    e += "    uint vtx = D.xfbVertexBase + mgl_t;\n";
-    const MultiPassInfo& mp = R.multipass;
-    std::vector<std::tuple<int, uint32_t, std::string>> words;
-    captureWords(Stage::Vertex, "g.", words);
-    for (auto& [b, off, w] : words)
-        e += "    mgl_st_uint(D.xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " + std::to_string(off) + "u, " + w + ");\n";
+    e += xfbVertexStores();
     e += "}\n\n";
     entries_ += e;
     EntryPoint k{"mgl_xfb", Stage::Vertex, EntryPoint::Kernel};

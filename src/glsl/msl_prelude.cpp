@@ -362,6 +362,13 @@ template <typename Tex, typename C, typename T> inline T mgl_img_cas_a(Tex t, C 
     return e.x;
 }
 )"});
+    // GL_SAMPLE_COVERAGE: round(value * samples) samples covered (optionally inverted).
+    c.push_back({{"mgl_coverage_mask"}, R"(inline uint mgl_coverage_mask(float v, bool inv) {
+    uint n = uint(rint(saturate(v) * float(get_num_samples())));
+    uint m = n >= 32u ? 0xffffffffu : (1u << n) - 1u;
+    return inv ? ~m : m;
+}
+)"});
     c.push_back({{"mgl_alpha_pass"}, R"(inline bool mgl_alpha_pass(float a, uint func, float ref) {
     switch (func) {
         case 0x0200u: return false;
@@ -415,7 +422,7 @@ struct MGLSys {
     uint alphaFunc;
     float minSampleShading;
     float renderTargetHeight;
-    uint pad1;
+    float sampleCoverage;
     float tessDefaultOuter[4];
     float tessDefaultInner[2];
     uint pad2[2];
