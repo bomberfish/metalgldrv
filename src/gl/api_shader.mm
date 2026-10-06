@@ -433,6 +433,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
             // Report backend failures through the link status so apps see them.
             p->linked = false;
             p->infoLog += "error: internal Metal shader compilation failed: " + v->error + "\n";
+            MGL_DBG("program %u: %s", program, p->infoLog.c_str());
         }
     }
 }
@@ -547,8 +548,20 @@ API GLint APIENTRY glGetAttribLocation(GLuint program, const GLchar* name) {
         ctx->setError(GL_INVALID_OPERATION);
         return -1;
     }
-    for (auto& a : p->refl.attributes)
-        if (a.name == name) return a.location;
+    // "attr", "attr[0]" or an array element "attr[N]" (N < array size; each element
+    // uses locationsUsed / arraySize consecutive locations).
+    std::string n = name;
+    for (auto& a : p->refl.attributes) {
+        if (a.name == n) return a.location;
+        if (n.size() > a.name.size() + 2 && n.compare(0, a.name.size(), a.name) == 0 && n[a.name.size()] == '[' && n.back() == ']') {
+            const char* digits = n.c_str() + a.name.size() + 1;
+            char* end = nullptr;
+            long idx = strtol(digits, &end, 10);
+            if (end == digits || *end != ']' || end + 1 != n.c_str() + n.size() || idx < 0 || idx >= a.arraySize) return -1;
+            if (idx > 0 && digits[0] == '0') return -1;  // no leading zeros
+            return a.location + (int)idx * (a.locationsUsed / std::max(1, a.arraySize));
+        }
+    }
     return -1;
 }
 

@@ -2318,9 +2318,19 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
     }
     bool hasClipD = si.bi.count(BuiltinVar::ClipDistance) && si.bi[BuiltinVar::ClipDistance]->q.storage == Storage::Out;
     bool hasClipV = si.bi.count(BuiltinVar::ClipVertex);
-    if (hasClipD || hasClipV) {
-        int nclip = hasClipD ? si.bi[BuiltinVar::ClipDistance]->type.dims[0] : 8;
-        r.vertexStruct += "    float mgl_clip [[clip_distance]] [" + std::to_string(nclip) + "];\n";
+    bool hasCullD = si.bi.count(BuiltinVar::CullDistance) && si.bi[BuiltinVar::CullDistance]->q.storage == Storage::Out;
+    int nclip = (hasClipD || hasClipV) ? (hasClipD ? si.bi[BuiltinVar::ClipDistance]->type.dims[0] : 8) : 0;
+    int ncull = hasCullD ? si.bi[BuiltinVar::CullDistance]->type.dims[0] : 0;
+    if (nclip + ncull > 0)
+        r.vertexStruct += "    float mgl_clip [[clip_distance]] [" + std::to_string(nclip + ncull) + "];\n";
+    // Cull distances (Metal has none) ride on extra clip distances: a vertex with a negative
+    // cull distance outputs -1, others a huge positive value. A primitive whose vertices are all
+    // negative is clipped away entirely (= culled); otherwise the clipped sliver next to the
+    // negative vertices is ~1e-20 of the primitive, i.e. it is drawn whole as GL requires.
+    for (int i = 0; i < ncull; i++)
+        r.vertexCopy += "v.mgl_clip[" + std::to_string(nclip + i) + "] = " + g + varName(si.bi[BuiltinVar::CullDistance]) + "[" +
+                        std::to_string(i) + "] < 0.0f ? -1.0f : 1e20f;\n";
+    if (nclip > 0) {
         for (int i = 0; i < nclip; i++) {
             std::string val;
             if (hasClipD) val = g + varName(si.bi[BuiltinVar::ClipDistance]) + "[" + std::to_string(i) + "]";

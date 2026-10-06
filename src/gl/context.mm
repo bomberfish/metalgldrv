@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #endif
 #include <cstdarg>
+#include <execinfo.h>
 #include "gl/internal_shaders.h"
 #include "gl/pipeline.h"
 #include "util/log.h"
@@ -100,6 +101,11 @@ void Context::setError(GLenum e, const char* fmt, ...) {
         va_end(ap);
     }
     MGL_DBG("GL error 0x%04x: %s", e, buf);
+    if (::mgl::g_logLevel >= ::mgl::LOG_TRACE) {  // METALGLDRV_LOG=4: who raised it
+        void* frames[4];
+        int n = backtrace(frames, 4);
+        if (n > 1) backtrace_symbols_fd(frames + 1, n - 1, 2);
+    }
     if (debugOutput) debugMessage(GL_DEBUG_SOURCE_API, GL_DEBUG_TYPE_ERROR, e, GL_DEBUG_SEVERITY_HIGH, buf[0] ? buf : "GL error");
 }
 
