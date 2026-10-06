@@ -602,8 +602,14 @@ bool readTextureRegion(Context* ctx, id<MTLTexture> tex, int level, int slice, i
     if (tex.sampleCount > 1) {
         MGL_WARN("readback of multisampled texture not resolved");
     }
+    // 3D textures: the GL layer is a depth plane, not a slice
+    int z = 0;
+    if (src.textureType == MTLTextureType3D) {
+        z = slice;
+        slice = 0;
+    }
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
-    [e copyFromTexture:src sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(x, y, 0) sourceSize:MTLSizeMake(w, h, 1)
+    [e copyFromTexture:src sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(x, y, z) sourceSize:MTLSizeMake(w, h, 1)
               toBuffer:buf destinationOffset:0 destinationBytesPerRow:rowBytes destinationBytesPerImage:imgBytes options:opt];
     uint64_t s = ctx->serial();
     ctx->finish();
