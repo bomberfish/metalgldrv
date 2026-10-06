@@ -36,6 +36,7 @@ struct StageCode {
     std::set<const Function*> reachable;              // function definitions reachable from main
     std::map<std::string, Function*> defs;            // mangled -> definition
     std::set<const Variable*> used;                   // global variables referenced by reachable code
+    std::set<const Variable*> activeBlocks;           // shared/std140/std430 blocks declared here (active even if unused)
     std::set<std::string> usedNames;                  // names of used globals
     Layout inLayout, outLayout;
     bool writesFragDepth = false, usesDiscard = false;

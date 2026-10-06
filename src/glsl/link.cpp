@@ -274,7 +274,7 @@ void Linker::collectStage(Stage s) {
                 // Uniform/storage blocks with a shared/std140/std430 layout are active even when not referenced.
                 if (g.var->block && (g.var->q.storage == Storage::Uniform || g.var->q.storage == Storage::Buffer) &&
                     g.var->block->blockQ.layout.packing != Packing::Packed)
-                    sc.used.insert(g.var);
+                    sc.activeBlocks.insert(g.var);
             }
     while (!work.empty()) {
         const Function* f = work.back();
@@ -609,6 +609,15 @@ void Linker::assignUniforms() {
         }
         std::vector<const Variable*> used(sc.used.begin(), sc.used.end());
         std::sort(used.begin(), used.end(), [](const Variable* a, const Variable* b) { return a->id < b->id; });
+        // declared-but-unreferenced shared/std140/std430 blocks are active without being referenced by this stage
+        std::vector<const Variable*> act(sc.activeBlocks.begin(), sc.activeBlocks.end());
+        std::sort(act.begin(), act.end(), [](const Variable* a, const Variable* b) { return a->id < b->id; });
+        for (auto* v : act) {
+            if (sc.used.count(v)) continue;
+            std::string key = std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name;
+            if (!blockVars.count(key)) { blockVars[key] = {v, 0u}; blockOrder.push_back(key); }
+            if (v->block->blockQ.layout.binding >= 0) declBinding[key] = v->block->blockQ.layout.binding;
+        }
         for (auto* v : used) {
             if (v->block && (v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer)) {
                 std::string key = std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name;
