@@ -343,7 +343,12 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_READ_FRAMEBUFFER_BINDING: v = I(ctx->readFb && !ctx->readFb->isDefault ? nameOf(ctx->readFb.get()) : 0); return true;
     case GL_RENDERBUFFER_BINDING: v = I(nameOf(ctx->renderbuffer.get())); return true;
     case GL_ACTIVE_TEXTURE: v = E(GL_TEXTURE0 + ctx->activeTexture); return true;
-    case GL_SAMPLER_BINDING: v = I(nameOf(ctx->samplers[ctx->activeTexture].get())); return true;
+    case GL_SAMPLER_BINDING: {  // indexed form (ARB_multi_bind) selects the texture unit
+        int unit = index >= 0 ? index : ctx->activeTexture;
+        if (unit >= kMaxTextureUnits) return false;
+        v = I(nameOf(ctx->samplers[unit].get()));
+        return true;
+    }
     case GL_TEXTURE_BINDING_1D: case GL_TEXTURE_BINDING_2D: case GL_TEXTURE_BINDING_3D: case GL_TEXTURE_BINDING_1D_ARRAY:
     case GL_TEXTURE_BINDING_2D_ARRAY: case GL_TEXTURE_BINDING_RECTANGLE: case GL_TEXTURE_BINDING_CUBE_MAP:
     case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY: case GL_TEXTURE_BINDING_BUFFER: case GL_TEXTURE_BINDING_2D_MULTISAMPLE:

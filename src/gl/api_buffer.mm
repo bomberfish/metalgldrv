@@ -238,16 +238,49 @@ API void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, 
     bindRange(ctx, target, index, buffer, offset, size, false);
 }
 
+// ARB_multi_bind (GL 4.6 §6.1.1): first+count beyond the binding points is INVALID_OPERATION;
+// a bad entry raises an error and is skipped while the others still bind.
+static bool multiBindCheck(Context* ctx, GLenum target, GLuint first, GLsizei count) {
+    int max;
+    switch (target) {
+    case GL_UNIFORM_BUFFER: max = kMaxUniformBufferBindings; break;
+    case GL_SHADER_STORAGE_BUFFER: max = kMaxSSBOBindings; break;
+    case GL_ATOMIC_COUNTER_BUFFER: max = kMaxAtomicCounterBindings; break;
+    case GL_TRANSFORM_FEEDBACK_BUFFER: max = kMaxXfbBuffers; break;
+    default: ctx->setError(GL_INVALID_ENUM); return false;
+    }
+    if (count < 0) return ctx->setError(GL_INVALID_VALUE), false;
+    if ((uint64_t)first + (uint64_t)count > (uint64_t)max) return ctx->setError(GL_INVALID_OPERATION), false;
+    return true;
+}
+
 API void APIENTRY glBindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers) {
     MGL_CTX();
-    for (int i = 0; i < count; i++) bindRange(ctx, target, first + i, buffers ? buffers[i] : 0, 0, 0, true);
+    if (!multiBindCheck(ctx, target, first, count)) return;
+    for (int i = 0; i < count; i++) {
+        GLuint b = buffers ? buffers[i] : 0;
+        if (b && !ctx->share->buffers.get(b)) {
+            ctx->setError(GL_INVALID_OPERATION, "BindBuffersBase: %u is not a buffer", b);
+            continue;
+        }
+        bindRange(ctx, target, first + i, b, 0, 0, true);
+    }
 }
 
 API void APIENTRY glBindBuffersRange(GLenum target, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets,
                                      const GLsizeiptr* sizes) {
     MGL_CTX();
+    if (!multiBindCheck(ctx, target, first, count)) return;
     for (int i = 0; i < count; i++) {
         GLuint b = buffers ? buffers[i] : 0;
+        if (b && !ctx->share->buffers.get(b)) {
+            ctx->setError(GL_INVALID_OPERATION, "BindBuffersRange: %u is not a buffer", b);
+            continue;
+        }
+        if (b && (offsets[i] < 0 || sizes[i] <= 0)) {
+            ctx->setError(GL_INVALID_VALUE);
+            continue;
+        }
         bindRange(ctx, target, first + i, b, b ? offsets[i] : 0, b ? sizes[i] : 0, b == 0);
     }
 }

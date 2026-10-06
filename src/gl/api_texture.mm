@@ -119,7 +119,8 @@ API void APIENTRY glBindTextureUnit(GLuint unit, GLuint texture) {
 
 API void APIENTRY glBindTextures(GLuint first, GLsizei count, const GLuint* textures) {
     MGL_CTX();
-    if (first + count > kMaxTextureUnits) return ctx->setError(GL_INVALID_OPERATION);
+    if (count < 0) return ctx->setError(GL_INVALID_VALUE);
+    if ((uint64_t)first + (uint64_t)count > (uint64_t)kMaxTextureUnits) return ctx->setError(GL_INVALID_OPERATION);
     for (int i = 0; i < count; i++) {
         GLuint name = textures ? textures[i] : 0;
         if (!name) {
@@ -1525,9 +1526,19 @@ API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, G
 
 API void APIENTRY glBindImageTextures(GLuint first, GLsizei count, const GLuint* textures) {
     MGL_CTX();
+    if (count < 0) return ctx->setError(GL_INVALID_VALUE);
+    if ((uint64_t)first + (uint64_t)count > (uint64_t)kMaxImageUnits) return ctx->setError(GL_INVALID_OPERATION);
     for (int i = 0; i < count; i++) {
         GLuint name = textures ? textures[i] : 0;
         Texture* t = name ? ctx->share->textures.get(name) : nullptr;
+        if (name && (!t || !t->target)) {
+            ctx->setError(GL_INVALID_OPERATION, "BindImageTextures: %u is not a texture", name);
+            continue;
+        }
+        if (t && !(t->target == GL_TEXTURE_BUFFER ? t->buffer != nullptr : t->levels[0][0].defined())) {
+            ctx->setError(GL_INVALID_OPERATION, "BindImageTextures: texture %u has no level 0", name);
+            continue;
+        }
         GLenum fmt = t && t->levels[0][0].defined() ? t->levels[0][0].fmt->internalFormat : GL_R8;
         glBindImageTexture(first + i, name, 0, t && (t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_3D || t->isCube()), 0,
                            GL_READ_WRITE, fmt);
@@ -1576,10 +1587,16 @@ API void APIENTRY glBindSampler(GLuint unit, GLuint sampler) {
 
 API void APIENTRY glBindSamplers(GLuint first, GLsizei count, const GLuint* samplers) {
     MGL_CTX();
-    if (first + count > kMaxTextureUnits) return ctx->setError(GL_INVALID_OPERATION);
+    if (count < 0) return ctx->setError(GL_INVALID_VALUE);
+    if ((uint64_t)first + (uint64_t)count > (uint64_t)kMaxTextureUnits) return ctx->setError(GL_INVALID_OPERATION);
     for (int i = 0; i < count; i++) {
         GLuint s = samplers ? samplers[i] : 0;
-        ctx->samplers[first + i] = s ? ctx->share->samplers.get(s) : nullptr;
+        Sampler* so = s ? ctx->share->samplers.get(s) : nullptr;
+        if (s && !so) {
+            ctx->setError(GL_INVALID_OPERATION, "BindSamplers: %u is not a sampler", s);
+            continue;
+        }
+        ctx->samplers[first + i] = so;
     }
 }
 
