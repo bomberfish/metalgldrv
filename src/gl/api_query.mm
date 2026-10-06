@@ -249,9 +249,11 @@ static bool resolveQuery(Context* ctx, Query* q, bool wait) {
 
 template <typename T>
 static void getQueryObject(Context* ctx, GLuint id, GLenum pname, T* params) {
+    if (pname != GL_QUERY_RESULT && pname != GL_QUERY_RESULT_NO_WAIT && pname != GL_QUERY_RESULT_AVAILABLE && pname != GL_QUERY_TARGET)
+        return ctx->setError(GL_INVALID_ENUM);
     Query* q = ctx->queries.get(id);
-    if (!q || !q->everActive) return ctx->setError(GL_INVALID_OPERATION, "invalid query");
-    if (q->active) return ctx->setError(GL_INVALID_OPERATION, "query active");
+    if (!q || (!q->everActive && !q->target)) return ctx->setError(GL_INVALID_OPERATION, "invalid query");
+    if (q->active && pname != GL_QUERY_TARGET) return ctx->setError(GL_INVALID_OPERATION, "query active");
     // Results written into a bound GL_QUERY_BUFFER (offset in params).
     Buffer* qb = ctx->queryBuffer.get();
     T value = 0;
@@ -283,6 +285,7 @@ template <typename T>
 static void getQueryBufferObject(Context* ctx, GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
     Buffer* b = ctx->share->buffers.get(buffer);
     if (!b) return ctx->setError(GL_INVALID_OPERATION);
+    if (offset < 0) return ctx->setError(GL_INVALID_VALUE);
     Ref<Buffer> saved = ctx->queryBuffer;
     ctx->queryBuffer = b;
     getQueryObject(ctx, id, pname, (T*)offset);

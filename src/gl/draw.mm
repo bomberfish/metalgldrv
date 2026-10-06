@@ -1084,6 +1084,18 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         // Later dispatches in this encoder may read what was captured (xfb ping-pong).
         [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit
                     visibilityOptions:MTL4VisibilityOptionDevice];
+        if (Query* wq = ctx->activeQueries[5][0].get()) {
+            // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN: whole primitives that fit every bound buffer
+            // (the capture shader drops a primitive that would overflow).
+            uint64_t fit = total / vpp;
+            for (int i = 0; i < kMaxXfbBuffers; i++) {
+                if (!info->xfbStride[i] || !info->xfbBuffer[i]) continue;
+                uint64_t cap = info->xfbCapacity[i] / info->xfbStride[i];
+                uint64_t room = cap > info->xfbVertexBase ? cap - info->xfbVertexBase : 0;
+                fit = std::min<uint64_t>(fit, room / vpp);
+            }
+            wq->cpuCount += fit;
+        }
         x->verticesWritten += total;
         return true;  // rasterization (if enabled) is handled by the caller's classic draw
     }

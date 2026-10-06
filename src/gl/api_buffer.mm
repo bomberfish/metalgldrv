@@ -327,7 +327,8 @@ API void APIENTRY glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeipt
 static void* mapRange(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr length, GLbitfield access) {
     const GLbitfield valid = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT |
                              GL_MAP_FLUSH_EXPLICIT_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
-    if (offset < 0 || length <= 0 || offset + length > b->size || (access & ~valid)) return ctx->setError(GL_INVALID_VALUE), nullptr;
+    if (offset < 0 || length < 0 || offset + length > b->size || (access & ~valid)) return ctx->setError(GL_INVALID_VALUE), nullptr;
+    if (length == 0) return ctx->setError(GL_INVALID_OPERATION), nullptr;  // GL 4.6 6.3.1
     if (!(access & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT))) return ctx->setError(GL_INVALID_OPERATION), nullptr;
     if ((access & GL_MAP_READ_BIT) && (access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT)))
         return ctx->setError(GL_INVALID_OPERATION), nullptr;
@@ -533,7 +534,8 @@ void clearBufferRange(Context* ctx, Buffer* b, GLenum internalformat, GLintptr o
                       const void* data) {
     const FormatInfo* f = formatInfo(internalformat);
     if (!f || f->comp == Comp::Compressed || isDepthOrStencil(f)) return ctx->setError(GL_INVALID_ENUM);
-    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
+    // Invalid format/type are INVALID_VALUE here (GL 4.6 6.2.1, as Mesa).
+    if (pixelFormatTypeError(format, type)) return ctx->setError(GL_INVALID_VALUE, "clear buffer format/type");
     // Buffer clear uses the GL texel size of the internal format (no RGB padding).
     int texel = clientPixelSize(f->baseFormat == GL_RGB ? GL_RGB : f->baseFormat == GL_RGBA ? GL_RGBA : f->baseFormat == GL_RG ? GL_RG : GL_RED,
                                 f->kind == FmtKind::Float ? (f->rBits == 16 ? GL_HALF_FLOAT : GL_FLOAT)
