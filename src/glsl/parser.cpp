@@ -2086,6 +2086,7 @@ Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
     }
     if (auto* bl = findBuiltins(name)) {
         for (auto* b : *bl) {
+            if (!(b->stageMask & (1u << (int)sh_.stage))) continue;
             int c = scoreParams(b->params, b->paramOut);
             if (c >= 0) cands.push_back({nullptr, b, c});
         }
