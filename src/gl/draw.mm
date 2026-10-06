@@ -925,6 +925,94 @@ void fillVertexFetch(Context* ctx, ProgramObj* prog, glsl::VariantKey& vk) {
 
 }  // namespace
 
+
+// Program pipelines whose geometry/tessellation stages (and the stages around them) come from
+// different separable programs: draws go through a composite program generated from all stage
+// programs (pipelineComposite), each stage reading its own program's argument buffer. Pipelines
+// without geometry/tessellation stages use the classic path (fragment stage mixed separately).
+ProgramObj* mglPipelineDrawProgram(Context* ctx) {
+    if (ctx->program || !ctx->pipeline) return ctx->activeProgramForStage(glsl::Stage::Vertex);
+    ProgramPipelineObj* pp = ctx->pipeline.get();
+    ProgramObj* vs = pp->stages[(int)glsl::Stage::Vertex].get();
+    if (!vs) return nullptr;
+    ProgramObj* st[(int)glsl::Stage::Count] = {};
+    bool multipass = false, mixed = false;
+    for (int s = 0; s < (int)glsl::Stage::Compute; s++) {
+        st[s] = pp->stages[s].get();
+        if (st[s] && !st[s]->program) st[s] = nullptr;
+        if (!st[s]) continue;
+        if (s == (int)glsl::Stage::Geometry || s == (int)glsl::Stage::TessEval || s == (int)glsl::Stage::TessControl) multipass = true;
+        if (st[s] != vs) mixed = true;
+    }
+    if (!multipass || !mixed) return vs;
+    std::vector<uint64_t> key;
+    for (int s = 0; s < (int)glsl::Stage::Compute; s++) {
+        key.push_back((uint64_t)(uintptr_t)st[s]);
+        key.push_back(st[s] ? (uint64_t)(uintptr_t)st[s]->program.get() : 0);
+    }
+    if (pp->composite && pp->compositeKey == key) return pp->composite.get();
+    Ref<ProgramObj> c = new ProgramObj();
+    c->composite = true;
+    c->name = vs->name;
+    c->linked = c->separable = true;
+    c->program = vs->program;
+    glsl::Reflection r = vs->refl;
+    const glsl::LinkedProgram* lp[(int)glsl::Stage::Count] = {};
+    r.stageMask = 0;
+    for (int s = 0; s < (int)glsl::Stage::Compute; s++) {
+        c->stagePrograms[s] = st[s];
+        if (!st[s]) continue;
+        c->stageLinked[s] = st[s]->program;
+        lp[s] = st[s]->program.get();
+        r.stageMask |= 1u << s;
+    }
+    if (ProgramObj* g = st[(int)glsl::Stage::Geometry]) {
+        r.gsInputPrimitive = g->refl.gsInputPrimitive;
+        r.gsOutputPrimitive = g->refl.gsOutputPrimitive;
+        r.gsMaxVertices = g->refl.gsMaxVertices;
+        r.gsInvocations = g->refl.gsInvocations;
+    }
+    if (ProgramObj* t = st[(int)glsl::Stage::TessControl]) r.tcsOutputVertices = t->refl.tcsOutputVertices;
+    if (ProgramObj* t = st[(int)glsl::Stage::TessEval]) {
+        r.tesPrimitiveMode = t->refl.tesPrimitiveMode;
+        r.tesSpacing = t->refl.tesSpacing;
+        r.tesOrder = t->refl.tesOrder;
+        r.tesPointMode = t->refl.tesPointMode;
+    }
+    ProgramObj* last = st[(int)glsl::Stage::Geometry] ? st[(int)glsl::Stage::Geometry] : st[(int)glsl::Stage::TessEval] ? st[(int)glsl::Stage::TessEval] : vs;
+    r.xfbVaryings = last->refl.xfbVaryings;
+    r.writesLayer = last->refl.writesLayer;
+    r.writesViewportIndex = last->refl.writesViewportIndex;
+    ProgramObj* fs = st[(int)glsl::Stage::Fragment];
+    r.fragOutputs = fs ? fs->refl.fragOutputs : std::vector<glsl::FragOutput>();
+    r.usesFragDepth = fs && fs->refl.usesFragDepth;
+    r.earlyFragmentTests = fs && fs->refl.earlyFragmentTests;
+    r.usesDiscard = fs && fs->refl.usesDiscard;
+    r.usesFlatShading = fs && fs->refl.usesFlatShading;
+    r.multipass = glsl::multipassInfo(lp);
+    c->refl = std::move(r);
+    pp->composite = c;
+    pp->compositeKey = key;
+    return c.get();
+}
+
+// Argument buffer address for a draw: a composite program gets a table of per-stage buffers.
+static uint64_t drawArguments(Context* ctx, ProgramObj* prog) {
+    if (!prog->composite) return buildArguments(ctx, prog, false);
+    uint64_t addr[(int)glsl::Stage::Count] = {};
+    for (int s = 0; s < (int)glsl::Stage::Count; s++) {
+        ProgramObj* p = prog->stagePrograms[s].get();
+        if (!p) continue;
+        for (int o = 0; o < s; o++)
+            if (prog->stagePrograms[o].get() == p) addr[s] = addr[o];
+        if (!addr[s]) addr[s] = buildArguments(ctx, p, false);
+        if (!addr[s]) addr[s] = ctx->upload(16).gpu;
+    }
+    UploadAlloc t = ctx->upload(sizeof addr, 16);
+    memcpy(t.cpu, addr, sizeof addr);
+    return t.gpu;
+}
+
 // ---------------------------------------------------------------------------
 // Multi-pass pipelines. Work whose output size only the GPU knows (geometry shader
 // amplification, tessellation) runs as count kernel -> CPU readback + prefix sums ->
@@ -1021,7 +1109,7 @@ void mpUpload(MPState& s) {
         info->itemOffsets = off.gpu;
     }
     s.infoAddr = di.gpu;
-    s.argAddr = buildArguments(ctx, s.prog, false);
+    s.argAddr = drawArguments(ctx, s.prog);
     if (!s.argAddr) s.argAddr = ctx->upload(16).gpu;
     s.sysAddr = buildSys(ctx, s.prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
 }
@@ -1459,7 +1547,7 @@ static bool validateDraw(Context* ctx, GLenum mode) {
         }
         if (!pp->stages[(int)glsl::Stage::Vertex]) return false;  // missing stages: undefined rendering, no error
     }
-    ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
+    ProgramObj* prog = mglPipelineDrawProgram(ctx);
     if (!prog && ctx->coreProfile) return false;  // no program/pipeline: undefined rendering, not an error
     bool hasTess = prog && (prog->refl.stageMask & (1u << (int)glsl::Stage::TessEval));
     if (mode == GL_PATCHES && !hasTess) {
@@ -1494,9 +1582,9 @@ static bool programHasSideEffects(const glsl::Reflection& r) {
 
 static void executeDraw(Context* ctx, const DrawParams& d) {
     MGL_STAT("draw");
-    ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
+    ProgramObj* prog = mglPipelineDrawProgram(ctx);
     // Compatibility profile: fixed-function emulation (prog == null) and gl_* state uniforms.
-    if (!ctx->coreProfile) prog = mglCompatPrepareDraw(ctx, prog);
+    if (!ctx->coreProfile && !(prog && prog->composite)) prog = mglCompatPrepareDraw(ctx, prog);
     if (!prog) return;
     if (!prog->program) return;  // last successfully linked executable
     if (!mglCheckDrawConditional(ctx)) return;

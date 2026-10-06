@@ -310,7 +310,10 @@ API void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
     if (primitiveMode != GL_POINTS && primitiveMode != GL_LINES && primitiveMode != GL_TRIANGLES) return ctx->setError(GL_INVALID_ENUM);
     TransformFeedbackObj* x = ctx->xfb.get();
     if (x->active) return ctx->setError(GL_INVALID_OPERATION);
-    ProgramObj* p = ctx->activeProgramForStage(glsl::Stage::Vertex);
+    // the program of the last vertex-processing stage provides the captured varyings
+    ProgramObj* p = nullptr;
+    for (glsl::Stage st : {glsl::Stage::Geometry, glsl::Stage::TessEval, glsl::Stage::Vertex})
+        if (!p) p = ctx->activeProgramForStage(st);
     if (!p || p->refl.xfbVaryings.empty()) return ctx->setError(GL_INVALID_OPERATION, "no transform feedback varyings");
     x->active = true;
     x->paused = false;

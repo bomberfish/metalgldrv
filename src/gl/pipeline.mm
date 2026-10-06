@@ -42,7 +42,13 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     if (!prog->program) {
         v->error = "program not linked";
     } else {
-        v->msl = glsl::generateMSL(*prog->program, key);
+        if (prog->composite) {
+            const glsl::LinkedProgram* st[(int)glsl::Stage::Count];
+            for (int i = 0; i < (int)glsl::Stage::Count; i++) st[i] = prog->stageLinked[i].get();
+            v->msl = glsl::generateMSL(st, key);
+        } else {
+            v->msl = glsl::generateMSL(*prog->program, key);
+        }
         if (!v->msl.error.empty()) {
             v->error = v->msl.error;
         } else {

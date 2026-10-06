@@ -261,6 +261,11 @@ struct MSLOutput {
 };
 
 MSLOutput generateMSL(const LinkedProgram& program, const VariantKey& key);
+// Program pipelines: pre-rasterization and fragment stages from different separable programs
+// (stages[s] = program providing stage s, or null). Each stage reads its own program's argument
+// buffer; MGLArgs at buffer 0 is then a table of 6 GPU addresses indexed by Stage.
+MSLOutput generateMSL(const LinkedProgram* const stages[(int)Stage::Count], const VariantKey& key);
+MultiPassInfo multipassInfo(const LinkedProgram* const stages[(int)Stage::Count]);
 
 // ---------------------------------------------------------------------------
 // Runtime <-> shader ABI. Mirrored verbatim in the MSL prelude.

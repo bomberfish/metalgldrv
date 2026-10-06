@@ -42,14 +42,50 @@ bool isSimpleIdent(const std::string& s) {
 }
 
 const char* kSwz = "xyzw";
+static const char* const kStageNs[] = {"vs", "tcs", "tes", "gs", "fs", "cs"};
 
 class Emitter {
 public:
-    Emitter(const LinkedProgram& p, const VariantKey& k) : P(p), K(k) {}
+    Emitter(const LinkedProgram& p, const VariantKey& k) : P(&p), P0(&p), K(k) {
+        for (auto& x : SP) x = &p;
+        stageMask_ = p.stageMask;
+        usesFp64_ = p.refl.usesFp64;
+    }
+    // Program pipeline: each stage from its own (separable) program, each with its own
+    // argument buffer (MGLArgs at buffer 0 then holds one pointer per stage).
+    Emitter(const LinkedProgram* const stages[(int)Stage::Count], const VariantKey& k) : K(k) {
+        multi_ = true;
+        for (int i = 0; i < (int)Stage::Count; i++) {
+            SP[i] = stages[i];
+            if (stages[i] && (stages[i]->stageMask & (1u << i))) {
+                stageMask_ |= 1u << i;
+                if (!P0) P0 = stages[i];
+                usesFp64_ |= stages[i]->refl.usesFp64;
+            }
+        }
+        for (auto& x : SP) if (!x) x = P0;
+        P = P0;
+    }
     MSLOutput run();
+    std::string recordSizes(MultiPassInfo& mp);
 
 private:
-    const LinkedProgram& P;
+    const LinkedProgram* P = nullptr;   // program of the current stage
+    const LinkedProgram* P0 = nullptr;
+    const LinkedProgram* SP[(int)Stage::Count] = {};
+    bool multi_ = false;
+    bool argsEmitted_[(int)Stage::Count] = {};
+    uint32_t stageMask_ = 0;
+    bool usesFp64_ = false;
+    const StageCode& SC(Stage s) const { return SP[(int)s]->stages[(int)s]; }
+    const Reflection& RF(Stage s) const { return SP[(int)s]->refl; }
+    Stage lastPreRaster() const {
+        for (Stage st : {Stage::Geometry, Stage::TessEval, Stage::Vertex})
+            if (stageMask_ & (1u << (int)st)) return st;
+        return Stage::Vertex;
+    }
+    // Expression giving a stage's argument buffer pointer inside entry points.
+    std::string argsOf(Stage s) const { return multi_ ? std::string("A.") + kStageNs[(int)s] : "&A"; }
     int discardCount_ = 0;  // METALGLDRV_DEBUG_NODISCARD bisecting
     const VariantKey& K;
     MSLOutput out_;
@@ -270,8 +306,8 @@ private:
     }
     const BlockBinding* blockOf(const Variable* v) {
         if (!v->block || !(v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer)) return nullptr;
-        auto it = P.blocks.find(std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name);
-        if (it == P.blocks.end()) fail("internal: block '" + v->block->name + "' has no binding");
+        auto it = P->blocks.find(std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name);
+        if (it == P->blocks.end()) fail("internal: block '" + v->block->name + "' has no binding");
         return &it->second;
     }
 
@@ -328,7 +364,8 @@ private:
     };
     void useStage(Stage s) {
         stage_ = s;
-        sc_ = &P.stages[(int)s];
+        P = SP[(int)s] ? SP[(int)s] : P0;
+        sc_ = &P->stages[(int)s];
     }
     void prepareStage(Stage s);
     void emitBody(Stage s, std::string& o, const std::string& preG = "", const std::string& extraMembers = "",
@@ -378,10 +415,6 @@ private:
     void emitGeometryXfb(std::string& o, bool fromTes);
     void captureWords(Stage st, const std::string& g, std::vector<std::tuple<int, uint32_t, std::string>>& out);
 
-public:
-    std::string recordSizes(MultiPassInfo& mp);
-
-private:
     void collectStructs(std::vector<const StructDef*>& order);
     void emitArgs(std::string& o);
     void flatten(const Type& t, const std::string& acc, std::vector<std::pair<Type, std::string>>& leaves);
@@ -407,9 +440,9 @@ bool Emitter::bufAccess(const Expr* e, Acc& a) {
         case EK::Var: {
             const Variable* v = e->var;
             if (isDefaultUniform(v)) {
-                auto it = P.defaultOffsets.find(v->name);
-                if (it == P.defaultOffsets.end()) fail("internal: uniform '" + v->name + "' has no offset");
-                a.ptr = "A->s" + std::to_string(P.defaultSlot);
+                auto it = P->defaultOffsets.find(v->name);
+                if (it == P->defaultOffsets.end()) fail("internal: uniform '" + v->name + "' has no offset");
+                a.ptr = "A->s" + std::to_string(P->defaultSlot);
                 a.off = std::to_string(it->second) + "u";
                 a.type = v->type;
                 a.layout = computeLayout(v->type, Packing::Std430, v->q.layout.matrix == 2);
@@ -797,7 +830,7 @@ std::string Emitter::ex(const Expr* e) {
                 if (v->builtin == BuiltinVar::DepthRange)
                     return "S_gl_DepthRangeParameters{sys->depthRangeNear, sys->depthRangeFar, sys->depthRangeFar - sys->depthRangeNear}";
                 if (v->builtin == BuiltinVar::WorkGroupSize) {
-                    const auto& r = P.refl;
+                    const auto& r = P->refl;
                     return "uint3(" + std::to_string(r.localSize[0]) + "u, " + std::to_string(r.localSize[1]) + "u, " +
                            std::to_string(r.localSize[2]) + "u)";
                 }
@@ -848,9 +881,9 @@ std::string Emitter::ex(const Expr* e) {
         case EK::Call: return callUser(e);
         case EK::Builtin: return callBuiltin(e);
         case EK::SubroutineCall: {
-            const auto& ss = P.refl.subroutines[(int)stage_];
-            auto it = P.subroutineLocation.find({(int)stage_, e->var->name});
-            if (ss.slot < 0 || it == P.subroutineLocation.end()) fail("internal: subroutine uniform without location");
+            const auto& ss = P->refl.subroutines[(int)stage_];
+            auto it = P->subroutineLocation.find({(int)stage_, e->var->name});
+            if (ss.slot < 0 || it == P->subroutineLocation.end()) fail("internal: subroutine uniform without location");
             std::string sel = "A->s" + std::to_string(ss.slot) + "[" + std::to_string(it->second) + "u" +
                               (e->aux ? " + uint(" + ex(e->aux) + ")" : "") + "]";
             std::vector<uint8_t> outs;
@@ -1036,8 +1069,8 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         };
         std::string p;
         if (!path(leaf, p)) fail("unsupported opaque member expression");
-        auto it = P.opaque.find(p);
-        if (it == P.opaque.end()) fail("internal: opaque uniform '" + p + "' has no binding");
+        auto it = P->opaque.find(p);
+        if (it == P->opaque.end()) fail("internal: opaque uniform '" + p + "' has no binding");
         const OpaqueBinding& ob = it->second;
         std::string t = "A->s" + std::to_string(ob.slot), sm = ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : "";
         if (e->kind == EK::Index) {
@@ -1052,8 +1085,8 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
             std::string n = varName(v);
             return {n + "_t", n + "_s"};
         }
-        auto it = P.opaque.find(v->name);
-        if (it == P.opaque.end()) fail("internal: opaque uniform '" + v->name + "' has no binding");
+        auto it = P->opaque.find(v->name);
+        if (it == P->opaque.end()) fail("internal: opaque uniform '" + v->name + "' has no binding");
         const OpaqueBinding& ob = it->second;
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
     }
@@ -1097,7 +1130,7 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
         if (base->kind != EK::Var) fail("unsupported atomic counter expression");
         const Variable* v = base->var;
         if (v->param) return varName(v);
-        const OpaqueBinding& ob = P.opaque.at(v->name);
+        const OpaqueBinding& ob = P->opaque.at(v->name);
         std::string off = std::to_string(ob.acOffset) + "u";
         if (!idx.empty()) off = "(" + off + " + " + idx + " * 4u)";
         return "((device atomic_uint*)(A->s" + std::to_string(ob.slot) + " + " + off + "))";
@@ -1299,10 +1332,10 @@ std::string Emitter::callBuiltin(const Expr* e) {
         return ops.at(n) + "(" + p + ", " + a(1) + ", memory_order_relaxed)";
     }
     if (n == "ftransform") {
-        auto it = P.defaultOffsets.find("gl_ModelViewProjectionMatrix");
-        if (it == P.defaultOffsets.end()) fail("internal: ftransform without gl_ModelViewProjectionMatrix");
+        auto it = P->defaultOffsets.find("gl_ModelViewProjectionMatrix");
+        if (it == P->defaultOffsets.end()) fail("internal: ftransform without gl_ModelViewProjectionMatrix");
         Type m4 = Type::matrix(BT::Float, 4, 4);
-        return "(" + loaderFor(m4, computeLayout(m4, Packing::Std430, false)) + "(A->s" + std::to_string(P.defaultSlot) + ", " +
+        return "(" + loaderFor(m4, computeLayout(m4, Packing::Std430, false)) + "(A->s" + std::to_string(P->defaultSlot) + ", " +
                std::to_string(it->second) + "u) * bi_gl_Vertex)";
     }
     if (n == "EmitVertex") return "mgl_EmitVertex(0)";
@@ -1750,8 +1783,8 @@ std::string Emitter::subroutineDispatchers() {
         out += "    " + mt(proto->ret) + " mgl_sub_" + v->name + "(" + params + ") {\n        switch (mgl_sel) {\n";
         for (auto& [mangled, f] : sc_->defs) {
             if (std::find(f->subroutineTypes.begin(), f->subroutineTypes.end(), proto->name) == f->subroutineTypes.end()) continue;
-            auto it = P.subroutineIndex.find({(int)stage_, f->name});
-            if (it == P.subroutineIndex.end() || !fnNames_.count(f)) continue;
+            auto it = P->subroutineIndex.find({(int)stage_, f->name});
+            if (it == P->subroutineIndex.end() || !fnNames_.count(f)) continue;
             std::string call = fnNames_.at(f) + "(" + args + ")";
             out += "            case " + std::to_string(it->second) + "u: " + (proto->ret.isVoid() ? call + "; return;" : "return " + call + ";") + "\n";
         }
@@ -1899,11 +1932,11 @@ void Emitter::collectStructs(std::vector<const StructDef*>& order) {
 }
 
 void Emitter::emitArgs(std::string& o) {
-    const auto& slots = P.refl.slots;
+    const auto& slots = P->refl.slots;
     std::vector<std::string> decl(slots.size());
     std::vector<bool> skip(slots.size(), false);
-    if (P.defaultSlot >= 0) decl[P.defaultSlot] = "constant uchar* s" + std::to_string(P.defaultSlot) + ";";
-    for (auto& [key, bb] : P.blocks) {
+    if (P->defaultSlot >= 0) decl[P->defaultSlot] = "constant uchar* s" + std::to_string(P->defaultSlot) + ";";
+    for (auto& [key, bb] : P->blocks) {
         std::string arr = bb.isArray ? "[" + std::to_string(bb.count) + "]" : "";
         decl[bb.slot] = std::string(bb.storage ? "device uchar* s" : "constant uchar* s") + std::to_string(bb.slot) + arr + ";";
         for (int i = 1; i < bb.count; i++) skip[bb.slot + i] = true;
@@ -1912,7 +1945,7 @@ void Emitter::emitArgs(std::string& o) {
             for (int i = 1; i < bb.count; i++) skip[bb.sizeSlot + i] = true;
         }
     }
-    for (auto& [name, ob] : P.opaque) {
+    for (auto& [name, ob] : P->opaque) {
         auto group = [&](int slot, const std::string& type) {
             if (ob.count > 1) decl[slot] = "array<" + type + ", " + std::to_string(ob.count) + "> s" + std::to_string(slot) + ";";
             else decl[slot] = type + " s" + std::to_string(slot) + ";";
@@ -1925,8 +1958,8 @@ void Emitter::emitArgs(std::string& o) {
             group(ob.slot, texType(ob.type, ob.memory));
         }
     }
-    for (auto& acb : P.refl.atomicCounterBuffers) decl[acb.slot] = "device uchar* s" + std::to_string(acb.slot) + ";";
-    for (auto& ss : P.refl.subroutines)
+    for (auto& acb : P->refl.atomicCounterBuffers) decl[acb.slot] = "device uchar* s" + std::to_string(acb.slot) + ";";
+    for (auto& ss : P->refl.subroutines)
         if (ss.slot >= 0) decl[ss.slot] = "device const uint* s" + std::to_string(ss.slot) + ";";
     o += "struct MGLArgs {\n";
     bool any = false;
@@ -2090,8 +2123,12 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     init += "    void mgl_zero() {\n" + zero + "    }\n";
 
     o += "namespace " + ns_ + " {\n";
+    if (multi_) {
+        emitArgs(o);
+        argsEmitted_[(int)s] = true;
+    }
     if (needEq_) o += "using ::mgl_eq;\n";
-    if (needEq_ && P.refl.usesFp64) o += "// mgl_eq_f64_overloads\n";
+    if (needEq_ && usesFp64_) o += "// mgl_eq_f64_overloads\n";
     o += structs;
     for (auto* sd : needEq_ ? order : std::vector<const StructDef*>{}) {
         std::string n = structName(sd);
@@ -2217,8 +2254,8 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                                               v->builtin == BuiltinVar::SecondaryColor || v->builtin == BuiltinVar::MultiTexCoord ||
                                               v->builtin == BuiltinVar::FogCoord))
             continue;
-        auto it = P.attribLocations.find(v->name);
-        if (it == P.attribLocations.end()) continue;
+        auto it = P->attribLocations.find(v->name);
+        if (it == P->attribLocations.end()) continue;
         int loc = it->second;
         std::vector<std::pair<Type, std::string>> leaves;
         flatten(v->type, g + varName(v), leaves);
@@ -2296,7 +2333,7 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
 std::string Emitter::runVS(const std::string& gv, const std::string& vid, const std::string& inst) {
     useStage(Stage::Vertex);
     StageInfo& si = si_[(int)Stage::Vertex];
-    std::string c = "vs::G " + gv + " = {};\n" + gv + ".A = &A;\n" + gv + ".sys = &sys;\n";
+    std::string c = "vs::G " + gv + " = {};\n" + gv + ".A = " + argsOf(Stage::Vertex) + ";\n" + gv + ".sys = &sys;\n";
     c += "{\n    uint mgl_vid = " + vid + ", mgl_vinst = " + inst + ";\n";
     std::string dummy;
     bool any;
@@ -2357,9 +2394,9 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
             std::string val;
             if (hasClipD) val = g + varName(si.bi[BuiltinVar::ClipDistance]) + "[" + std::to_string(i) + "]";
             else {
-                auto it = P.defaultOffsets.find("gl_ClipPlane");
-                if (it == P.defaultOffsets.end()) fail("internal: gl_ClipVertex without gl_ClipPlane");
-                val = "dot(" + g + "bi_gl_ClipVertex, mgl_ld_float4(" + g + "A->s" + std::to_string(P.defaultSlot) + ", " +
+                auto it = P->defaultOffsets.find("gl_ClipPlane");
+                if (it == P->defaultOffsets.end()) fail("internal: gl_ClipVertex without gl_ClipPlane");
+                val = "dot(" + g + "bi_gl_ClipVertex, mgl_ld_float4(" + g + "A->s" + std::to_string(P->defaultSlot) + ", " +
                       std::to_string(it->second + 16 * i) + "u))";
             }
             r.vertexCopy += "v.mgl_clip[" + std::to_string(i) + "] = ((" + sys + "clipDistanceMask >> " + std::to_string(i) +
@@ -2380,7 +2417,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
         perPrim("uint", "mgl_layer", "render_target_array_index", "uint(" + g + "bi_gl_Layer)");
     if (si.bi.count(BuiltinVar::ViewportIndex) && si.bi[BuiltinVar::ViewportIndex]->q.storage == Storage::Out)
         perPrim("uint", "mgl_vp", "viewport_array_index", "uint(" + g + "bi_gl_ViewportIndex)");
-    const StageCode& fsc = P.stages[(int)Stage::Fragment];
+    const StageCode& fsc = SC(Stage::Fragment);
     bool fsClip = fsc.main && fsc.usedNames.count("gl_ClipDistance");
     bool fsCull = fsc.main && fsc.usedNames.count("gl_CullDistance");
     for (auto& f : fields) {
@@ -2426,7 +2463,7 @@ void Emitter::emitClassicVS(std::string& o) {
     e += ", uint mgl_bi [[base_instance]]";
     if (K.manualFetch) e += ", constant MGLDrawInfo& D [[buffer(22)]]";
     if (si.bi.count(BuiltinVar::BaseVertex)) e += ", uint mgl_bv [[base_vertex]]";
-    e += ") {\n    vs::G g;\n    g.mgl_zero();\n    g.A = &A;\n    g.sys = &sys;\n";
+    e += ") {\n    vs::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Vertex) + ";\n    g.sys = &sys;\n";
     e += copyIn;
     for (auto* v : si.builtins) {
         if (v->builtin == BuiltinVar::VertexID) e += "    g.bi_" + v->name + " = int(mgl_vid);\n";
@@ -2611,8 +2648,8 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     std::string color0;
     for (auto* v : sc_->globals) {
         if (v->q.storage != Storage::Out || v->builtin != BuiltinVar::None) continue;
-        auto it = P.fragOutputs.find(v->name);
-        if (it == P.fragOutputs.end()) continue;
+        auto it = P->fragOutputs.find(v->name);
+        if (it == P->fragOutputs.end()) continue;
         auto [loc, idx] = it->second;
         int n = v->type.isArray() ? v->type.dims[0] : 1;
         Type et = v->type.stripArrays();
@@ -2674,7 +2711,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     e += std::string("fragment ") + (anyOut ? "fs::Out" : "void") + " mgl_fs(";
     if (anyIn) e += "fs::In in [[stage_in]], ";
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
-    e += "    fs::G g;\n    g.mgl_zero();\n    g.A = &A;\n    g.sys = &sys;\n" + copyIn;
+    e += "    fs::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Fragment) + ";\n    g.sys = &sys;\n" + copyIn;
     e += "    g.mgl_init();\n    g." + si.mainName + "();\n";
     if (anyOut) e += "    fs::Out o;\n" + copyOut + alpha + "    return o;\n";
     e += "}\n\n";
@@ -2686,7 +2723,7 @@ void Emitter::emitCS(std::string& o) {
     emitBody(Stage::Compute, o);
     StageInfo& si = si_[(int)Stage::Compute];
     o += "}  // namespace cs\n\n";
-    const auto& r = P.refl;
+    const auto& r = P->refl;
     std::string e = "kernel void mgl_cs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint3 mgl_gid [[thread_position_in_grid]], "
                     "uint3 mgl_lid [[thread_position_in_threadgroup]], uint3 mgl_wid [[threadgroup_position_in_grid]], uint mgl_lidx [[thread_index_in_threadgroup]], "
                     "uint3 mgl_nwg [[threadgroups_per_grid]]) {\n";
@@ -2748,7 +2785,7 @@ std::string Emitter::gsUnpack(const std::vector<Field>& src, const std::string& 
 // Geometry shader rasterized through a mesh shader. Inputs come from the vertex shader (run per
 // input vertex) or, after tessellation, from the TES output records.
 void Emitter::emitGeometry(std::string& o, bool fromTes) {
-    const Reflection& R = P.refl;
+    const Reflection& R = RF(Stage::Geometry);
     int NV = primVerts(R.gsInputPrimitive);
     if (!NV) fail("unsupported geometry shader input primitive");
     uint32_t outPrim = R.gsOutputPrimitive;
@@ -2814,7 +2851,7 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
     }
     loop += "        }\n";
     e += "    if (mgl_tid == 0u) {\n";
-    e += "        gs::G g = {};\n        g.A = &A;\n        g.sys = &sys;\n        g.mgl_mo = &mgl_mo;\n        g.mgl_nv = 0u;\n"
+    e += "        gs::G g = {};\n        g.A = " + argsOf(Stage::Geometry) + ";\n        g.sys = &sys;\n        g.mgl_mo = &mgl_mo;\n        g.mgl_nv = 0u;\n"
          "        g.mgl_np = 0u;\n        g.mgl_strip = 0u;\n        g.mgl_primIn = int(mgl_prim);\n";
     e += loop;
     useStage(Stage::Geometry);
@@ -2839,9 +2876,9 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
 // TES records (mgl_tes_count / mgl_tes_gen) feeding a geometry shader or transform feedback.
 // ---------------------------------------------------------------------------
 void Emitter::emitTessControlPass(std::string& o) {
-    const Reflection& R = P.refl;
-    ts_.hasTCS = P.stages[(int)Stage::TessControl].main != nullptr;
-    int OUTV = ts_.hasTCS ? R.tcsOutputVertices : 0;
+    const Reflection& R = RF(Stage::TessEval);
+    ts_.hasTCS = SC(Stage::TessControl).main != nullptr;
+    int OUTV = ts_.hasTCS ? RF(Stage::TessControl).tcsOutputVertices : 0;
     ts_.OUTV = OUTV;
     if (ts_.hasTCS && (OUTV < 1 || OUTV > 32)) fail("invalid tessellation control output vertex count");
     // VS
@@ -2891,7 +2928,7 @@ void Emitter::emitTessControlPass(std::string& o) {
             e += "        " + acc(f, "", "mgl_cp") + " = " + src + ";\n";
         }
         e += "    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
-        e += "    tcs::G g = {};\n    g.A = &A;\n    g.sys = &sys;\n";
+        e += "    tcs::G g = {};\n    g.A = " + argsOf(Stage::TessControl) + ";\n    g.sys = &sys;\n";
         if (tsi.hasShared) e += "    g.S = S;\n";
         for (auto* v : tsi.builtins) {
             if (v->builtin == BuiltinVar::InvocationID) e += "    g.bi_" + v->name + " = int(mgl_tid);\n";
@@ -2971,7 +3008,7 @@ std::string Emitter::tesLoadPatch() {
 std::string Emitter::tesRun(const std::string& coord, const std::string& patch, const std::string& cps) {
     useStage(Stage::TessEval);
     StageInfo& esi = si_[(int)Stage::TessEval];
-    std::string e = "tes::G g = {};\ng.A = &A;\ng.sys = &sys;\n";
+    std::string e = "tes::G g = {};\ng.A = " + argsOf(Stage::TessEval) + ";\ng.sys = &sys;\n";
     if (esi.hasShared) e += "g.S = S;\n";
     for (auto* v : esi.builtins) {
         if (v->builtin == BuiltinVar::TessCoord) e += "g.bi_" + v->name + " = " + coord + ";\n";
@@ -2982,7 +3019,7 @@ std::string Emitter::tesRun(const std::string& coord, const std::string& patch, 
 }
 
 void Emitter::emitTessEvalMesh(std::string& o) {
-    const Reflection& R = P.refl;
+    const Reflection& R = RF(Stage::TessEval);
     bool points = R.tesPointMode;
     bool isolines = R.tesPrimitiveMode != gl::TRIANGLES && R.tesPrimitiveMode != gl::QUADS;
     std::string topo = points ? "point" : isolines ? "line" : "triangle";
@@ -3097,7 +3134,7 @@ void Emitter::emitTessEvalRecords(std::string& o) {
 // Transform feedback of TES output (no geometry shader): one thread per TES primitive.
 void Emitter::emitTesXfb(std::string& o) {
     (void)o;
-    const MultiPassInfo& mp = P.refl.multipass;
+    const MultiPassInfo& mp = RF(lastPreRaster()).multipass;
     std::string ipp = std::to_string(tesIpp_) + "u";
     std::string e = "kernel void mgl_tes_xfb(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
                     "uint mgl_p [[thread_position_in_grid]]) {\n";
@@ -3123,7 +3160,7 @@ void Emitter::emitTesXfb(std::string& o) {
 // Transform feedback capture: vertex shader as a kernel
 // ---------------------------------------------------------------------------
 void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tuple<int, uint32_t, std::string>>& out) {
-    const Reflection& R = P.refl;
+    const Reflection& R = P->refl;
     prepareStage(st);
     useStage(st);
     StageInfo& si = si_[(int)st];
@@ -3190,9 +3227,9 @@ void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tupl
 
 
 void Emitter::emitXfb(std::string& o) {
-    const Reflection& R = P.refl;
-    bool gs = P.stages[(int)Stage::Geometry].main != nullptr;
-    if (P.stages[(int)Stage::TessEval].main) {
+    const Reflection& R = RF(lastPreRaster());
+    bool gs = SC(Stage::Geometry).main != nullptr;
+    if (SC(Stage::TessEval).main) {
         emitTessControlPass(o);
         emitTessEvalRecords(o);
         if (gs) emitGeometryXfb(o, true);
@@ -3231,8 +3268,8 @@ void Emitter::emitXfb(std::string& o) {
 // many primitives fit (xfbPrimLimit), and mgl_gs_write runs it again writing the captured
 // vertices of each completed primitive (strips decomposed into lists) at its final position.
 void Emitter::emitGeometryXfb(std::string& o, bool fromTes) {
-    const Reflection& R = P.refl;
-    const MultiPassInfo& mp = R.multipass;
+    const Reflection& R = RF(Stage::Geometry);
+    const MultiPassInfo& mp = RF(lastPreRaster()).multipass;
     int NV = primVerts(R.gsInputPrimitive);
     if (!NV) fail("unsupported geometry shader input primitive");
     uint32_t outPrim = R.gsOutputPrimitive;
@@ -3311,7 +3348,7 @@ void Emitter::emitGeometryXfb(std::string& o, bool fromTes) {
                 "u + j] * " + std::to_string(tesRB_) + "u);\n";
         loop += indentBy(gsUnpack(vf, "r[$I]", "g."), 8) + "    }\n";
     }
-    e += "    gs::G g = {};\n    g.A = &A;\n    g.sys = &sys;\n    g.mgl_D = &D;\n    g.mgl_mode = mgl_mode;\n"
+    e += "    gs::G g = {};\n    g.A = " + argsOf(Stage::Geometry) + ";\n    g.sys = &sys;\n    g.mgl_D = &D;\n    g.mgl_mode = mgl_mode;\n"
          "    for (int k = 0; k < 4; k++) { g.mgl_cnt[k] = 0u; g.mgl_strip[k] = 0u; g.mgl_np[k] = 0u; }\n"
          "    g.mgl_off = mgl_mode != 0u ? D.itemOffsets[mgl_t] : uint4(0u);\n    g.mgl_primIn = int(mgl_prim);\n";
     e += loop;
@@ -3335,25 +3372,25 @@ void Emitter::emitGeometryXfb(std::string& o, bool fromTes) {
 
 MSLOutput Emitter::run() {
     try {
-        uint32_t m = P.stageMask;
+        uint32_t m = stageMask_;
         bool gs = m & (1u << (int)Stage::Geometry), tess = m & (1u << (int)Stage::TessEval);
         std::string o;
-        emitArgs(o);
+        if (!multi_) emitArgs(o);
         switch (K.kind) {
             case PipelineKind::Compute:
-                if (!P.stages[(int)Stage::Compute].main) fail("program has no compute shader");
+                if (!SC(Stage::Compute).main) fail("program has no compute shader");
                 emitCS(o);
                 break;
             case PipelineKind::Classic:
                 if (gs || tess) fail("geometry/tessellation programs need PipelineKind::MeshGeometry/Tessellation");
-                if (P.stages[(int)Stage::Vertex].main) emitClassicVS(o);
-                if (P.stages[(int)Stage::Fragment].main) emitFS(o, false);
+                if (SC(Stage::Vertex).main) emitClassicVS(o);
+                if (SC(Stage::Fragment).main) emitFS(o, false);
                 break;
             case PipelineKind::MeshGeometry:
                 if (!gs) fail("program has no geometry shader");
                 if (tess) fail("tessellation programs need PipelineKind::Tessellation");
                 emitGeometry(o, false);
-                if (P.stages[(int)Stage::Fragment].main) emitFS(o, true);
+                if (SC(Stage::Fragment).main) emitFS(o, true);
                 else emitNullFS();
                 break;
             case PipelineKind::Tessellation:
@@ -3365,12 +3402,20 @@ MSLOutput Emitter::run() {
                 } else {
                     emitTessEvalMesh(o);
                 }
-                if (P.stages[(int)Stage::Fragment].main) emitFS(o, true);
+                if (SC(Stage::Fragment).main) emitFS(o, true);
                 else emitNullFS();
                 break;
             case PipelineKind::XfbCapture:
                 emitXfb(o);
                 break;
+        }
+        if (multi_) {
+            // one argument buffer per stage program; unused stages keep a placeholder
+            o += "struct MGLArgs {\n";
+            for (int i = 0; i < (int)Stage::Count; i++)
+                o += argsEmitted_[i] ? std::string("    constant ") + kStageNs[i] + "::MGLArgs* " + kStageNs[i] + ";\n"
+                                     : std::string("    ulong ") + kStageNs[i] + ";\n";
+            o += "};\n\n";
         }
         o += entries_;
         out_.source = buildMSLPrelude(o) + "\n" + o;
@@ -3384,13 +3429,13 @@ MSLOutput Emitter::run() {
 
 std::string Emitter::recordSizes(MultiPassInfo& mp) {
     try {
-        if (!P.stages[(int)Stage::TessEval].main) return "";
-        bool hasTCS = P.stages[(int)Stage::TessControl].main != nullptr;
+        if (!SC(Stage::TessEval).main) return "";
+        bool hasTCS = SC(Stage::TessControl).main != nullptr;
         size_t nv, np;
         if (hasTCS) {
             nv = arrayedFields(Stage::TessControl, Storage::Out).size();
             np = patchFields(Stage::TessControl, Storage::Out).size();
-            mp.tcsOutputVertices = (uint32_t)P.refl.tcsOutputVertices;
+            mp.tcsOutputVertices = (uint32_t)RF(Stage::TessControl).tcsOutputVertices;
         } else {
             nv = producerFields(Stage::Vertex).size();
             np = 0;
@@ -3416,6 +3461,31 @@ std::string fillMultipassRecords(const LinkedProgram& prog, MultiPassInfo& mp) {
 MSLOutput generateMSL(const LinkedProgram& program, const VariantKey& key) {
     Emitter e(program, key);
     return e.run();
+}
+
+}  // namespace glsl
+
+namespace glsl {
+
+MSLOutput generateMSL(const LinkedProgram* const stages[(int)Stage::Count], const VariantKey& key) {
+    Emitter e(stages, key);
+    return e.run();
+}
+
+MultiPassInfo multipassInfo(const LinkedProgram* const stages[(int)Stage::Count]) {
+    static const VariantKey key;
+    // transform feedback layout comes from the program of the last vertex-processing stage
+    MultiPassInfo mp;
+    for (Stage st : {Stage::Geometry, Stage::TessEval, Stage::Vertex}) {
+        const LinkedProgram* p = stages[(int)st];
+        if (p && (p->stageMask & (1u << (int)st))) {
+            mp = p->refl.multipass;
+            break;
+        }
+    }
+    Emitter e(stages, key);
+    e.recordSizes(mp);
+    return mp;
 }
 
 }  // namespace glsl
