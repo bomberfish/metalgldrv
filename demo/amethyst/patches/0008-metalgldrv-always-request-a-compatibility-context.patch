@@ -1,0 +1,41 @@
+From 0c4b72a846832e7d42b44993eb965851d0c392cf Mon Sep 17 00:00:00 2001
+From: bomberfish <me@bomberfish.ca>
+Date: Mon, 5 Oct 2026 21:14:42 -0400
+Subject: [PATCH 8/8] metalgldrv: always request a compatibility context
+
+GLFW's glfwExtensionSupported shim calls glGetString(GL_EXTENSIONS), which core
+profiles reject. A 4.6 compatibility context is a superset of core.
+---
+ Natives/ctxbridges/gl_bridge.m | 16 ++++++----------
+ 1 file changed, 6 insertions(+), 10 deletions(-)
+
+diff --git a/Natives/ctxbridges/gl_bridge.m b/Natives/ctxbridges/gl_bridge.m
+index e68022b..10e6c2e 100644
+--- a/Natives/ctxbridges/gl_bridge.m
++++ b/Natives/ctxbridges/gl_bridge.m
+@@ -115,16 +115,12 @@ static bool gl_init() {
+         ctx_attribs[n++] = gl_hint_major;
+         ctx_attribs[n++] = EGL_CONTEXT_MINOR_VERSION;
+         ctx_attribs[n++] = gl_hint_minor;
+-        if (gl_hint_profile == GLFW_OPENGL_CORE_PROFILE || gl_hint_profile == GLFW_OPENGL_COMPAT_PROFILE) {
+-            ctx_attribs[n++] = EGL_CONTEXT_OPENGL_PROFILE_MASK;
+-            ctx_attribs[n++] = gl_hint_profile == GLFW_OPENGL_CORE_PROFILE ?
+-                EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT : EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT;
+-        }
+-        if (gl_hint_forward_compat) {
+-            ctx_attribs[n++] = EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE;
+-            ctx_attribs[n++] = EGL_TRUE;
+-        }
+-        NSLog(@"EGLBridge: metalgldrv context requested: %d.%d profile=0x%x fwd=%d",
++        // Always a compatibility context: it is a superset of core, and the GLFW stub's
++        // glfwExtensionSupported queries glGetString(GL_EXTENSIONS), which core profiles reject.
++        // (Forward-compatible only applies to core, so the hint is dropped along with it.)
++        ctx_attribs[n++] = EGL_CONTEXT_OPENGL_PROFILE_MASK;
++        ctx_attribs[n++] = EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT;
++        NSLog(@"EGLBridge: metalgldrv compatibility context for requested %d.%d profile=0x%x fwd=%d",
+             gl_hint_major, gl_hint_minor, gl_hint_profile, gl_hint_forward_compat);
+     } else {
+         ctx_attribs[n++] = EGL_CONTEXT_CLIENT_VERSION;
+-- 
+2.54.0 (Apple Git-157)
+
