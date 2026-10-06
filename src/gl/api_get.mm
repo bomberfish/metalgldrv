@@ -140,6 +140,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_NUM_EXTENSIONS: v = I(kNumExtensions); return true;
     case GL_NUM_SHADING_LANGUAGE_VERSIONS: v = I(17); return true;
     case GL_NUM_SPIR_V_EXTENSIONS: v = I(0); return true;
+    case GL_PRIMITIVE_RESTART_FOR_PATCHES_SUPPORTED: v = B(false); return true;  // tess path ignores restart
     case GL_RESET_NOTIFICATION_STRATEGY: v = E(ctx->loseContextOnReset ? GL_LOSE_CONTEXT_ON_RESET : GL_NO_RESET_NOTIFICATION); return true;
     case GL_CONTEXT_RELEASE_BEHAVIOR: v = E(GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH); return true;
     case GL_MAX_TEXTURE_SIZE: case GL_MAX_CUBE_MAP_TEXTURE_SIZE: case GL_MAX_RENDERBUFFER_SIZE: case GL_MAX_RECTANGLE_TEXTURE_SIZE:

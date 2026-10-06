@@ -615,6 +615,10 @@ struct IndexInfo {
     bool generated = false;  // indices produced on CPU (fans/loops/quads/u8)
 };
 
+namespace {
+void decomposeToList(Context* ctx, const DrawParams& d, const uint8_t* src, std::vector<uint32_t>& out);
+}  // namespace
+
 // Expands primitives Metal lacks and converts u8 / custom restart indices.
 static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, uint32_t* minIdx, uint32_t* maxIdx) {
     GLenum mode = d.mode;
@@ -667,6 +671,36 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
         }
         *minIdx = mn == UINT32_MAX ? 0 : mn + d.baseVertex;
         *maxIdx = mx + d.baseVertex;
+    }
+    // Adjacency topologies without a geometry shader draw their non-adjacent vertices, and list
+    // topologies with primitive restart drop the incomplete primitive before each restart
+    // (Metal only restarts strips): decompose to a plain list on the CPU.
+    bool adjacency = mode == GL_LINES_ADJACENCY || mode == GL_LINE_STRIP_ADJACENCY || mode == GL_TRIANGLES_ADJACENCY ||
+                     mode == GL_TRIANGLE_STRIP_ADJACENCY;
+    bool listRestart = restart && d.indexed && (mode == GL_POINTS || mode == GL_LINES || mode == GL_TRIANGLES);
+    if (adjacency || listRestart) {
+        if (d.indexed && ib && ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+        std::vector<uint32_t> list, idx;
+        decomposeToList(ctx, d, d.indexed ? src : nullptr, list);
+        if (mode == GL_LINES_ADJACENCY || mode == GL_LINE_STRIP_ADJACENCY) {
+            for (size_t i = 0; i + 3 < list.size(); i += 4) idx.insert(idx.end(), {list[i + 1], list[i + 2]});
+            out.prim = MTLPrimitiveTypeLine;
+        } else if (adjacency) {
+            for (size_t i = 0; i + 5 < list.size(); i += 6) idx.insert(idx.end(), {list[i], list[i + 2], list[i + 4]});
+            out.prim = MTLPrimitiveTypeTriangle;
+        } else {
+            idx = std::move(list);
+            out.prim = mode == GL_POINTS ? MTLPrimitiveTypePoint : mode == GL_LINES ? MTLPrimitiveTypeLine : MTLPrimitiveTypeTriangle;
+        }
+        out.generated = true;
+        out.count = (uint32_t)idx.size();
+        if (idx.empty()) return true;
+        UploadAlloc u = ctx->upload(idx.size() * 4, 16);
+        memcpy(u.cpu, idx.data(), idx.size() * 4);
+        out.addr = u.gpu;
+        out.length = idx.size() * 4;
+        out.type = MTLIndexTypeUInt32;
+        return true;
     }
     switch (mode) {
     case GL_POINTS: out.prim = MTLPrimitiveTypePoint; break;
@@ -1244,7 +1278,7 @@ static bool validateDraw(Context* ctx, GLenum mode) {
         ctx->setError(GL_INVALID_ENUM);
         return false;
     }
-    if (!ctx->vao) {
+    if (!ctx->vao || (ctx->coreProfile && ctx->vao == ctx->defaultVao)) {
         ctx->setError(GL_INVALID_OPERATION, "no VAO bound");
         return false;
     }

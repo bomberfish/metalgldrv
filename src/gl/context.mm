@@ -63,7 +63,7 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
         for (int i = 0; i < kNumTexTargets; i++) textures[u][i] = defaultTextures[i];
     defaultVao = new VertexArray();
     for (int i = 0; i < kMaxVertexBindings; i++) defaultVao->attribs[i].binding = i;
-    if (!coreProfile) vao = defaultVao;
+    vao = defaultVao;  // hidden in core profiles (see api_vertex.mm specVao)
     defaultXfb = new TransformFeedbackObj();
     xfb = defaultXfb;
 

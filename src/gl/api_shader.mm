@@ -186,6 +186,7 @@ API void APIENTRY glGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
     case GL_SHADER_TYPE: *params = s->type; break;
     case GL_DELETE_STATUS: *params = s->deleted; break;
     case GL_COMPILE_STATUS: *params = s->compiled; break;
+    case GL_COMPLETION_STATUS_ARB: *params = GL_TRUE; break;  // compiles are synchronous
     case GL_INFO_LOG_LENGTH: *params = s->infoLog.empty() ? 0 : (GLint)s->infoLog.size() + 1; break;
     case GL_SHADER_SOURCE_LENGTH: {
         size_t n = 0;
@@ -482,6 +483,7 @@ API void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
     switch (pname) {
     case GL_DELETE_STATUS: *params = p->deleted; break;
     case GL_LINK_STATUS: *params = p->linked; break;
+    case GL_COMPLETION_STATUS_ARB: *params = GL_TRUE; break;
     case GL_VALIDATE_STATUS: *params = p->validated; break;
     case GL_INFO_LOG_LENGTH: *params = p->infoLog.empty() ? 0 : (GLint)p->infoLog.size() + 1; break;
     case GL_ATTACHED_SHADERS: *params = (GLint)p->attached.size(); break;
