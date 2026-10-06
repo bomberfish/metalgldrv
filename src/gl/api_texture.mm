@@ -175,6 +175,71 @@ static void defineLevel(Texture* t, int face, int level, int w, int h, int d, GL
     }
 }
 
+// --- online RGTC (BC4/BC5) compression for glTexImage with uncompressed data ---
+static bool rgtcFormat(GLenum f) {
+    return f == GL_COMPRESSED_RED_RGTC1 || f == GL_COMPRESSED_SIGNED_RED_RGTC1 || f == GL_COMPRESSED_RG_RGTC2 ||
+           f == GL_COMPRESSED_SIGNED_RG_RGTC2;
+}
+
+// One BC4 block from 16 values ([0,1] unsigned or [-1,1] signed).
+static void encodeBC4(const float* v, bool sgn, uint8_t* out) {
+    int q[16], mn = 1 << 30, mx = -(1 << 30);
+    for (int i = 0; i < 16; i++) {
+        float c = sgn ? std::clamp(v[i], -1.f, 1.f) * 127.f : std::clamp(v[i], 0.f, 1.f) * 255.f;
+        q[i] = (int)lroundf(c);
+        mn = std::min(mn, q[i]);
+        mx = std::max(mx, q[i]);
+    }
+    int pal[8] = {mx, mn};
+    for (int i = 1; i <= 6; i++) pal[i + 1] = ((7 - i) * mx + i * mn + 3) / 7;
+    uint64_t bits = 0;
+    for (int i = 0; i < 16; i++) {
+        int best = 0, bestErr = 1 << 30;
+        for (int k = 0; k < 8 && mx != mn; k++) {
+            int e = std::abs(pal[k] - q[i]);
+            if (e < bestErr) bestErr = e, best = k;
+        }
+        bits |= (uint64_t)best << (3 * i);
+    }
+    out[0] = (uint8_t)(sgn ? (int8_t)mx : mx);
+    out[1] = (uint8_t)(sgn ? (int8_t)mn : mn);
+    for (int k = 0; k < 6; k++) out[2 + k] = (uint8_t)(bits >> (8 * k));
+}
+
+static void compressRgtcUpload(Context* ctx, Texture* t, int level, int face, int w, int h, int d, const FormatInfo* f, GLenum format,
+                               GLenum type, const void* pixels) {
+    size_t need = clientImageSize(format, type, w, h, d, ctx->unpack);
+    bool err;
+    const uint8_t* src = (const uint8_t*)resolveUnpackSource(ctx, pixels, need, &err);
+    if (err || !src) return;
+    ClientLayout cl = clientLayout(format, type, w, h, ctx->unpack);
+    src += cl.skipBytes;
+    std::vector<float> rgba((size_t)w * h * 4);
+    bool sgn = f->internalFormat == GL_COMPRESSED_SIGNED_RED_RGTC1 || f->internalFormat == GL_COMPRESSED_SIGNED_RG_RGTC2;
+    int channels = f->internalFormat == GL_COMPRESSED_RG_RGTC2 || f->internalFormat == GL_COMPRESSED_SIGNED_RG_RGTC2 ? 2 : 1;
+    int bw = (w + 3) / 4, bh = (h + 3) / 4;
+    size_t sliceBytes = (size_t)bw * bh * 8 * channels;
+    std::vector<uint8_t> blocks(sliceBytes * d);
+    for (int z = 0; z < d; z++) {
+        convertToStorage(formatInfo(GL_RGBA32F), format, type, src + z * cl.imageStride, cl.rowStride, cl.imageStride, rgba.data(),
+                         (size_t)w * 16, 0, w, h, 1, ctx->unpack.swapBytes);
+        for (int by = 0; by < bh; by++)
+            for (int bx = 0; bx < bw; bx++)
+                for (int c = 0; c < channels; c++) {
+                    float v[16];
+                    for (int i = 0; i < 16; i++) {
+                        int px = std::min(w - 1, bx * 4 + (i & 3)), py = std::min(h - 1, by * 4 + (i >> 2));
+                        v[i] = rgba[((size_t)py * w + px) * 4 + c];
+                    }
+                    encodeBC4(v, sgn, &blocks[z * sliceBytes + ((size_t)by * bw + bx) * 8 * channels + c * 8]);
+                }
+    }
+    Ref<Buffer> savedPbo = ctx->pixelUnpackBuffer;  // the encoded blocks are client memory
+    ctx->pixelUnpackBuffer = nullptr;
+    uploadCompressedSubImage(ctx, t, level, face, 0, 0, 0, w, h, d, (GLsizei)blocks.size(), blocks.data());
+    ctx->pixelUnpackBuffer = savedPbo;
+}
+
 static void texImage(Context* ctx, GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h, GLsizei d, GLint border,
                      GLenum format, GLenum type, const void* pixels, int dims) {
     if (!validTexTarget(target, dims)) return ctx->setError(GL_INVALID_ENUM);
@@ -190,9 +255,12 @@ static void texImage(Context* ctx, GLenum target, GLint level, GLint internalfor
         (f->internalFormat == GL_COMPRESSED_RED_RGTC1 || f->internalFormat == GL_COMPRESSED_SIGNED_RED_RGTC1 ||
          f->internalFormat == GL_COMPRESSED_RG_RGTC2 || f->internalFormat == GL_COMPRESSED_SIGNED_RG_RGTC2))
         return ctx->setError(GL_INVALID_OPERATION);
-    if (f->comp == Comp::Compressed) {
-        // glTexImage with a compressed internal format and uncompressed data: CPU-compress not supported; store RGBA8.
-        f = formatInfo(f->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8);
+    bool onlineCompress = f->comp == Comp::Compressed && (pixels || ctx->pixelUnpackBuffer) && !isProxy(target);
+    if (onlineCompress && !rgtcFormat(f->internalFormat)) {
+        // Online compression is only implemented for RGTC; the GL lets implementations refuse it
+        // (the CTS treats INVALID_OPERATION as "unsupported"). Without data the level is
+        // allocated in the compressed format, ready for glCompressedTexSubImage*.
+        return ctx->setError(GL_INVALID_OPERATION, "online compression to 0x%x not supported", internalformat);
     }
     if (isProxy(target)) {
         // Proxy: record the level if it would succeed, otherwise clear it (GL 4.6 §8.22).
@@ -225,7 +293,9 @@ static void texImage(Context* ctx, GLenum target, GLint level, GLint internalfor
     }
     if (target == GL_TEXTURE_CUBE_MAP_ARRAY && (w != h || d % 6)) return ctx->setError(GL_INVALID_VALUE);
     defineLevel(t, face, level, w, h, d, internalformat, f);
-    if (pixels || ctx->pixelUnpackBuffer) {
+    if (onlineCompress) {
+        if (w && h && d) compressRgtcUpload(ctx, t, level, face, w, h, d, f, format, type, pixels);
+    } else if (pixels || ctx->pixelUnpackBuffer) {
         if (w && h && d) uploadTexSubImage(ctx, t, level, face, 0, 0, 0, w, h, d, format, type, pixels);
     }
     if (t->generateMipmapHint && level == t->baseLevel) {
@@ -252,11 +322,28 @@ API void APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat,
     texImage(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels, 3);
 }
 
+// Bytes of one datum of `type` (a whole pixel for packed types): PBO offsets must be multiples.
+static int typeDatumBytes(GLenum type) {
+    switch (type) {
+    case GL_UNSIGNED_BYTE: case GL_BYTE: case GL_UNSIGNED_BYTE_3_3_2: case GL_UNSIGNED_BYTE_2_3_3_REV: return 1;
+    case GL_UNSIGNED_SHORT: case GL_SHORT: case GL_HALF_FLOAT: case GL_UNSIGNED_SHORT_5_6_5: case GL_UNSIGNED_SHORT_5_6_5_REV:
+    case GL_UNSIGNED_SHORT_4_4_4_4: case GL_UNSIGNED_SHORT_4_4_4_4_REV: case GL_UNSIGNED_SHORT_5_5_5_1: case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+        return 2;
+    case GL_FLOAT_32_UNSIGNED_INT_24_8_REV: return 8;
+    default: return 4;
+    }
+}
+
+static bool pboOffsetMisaligned(Buffer* pbo, const void* pixels, GLenum type) {
+    return pbo && ((uintptr_t)pixels % typeDatumBytes(type)) != 0;
+}
+
 static void texSubImage(Context* ctx, Texture* t, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d,
                         GLenum format, GLenum type, const void* pixels) {
     if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE);
     if (w < 0 || h < 0 || d < 0) return ctx->setError(GL_INVALID_VALUE);
     if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
+    if (pboOffsetMisaligned(ctx->pixelUnpackBuffer.get(), pixels, type)) return ctx->setError(GL_INVALID_OPERATION, "unaligned PBO offset");
     int face = faceIndex(target);
     if (t->target == GL_TEXTURE_CUBE_MAP && !isCubeFace(target)) {
         // DSA path on cube maps: z selects faces
@@ -419,6 +506,11 @@ API void APIENTRY glCompressedTextureSubImage3D(GLuint texture, GLint level, GLi
 
 // --- immutable storage ---
 static void texStorage(Context* ctx, Texture* t, GLsizei levels, GLenum internalformat, GLsizei w, GLsizei h, GLsizei d, int dims) {
+    GLenum tt = t->target;
+    bool targetOk = dims == 1   ? tt == GL_TEXTURE_1D
+                    : dims == 2 ? (tt == GL_TEXTURE_2D || tt == GL_TEXTURE_1D_ARRAY || tt == GL_TEXTURE_RECTANGLE || tt == GL_TEXTURE_CUBE_MAP)
+                                : (tt == GL_TEXTURE_3D || tt == GL_TEXTURE_2D_ARRAY || tt == GL_TEXTURE_CUBE_MAP_ARRAY);
+    if (!targetOk) return ctx->setError(GL_INVALID_OPERATION, "texture storage: wrong texture target 0x%x", tt);  // DSA only
     if (levels < 1 || w < 1 || h < 1 || d < 1) return ctx->setError(GL_INVALID_VALUE);
     const FormatInfo* f = formatInfo(internalformat);
     if (!f) return ctx->setError(GL_INVALID_ENUM, "texStorage: unsized/unsupported format 0x%x", internalformat);
@@ -496,12 +588,16 @@ API void APIENTRY glTextureStorage3D(GLuint texture, GLsizei levels, GLenum inte
 }
 
 static void texStorageMS(Context* ctx, Texture* t, GLsizei samples, GLenum internalformat, GLsizei w, GLsizei h, GLsizei d,
-                         GLboolean fixed, bool immutable) {
+                         GLboolean fixed, bool immutable, bool is3D) {
+    if (t->target != (is3D ? GL_TEXTURE_2D_MULTISAMPLE_ARRAY : GL_TEXTURE_2D_MULTISAMPLE))
+        return ctx->setError(GL_INVALID_OPERATION, "multisample storage: wrong texture target");  // DSA only
     const FormatInfo* f = resolveInternalFormat(internalformat, GL_RGBA, GL_UNSIGNED_BYTE);
-    if (!f || !f->renderable) return ctx->setError(GL_INVALID_ENUM);
+    // TexStorage*Multisample needs a sized format.
+    if (!f || !f->renderable || (immutable && f->internalFormat != internalformat)) return ctx->setError(GL_INVALID_ENUM);
     // TexStorage*Multisample needs sizes >= 1; TexImage*Multisample only rejects negative ones.
     int minSize = immutable ? 1 : 0;
     if (samples < 1 || w < minSize || h < minSize || d < minSize) return ctx->setError(GL_INVALID_VALUE);
+    if (w > 16384 || h > 16384 || d > 2048) return ctx->setError(GL_INVALID_VALUE);
     if (samples > 4) return ctx->setError(GL_INVALID_OPERATION);
     if (t->immutable) return ctx->setError(GL_INVALID_OPERATION);
     // Metal multisample textures need >= 2 samples; GL allows rounding the count up.
@@ -526,7 +622,7 @@ API void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum
     if (target == GL_PROXY_TEXTURE_2D_MULTISAMPLE) return;
     if (target != GL_TEXTURE_2D_MULTISAMPLE) return ctx->setError(GL_INVALID_ENUM);
     Texture* t = texForTarget(ctx, target);
-    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, 1, fixed, false);
+    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, 1, fixed, false, false);
 }
 
 API void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height,
@@ -535,7 +631,7 @@ API void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum
     if (target == GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY) return;
     if (target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) return ctx->setError(GL_INVALID_ENUM);
     Texture* t = texForTarget(ctx, target);
-    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, depth, fixed, false);
+    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, depth, fixed, false, true);
 }
 
 API void APIENTRY glTexStorage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height,
@@ -543,7 +639,7 @@ API void APIENTRY glTexStorage2DMultisample(GLenum target, GLsizei samples, GLen
     MGL_CTX();
     if (target != GL_TEXTURE_2D_MULTISAMPLE) return ctx->setError(GL_INVALID_ENUM);
     Texture* t = texForTarget(ctx, target);
-    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, 1, fixed, true);
+    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, 1, fixed, true, false);
 }
 
 API void APIENTRY glTexStorage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height,
@@ -551,21 +647,21 @@ API void APIENTRY glTexStorage3DMultisample(GLenum target, GLsizei samples, GLen
     MGL_CTX();
     if (target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) return ctx->setError(GL_INVALID_ENUM);
     Texture* t = texForTarget(ctx, target);
-    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, depth, fixed, true);
+    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, depth, fixed, true, true);
 }
 
 API void APIENTRY glTextureStorage2DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height,
                                                 GLboolean fixed) {
     MGL_CTX();
     Texture* t = namedTex(ctx, texture);
-    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, 1, fixed, true);
+    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, 1, fixed, true, false);
 }
 
 API void APIENTRY glTextureStorage3DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height,
                                                 GLsizei depth, GLboolean fixed) {
     MGL_CTX();
     Texture* t = namedTex(ctx, texture);
-    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, depth, fixed, true);
+    if (t) texStorageMS(ctx, t, samples, internalformat, width, height, depth, fixed, true, true);
 }
 
 // --- parameters ---
@@ -591,7 +687,7 @@ static bool samplerParam(Context* ctx, SamplerState& s, GLenum pname, const doub
         return true;
     case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T: case GL_TEXTURE_WRAP_R:
         if (!validWrap(e, ctx->coreProfile)) return ctx->setError(GL_INVALID_ENUM), true;
-        if (rect && (e == GL_REPEAT || e == GL_MIRRORED_REPEAT)) return ctx->setError(GL_INVALID_ENUM), true;
+        if (rect && (e == GL_REPEAT || e == GL_MIRRORED_REPEAT || e == GL_MIRROR_CLAMP_TO_EDGE)) return ctx->setError(GL_INVALID_ENUM), true;
         (pname == GL_TEXTURE_WRAP_S ? s.wrapS : pname == GL_TEXTURE_WRAP_T ? s.wrapT : s.wrapR) = e;
         return true;
     case GL_TEXTURE_MIN_LOD: s.minLod = (float)v[0]; return true;
@@ -617,16 +713,22 @@ static bool samplerParam(Context* ctx, SamplerState& s, GLenum pname, const doub
 static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, int count, bool isIntVec, bool isIntegerBorder = false) {
     bool rect = t->target == GL_TEXTURE_RECTANGLE;
     bool ms = t->target == GL_TEXTURE_2D_MULTISAMPLE || t->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    if (ms) {
+        // Multisample textures have no sampler state (GL 4.6 8.10).
+        switch (pname) {
+        case GL_TEXTURE_MIN_FILTER: case GL_TEXTURE_MAG_FILTER: case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T: case GL_TEXTURE_WRAP_R:
+        case GL_TEXTURE_MIN_LOD: case GL_TEXTURE_MAX_LOD: case GL_TEXTURE_LOD_BIAS: case GL_TEXTURE_COMPARE_MODE:
+        case GL_TEXTURE_COMPARE_FUNC: case GL_TEXTURE_MAX_ANISOTROPY: case GL_TEXTURE_BORDER_COLOR:
+            return ctx->setError(GL_INVALID_OPERATION, "sampler state on a multisample texture");
+        default: break;
+        }
+    }
     if (pname == GL_TEXTURE_BORDER_COLOR) {
-        if (ms) return ctx->setError(GL_INVALID_ENUM);
         for (int k = 0; k < 4; k++) t->sampler.borderColor[k] = (float)v[k];
         t->sampler.borderIsInt = isIntegerBorder;
         return;
     }
-    if (samplerParam(ctx, t->sampler, pname, v, isIntVec, rect)) {
-        if (ms) ctx->setError(GL_INVALID_ENUM);
-        return;
-    }
+    if (samplerParam(ctx, t->sampler, pname, v, isIntVec, rect)) return;
     GLenum e = (GLenum)v[0];
     switch (pname) {
     case GL_TEXTURE_BASE_LEVEL:
@@ -689,6 +791,9 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
         MGL_CTX();                                                                        \
         Texture* t = namedTex(ctx, texture);                                              \
         if (!t) return;                                                                   \
+        if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);   \
+        if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA)         \
+            return ctx->setError(GL_INVALID_ENUM);                                        \
         double v[4] = {(double)param, 0, 0, 0};                                           \
         texParam(ctx, t, pname, v, 1, IsInt);                                             \
     }
@@ -714,6 +819,7 @@ static void texParamVec(Context* ctx, Texture* t, GLenum pname, const double* v,
         MGL_CTX();                                                                                  \
         Texture* t = namedTex(ctx, texture);                                                        \
         if (!t) return;                                                                             \
+        if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);             \
         double v[4];                                                                                \
         int n = (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) ? 4 : 1;    \
         for (int k = 0; k < n; k++) v[k] = (Norm && pname == GL_TEXTURE_BORDER_COLOR) ? params[k] / 2147483647.0 : (double)params[k]; \
@@ -777,6 +883,7 @@ static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int
         MGL_CTX();                                                                           \
         Texture* t = namedTex(ctx, texture);                                                 \
         if (!t) return;                                                                      \
+        if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);      \
         double v[4];                                                                         \
         int n;                                                                               \
         if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM);       \
@@ -800,6 +907,7 @@ API void APIENTRY glGetTextureParameteriv(GLuint texture, GLenum pname, GLint* p
     MGL_CTX();
     Texture* t = namedTex(ctx, texture);
     if (!t) return;
+    if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);
     double v[4];
     int n;
     if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM);
@@ -1065,6 +1173,8 @@ static void getTexImage(Context* ctx, Texture* t, GLenum target, GLint level, GL
     size_t need = clientImageSize(format, type, w, h, d, ctx->pack);
     uint8_t* dst = (uint8_t*)pixels;
     if (Buffer* pbo = ctx->pixelPackBuffer.get()) {
+        if (pboOffsetMisaligned(pbo, pixels, type)) return ctx->setError(GL_INVALID_OPERATION, "unaligned PBO offset");
+        if (pbo->mapped && !(pbo->mapAccess & GL_MAP_PERSISTENT_BIT)) return ctx->setError(GL_INVALID_OPERATION);
         if ((size_t)pixels + need > (size_t)pbo->size) return ctx->setError(GL_INVALID_OPERATION);
         if (pbo->lastUse && !ctx->dev->isComplete(pbo->lastUse)) ctx->waitForResource(pbo->lastUse);
         dst = pbo->cpu + (size_t)pixels;
@@ -1139,10 +1249,30 @@ API void APIENTRY glGetnTexImage(GLenum target, GLint level, GLenum format, GLen
     if (t) getTexImage(ctx, t, target, level, format, type, bufSize, pixels);
 }
 
+// Whole-texture DSA image queries: target, rectangle level and cube completeness checks.
+static bool dsaImageQueryOk(Context* ctx, Texture* t, GLint level) {
+    switch (t->target) {
+    case GL_TEXTURE_1D: case GL_TEXTURE_2D: case GL_TEXTURE_3D: case GL_TEXTURE_1D_ARRAY: case GL_TEXTURE_2D_ARRAY:
+    case GL_TEXTURE_CUBE_MAP_ARRAY: case GL_TEXTURE_RECTANGLE: case GL_TEXTURE_CUBE_MAP: break;
+    default: return ctx->setError(GL_INVALID_OPERATION, "image query on texture target 0x%x", t->target), false;
+    }
+    if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE), false;
+    if (t->target == GL_TEXTURE_RECTANGLE && level != 0) return ctx->setError(GL_INVALID_VALUE), false;
+    if (t->target == GL_TEXTURE_CUBE_MAP) {
+        const TexImageLevel& L0 = t->levels[0][level];
+        for (int f = 0; f < 6; f++) {
+            const TexImageLevel& L = t->levels[f][level];
+            if (!L.defined() || L.width != L0.width || L.height != L0.height || L.fmt != L0.fmt)
+                return ctx->setError(GL_INVALID_OPERATION, "cube map not cube complete"), false;
+        }
+    }
+    return true;
+}
+
 API void APIENTRY glGetTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
     MGL_CTX();
     Texture* t = namedTex(ctx, texture);
-    if (t) getTexImage(ctx, t, t->target, level, format, type, bufSize, pixels);
+    if (t && dsaImageQueryOk(ctx, t, level)) getTexImage(ctx, t, t->target, level, format, type, bufSize, pixels);
 }
 
 API void APIENTRY glGetTextureSubImage(GLuint texture, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d,
@@ -1152,13 +1282,86 @@ API void APIENTRY glGetTextureSubImage(GLuint texture, GLint level, GLint x, GLi
     if (t) getTexImage(ctx, t, t->target, level, format, type, bufSize, pixels, x, y, z, w, h, d);
 }
 
+// Compressed image readback: raw blocks of one face/layer range.
+static void getCompressedImage(Context* ctx, Texture* t, GLenum target, GLint level, GLsizei bufSize, void* pixels, int x = 0, int y = 0,
+                               int z = 0, int w = -1, int h = -1, int d = -1) {
+    if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE);
+    bool wholeCube = t->target == GL_TEXTURE_CUBE_MAP && !isCubeFace(target);
+    int face = faceIndex(target);
+    const TexImageLevel& L = t->levels[face][level];
+    if (!L.defined() || L.fmt->comp != Comp::Compressed) return ctx->setError(GL_INVALID_OPERATION, "not a compressed image");
+    if (w < 0) {
+        w = L.width;
+        h = L.height;
+        d = wholeCube ? 6 : L.depth;
+    }
+    const FormatInfo* f = L.fmt;
+    size_t sliceBytes = storageImageBytes(f, w, h);
+    size_t need = sliceBytes * d;
+    uint8_t* dst = (uint8_t*)pixels;
+    if (Buffer* pbo = ctx->pixelPackBuffer.get()) {
+        if (pbo->mapped && !(pbo->mapAccess & GL_MAP_PERSISTENT_BIT)) return ctx->setError(GL_INVALID_OPERATION, "pack buffer is mapped");
+        if ((size_t)pixels + need > (size_t)pbo->size) return ctx->setError(GL_INVALID_OPERATION, "pack buffer too small");
+        if (pbo->lastUse && !ctx->dev->isComplete(pbo->lastUse)) ctx->waitForResource(pbo->lastUse);
+        dst = pbo->cpu + (size_t)pixels;
+        pbo->contentVersion++;
+    } else {
+        if (bufSize >= 0 && need > (size_t)bufSize) return ctx->setError(GL_INVALID_OPERATION, "bufSize too small");
+        if (!pixels) return ctx->setError(GL_INVALID_OPERATION);
+    }
+    if (!ensureTextureStorage(ctx, t) || !t->storageFmt || t->storageFmt->comp != Comp::Compressed) {
+        memset(dst, 0, need);  // stored decompressed: no block data to return
+        return;
+    }
+    for (int i = 0; i < d; i++) {
+        int slice = wholeCube ? z + i : t->target == GL_TEXTURE_CUBE_MAP ? face : z + i;
+        if (t->target == GL_TEXTURE_2D || t->target == GL_TEXTURE_RECTANGLE) slice = 0;
+        std::vector<uint8_t> data;
+        size_t rowBytes;
+        if (t->target == GL_TEXTURE_3D) {
+            // 3D compressed textures are read a depth plane at a time.
+            size_t bpr = (size_t)((w + f->blockW - 1) / f->blockW) * f->bytesPerPixel;
+            id<MTLBuffer> buf = ctx->dev->newBuffer(sliceBytes);
+            id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+            [e copyFromTexture:t->mtl sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(x, y, z + i) sourceSize:MTLSizeMake(w, h, 1)
+                      toBuffer:buf destinationOffset:0 destinationBytesPerRow:bpr destinationBytesPerImage:sliceBytes];
+            ctx->finish();
+            memcpy(dst + i * sliceBytes, buf.contents, sliceBytes);
+            ctx->dev->releaseAfter(buf, 0);
+            continue;
+        }
+        readTextureRegion(ctx, t->mtl, level, slice, x, y, w, h, data, rowBytes, f, MTLBlitOptionNone);
+        memcpy(dst + i * sliceBytes, data.data(), std::min(sliceBytes, data.size()));
+    }
+}
+
 API void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void* img) {
     MGL_CTX();
+    if (target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_BUFFER || isProxy(target)) return ctx->setError(GL_INVALID_ENUM);
     Texture* t = texForTarget(ctx, target);
-    if (!t) return;
-    const TexImageLevel& L = t->levels[faceIndex(target)][level];
-    if (!L.defined() || L.fmt->comp != Comp::Compressed) return ctx->setError(GL_INVALID_OPERATION);
-    getTexImage(ctx, t, target, level, GL_RGBA, GL_UNSIGNED_BYTE, -1, img);
+    if (t) getCompressedImage(ctx, t, target, level, -1, img);
+}
+
+API void APIENTRY glGetnCompressedTexImage(GLenum target, GLint level, GLsizei bufSize, void* img) {
+    MGL_CTX();
+    if (target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_BUFFER || isProxy(target)) return ctx->setError(GL_INVALID_ENUM);
+    Texture* t = texForTarget(ctx, target);
+    if (t) getCompressedImage(ctx, t, target, level, bufSize, img);
+}
+
+API void APIENTRY glGetCompressedTextureImage(GLuint texture, GLint level, GLsizei bufSize, void* pixels) {
+    MGL_CTX();
+    Texture* t = namedTex(ctx, texture);
+    if (t && dsaImageQueryOk(ctx, t, level)) getCompressedImage(ctx, t, t->target, level, bufSize, pixels);
+}
+
+API void APIENTRY glGetCompressedTextureSubImage(GLuint texture, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d,
+                                                 GLsizei bufSize, void* pixels) {
+    MGL_CTX();
+    Texture* t = namedTex(ctx, texture);
+    if (!t || !dsaImageQueryOk(ctx, t, level)) return;
+    if (x < 0 || y < 0 || z < 0 || w < 0 || h < 0 || d < 0) return ctx->setError(GL_INVALID_VALUE);
+    getCompressedImage(ctx, t, t->target, level, bufSize, pixels, x, y, z, w, h, d);
 }
 
 // --- copies from the framebuffer ---
