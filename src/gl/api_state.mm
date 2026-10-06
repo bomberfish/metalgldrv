@@ -168,6 +168,10 @@ API GLboolean APIENTRY glIsEnabled(GLenum cap) {
 API GLboolean APIENTRY glIsEnabledi(GLenum cap, GLuint index) {
     MGL_CTX_RET(GL_FALSE);
     bool v = false;
+    if ((cap == GL_SCISSOR_TEST && index >= (GLuint)kMaxViewports) || (cap == GL_BLEND && index >= (GLuint)kMaxDrawBuffers)) {
+        ctx->setError(GL_INVALID_VALUE);
+        return GL_FALSE;
+    }
     if (!mglIsEnabled(ctx, cap, index, &v)) {
         ctx->setError(GL_INVALID_ENUM);
         return GL_FALSE;
@@ -678,8 +682,14 @@ static void doClear(Context* ctx, bool color, int colorDB, const float* fval, co
     QuadClear q;
     q.drawBufferMask = dbMask;
     for (int i = 0; i < kMaxDrawBuffers; i++) {
-        if (isIntClear) memcpy(q.colorInt[i], ival, 16);
-        else memcpy(q.color[i], fval, 16);
+        if (isIntClear) {
+            memcpy(q.colorInt[i], ival, 16);
+            for (int k = 0; k < 4; k++) q.color[i][k] = (float)(int32_t)ival[k];
+        } else {
+            memcpy(q.color[i], fval, 16);
+            // float clear of an integer attachment is undefined; store something sensible
+            for (int k = 0; k < 4; k++) q.colorInt[i][k] = (uint32_t)(int32_t)fval[k];
+        }
         q.colorWriteMask[i] = ctx->blend[i].colorMask;
     }
     q.depth = doDepth;

@@ -287,7 +287,7 @@ public:
         id pipeline = nil;
         id depthStencil = nil;
         MTLViewport vp[kMaxViewports];
-        int numViewports = 0;
+        int numViewports = 0, numScissors = 0;
         MTLScissorRect sc[kMaxViewports];
         int cull = -1, winding = -1, fill = -1, depthClip = -1;
         float depthBias[3] = {NAN, NAN, NAN};

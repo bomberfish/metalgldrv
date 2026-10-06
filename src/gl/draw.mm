@@ -80,32 +80,42 @@ inline uint32_t readIndex(const uint8_t* p, GLenum type, size_t i) {
 // ---------------------------------------------------------------------------
 // state application
 // ---------------------------------------------------------------------------
-static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLenum mode) {
+static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLenum mode, bool viewportArray = false) {
     auto& es = ctx->enc;
     const PassDesc& p = ctx->curPass;
-    // Viewport 0 (y is not flipped: GL row 0 == Metal row 0, see glsl.h)
-    MTLViewport vp;
-    vp.originX = ctx->viewport[0][0];
-    vp.originY = ctx->viewport[0][1];
-    vp.width = std::max(0.0f, ctx->viewport[0][2]);
-    vp.height = std::max(0.0f, ctx->viewport[0][3]);
-    vp.znear = ctx->depthRange[0][0];
-    vp.zfar = ctx->depthRange[0][1];
-    if (es.numViewports != 1 || memcmp(&es.vp[0], &vp, sizeof vp) != 0) {
-        [e setViewport:vp];
-        es.vp[0] = vp;
-        es.numViewports = 1;
+    // Viewport 0, or all of them when the last pre-rasterization stage writes gl_ViewportIndex
+    // (y is not flipped: GL row 0 == Metal row 0, see glsl.h)
+    int n = viewportArray ? kMaxViewports : 1;
+    MTLViewport vps[kMaxViewports];
+    MTLScissorRect scs[kMaxViewports];
+    for (int i = 0; i < n; i++) {
+        MTLViewport& vp = vps[i];
+        vp.originX = ctx->viewport[i][0];
+        vp.originY = ctx->viewport[i][1];
+        vp.width = std::max(0.0f, ctx->viewport[i][2]);
+        vp.height = std::max(0.0f, ctx->viewport[i][3]);
+        vp.znear = ctx->depthRange[i][0];
+        vp.zfar = ctx->depthRange[i][1];
+        MTLScissorRect sc = {0, 0, (NSUInteger)p.width, (NSUInteger)p.height};
+        if (ctx->scissorEnabled & (1u << i)) {
+            int x0 = std::clamp(ctx->scissor[i][0], 0, p.width), y0 = std::clamp(ctx->scissor[i][1], 0, p.height);
+            int x1 = std::clamp(ctx->scissor[i][0] + ctx->scissor[i][2], 0, p.width);
+            int y1 = std::clamp(ctx->scissor[i][1] + ctx->scissor[i][3], 0, p.height);
+            sc = {(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)std::max(0, x1 - x0), (NSUInteger)std::max(0, y1 - y0)};
+        }
+        scs[i] = sc;
     }
-    MTLScissorRect sc = {0, 0, (NSUInteger)p.width, (NSUInteger)p.height};
-    if (ctx->scissorEnabled & 1) {
-        int x0 = std::clamp(ctx->scissor[0][0], 0, p.width), y0 = std::clamp(ctx->scissor[0][1], 0, p.height);
-        int x1 = std::clamp(ctx->scissor[0][0] + ctx->scissor[0][2], 0, p.width);
-        int y1 = std::clamp(ctx->scissor[0][1] + ctx->scissor[0][3], 0, p.height);
-        sc = {(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)std::max(0, x1 - x0), (NSUInteger)std::max(0, y1 - y0)};
+    if (es.numViewports != n || memcmp(es.vp, vps, sizeof(MTLViewport) * n) != 0) {
+        if (n == 1) [e setViewport:vps[0]];
+        else [e setViewports:vps count:n];
+        memcpy(es.vp, vps, sizeof(MTLViewport) * n);
+        es.numViewports = n;
     }
-    if (memcmp(&es.sc[0], &sc, sizeof sc) != 0) {
-        [e setScissorRect:sc];
-        es.sc[0] = sc;
+    if (es.numScissors != n || memcmp(es.sc, scs, sizeof(MTLScissorRect) * n) != 0) {
+        if (n == 1) [e setScissorRect:scs[0]];
+        else [e setScissorRects:scs count:n];
+        memcpy(es.sc, scs, sizeof(MTLScissorRect) * n);
+        es.numScissors = n;
     }
     int cull = MTLCullModeNone;
     static const bool noCull = envFlag("METALGLDRV_DEBUG_NOCULL");  // bisect switch
@@ -1359,7 +1369,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         [e setRenderPipelineState:pso];
         ctx->enc.pipeline = pso;
     }
-    applyDynamicState(ctx, e, refl.gsOutputPrimitive ? refl.gsOutputPrimitive : GL_TRIANGLES);
+    applyDynamicState(ctx, e, refl.gsOutputPrimitive ? refl.gsOutputPrimitive : GL_TRIANGLES, refl.writesViewportIndex);
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
     [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
     [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
@@ -1814,7 +1824,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         [e setRenderPipelineState:pso];
         ctx->enc.pipeline = pso;
     }
-    applyDynamicState(ctx, e, d.mode);
+    applyDynamicState(ctx, e, d.mode, refl.writesViewportIndex);
     [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
     uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
     [table setAddress:sysAddr atIndex:glsl::kBufSys];

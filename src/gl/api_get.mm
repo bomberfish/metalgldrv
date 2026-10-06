@@ -389,14 +389,15 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
 
     // --- fixed function ---
     case GL_VIEWPORT: {
+        if (idx >= kMaxViewports) return false;
         Value r; r.type = VT::Float; r.n = 4;
         for (int k = 0; k < 4; k++) r.d[k] = ctx->viewport[idx][k];
         v = r;
         if (index < 0) v.type = VT::Int;  // glGetIntegerv(GL_VIEWPORT) returns ints; float getters use float
         return true;
     }
-    case GL_SCISSOR_BOX: v = I4(ctx->scissor[idx][0], ctx->scissor[idx][1], ctx->scissor[idx][2], ctx->scissor[idx][3]); return true;
-    case GL_DEPTH_RANGE: { Value r; r.type = VT::Double; r.n = 2; r.d[0] = ctx->depthRange[idx][0]; r.d[1] = ctx->depthRange[idx][1]; v = r; return true; }
+    case GL_SCISSOR_BOX: if (idx >= kMaxViewports) return false; v = I4(ctx->scissor[idx][0], ctx->scissor[idx][1], ctx->scissor[idx][2], ctx->scissor[idx][3]); return true;
+    case GL_DEPTH_RANGE: { if (idx >= kMaxViewports) return false; Value r; r.type = VT::Double; r.n = 2; r.d[0] = ctx->depthRange[idx][0]; r.d[1] = ctx->depthRange[idx][1]; v = r; return true; }
     case GL_COLOR_CLEAR_VALUE: v = F4(ctx->clearColor); return true;
     case GL_DEPTH_CLEAR_VALUE: { Value r; r.type = VT::Double; r.d[0] = ctx->clearDepth; v = r; return true; }
     case GL_STENCIL_CLEAR_VALUE: v = I(ctx->clearStencil); return true;
