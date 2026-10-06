@@ -1218,30 +1218,6 @@ static void copyTexSubImage(Context* ctx, Texture* t, GLenum target, GLint level
     markTextureWrite(ctx, t);
 }
 
-API void APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height,
-                                   GLint border) {
-    MGL_CTX();
-    if (border != 0 || width < 0 || height < 0) return ctx->setError(GL_INVALID_VALUE);
-    const FormatInfo* rf;
-    int rl, rs;
-    id<MTLTexture> src = readAttachmentTexture(ctx, ctx->readFb.get(), &rf, &rl, &rs);
-    if (!src) return ctx->setError(GL_INVALID_OPERATION);
-    GLenum fmt = isDepthOrStencil(rf) ? (rf->kind == FmtKind::DepthStencil ? GL_DEPTH_STENCIL : GL_DEPTH_COMPONENT) : GL_RGBA;
-    GLenum type = rf->kind == FmtKind::Float ? GL_FLOAT : GL_UNSIGNED_BYTE;
-    if (fmt == GL_DEPTH_STENCIL) type = GL_UNSIGNED_INT_24_8;
-    texImage(ctx, target, level, internalformat, width, height, 1, 0, fmt, type, nullptr, 2);
-    Texture* t = texForTarget(ctx, target);
-    if (t && ctx->error == GL_NO_ERROR) copyTexSubImage(ctx, t, target, level, 0, 0, 0, x, y, width, height);
-}
-
-API void APIENTRY glCopyTexImage1D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border) {
-    MGL_CTX();
-    if (border != 0 || width < 0) return ctx->setError(GL_INVALID_VALUE);
-    texImage(ctx, target, level, internalformat, width, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr, 1);
-    Texture* t = texForTarget(ctx, target);
-    if (t && ctx->error == GL_NO_ERROR) copyTexSubImage(ctx, t, target, level, 0, 0, 0, x, y, width, 1);
-}
-
 bool mglFramebufferComplete(Context* ctx, Framebuffer* fb, GLenum* status);  // api_fbo.mm
 
 static bool readFbMultisampled(Framebuffer* fb) {
@@ -1284,6 +1260,63 @@ static void copySubImageChecked(Context* ctx, Texture* t, GLenum target, int dim
     if (dims == 3 && (zo < 0 || zo >= ld)) return ctx->setError(GL_INVALID_VALUE);
     if (fb->readBuffer == GL_NONE) return ctx->setError(GL_INVALID_OPERATION, "copy: read buffer is NONE");
     copyTexSubImage(ctx, t, target, level, xo, yo, zo, x, y, w, h);
+}
+
+static void copyTexImage(Context* ctx, GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei w, GLsizei h,
+                         GLint border, int dims) {
+    if (!validTexTarget(target, dims) || isProxy(target)) return ctx->setError(GL_INVALID_ENUM);
+    if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE);
+    if (border != 0 || w < 0 || h < 0 || w > 16384 || h > 16384) return ctx->setError(GL_INVALID_VALUE);
+    if (target == GL_TEXTURE_RECTANGLE && level != 0) return ctx->setError(GL_INVALID_VALUE);
+    if (isCubeFace(target) && w != h) return ctx->setError(GL_INVALID_VALUE);
+    Framebuffer* fb = ctx->readFb.get();
+    GLenum status;
+    if (!fb || !mglFramebufferComplete(ctx, fb, &status)) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+    if (readFbMultisampled(fb)) return ctx->setError(GL_INVALID_OPERATION, "copy: multisampled read framebuffer");
+    bool depthReq = internalformat == GL_DEPTH_COMPONENT || internalformat == GL_DEPTH_COMPONENT16 || internalformat == GL_DEPTH_COMPONENT24 ||
+                    internalformat == GL_DEPTH_COMPONENT32 || internalformat == GL_DEPTH_COMPONENT32F;
+    bool dsReq = internalformat == GL_DEPTH_STENCIL || internalformat == GL_DEPTH24_STENCIL8 || internalformat == GL_DEPTH32F_STENCIL8;
+    const FormatInfo* rf = nullptr;
+    int rl, rs;
+    const FormatInfo* f = nullptr;
+    if (depthReq || dsReq) {
+        if (!readDepthStencilTexture(ctx, fb, false, &rf, &rl, &rs)) return ctx->setError(GL_INVALID_OPERATION, "copy: no depth buffer");
+        if (internalformat == GL_DEPTH_COMPONENT) f = formatInfo(rf->kind == FmtKind::DepthStencil ? GL_DEPTH_COMPONENT24 : rf->internalFormat);
+        else if (internalformat == GL_DEPTH_STENCIL) f = formatInfo(GL_DEPTH24_STENCIL8);
+        else f = formatInfo(internalformat);
+        if (f && !isDepthOrStencil(f)) f = nullptr;
+    } else {
+        if (fb->readBuffer == GL_NONE || !readAttachmentTexture(ctx, fb, &rf, &rl, &rs))
+            return ctx->setError(GL_INVALID_OPERATION, "copy: no read buffer");
+        bool srcInt = rf->kind == FmtKind::UInt || rf->kind == FmtKind::SInt;
+        GLenum fmt = srcInt ? GL_RGBA_INTEGER : GL_RGBA;
+        GLenum type = rf->kind == FmtKind::Float ? GL_FLOAT : rf->kind == FmtKind::SInt ? GL_INT : rf->kind == FmtKind::UInt ? GL_UNSIGNED_INT
+                                                                                                                         : GL_UNSIGNED_BYTE;
+        f = resolveInternalFormat(internalformat, fmt, type);
+        if (f && (isDepthOrStencil(f) || f->comp == Comp::Compressed)) return ctx->setError(GL_INVALID_OPERATION);
+        if (f) {
+            bool dstInt = f->kind == FmtKind::UInt || f->kind == FmtKind::SInt;
+            if (dstInt != srcInt) return ctx->setError(GL_INVALID_OPERATION, "copy: integer/non-integer mismatch");
+            if (dstInt && (f->kind == FmtKind::SInt) != (rf->kind == FmtKind::SInt)) return ctx->setError(GL_INVALID_OPERATION);
+        }
+    }
+    if (!f) return ctx->setError(GL_INVALID_VALUE, "copy: unsupported internal format 0x%x", internalformat);
+    Texture* t = texForTarget(ctx, target);
+    if (!t) return;
+    if (t->immutable) return ctx->setError(GL_INVALID_OPERATION, "texture is immutable");
+    defineLevel(t, faceIndex(target), level, w, dims == 2 ? h : 1, 1, internalformat, f);
+    if (w > 0 && h > 0) copyTexSubImage(ctx, t, target, level, 0, 0, 0, x, y, w, dims == 2 ? h : 1);
+}
+
+API void APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height,
+                                   GLint border) {
+    MGL_CTX();
+    copyTexImage(ctx, target, level, internalformat, x, y, width, height, border, 2);
+}
+
+API void APIENTRY glCopyTexImage1D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border) {
+    MGL_CTX();
+    copyTexImage(ctx, target, level, internalformat, x, y, width, 1, border, 1);
 }
 
 API void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {

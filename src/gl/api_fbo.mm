@@ -154,7 +154,9 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
     if (internalformat == GL_STENCIL_INDEX || internalformat == GL_STENCIL_INDEX1 || internalformat == GL_STENCIL_INDEX4 ||
         internalformat == GL_STENCIL_INDEX16)
         f = formatInfo(GL_STENCIL_INDEX8);
-    if (!f || !f->renderable) return ctx->setError(GL_INVALID_ENUM, "renderbuffer format 0x%x", internalformat);
+    // RGB9_E5 is accepted (as Mesa does on desktop GL) but leaves the framebuffer incomplete.
+    if (!f || (!f->renderable && f->internalFormat != GL_RGB9_E5))
+        return ctx->setError(GL_INVALID_ENUM, "renderbuffer format 0x%x", internalformat);
     if (w < 0 || h < 0 || samples < 0) return ctx->setError(GL_INVALID_VALUE);
     if (w > 16384 || h > 16384) return ctx->setError(GL_INVALID_VALUE);
     if (samples > 4) return ctx->setError(GL_INVALID_OPERATION);
@@ -175,7 +177,7 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
         }
         td.storageMode = MTLStorageModePrivate;
         td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
-        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | (f->kind == FmtKind::DepthStencil ? MTLTextureUsagePixelFormatView : 0);
+        td.usage = (f->renderable ? MTLTextureUsageRenderTarget : 0) | MTLTextureUsageShaderRead | (f->kind == FmtKind::DepthStencil ? MTLTextureUsagePixelFormatView : 0);
         rb->mtl = [ctx->dev->mtl newTextureWithDescriptor:td];
         if (!rb->mtl) return ctx->setError(GL_OUT_OF_MEMORY);
         ctx->dev->makeResident(rb->mtl);
