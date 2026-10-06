@@ -36,7 +36,7 @@ struct MGLDrawInfo {
     uint xfbPrimLimit[4];
     uint xfbStreamBase[4];
     uint xfbBufferStream[4];
-    uint pad1[2];
+    device uint* gsRecord;
 };
 inline device const uchar* mgl_vptr(constant MGLDrawInfo& D, uint b, uint off, uint vid, uint inst) {
     device const uchar* p = D.vertexBuffer[b];

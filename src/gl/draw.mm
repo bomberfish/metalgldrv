@@ -1079,7 +1079,7 @@ struct MPState {
     int vpp;
     uint32_t prims;
     // persistent scratch (survives the CPU waits between passes)
-    id<MTLBuffer> tcsV = nil, tcsP = nil, counts = nil, tesV = nil, tesP = nil;
+    id<MTLBuffer> tcsV = nil, tcsP = nil, counts = nil, tesV = nil, tesP = nil, gsRec = nil;
     uint32_t itemCount = 0, tesPrimCount = 0;
     std::vector<uint32_t> offsets;  // uint4 per item, uploaded with the draw info
     uint32_t xfbPrimLimit[4] = {0, 0, 0, 0};
@@ -1148,6 +1148,7 @@ void mpUpload(MPState& s) {
     info->tesVertexOut = s.tesV ? s.tesV.gpuAddress : 0;
     info->tesPrimOut = s.tesP ? s.tesP.gpuAddress : 0;
     info->itemCount = s.itemCount;
+    info->gsRecord = s.gsRec ? s.gsRec.gpuAddress : 0;
     info->tesPrimCount = s.tesPrimCount;
     if (!s.offsets.empty()) {
         UploadAlloc off = ctx->upload(s.offsets.size() * 4, 16);
@@ -1320,7 +1321,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     uint64_t serialStart = ctx->serial();
     auto retire = [&]() {
         uint64_t sr = ctx->serial();
-        for (id<MTLBuffer> b : {s.tcsV, s.tcsP, s.counts, s.tesV, s.tesP})
+        for (id<MTLBuffer> b : {s.tcsV, s.tcsP, s.counts, s.tesV, s.tesP, s.gsRec})
             if (b) ctx->dev->releaseAfter(b, sr);
         (void)serialStart;
     };
@@ -1362,6 +1363,13 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         s.itemCount = (hasTess ? s.tesPrimCount : s.prims * d.instances) * inv;
         s.offsets.clear();
         s.counts = mpScratch(s, (size_t)s.itemCount * 16);
+        // Record mode: the count pass also stores every item's captured primitives and a copy
+        // pass places them, so the shaders run exactly once (side effects!). Re-executing the
+        // GS in a write pass is the fallback when the records would be too large.
+        const glsl::EntryPoint* copyEp = var->entry("mgl_gs_copy");
+        size_t recBytes = copyEp ? (size_t)s.itemCount * copyEp->scratchWordsPerItem * 4 : 0;
+        bool record = s.xfb && copyEp && recBytes <= ((size_t)64 << 20);
+        if (record) s.gsRec = mpScratch(s, recBytes);
         mpUpload(s);
         if (!mpDispatch(s, "mgl_gs_count", MTLSizeMake(s.itemCount, 1, 1), false)) { retire(); return false; }
         mpWait(s);
@@ -1374,7 +1382,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
             }
         if (s.xfb) {
             mpUpload(s);
-            mpDispatch(s, "mgl_gs_write", MTLSizeMake(s.itemCount, 1, 1), false);
+            mpDispatch(s, record ? "mgl_gs_copy" : "mgl_gs_write", MTLSizeMake(s.itemCount, 1, 1), false);
         }
         mpFinishCounts(s, generated, outVpp);
         retire();
@@ -1690,12 +1698,15 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     if (vk.kind != glsl::PipelineKind::Classic) {
         // GS / tessellation: counted capture pass for transform feedback and primitive queries,
         // then the rasterizing mesh pipeline.
+        bool captured = false;
         if ((xfbActive || primQueries) && !d.indirect) {
             glsl::VariantKey xk = vk;
             xk.kind = glsl::PipelineKind::XfbCapture;
-            executeMultiPass(ctx, prog, d, xk, xfbActive);
+            captured = executeMultiPass(ctx, prog, d, xk, xfbActive);
         }
-        if (!ctx->rasterizerDiscard) executeMultiPass(ctx, prog, d, vk, false);
+        // With rasterizer discard the mesh pass only matters for shader side effects, which the
+        // capture pass already produced; otherwise it runs with rasterization disabled.
+        if (!(ctx->rasterizerDiscard && captured && xfbActive)) executeMultiPass(ctx, prog, d, vk, false);
         return;
     }
     if (primQueries && !d.indirect) {
@@ -1706,6 +1717,8 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         glsl::VariantKey xk = vk;
         xk.kind = glsl::PipelineKind::XfbCapture;
         executeMultiPass(ctx, prog, d, xk, true);
+        // the capture kernel already ran the vertex shader once per vertex (side effects included)
+        if (ctx->rasterizerDiscard) return;
     }
     // With rasterization discarded the draw only matters for vertex-stage side effects
     // (storage buffer / image / atomic counter writes); run it without a fragment stage then.

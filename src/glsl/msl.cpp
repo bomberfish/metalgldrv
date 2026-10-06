@@ -3338,31 +3338,57 @@ void Emitter::emitGeometryXfb(std::string& o, bool fromTes) {
     // captured words per vertex stream
     std::vector<size_t> sw[4];
     for (size_t i = 0; i < words.size(); i++) sw[mp.xfbBufferStream[std::get<0>(words[i]) & 3] & 3].push_back(i);
-    std::string members = "    constant MGLDrawInfo* mgl_D;\n    uint mgl_mode;\n    uint mgl_cnt[4], mgl_strip[4], mgl_np[4];\n    uint4 mgl_off;\n"
+    std::string members = "    constant MGLDrawInfo* mgl_D;\n    uint mgl_mode, mgl_t;\n    uint mgl_cnt[4], mgl_strip[4], mgl_np[4];\n    uint4 mgl_off;\n"
                           "    int mgl_primIn;\n";
+    // GL order of the vertices of the primitive completed by the last emitted vertex (strips decomposed)
+    auto orderCode = [](int vpp, const std::string& pad) -> std::string {
+        if (vpp == 1) return pad + "uint order[1] = {(e - 1u) % 3u};\n";
+        if (vpp == 2) return pad + "uint order[2] = {(e - 2u) % 3u, (e - 1u) % 3u};\n";
+        return pad + "uint a = (e - 3u) % 3u, b = (e - 2u) % 3u;\n" + pad + "if (((st - 3u) & 1u) != 0u) { uint t = a; a = b; b = t; }\n" + pad +
+               "uint order[3] = {a, b, (e - 1u) % 3u};\n";
+    };
+    // primitives one item can emit per stream (max_vertices bounds them)
+    const int maxPrimsRec = std::clamp(R.gsMaxVertices, 1, 256);
     for (int s = 0; s < 4; s++)
         if (!sw[s].empty()) members += "    uint mgl_ring" + std::to_string(s) + "[3][" + std::to_string(sw[s].size()) + "];\n";
     std::string m = "    void mgl_EmitVertex(int s) {\n        if (s < 0 || s > 3) return;\n        uint su = uint(s);\n";
     for (int s = 0; s < 4; s++) {
         if (sw[s].empty()) continue;
         std::string S = std::to_string(s);
-        m += "        if (su == " + S + "u && mgl_mode != 0u) {\n            uint slot = mgl_cnt[" + S + "] % 3u;\n";
+        m += "        if (su == " + S + "u && (mgl_mode != 0u || mgl_D->gsRecord != nullptr)) {\n            uint slot = mgl_cnt[" + S + "] % 3u;\n";
         for (size_t i = 0; i < sw[s].size(); i++)
             m += "            mgl_ring" + S + "[slot][" + std::to_string(i) + "] = " + std::get<2>(words[sw[s][i]]) + ";\n";
         m += "        }\n";
     }
     m += "        mgl_cnt[su]++;\n        mgl_strip[su]++;\n        if (mgl_strip[su] < " + VPP + ") return;\n";
-    m += "        uint pi = mgl_np[su]++;\n        if (mgl_mode == 0u) return;\n        pi += mgl_off[su];\n"
+    // record layout per item: stream s area at recBase[s], local primitive p, vertex k, word i
+    uint32_t recBase[4], recWords = 0;
+    for (int s = 0; s < 4; s++) {
+        recBase[s] = recWords;
+        recWords += (uint32_t)(maxPrimsRec * vpp * sw[s].size());
+    }
+    m += "        uint pi = mgl_np[su]++;\n";
+    m += "        if (mgl_mode == 0u) {\n            if (mgl_D->gsRecord == nullptr) return;\n";
+    for (int s = 0; s < 4; s++) {
+        if (sw[s].empty()) continue;
+        std::string S = std::to_string(s);
+        m += "            if (su == " + S + "u && pi < " + std::to_string(maxPrimsRec) + "u) {\n";
+        m += "                uint e = mgl_cnt[" + S + "], st = mgl_strip[" + S + "];\n";
+        m += orderCode(vpp, "                ");
+        m += "                device uint* r = mgl_D->gsRecord + mgl_t * " + std::to_string(recWords) + "u + " + std::to_string(recBase[s]) +
+             "u + pi * " + std::to_string(vpp * sw[s].size()) + "u;\n";
+        m += "                for (uint k = 0; k < " + VPP + "; k++) {\n";
+        for (size_t i = 0; i < sw[s].size(); i++)
+            m += "                    r[k * " + std::to_string(sw[s].size()) + "u + " + std::to_string(i) + "u] = mgl_ring" + S + "[order[k]][" + std::to_string(i) + "];\n";
+        m += "                }\n            }\n";
+    }
+    m += "            return;\n        }\n        pi += mgl_off[su];\n"
          "        if (pi >= mgl_D->xfbPrimLimit[su]) return;\n";
     for (int s = 0; s < 4; s++) {
         if (sw[s].empty()) continue;
         std::string S = std::to_string(s);
         m += "        if (su == " + S + "u) {\n            uint e = mgl_cnt[" + S + "], st = mgl_strip[" + S + "];\n";
-        if (vpp == 1) m += "            uint order[1] = {(e - 1u) % 3u};\n";
-        else if (vpp == 2) m += "            uint order[2] = {(e - 2u) % 3u, (e - 1u) % 3u};\n";
-        else
-            m += "            uint a = (e - 3u) % 3u, b = (e - 2u) % 3u;\n"
-                 "            if (((st - 3u) & 1u) != 0u) { uint t = a; a = b; b = t; }\n            uint order[3] = {a, b, (e - 1u) % 3u};\n";
+        m += orderCode(vpp, "            ");
         m += "            for (uint k = 0; k < " + VPP + "; k++) {\n                uint vtx = mgl_D->xfbStreamBase[" + S + "] + pi * " + VPP + " + k;\n";
         for (size_t i = 0; i < sw[s].size(); i++) {
             auto& [b, off, w] = words[sw[s][i]];
@@ -3396,7 +3422,7 @@ void Emitter::emitGeometryXfb(std::string& o, bool fromTes) {
                 "u + j] * " + std::to_string(tesRB_) + "u);\n";
         loop += indentBy(gsUnpack(vf, "r[$I]", "g."), 8) + "    }\n";
     }
-    e += "    gs::G g = {};\n    g.A = " + argsOf(Stage::Geometry) + ";\n    g.sys = &sys;\n    g.mgl_D = &D;\n    g.mgl_mode = mgl_mode;\n"
+    e += "    gs::G g = {};\n    g.A = " + argsOf(Stage::Geometry) + ";\n    g.sys = &sys;\n    g.mgl_D = &D;\n    g.mgl_mode = mgl_mode;\n    g.mgl_t = mgl_t;\n"
          "    for (int k = 0; k < 4; k++) { g.mgl_cnt[k] = 0u; g.mgl_strip[k] = 0u; g.mgl_np[k] = 0u; }\n"
          "    g.mgl_off = mgl_mode != 0u ? D.itemOffsets[mgl_t] : uint4(0u);\n    g.mgl_primIn = int(mgl_prim);\n";
     e += loop;
@@ -3407,6 +3433,33 @@ void Emitter::emitGeometryXfb(std::string& o, bool fromTes) {
     }
     e += "    g.mgl_init();\n    g." + gsi.mainName + "();\n";
     e += "    if (mgl_mode == 0u) D.itemCounts[mgl_t] = uint4(g.mgl_np[0], g.mgl_np[1], g.mgl_np[2], g.mgl_np[3]);\n}\n\n";
+    // mgl_gs_copy: places the primitives recorded by mgl_gs_count (one GS execution in total, so
+    // side effects such as atomic counters happen exactly once per invocation)
+    {
+        e += "kernel void mgl_gs_copy(constant MGLDrawInfo& D [[buffer(22)]], uint mgl_t [[thread_position_in_grid]]) {\n"
+             "    if (mgl_t >= D.itemCount) return;\n    uint4 n = D.itemCounts[mgl_t], off = D.itemOffsets[mgl_t];\n";
+        for (int s = 0; s < 4; s++) {
+            if (sw[s].empty()) continue;
+            std::string S = std::to_string(s), WS = std::to_string(sw[s].size());
+            e += "    for (uint p = 0; p < min(n[" + S + "], " + std::to_string(maxPrimsRec) + "u); p++) {\n";
+            e += "        uint pi = off[" + S + "] + p;\n        if (pi >= D.xfbPrimLimit[" + S + "]) break;\n";
+            e += "        device const uint* r = D.gsRecord + mgl_t * " + std::to_string(recWords) + "u + " + std::to_string(recBase[s]) +
+                 "u + p * " + std::to_string(vpp * sw[s].size()) + "u;\n";
+            e += "        for (uint k = 0; k < " + VPP + "; k++) {\n            uint vtx = D.xfbStreamBase[" + S + "] + pi * " + VPP + " + k;\n";
+            for (size_t i = 0; i < sw[s].size(); i++) {
+                auto& [b, off, w] = words[sw[s][i]];
+                (void)w;
+                e += "            mgl_st_uint(D.xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " +
+                     std::to_string(off) + "u, r[k * " + WS + "u + " + std::to_string(i) + "u]);\n";
+            }
+            e += "        }\n    }\n";
+        }
+        e += "}\n\n";
+        EntryPoint k{"mgl_gs_copy", Stage::Geometry, EntryPoint::Kernel};
+        k.threadsPerThreadgroup[0] = 64;
+        k.scratchWordsPerItem = recWords;
+        out_.entryPoints.push_back(k);
+    }
     for (const char* nm : {"mgl_gs_count", "mgl_gs_write"}) {
         e += std::string("kernel void ") + nm + "(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
              "uint mgl_t [[thread_position_in_grid]]) {\n    if (mgl_t < D.itemCount) mgl_gs_xfb_run(" + (std::string(nm) == "mgl_gs_count" ? "0u" : "1u") +
