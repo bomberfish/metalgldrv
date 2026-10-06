@@ -527,15 +527,27 @@ API void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
     case GL_TRANSFORM_FEEDBACK_BUFFER_MODE: *params = p->xfbBufferMode; break;
     case GL_TRANSFORM_FEEDBACK_VARYINGS: *params = p->linked ? (GLint)r.xfbVaryings.size() : 0; break;
     case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH: *params = maxLen(r.xfbVaryings, [](auto& a) -> const std::string& { return a.name; }); break;
-    case GL_GEOMETRY_VERTICES_OUT: if (!(r.stageMask & (1 << (int)glsl::Stage::Geometry))) return ctx->setError(GL_INVALID_OPERATION); *params = r.gsMaxVertices; break;
-    case GL_GEOMETRY_INPUT_TYPE: if (!(r.stageMask & (1 << (int)glsl::Stage::Geometry))) return ctx->setError(GL_INVALID_OPERATION); *params = r.gsInputPrimitive; break;
-    case GL_GEOMETRY_OUTPUT_TYPE: if (!(r.stageMask & (1 << (int)glsl::Stage::Geometry))) return ctx->setError(GL_INVALID_OPERATION); *params = r.gsOutputPrimitive; break;
-    case GL_GEOMETRY_SHADER_INVOCATIONS: *params = r.gsInvocations; break;
-    case GL_TESS_CONTROL_OUTPUT_VERTICES: *params = r.tcsOutputVertices; break;
-    case GL_TESS_GEN_MODE: *params = r.tesPrimitiveMode; break;
-    case GL_TESS_GEN_SPACING: *params = r.tesSpacing; break;
-    case GL_TESS_GEN_VERTEX_ORDER: *params = r.tesOrder; break;
-    case GL_TESS_GEN_POINT_MODE: *params = r.tesPointMode; break;
+    // GL 4.6 7.13: stage-specific queries need a linked program containing that stage
+    case GL_GEOMETRY_VERTICES_OUT: case GL_GEOMETRY_INPUT_TYPE: case GL_GEOMETRY_OUTPUT_TYPE: case GL_GEOMETRY_SHADER_INVOCATIONS:
+    case GL_TESS_CONTROL_OUTPUT_VERTICES: case GL_TESS_GEN_MODE: case GL_TESS_GEN_SPACING: case GL_TESS_GEN_VERTEX_ORDER:
+    case GL_TESS_GEN_POINT_MODE: {
+        glsl::Stage st = pname == GL_TESS_CONTROL_OUTPUT_VERTICES ? glsl::Stage::TessControl
+                       : (pname == GL_TESS_GEN_MODE || pname == GL_TESS_GEN_SPACING || pname == GL_TESS_GEN_VERTEX_ORDER ||
+                          pname == GL_TESS_GEN_POINT_MODE) ? glsl::Stage::TessEval : glsl::Stage::Geometry;
+        if (!p->linked || !(r.stageMask & (1u << (int)st))) return ctx->setError(GL_INVALID_OPERATION);
+        switch (pname) {
+        case GL_GEOMETRY_VERTICES_OUT: *params = r.gsMaxVertices; break;
+        case GL_GEOMETRY_INPUT_TYPE: *params = r.gsInputPrimitive; break;
+        case GL_GEOMETRY_OUTPUT_TYPE: *params = r.gsOutputPrimitive; break;
+        case GL_GEOMETRY_SHADER_INVOCATIONS: *params = r.gsInvocations; break;
+        case GL_TESS_CONTROL_OUTPUT_VERTICES: *params = r.tcsOutputVertices; break;
+        case GL_TESS_GEN_MODE: *params = r.tesPrimitiveMode; break;
+        case GL_TESS_GEN_SPACING: *params = r.tesSpacing; break;
+        case GL_TESS_GEN_VERTEX_ORDER: *params = r.tesOrder; break;
+        default: *params = r.tesPointMode; break;
+        }
+        break;
+    }
     case GL_COMPUTE_WORK_GROUP_SIZE:
         if (!p->linked || !(r.stageMask & (1 << (int)glsl::Stage::Compute))) return ctx->setError(GL_INVALID_OPERATION);
         params[0] = r.localSize[0];
