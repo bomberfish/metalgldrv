@@ -2,7 +2,8 @@
 # Fetch, patch, configure and build the Khronos OpenGL CTS (glcts) for macOS
 # arm64 against metalgldrv's EGL/GL dylib.
 #
-# Usage: tests/cts/setup.sh [--clean]
+# Usage: tests/cts/setup.sh [--clean] [--ios]
+#   --ios: build glcts for iOS (build-ios/) instead; install/run with run.sh --ios
 #   CTS_DIR      checkout location            (default ~/metalgldrv-deps/cts)
 #   CTS_BUILD    build directory              (default $CTS_DIR/build)
 #   DRIVER_BUILD metalgldrv build dir (rpath) (default <repo>/build)
@@ -23,7 +24,10 @@ PATCH="$HERE/cts-macos-metalgl.patch"
 
 export PATH="/opt/homebrew/bin:$PATH"
 
-if [[ "${1:-}" == "--clean" ]]; then
+IOS=0
+for arg in "$@"; do [[ "$arg" == "--ios" ]] && IOS=1; done
+[[ $IOS == 1 ]] && CTS_BUILD="${CTS_BUILD_IOS:-$CTS_DIR/build-ios}"
+if [[ " $* " == *" --clean "* ]]; then
     rm -rf "$CTS_BUILD"
 fi
 
@@ -49,6 +53,17 @@ fi
 
 # 3. External deps (GL-relevant only, shallow)
 python3 "$HERE/fetch_deps.py" "$CTS_DIR"
+
+if [[ $IOS == 1 ]]; then
+    cmake -G Ninja -S "$CTS_DIR" -B "$CTS_BUILD" \
+        -DCMAKE_TOOLCHAIN_FILE="$REPO/cmake/ios.cmake" \
+        -DDEQP_TARGET=metalgl \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DDEQP_DISABLE_VK_VIDEO_TESTS=ON
+    ninja -C "$CTS_BUILD" ${CTS_JOBS:+-j "$CTS_JOBS"} glcts
+    echo "[setup] iOS glcts: $CTS_BUILD/external/openglcts/modules/glcts (install+run: run.sh --ios)"
+    exit 0
+fi
 
 # 4. Driver (glcts dlopens it at runtime; build it so the rpath target exists)
 if [[ -f "$REPO/CMakeLists.txt" && ! -f "$DRIVER_BUILD/libmetalgldrv.dylib" ]]; then

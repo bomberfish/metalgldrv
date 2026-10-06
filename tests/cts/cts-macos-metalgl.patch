@@ -1,3 +1,113 @@
+diff --git a/framework/platform/metalgl/tcuMetalGLIOSMain.mm b/framework/platform/metalgl/tcuMetalGLIOSMain.mm
+new file mode 100644
+index 0000000..5691584
+--- /dev/null
++++ b/framework/platform/metalgl/tcuMetalGLIOSMain.mm
+@@ -0,0 +1,104 @@
++/*-------------------------------------------------------------------------
++ * drawElements Quality Program Tester Core
++ * ----------------------------------------
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ *//*!
++ * \file
++ * \brief iOS host app for metalgldrv: runs the generic tcuMain (compiled as
++ *        deqp_main) on a background thread once the scene is up.
++ *
++ * Command-line arguments come from the launch (xcrun devicectl ... process
++ * launch <bundle> --deqp-...). An "@docs/" prefix in any argument is
++ * replaced with the app's Documents directory, so logs and case lists can
++ * be exchanged with `devicectl device copy`. The working directory is the
++ * app bundle, which holds the test data (gl_cts/, gles2/).
++ *//*--------------------------------------------------------------------*/
++
++#undef main
++#import <UIKit/UIKit.h>
++
++#include <string>
++#include <vector>
++#include <unistd.h>
++
++extern "C++" int deqp_main(int argc, char **argv);
++
++static void runDeqp(void)
++{
++    NSArray<NSString *> *args = NSProcessInfo.processInfo.arguments;
++    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
++    chdir(NSBundle.mainBundle.bundlePath.fileSystemRepresentation);
++    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
++        std::vector<std::string> storage;
++        for (NSString *a in args)
++            storage.push_back([a stringByReplacingOccurrencesOfString:@"@docs/"
++                                                           withString:[docs stringByAppendingString:@"/"]]
++                                  .UTF8String);
++        std::vector<char *> argv;
++        for (auto &s : storage)
++            argv.push_back((char *)s.c_str());
++        argv.push_back(nullptr);
++        int rc = deqp_main((int)storage.size(), argv.data());
++        printf("DEQP_DONE rc=%d\n", rc);
++        fflush(stdout);
++        fflush(stderr);
++        exit(rc);
++    });
++}
++
++@interface DeqpSceneDelegate : UIResponder <UIWindowSceneDelegate>
++@property(strong, nonatomic) UIWindow *window;
++@end
++
++@implementation DeqpSceneDelegate
++- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options
++{
++    UIWindowScene *ws = (UIWindowScene *)scene;
++    self.window = [[UIWindow alloc] initWithWindowScene:ws];
++    UIViewController *vc = [UIViewController new];
++    vc.view.backgroundColor = UIColor.blackColor;
++    self.window.rootViewController = vc;
++    [self.window makeKeyAndVisible];
++    // The driver parks GPU submission while backgrounded; keep the device awake.
++    UIApplication.sharedApplication.idleTimerDisabled = YES;
++    runDeqp();
++}
++@end
++
++@interface DeqpAppDelegate : UIResponder <UIApplicationDelegate>
++@end
++
++@implementation DeqpAppDelegate
++- (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)opts
++{
++    return YES;
++}
++- (UISceneConfiguration *)application:(UIApplication *)app
++    configurationForConnectingSceneSession:(UISceneSession *)session
++                                   options:(UISceneConnectionOptions *)options
++{
++    UISceneConfiguration *c = [[UISceneConfiguration alloc] initWithName:@"Default" sessionRole:session.role];
++    c.delegateClass = [DeqpSceneDelegate class];
++    return c;
++}
++@end
++
++int main(int argc, char *argv[])
++{
++    @autoreleasepool
++    {
++        return UIApplicationMain(argc, argv, nil, NSStringFromClass([DeqpAppDelegate class]));
++    }
++}
 diff --git a/framework/platform/metalgl/tcuMetalGLPlatform.mm b/framework/platform/metalgl/tcuMetalGLPlatform.mm
 new file mode 100644
 index 0000000..87034ac
@@ -230,10 +340,10 @@ index 0000000..87034ac
 +}
 diff --git a/targets/metalgl/metalgl.cmake b/targets/metalgl/metalgl.cmake
 new file mode 100644
-index 0000000..edf76c7
+index 0000000..b8558e3
 --- /dev/null
 +++ b/targets/metalgl/metalgl.cmake
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,43 @@
 +# macOS target for metalgldrv: desktop GL 4.6 + EGL 1.5 from one dylib.
 +#
 +#   -DDEQP_TARGET=metalgl -DMETALGLDRV_LIB_DIR=/path/to/metalgldrv/build
@@ -256,6 +366,19 @@ index 0000000..edf76c7
 +
 +set(TCUTIL_PLATFORM_SRCS metalgl/tcuMetalGLPlatform.mm)
 +set(TCUTIL_PLATFORM_LIBS ${QUARTZCORE_LIBRARY} ${FOUNDATION_LIBRARY})
++
++# iOS (CMAKE_SYSTEM_NAME=iOS): build the same command-line executables (DE_OS
++# stays OSX), but rename tcuMain's main() to deqp_main and provide a UIKit app
++# main that calls it; the driver is loaded from the app's Frameworks/.
++if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
++	message("*** metalgl: iOS app executables")
++	find_library(UIKIT_LIBRARY UIKit)
++	add_definitions(-Dmain=deqp_main)
++	list(APPEND TCUTIL_PLATFORM_SRCS metalgl/tcuMetalGLIOSMain.mm)
++	list(APPEND TCUTIL_PLATFORM_LIBS ${UIKIT_LIBRARY})
++	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-u,_main")
++	set(METALGLDRV_LIB_DIR "@executable_path/Frameworks" CACHE PATH "" FORCE)
++endif ()
 +
 +# Fallback path used by eglu::GLContextFactory if the driver ever stops
 +# advertising EGL_KHR_get_all_proc_addresses.

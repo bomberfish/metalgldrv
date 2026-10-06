@@ -18,6 +18,8 @@
 #   -j, --jobs N     parallel glcts processes (default: number of P-cores)
 #   --no-build       don't rebuild the driver first
 #   --log-images     keep images in the QPA log
+#   --ios            run on the connected iOS device (glcts app from setup.sh --ios,
+#                    reinstalled with the current driver by ios-install.sh)
 #   --               remaining args are passed to glcts verbatim
 #
 # Outputs in DIR: results.qpa (merged log), results.csv, summary.txt,
@@ -39,7 +41,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 
 caselists=() filters=() excludes=() extra=()
 jobs=$(( $(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo 4) ))
-out="" surface=pbuffer config=rgba8888d24s8ms0 timeout=60 build=1 images=disable
+out="" surface=pbuffer config=rgba8888d24s8ms0 timeout=60 build=1 images=disable ios=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -l|--caselist) caselists+=("$2"); shift 2 ;;
@@ -51,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         -j|--jobs)     jobs="$2"; shift 2 ;;
         --no-build)    build=0; shift ;;
         --log-images)  images=enable; shift ;;
+        --ios)         ios=1; shift ;;
         -h|--help)     sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;$d'; exit 0 ;;
         --)            shift; extra+=("$@"); break ;;
         *)             filters+=("$1"); shift ;;
@@ -67,6 +70,22 @@ for c in "${caselists[@]}"; do
     elif [[ -f "$MUSTPASS/aosp_mustpass/main/${c#aosp-}-main.txt" ]]; then resolved+=("$MUSTPASS/aosp_mustpass/main/${c#aosp-}-main.txt")
     else echo "case list not found: $c" >&2; exit 2; fi
 done
+
+if [[ $ios == 1 ]]; then
+    [[ -z "$out" ]] && out="$HERE/results/ios-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$out"; out="$(cd "$out" && pwd)"
+    "$HERE/ios-install.sh"
+    (cd "$REPO" && git rev-parse --short HEAD 2>/dev/null; git -C "$REPO" status --short -- src 2>/dev/null | head -50) > "$out/driver-version.txt" || true
+    args=(--ios-device "${MGL_DEVICE:-00008142-001538391E80C01C}" --outdir "$out" --timeout "$timeout" --jobs 1)
+    for c in "${resolved[@]}"; do args+=(--caselist "$c"); done
+    for f in ${filters[@]+"${filters[@]}"}; do args+=(--filter "$f"); done
+    for x in ${excludes[@]+"${excludes[@]}"}; do args+=(--exclude "$x"); done
+    exec python3 "$HERE/run_cts.py" "${args[@]}" -- \
+        --deqp-gl-context-type=egl --deqp-surface-type="$surface" --deqp-gl-config-name="$config" \
+        --deqp-surface-width=64 --deqp-surface-height=64 --deqp-base-seed=1 \
+        --deqp-screen-rotation=unspecified --deqp-watchdog=disable --deqp-log-images="$images" \
+        --deqp-log-shader-sources=disable --deqp-log-flush=enable ${extra[@]+"${extra[@]}"}
+fi
 
 if [[ ! -x "$GLCTS_DIR/glcts" ]]; then
     echo "glcts not built; run tests/cts/setup.sh" >&2; exit 2

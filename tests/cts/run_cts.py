@@ -143,6 +143,95 @@ def summarize_ips(path, max_frames=40):
     return "\n".join(out)
 
 
+def host_run_chunk(a, cl, log, stdout_path):
+    """Run one glcts chunk as a local process. Returns (rc, timed_out, pid)."""
+    cmd = [a.glcts, f"--deqp-caselist-file={cl}", f"--deqp-log-filename={log}"] + a.extra
+    timed_out = False
+    with open(stdout_path, "w") as so:
+        p = subprocess.Popen(cmd, cwd=a.workdir, stdout=so, stderr=subprocess.STDOUT, start_new_session=True)
+        last_size, last_change = -1, time.time()
+        while p.poll() is None:
+            time.sleep(0.1)
+            try:
+                sz = os.path.getsize(log)
+            except OSError:
+                sz = 0
+            if sz != last_size:
+                last_size, last_change = sz, time.time()
+            elif time.time() - last_change > a.timeout:
+                timed_out = True
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait()
+                break
+    return p.returncode, timed_out, p.pid
+
+
+# ---- iOS device backend: glcts runs inside the deqp app (tcuMetalGLIOSMain.mm), one launch per chunk.
+def devicectl(*args, timeout=600):
+    return subprocess.run(["xcrun", "devicectl", *args], capture_output=True, text=True, timeout=timeout)
+
+
+def ios_copy(a, direction, src, dst):
+    r = devicectl("device", "copy", direction, "--device", a.ios_device, "--domain-type", "appDataContainer",
+                  "--domain-identifier", a.ios_bundle, "--source", src, "--destination", dst)
+    return r.returncode == 0
+
+
+def ios_run_chunk(a, cl, log, stdout_path):
+    """Run one glcts chunk on the device. Returns (rc, timed_out, None); rc 0 only if glcts finished."""
+    if not ios_copy(a, "to", cl, "Documents/caselist.txt"):
+        return -1, False, None
+    env = {k: v for k, v in os.environ.items() if k.startswith("METALGLDRV_")}
+    cmd = ["xcrun", "devicectl", "device", "process", "launch", "--device", a.ios_device, "--console",
+           "--terminate-existing", "--environment-variables", json.dumps(env), a.ios_bundle,
+           "--deqp-caselist-file=@docs/caselist.txt", "--deqp-log-filename=@docs/log.qpa"] + a.extra
+    timed_out = False
+    with open(stdout_path, "w") as so:
+        p = subprocess.Popen(cmd, stdout=so, stderr=subprocess.STDOUT, start_new_session=True)
+        last_size, last_change = -1, time.time()
+        while p.poll() is None:
+            time.sleep(0.5)
+            sz = os.path.getsize(stdout_path)
+            if sz != last_size:
+                last_size, last_change = sz, time.time()
+            elif time.time() - last_change > a.timeout:
+                timed_out = True
+                p.send_signal(signal.SIGINT)  # forwarded to the app
+                try:
+                    p.wait(20)
+                except subprocess.TimeoutExpired:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.wait()
+                break
+    out = open(stdout_path, errors="replace").read()
+    m = re.search(r"DEQP_DONE rc=(-?\d+)", out)
+    if os.path.exists(log):
+        os.remove(log)
+    ios_copy(a, "from", "Documents/log.qpa", log)
+    return (int(m.group(1)) if m else -1), timed_out, None
+
+
+def ios_crash_report(a):
+    """Newest deqp crash report pulled from the device (if any), summarized."""
+    d = os.path.join(a.outdir, "ios-crashlogs")
+    os.makedirs(d, exist_ok=True)
+    before = set(glob.glob(os.path.join(d, "*.ips")))
+    try:
+        subprocess.run(["xcrun", "devicectl", "device", "info", "crashes"], capture_output=True, timeout=1)
+    except Exception:  # noqa: BLE001
+        pass
+    if shutil_which("idevicecrashreport"):
+        subprocess.run(["idevicecrashreport", "-u", a.ios_device, "-k", "-f", a.ios_process, d],
+                       capture_output=True, timeout=120)
+    new = sorted(set(glob.glob(os.path.join(d, "**", "*.ips"), recursive=True)) - before, key=os.path.getmtime)
+    return (f"report: {new[-1]}\n" + summarize_ips(new[-1])) if new else "(no device crash report fetched)"
+
+
+def shutil_which(x):
+    import shutil
+    return shutil.which(x)
+
+
 def run_suite(a):
     os.makedirs(a.outdir, exist_ok=True)
     cases = load_cases(a.caselist, a.filter, a.exclude)
@@ -174,28 +263,15 @@ def run_suite(a):
                 f.write("\n".join(remaining) + "\n")
             if os.path.exists(log):
                 os.remove(log)
-            cmd = [a.glcts, f"--deqp-caselist-file={cl}", f"--deqp-log-filename={log}"] + a.extra
             stdout_path = os.path.join(a.outdir, f"{tag}.stdout")
-            with open(stdout_path, "w") as so:
-                p = subprocess.Popen(cmd, cwd=a.workdir, stdout=so, stderr=subprocess.STDOUT,
-                                     start_new_session=True)
+            if a.ios_device:
+                rc, timed_out, pid = ios_run_chunk(a, cl, log, stdout_path)
                 with lock:
                     nproc[0] += 1
-                last_size, last_change, timed_out = -1, time.time(), False
-                while p.poll() is None:
-                    time.sleep(0.1)
-                    try:
-                        sz = os.path.getsize(log)
-                    except OSError:
-                        sz = 0
-                    if sz != last_size:
-                        last_size, last_change = sz, time.time()
-                    elif time.time() - last_change > a.timeout:
-                        timed_out = True
-                        os.killpg(p.pid, signal.SIGKILL)
-                        p.wait()
-                        break
-            rc = p.returncode
+            else:
+                rc, timed_out, pid = host_run_chunk(a, cl, log, stdout_path)
+                with lock:
+                    nproc[0] += 1
             text = open(log, errors="replace").read() if os.path.exists(log) else ""
             res, blocks, inflight, partial = parse_qpa(text)
             crash = None
@@ -205,10 +281,10 @@ def run_suite(a):
                 detail = (f"process {'killed after %.0fs inactivity' % a.timeout if timed_out else 'died'} (rc={rc}"
                           + (f", signal {signal.Signals(sig).name}" if sig else "") + ")")
                 bt = ""
-                if not timed_out:
+                if not timed_out and not a.ios_device:
                     ips = None
                     for _ in range(40):  # wait for ReportCrash to write the .ips
-                        ips = find_ips(p.pid)
+                        ips = find_ips(pid)
                         if ips:
                             break
                         time.sleep(0.25)
@@ -226,6 +302,8 @@ def run_suite(a):
                         # ReportCrash throttles repeated reports; re-run the case under lldb instead.
                         bt = "(no .ips crash report; backtrace from lldb re-run)\n" + lldb_backtrace(a, inflight, tag)
                 tail = "".join(open(stdout_path, errors="replace").readlines()[-12:])
+                if a.ios_device:
+                    bt += ios_crash_report(a)
                 bt += "\nglcts output tail:\n" + "".join("  | " + l for l in tail.splitlines(True))
                 crash = (inflight, status, detail, bt)
             with lock:
@@ -317,6 +395,9 @@ def main():
     ap.add_argument("--from-qpa", action="store_true", help="only re-summarize OUTDIR/results.qpa")
     ap.add_argument("--jobs", type=int, default=1, help="parallel glcts processes")
     ap.add_argument("--max-restarts", type=int, default=10000)
+    ap.add_argument("--ios-device", help="run on this iOS device (UDID) through the deqp app")
+    ap.add_argument("--ios-bundle", default="ca.bomberfish.glcts")
+    ap.add_argument("--ios-process", default="glcts", help="process name for crash reports")
     ap.add_argument("extra", nargs="*", help="extra glcts args")
     a = ap.parse_args()
 
