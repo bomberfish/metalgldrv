@@ -1141,7 +1141,8 @@ LinkResult Linker::run() {
     if (!prog_->stageMask) error("no shaders attached");
     if ((prog_->stageMask & (1u << (int)Stage::Compute)) && (prog_->stageMask & ~(1u << (int)Stage::Compute)))
         error("a compute shader cannot be linked with other shader stages");
-    if ((prog_->stageMask & (1u << (int)Stage::TessEval)) == 0 && (prog_->stageMask & (1u << (int)Stage::TessControl)))
+    // a separable program may hold a tessellation control shader alone (combined in a pipeline)
+    if (!in_.separable && (prog_->stageMask & (1u << (int)Stage::TessEval)) == 0 && (prog_->stageMask & (1u << (int)Stage::TessControl)))
         error("tessellation control shader requires a tessellation evaluation shader");
     if (!in_.separable && (prog_->stageMask & ~(1u << (int)Stage::Compute)) && !(prog_->stageMask & (1u << (int)Stage::Vertex)))
         error("program has no vertex shader");

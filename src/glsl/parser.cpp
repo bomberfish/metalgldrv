@@ -248,6 +248,8 @@ private:
     void checkComponent(const Type& type, int comp, bool hasLocation, int ln);
     void noteXfb(const Layout& L, Storage storage, int buffer, int ln);
     void finalizeXfb();
+    void checkInterfaceLocations();
+    int limitConst(const char* name);
     void parseFunction(const Qualifiers& q, const Type& ret, const std::string& name);
     std::vector<Variable*> parseParamList();
     Expr* mkSubroutineCall(Variable* v, Expr* index, std::vector<Expr*> args, int ln);
@@ -311,6 +313,7 @@ bool Parser::run(const PPResult& pp) {
         parseTokens(pp.tokens);
         finalize();
         finalizeXfb();
+        checkInterfaceLocations();
     } catch (ParseError&) {
         return false;
     }
@@ -964,6 +967,109 @@ void Parser::finalizeXfb() {
     }
     std::string err = checkXfbLayout(caps, sh_.xfbStride);
     if (!err.empty()) fail(err);
+}
+
+int Parser::limitConst(const char* name) {
+    auto it = scopes_[0].find(name);
+    if (it == scopes_[0].end() || !it->second.var || !it->second.var->constVal || it->second.var->constVal->c.empty()) return 1 << 20;
+    return (int)it->second.var->constVal->c[0].i;
+}
+
+// GLSL 4.60 §4.4.1: explicit input/output locations must fit the stage's limits, and variables sharing a
+// location must not alias components (except vertex shader inputs) and must agree on the numeric type
+// class, interpolation and auxiliary storage.
+void Parser::checkInterfaceLocations() {
+    struct Slot {
+        int loc, comp, count;  // count in 32-bit components
+        int cls;               // 0 float, 1 integer, 2 double
+        Interp interp;
+        int aux;               // centroid | sample<<1 | patch<<2
+        bool member;
+        int index;             // fragment output index
+        std::string name;
+    };
+    Stage st = sh_.stage;
+    if (st == Stage::Compute) return;
+    for (Storage dir : {Storage::In, Storage::Out}) {
+        bool in = dir == Storage::In;
+        int maxLoc;
+        switch (st) {
+            case Stage::Vertex: maxLoc = in ? limitConst("gl_MaxVertexAttribs") : limitConst("gl_MaxVertexOutputComponents") / 4; break;
+            case Stage::TessControl: maxLoc = limitConst(in ? "gl_MaxTessControlInputComponents" : "gl_MaxTessControlOutputComponents") / 4; break;
+            case Stage::TessEval: maxLoc = limitConst(in ? "gl_MaxTessEvaluationInputComponents" : "gl_MaxTessEvaluationOutputComponents") / 4; break;
+            case Stage::Geometry: maxLoc = limitConst(in ? "gl_MaxGeometryInputComponents" : "gl_MaxGeometryOutputComponents") / 4; break;
+            default: maxLoc = in ? limitConst("gl_MaxFragmentInputComponents") / 4 : limitConst("gl_MaxDrawBuffers"); break;
+        }
+        bool arrayed = in ? (st == Stage::TessControl || st == Stage::TessEval || st == Stage::Geometry) : st == Stage::TessControl;
+        std::vector<Slot> slots;
+        // appends the slots of type t starting at location loc / component comp; returns the next location
+        std::function<int(const Type&, int, int, const Qualifiers&, bool, const std::string&, int)> add =
+            [&](const Type& t, int loc, int comp, const Qualifiers& q, bool member, const std::string& name, int ln) -> int {
+            if (t.isArray()) {
+                Type e = t.elem();
+                for (int i = 0; i < std::max(1, t.dims[0]); i++) loc = add(e, loc, i ? -1 : comp, q, member, name, ln);
+                return loc;
+            }
+            if (t.base == BT::Struct) {
+                for (auto& m : t.sdef->members) loc = add(m.type, loc, -1, q, member, name, ln);
+                return loc;
+            }
+            int cols = t.cols ? t.cols : 1;
+            bool dbl = t.base == BT::Double;
+            int cls = dbl ? 2 : (t.base == BT::Float ? 0 : 1);
+            int aux = (q.centroid ? 1 : 0) | (q.sample ? 2 : 0) | (q.patch ? 4 : 0);
+            for (int c = 0; c < cols; c++) {
+                int comps = t.vec * (dbl ? 2 : 1);
+                int start = std::max(comp, 0);
+                while (comps > 0) {
+                    int n = std::min(comps, 4 - start);
+                    if (loc >= maxLoc) fail("'location' : '" + name + "' exceeds the maximum number of locations", ln);
+                    slots.push_back({loc, start, n, cls, q.interp, aux, member, std::max(0, q.layout.index), name});
+                    comps -= n;
+                    start = 0;
+                    loc++;
+                }
+            }
+            return loc;
+        };
+        for (auto& g : sh_.globals) {
+            if (g.kind != GlobalDecl::Var || !g.var || g.var->q.storage != dir || g.var->builtin != BuiltinVar::None) continue;
+            Variable* v = g.var;
+            if (v->block) {
+                const StructDef* sd = v->block;
+                int loc = sd->blockQ.layout.location;
+                bool any = loc >= 0;
+                for (auto& m : sd->members) any |= m.q.layout.location >= 0;
+                if (!any) continue;
+                for (auto& m : sd->members) {
+                    if (m.q.layout.location >= 0) loc = m.q.layout.location;
+                    if (loc < 0) continue;
+                    Qualifiers mq = m.q;
+                    mq.patch = mq.patch || v->q.patch;
+                    loc = add(m.type, loc, m.q.layout.component, mq, true, sd->name + "." + m.name, m.line);
+                }
+                continue;
+            }
+            if (v->q.layout.location < 0) continue;
+            Type t = v->type;
+            if (arrayed && !v->q.patch && t.isArray()) t = t.elem();
+            add(t, v->q.layout.location, v->q.layout.component, v->q, false, v->name, v->line);
+        }
+        bool vsIn = st == Stage::Vertex && in;
+        for (size_t i = 0; i < slots.size(); i++)
+            for (size_t j = 0; j < i; j++) {
+                const Slot& a = slots[i];
+                const Slot& b = slots[j];
+                if (a.loc != b.loc || a.index != b.index || a.name == b.name) continue;
+                bool overlap = a.comp < b.comp + b.count && b.comp < a.comp + a.count;
+                if (overlap && !(vsIn && !a.member && !b.member))
+                    fail("'location' : '" + a.name + "' and '" + b.name + "' use the same location and component");
+                if (a.cls != b.cls)
+                    fail("'location' : '" + a.name + "' and '" + b.name + "' share a location but have different numeric types");
+                if (!vsIn && (a.interp != b.interp || a.aux != b.aux))
+                    fail("'location' : '" + a.name + "' and '" + b.name + "' share a location but have different interpolation or storage qualifiers");
+            }
+    }
 }
 
 // GLSL 4.60 §4.4.2.1 'component' rules for a shader input/output (or block member) of type t.
