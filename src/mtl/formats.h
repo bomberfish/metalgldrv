@@ -46,6 +46,16 @@ const FormatInfo* resolveInternalFormat(GLenum internalFormat, GLenum format, GL
 const FormatInfo* formatInfoForMTL(MTLPixelFormat f);
 bool isCompressedFormat(GLenum internalFormat);
 bool isDepthOrStencil(const FormatInfo* f);
+// GL 4.6 Table 8.27 view class: texel bits for uncompressed classes, 1000+n for
+// compressed classes, 0 if the format belongs to no class.
+int viewClass(GLenum internalFormat);
+// Apple GPU lossless compression canonicalizes RGB9E5 encodings and RG11B10F NaNs,
+// but GL requires bit-exact uploads, readbacks and copies: such textures opt out.
+inline bool losslessCompressionSafe(MTLPixelFormat f) {
+    return f != MTLPixelFormatRGB9E5Float && f != MTLPixelFormatRG11B10Float;
+}
+// glCopyImageSubData format compatibility (§18.3.3).
+bool copyImageCompatible(const FormatInfo* a, const FormatInfo* b);
 
 // --- client pixel layout ---------------------------------------------------
 struct PixelStore {

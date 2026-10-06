@@ -129,6 +129,7 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
     }
     if (fmt->srgb || t->needsFormatView || fmt->kind == FmtKind::DepthStencil) usage |= MTLTextureUsagePixelFormatView;
     td.usage = usage;
+    if (!losslessCompressionSafe(fmt->mtl)) td.allowGPUOptimizedContents = NO;
     id<MTLTexture> nt = [ctx->dev->mtl newTextureWithDescriptor:td];
     if (nt && g_statsEnabled) statAddCaller("newTexture KB", __builtin_return_address(0), nt.allocatedSize >> 10);
     if (!nt) {

@@ -176,6 +176,7 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
         td.storageMode = MTLStorageModePrivate;
         td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | (f->kind == FmtKind::DepthStencil ? MTLTextureUsagePixelFormatView : 0);
+        if (!losslessCompressionSafe(f->mtl)) td.allowGPUOptimizedContents = NO;
         rb->mtl = [ctx->dev->mtl newTextureWithDescriptor:td];
         if (!rb->mtl) return ctx->setError(GL_OUT_OF_MEMORY);
         ctx->dev->makeResident(rb->mtl);

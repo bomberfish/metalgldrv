@@ -160,6 +160,52 @@ bool isDepthOrStencil(const FormatInfo* f) {
     return f && (f->kind == FmtKind::Depth || f->kind == FmtKind::Stencil || f->kind == FmtKind::DepthStencil);
 }
 
+int viewClass(GLenum internalFormat) {
+    switch (internalFormat) {
+    case GL_RGBA32F: case GL_RGBA32UI: case GL_RGBA32I: return 128;
+    case GL_RGB32F: case GL_RGB32UI: case GL_RGB32I: return 96;
+    case GL_RGBA16F: case GL_RG32F: case GL_RGBA16UI: case GL_RG32UI: case GL_RGBA16I: case GL_RG32I: case GL_RGBA16:
+    case GL_RGBA16_SNORM: return 64;
+    case GL_RGB16: case GL_RGB16_SNORM: case GL_RGB16F: case GL_RGB16UI: case GL_RGB16I: return 48;
+    case GL_RG16F: case GL_R11F_G11F_B10F: case GL_R32F: case GL_RGB10_A2UI: case GL_RGBA8UI: case GL_RG16UI: case GL_R32UI:
+    case GL_RGBA8I: case GL_RG16I: case GL_R32I: case GL_RGB10_A2: case GL_RGBA8: case GL_RG16: case GL_RGBA8_SNORM:
+    case GL_RG16_SNORM: case GL_SRGB8_ALPHA8: case GL_RGB9_E5: return 32;
+    case GL_RGB8: case GL_RGB8_SNORM: case GL_SRGB8: case GL_RGB8UI: case GL_RGB8I: return 24;
+    case GL_R16F: case GL_RG8UI: case GL_R16UI: case GL_RG8I: case GL_R16I: case GL_RG8: case GL_R16: case GL_RG8_SNORM:
+    case GL_R16_SNORM: return 16;
+    case GL_R8UI: case GL_R8I: case GL_R8: case GL_R8_SNORM: return 8;
+    case GL_COMPRESSED_RED_RGTC1: case GL_COMPRESSED_SIGNED_RED_RGTC1: return 1001;
+    case GL_COMPRESSED_RG_RGTC2: case GL_COMPRESSED_SIGNED_RG_RGTC2: return 1002;
+    case GL_COMPRESSED_RGBA_BPTC_UNORM: case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM: return 1003;
+    case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT: case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT: return 1004;
+    case GL_COMPRESSED_RGB_S3TC_DXT1_EXT: case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT: return 1005;
+    case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT: case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT: return 1006;
+    case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT: case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT: return 1007;
+    case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT: case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT: return 1008;
+    case GL_COMPRESSED_R11_EAC: case GL_COMPRESSED_SIGNED_R11_EAC: return 1009;
+    case GL_COMPRESSED_RG11_EAC: case GL_COMPRESSED_SIGNED_RG11_EAC: return 1010;
+    case GL_COMPRESSED_RGB8_ETC2: case GL_COMPRESSED_SRGB8_ETC2: return 1011;
+    case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2: case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2: return 1012;
+    case GL_COMPRESSED_RGBA8_ETC2_EAC: case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC: return 1013;
+    default: return 0;
+    }
+}
+
+bool copyImageCompatible(const FormatInfo* a, const FormatInfo* b) {
+    if (a->internalFormat == b->internalFormat) return true;
+    int ca = viewClass(a->internalFormat), cb = viewClass(b->internalFormat);
+    if (!ca || !cb) return false;
+    if (ca == cb) return true;
+    bool ac = a->comp == Comp::Compressed, bc = b->comp == Comp::Compressed;
+    // §18.3.3 / Table 18.4: an uncompressed format whose texel size equals the block size.
+    if (ac != bc) {
+        int texelBits = ac ? cb : ca;
+        int blockBytes = ac ? a->bytesPerPixel : b->bytesPerPixel;
+        return texelBits < 1000 && texelBits == blockBytes * 8;
+    }
+    return false;
+}
+
 const FormatInfo* resolveInternalFormat(GLenum internalFormat, GLenum format, GLenum type) {
     // Unsized / generic internal formats: choose based on client type.
     bool isFloat = type == GL_FLOAT;

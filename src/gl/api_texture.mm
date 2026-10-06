@@ -190,8 +190,9 @@ static void texImage(Context* ctx, GLenum target, GLint level, GLint internalfor
         (f->internalFormat == GL_COMPRESSED_RED_RGTC1 || f->internalFormat == GL_COMPRESSED_SIGNED_RED_RGTC1 ||
          f->internalFormat == GL_COMPRESSED_RG_RGTC2 || f->internalFormat == GL_COMPRESSED_SIGNED_RG_RGTC2))
         return ctx->setError(GL_INVALID_OPERATION);
-    if (f->comp == Comp::Compressed) {
+    if (f->comp == Comp::Compressed && (pixels || ctx->pixelUnpackBuffer)) {
         // glTexImage with a compressed internal format and uncompressed data: CPU-compress not supported; store RGBA8.
+        // Without data the image keeps its compressed format (it's filled by copies or CompressedTexSubImage).
         f = formatInfo(f->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8);
     }
     if (isProxy(target)) {
@@ -1286,59 +1287,179 @@ API void APIENTRY glCopyTextureSubImage1D(GLuint texture, GLint level, GLint xof
 }
 
 // --- copy image ---
-static id<MTLTexture> copyImageTarget(Context* ctx, GLuint name, GLenum target, GLint level, const FormatInfo** f, Texture** tex) {
-    *tex = nullptr;
-    if (target == GL_RENDERBUFFER) {
-        Renderbuffer* rb = ctx->share->renderbuffers.get(name);
-        if (!rb || !rb->mtl) return nil;
-        *f = rb->fmt;
-        rb->lastUse = ctx->serial();
-        return rb->mtl;
+namespace {
+struct CopyImageRef {
+    const FormatInfo* f = nullptr;
+    Texture* tex = nullptr;
+    Renderbuffer* rb = nullptr;
+    int w = 0, h = 0, d = 0;  // level dimensions in GL terms (d = depth / layers / faces)
+    int samples = 0;
+};
+}  // namespace
+
+static bool copyImageTargetValid(GLenum t) {
+    switch (t) {
+    case GL_RENDERBUFFER: case GL_TEXTURE_1D: case GL_TEXTURE_1D_ARRAY: case GL_TEXTURE_2D: case GL_TEXTURE_2D_ARRAY:
+    case GL_TEXTURE_2D_MULTISAMPLE: case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: case GL_TEXTURE_3D: case GL_TEXTURE_CUBE_MAP:
+    case GL_TEXTURE_CUBE_MAP_ARRAY: case GL_TEXTURE_RECTANGLE: return true;
+    default: return false;
     }
-    Texture* t = ctx->share->textures.get(name);
-    if (!t || t->target != target) return nil;
-    if (!ensureTextureStorage(ctx, t)) return nil;
-    *f = t->storageFmt;
-    *tex = t;
-    return t->mtl;
+}
+
+// Resolves one side of glCopyImageSubData (§18.3.3), returning the GL error to raise.
+static GLenum copyImageResolve(Context* ctx, GLuint name, GLenum target, GLint level, CopyImageRef& r) {
+    if (target == GL_RENDERBUFFER) {
+        Renderbuffer* rb = name ? ctx->share->renderbuffers.get(name) : nullptr;
+        if (!rb || !rb->fmt) return GL_INVALID_VALUE;
+        if (level != 0) return GL_INVALID_VALUE;
+        r.rb = rb;
+        r.f = rb->fmt;
+        r.w = rb->width;
+        r.h = rb->height;
+        r.d = 1;
+        r.samples = rb->samples;
+        return GL_NO_ERROR;
+    }
+    Texture* t = name ? ctx->share->textures.get(name) : nullptr;
+    if (!t || !t->target) return GL_INVALID_VALUE;
+    if (t->target != target) return GL_INVALID_ENUM;
+    if (level < 0 || level >= Texture::kMaxLevels) return GL_INVALID_VALUE;
+    if (t->immutable && level >= t->immutableLevels) return GL_INVALID_VALUE;
+    const TexImageLevel& L = t->levels[0][level];
+    if (!L.defined()) return GL_INVALID_VALUE;
+    int first, last;
+    if (!textureComplete(t, t->sampler, &first, &last)) return GL_INVALID_OPERATION;
+    r.tex = t;
+    r.f = L.fmt;
+    r.w = L.width;
+    r.h = target == GL_TEXTURE_1D || target == GL_TEXTURE_1D_ARRAY ? 1 : L.height;
+    // §18.3.3: slices of array textures (1D arrays included) and cube faces are addressed by z.
+    switch (target) {
+    case GL_TEXTURE_1D_ARRAY: r.d = L.height; break;
+    case GL_TEXTURE_3D: case GL_TEXTURE_2D_ARRAY: case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: case GL_TEXTURE_CUBE_MAP_ARRAY:
+        r.d = L.depth;
+        break;
+    case GL_TEXTURE_CUBE_MAP: r.d = 6; break;
+    default: r.d = 1; break;
+    }
+    r.samples = t->samples;
+    return GL_NO_ERROR;
+}
+
+// Region checks for one side; w/h/d are in this image's texels.
+static bool copyImageRegionValid(const CopyImageRef& r, int x, int y, int z, int w, int h, int d) {
+    if (x < 0 || y < 0 || z < 0) return false;
+    if ((int64_t)x + w > r.w || (int64_t)y + h > r.h || (int64_t)z + d > r.d) return false;
+    if (r.f->comp == Comp::Compressed) {
+        int bw = r.f->blockW, bh = r.f->blockH;
+        if (x % bw || y % bh) return false;
+        if (w % bw && x + w != r.w) return false;
+        if (h % bh && y + h != r.h) return false;
+    }
+    return true;
+}
+
+// GL (x, y, z) of an image -> Metal slice + origin.
+static void copyImageLoc(GLenum target, int x, int y, int z, NSUInteger& slice, MTLOrigin& o) {
+    switch (target) {
+    case GL_TEXTURE_3D: slice = 0; o = MTLOriginMake(x, y, z); break;
+    case GL_TEXTURE_1D_ARRAY: case GL_TEXTURE_2D_ARRAY: case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: case GL_TEXTURE_CUBE_MAP:
+    case GL_TEXTURE_CUBE_MAP_ARRAY:
+        slice = z; o = MTLOriginMake(x, y, 0); break;
+    default: slice = 0; o = MTLOriginMake(x, y, 0); break;
+    }
+}
+
+// Reallocates a texture's storage so it can be reinterpreted with format views,
+// keeping its contents.
+static bool ensureFormatViewable(Context* ctx, Texture* t) {
+    if (t->viewParent) t = t->viewParent.get();
+    if (t->mtl && (t->mtl.usage & MTLTextureUsagePixelFormatView)) return true;
+    t->needsFormatView = true;
+    id<MTLTexture> old = t->mtl;
+    t->mtl = nil;
+    t->storageFmt = nullptr;
+    t->storageDirty = true;
+    if (!ensureTextureStorage(ctx, t)) return false;
+    if (old) {
+        id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+        [e copyFromTexture:old toTexture:t->mtl];
+        [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        ctx->dev->releaseAfter(old, ctx->serial());
+    }
+    return true;
 }
 
 API void APIENTRY glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName,
                                      GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei w, GLsizei h,
                                      GLsizei d) {
     MGL_CTX();
-    const FormatInfo *sf, *df;
-    Texture *st, *dt;
-    id<MTLTexture> s = copyImageTarget(ctx, srcName, srcTarget, srcLevel, &sf, &st);
-    id<MTLTexture> dtx = copyImageTarget(ctx, dstName, dstTarget, dstLevel, &df, &dt);
-    if (!s || !dtx) return ctx->setError(GL_INVALID_VALUE);
-    if (sf->bytesPerPixel != df->bytesPerPixel) return ctx->setError(GL_INVALID_OPERATION);
-    if (w <= 0 || h <= 0 || d <= 0) return;
-    id<MTLTexture> src = s;
-    if (s.pixelFormat != dtx.pixelFormat) {
-        // Reinterpret via a view of the source with the destination format (same texel size).
-        if (!(s.usage & MTLTextureUsagePixelFormatView)) {
-            if (st) {
-                st->needsFormatView = true;
-                st->storageDirty = true;
-                st->mtl = nil;  // force realloc w/ migration skipped; content would be lost. Fallback below.
-                MGL_WARN("glCopyImageSubData format reinterpretation on texture without view usage");
-            }
+    if (!copyImageTargetValid(srcTarget) || !copyImageTargetValid(dstTarget)) return ctx->setError(GL_INVALID_ENUM);
+    CopyImageRef s, dr;
+    if (GLenum e = copyImageResolve(ctx, srcName, srcTarget, srcLevel, s)) return ctx->setError(e);
+    if (GLenum e = copyImageResolve(ctx, dstName, dstTarget, dstLevel, dr)) return ctx->setError(e);
+    if (w < 0 || h < 0 || d < 0) return ctx->setError(GL_INVALID_VALUE);
+    if (s.samples != dr.samples) return ctx->setError(GL_INVALID_OPERATION);
+    if (!copyImageCompatible(s.f, dr.f)) return ctx->setError(GL_INVALID_OPERATION);
+    // Destination extent: compressed <-> uncompressed copies map one block to one texel.
+    int sbw = s.f->blockW, sbh = s.f->blockH, dbw = dr.f->blockW, dbh = dr.f->blockH;
+    int dw = w, dh = h;
+    if (sbw != dbw) dw = (w + sbw - 1) / sbw * dbw;
+    if (sbh != dbh) dh = (h + sbh - 1) / sbh * dbh;
+    if (!copyImageRegionValid(s, srcX, srcY, srcZ, w, h, d) || !copyImageRegionValid(dr, dstX, dstY, dstZ, dw, dh, d))
+        return ctx->setError(GL_INVALID_VALUE);
+    if (w == 0 || h == 0 || d == 0) return;
+
+    if (s.tex && !ensureTextureStorage(ctx, s.tex)) return;
+    if (dr.tex && !ensureTextureStorage(ctx, dr.tex)) return;
+    id<MTLTexture> src = s.tex ? s.tex->mtl : s.rb->mtl;
+    id<MTLTexture> dst = dr.tex ? dr.tex->mtl : dr.rb->mtl;
+    if (!src || !dst) return;
+    if (src.pixelFormat != dst.pixelFormat && src.sampleCount > 1) {
+        // Multisample images can't go through a buffer: reinterpret the source with a view.
+        if (!s.tex || !ensureFormatViewable(ctx, s.tex)) {
+            MGL_WARN("glCopyImageSubData: multisample format reinterpretation unsupported");
             return;
         }
-        src = [s newTextureViewWithPixelFormat:dtx.pixelFormat];
+        src = [s.tex->mtl newTextureViewWithPixelFormat:dst.pixelFormat];
         ctx->dev->retainUntil(src, ctx->serial());
     }
-    bool s3d = s.textureType == MTLTextureType3D, d3d = dtx.textureType == MTLTextureType3D;
-    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
-    for (int i = 0; i < d; i++) {
-        [e copyFromTexture:src sourceSlice:s3d ? 0 : srcZ + i sourceLevel:srcLevel sourceOrigin:MTLOriginMake(srcX, srcY, s3d ? srcZ + i : 0)
-                sourceSize:MTLSizeMake(w, h, 1) toTexture:dtx destinationSlice:d3d ? 0 : dstZ + i destinationLevel:dstLevel
-         destinationOrigin:MTLOriginMake(dstX, dstY, d3d ? dstZ + i : 0)];
+    bool direct = src.pixelFormat == dst.pixelFormat;
+    if (!direct && s.f->bytesPerPixel != dr.f->bytesPerPixel) {
+        MGL_WARN("glCopyImageSubData: storage size mismatch (%d vs %d)", s.f->bytesPerPixel, dr.f->bytesPerPixel);
+        return;
     }
-    [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
-    if (st) st->lastUse = ctx->serial();
-    if (dt) markTextureWrite(ctx, dt);
+
+    // Staging layout for the reinterpreting path: raw bytes, one source block per destination texel.
+    size_t bpr = (size_t)((w + sbw - 1) / sbw) * s.f->bytesPerPixel;
+    size_t img = bpr * ((h + sbh - 1) / sbh);
+    UploadAlloc stage{};
+    if (!direct) stage = ctx->upload(img * d, 256);
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    for (int pass = 0; pass < (direct ? 1 : 2); pass++) {
+        for (int k = 0; k < d; k++) {
+            NSUInteger ss, ds;
+            MTLOrigin so, dO;
+            copyImageLoc(srcTarget, srcX, srcY, srcZ + k, ss, so);
+            copyImageLoc(dstTarget, dstX, dstY, dstZ + k, ds, dO);
+            size_t off = stage.offset + img * k;
+            if (direct) {
+                [e copyFromTexture:src sourceSlice:ss sourceLevel:srcLevel sourceOrigin:so sourceSize:MTLSizeMake(w, h, 1)
+                         toTexture:dst destinationSlice:ds destinationLevel:dstLevel destinationOrigin:dO];
+            } else if (pass == 0) {
+                [e copyFromTexture:src sourceSlice:ss sourceLevel:srcLevel sourceOrigin:so sourceSize:MTLSizeMake(w, h, 1)
+                          toBuffer:stage.buffer destinationOffset:off destinationBytesPerRow:bpr destinationBytesPerImage:img];
+            } else {
+                [e copyFromBuffer:stage.buffer sourceOffset:off sourceBytesPerRow:bpr sourceBytesPerImage:img sourceSize:MTLSizeMake(dw, dh, 1)
+                        toTexture:dst destinationSlice:ds destinationLevel:dstLevel destinationOrigin:dO];
+            }
+        }
+        [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    }
+    if (s.tex) s.tex->lastUse = ctx->serial();
+    if (s.rb) s.rb->lastUse = ctx->serial();
+    if (dr.tex) markTextureWrite(ctx, dr.tex);
+    if (dr.rb) dr.rb->lastUse = ctx->serial();
 }
 
 // --- texture views ---
