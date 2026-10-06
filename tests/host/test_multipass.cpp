@@ -188,3 +188,51 @@ in vec4 gs_fs_color; out vec4 result; void main() { result = gs_fs_color; })";
     glDeleteProgram(p);
     CHECK_GL();
 }
+
+// Layered framebuffer without a geometry shader: only layer 0 is rendered (GL 4.6 9.8).
+TEST(layered_fbo_no_gs_renders_layer0) {
+    const char* vs = R"(#version 400
+in vec4 pos; void main() { gl_Position = pos; })";
+    const char* fs = R"(#version 400
+out vec4 o; void main() { o = vec4(1.0); })";
+    GLuint p = mkProgram({{GL_VERTEX_SHADER, vs}, {GL_FRAGMENT_SHADER, fs}});
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_3D, tex);
+    glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA8, 4, 4, 2);
+    std::vector<uint8_t> zero(4 * 4 * 2 * 4, 0);
+    glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, 4, 4, 2, GL_RGBA, GL_UNSIGNED_BYTE, zero.data());
+    GLuint fbo, rfbo;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+    glFramebufferTexture(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0);
+    CHECK_EQ(glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER), (GLenum)GL_FRAMEBUFFER_COMPLETE);
+    glViewport(0, 0, 4, 4);
+    float v[] = {-1, -1, 0, 1, 3, -1, 0, 1, -1, 3, 0, 1};
+    GLuint vao, vbo;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glEnableVertexAttribArray(0);
+    glUseProgram(p);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glGenFramebuffers(1, &rfbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, rfbo);
+    for (int layer = 0; layer < 2; layer++) {
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0, layer);
+        uint8_t px[4];
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK_EQ((int)px[0], layer == 0 ? 255 : 0);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteFramebuffers(1, &rfbo);
+    glDeleteTextures(1, &tex);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(p);
+    CHECK_GL();
+}

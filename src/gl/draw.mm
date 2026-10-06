@@ -940,7 +940,7 @@ void decomposeToList(Context* ctx, const DrawParams& d, const uint8_t* src, std:
             }
             break;
         case GL_TRIANGLE_FAN: case GL_POLYGON:
-            for (size_t i = 1; i + 1 < n; i++) out.insert(out.end(), {v(i), v(i + 1), v(0)});
+            for (size_t i = 1; i + 1 < n; i++) out.insert(out.end(), {v(0), v(i), v(i + 1)});
             break;
         case GL_QUADS:
             for (size_t q = 0; q + 3 < n; q += 4) out.insert(out.end(), {v(q), v(q + 1), v(q + 3), v(q + 1), v(q + 2), v(q + 3)});
