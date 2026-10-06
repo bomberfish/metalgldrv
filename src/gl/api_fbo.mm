@@ -352,17 +352,35 @@ static void setAttachment(Context* ctx, Framebuffer* fb, GLenum attachment, cons
     if (fb == ctx->drawFb.get()) ctx->passDirty = true;
 }
 
+enum class FbTexCall { Texture, TextureND, TextureLayer };
+
 static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint layer,
-                               bool layered) {
+                               bool layered, FbTexCall call = FbTexCall::TextureND) {
     Attachment a;
     if (texture) {
         Texture* t = ctx->share->textures.get(texture);
-        if (!t) return ctx->setError(GL_INVALID_OPERATION, "texture %u does not exist", texture);
-        if (level < 0) return ctx->setError(GL_INVALID_VALUE);
+        // Missing textures: INVALID_VALUE for (Named)FramebufferTexture, INVALID_OPERATION
+        // for the others (GL 4.6 9.2.8; Mesa does the same).
+        if (!t || !t->target)
+            return ctx->setError(call == FbTexCall::Texture ? GL_INVALID_VALUE : GL_INVALID_OPERATION, "texture %u does not exist", texture);
+        if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);
+        if (call == FbTexCall::TextureLayer) {
+            switch (t->target) {
+            case GL_TEXTURE_3D: case GL_TEXTURE_2D_ARRAY: case GL_TEXTURE_1D_ARRAY: case GL_TEXTURE_CUBE_MAP_ARRAY:
+            case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: case GL_TEXTURE_CUBE_MAP: break;
+            default: return ctx->setError(GL_INVALID_OPERATION, "texture target 0x%x is not layered", t->target);
+            }
+            int maxLayer = t->target == GL_TEXTURE_3D ? 2048 : t->target == GL_TEXTURE_CUBE_MAP ? 6 : 2048;
+            if (layer < 0 || layer >= maxLayer) return ctx->setError(GL_INVALID_VALUE, "layer %d out of range", layer);
+        }
+        int maxLevel = t->target == GL_TEXTURE_3D ? 11 : 14;
+        if (level < 0 || level > maxLevel) return ctx->setError(GL_INVALID_VALUE);
+        if ((t->target == GL_TEXTURE_RECTANGLE || t->target == GL_TEXTURE_2D_MULTISAMPLE || t->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) &&
+            level != 0)
+            return ctx->setError(GL_INVALID_VALUE);
         if (textarget && textarget != t->target &&
             !(t->target == GL_TEXTURE_CUBE_MAP && textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z))
             return ctx->setError(GL_INVALID_OPERATION);
-        if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);
         a.type = GL_TEXTURE;
         a.tex = t;
         a.level = level;
@@ -400,29 +418,28 @@ API void APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment, GL
     MGL_CTX();
     Framebuffer* fb = fbTarget(ctx, target);
     if (!fb && ctx->error) return;
-    if (layer < 0) return ctx->setError(GL_INVALID_VALUE);
-    framebufferTexture(ctx, fb, attachment, 0, texture, level, layer, false);
+    framebufferTexture(ctx, fb, attachment, 0, texture, level, layer, false, FbTexCall::TextureLayer);
 }
 
 API void APIENTRY glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level) {
     MGL_CTX();
     Framebuffer* fb = fbTarget(ctx, target);
     if (!fb && ctx->error) return;
-    framebufferTexture(ctx, fb, attachment, 0, texture, level, 0, true);
+    framebufferTexture(ctx, fb, attachment, 0, texture, level, 0, true, FbTexCall::Texture);
 }
 
 API void APIENTRY glNamedFramebufferTexture(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level) {
     MGL_CTX();
     Framebuffer* fb = ctx->framebuffers.get(framebuffer);
     if (!fb) return ctx->setError(GL_INVALID_OPERATION);
-    framebufferTexture(ctx, fb, attachment, 0, texture, level, 0, true);
+    framebufferTexture(ctx, fb, attachment, 0, texture, level, 0, true, FbTexCall::Texture);
 }
 
 API void APIENTRY glNamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer) {
     MGL_CTX();
     Framebuffer* fb = ctx->framebuffers.get(framebuffer);
     if (!fb) return ctx->setError(GL_INVALID_OPERATION);
-    framebufferTexture(ctx, fb, attachment, 0, texture, level, layer, false);
+    framebufferTexture(ctx, fb, attachment, 0, texture, level, layer, false, FbTexCall::TextureLayer);
 }
 
 static void framebufferRenderbuffer(Context* ctx, Framebuffer* fb, GLenum attachment, GLenum rbtarget, GLuint rb) {
@@ -464,6 +481,10 @@ API GLenum APIENTRY glCheckFramebufferStatus(GLenum target) {
 
 API GLenum APIENTRY glCheckNamedFramebufferStatus(GLuint framebuffer, GLenum target) {
     MGL_CTX_RET(0);
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        ctx->setError(GL_INVALID_ENUM);
+        return 0;
+    }
     Framebuffer* fb = framebuffer ? ctx->framebuffers.get(framebuffer) : ctx->defaultFramebuffer();
     if (!fb) {
         ctx->setError(GL_INVALID_OPERATION);
@@ -477,10 +498,16 @@ static void fbAttachmentParam(Context* ctx, Framebuffer* fb, GLenum attachment, 
     if (fb->isDefault) {
         Surface* s = fb->surface;
         bool isColor = attachment == GL_BACK || attachment == GL_FRONT || attachment == GL_BACK_LEFT || attachment == GL_FRONT_LEFT;
+        bool isRight = attachment == GL_FRONT_RIGHT || attachment == GL_BACK_RIGHT;  // no stereo: never present
         bool isDepth = attachment == GL_DEPTH;
         bool isStencil = attachment == GL_STENCIL;
-        if (!isColor && !isDepth && !isStencil) return ctx->setError(GL_INVALID_ENUM);
+        if (!isColor && !isRight && !isDepth && !isStencil) return ctx->setError(GL_INVALID_ENUM);
         bool present = s && (isColor || (isDepth && s->hasDepth) || (isStencil && s->hasStencil));
+        if (!present && pname != GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) {
+            if (pname == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME) *params = 0;
+            else ctx->setError(GL_INVALID_OPERATION);
+            return;
+        }
         switch (pname) {
         case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE: *params = present ? GL_FRAMEBUFFER_DEFAULT : GL_NONE; return;
         case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE: case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE: case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
@@ -574,8 +601,25 @@ API void APIENTRY glNamedFramebufferParameteri(GLuint framebuffer, GLenum pname,
     fbParameter(ctx, ctx->framebuffers.get(framebuffer), pname, param);
 }
 
+static int fbSamples(Framebuffer* fb) {
+    if (fb->isDefault) return fb->surface && fb->surface->samples > 1 ? fb->surface->samples : 0;
+    for (auto& a : fb->att) {
+        if (a.type == GL_RENDERBUFFER && a.rb) return a.rb->samples > 1 ? a.rb->samples : 0;
+        if (a.type == GL_TEXTURE && a.tex) return a.tex->samples > 1 ? a.tex->samples : 0;
+    }
+    return fb->defaultSamples;
+}
+
 static void getFbParameter(Context* ctx, Framebuffer* fb, GLenum pname, GLint* params) {
     if (!fb) return ctx->setError(GL_INVALID_OPERATION);
+    switch (pname) {
+    case GL_FRAMEBUFFER_DEFAULT_WIDTH: case GL_FRAMEBUFFER_DEFAULT_HEIGHT: case GL_FRAMEBUFFER_DEFAULT_LAYERS:
+    case GL_FRAMEBUFFER_DEFAULT_SAMPLES: case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS:
+        // Only framebuffer objects have these (GL 4.6 9.2.3).
+        if (fb->isDefault) return ctx->setError(GL_INVALID_OPERATION);
+        break;
+    default: break;
+    }
     switch (pname) {
     case GL_FRAMEBUFFER_DEFAULT_WIDTH: *params = fb->defaultWidth; break;
     case GL_FRAMEBUFFER_DEFAULT_HEIGHT: *params = fb->defaultHeight; break;
@@ -584,8 +628,8 @@ static void getFbParameter(Context* ctx, Framebuffer* fb, GLenum pname, GLint* p
     case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS: *params = fb->defaultFixedSampleLocations; break;
     case GL_DOUBLEBUFFER: *params = fb->isDefault; break;
     case GL_STEREO: *params = 0; break;
-    case GL_SAMPLES: { PassDesc p; *params = 0; break; }
-    case GL_SAMPLE_BUFFERS: *params = 0; break;
+    case GL_SAMPLES: *params = fbSamples(fb); break;
+    case GL_SAMPLE_BUFFERS: *params = fbSamples(fb) > 1 ? 1 : 0; break;
     case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA; break;
     case GL_IMPLEMENTATION_COLOR_READ_TYPE: *params = GL_UNSIGNED_BYTE; break;
     default: ctx->setError(GL_INVALID_ENUM);
@@ -608,21 +652,28 @@ static bool validDefaultBuffer(GLenum b) {
            b == GL_FRONT_AND_BACK;
 }
 
+static bool isColorAttachmentEnum(GLenum b) { return b >= GL_COLOR_ATTACHMENT0 && b < GL_COLOR_ATTACHMENT0 + 32; }
+
+// glDrawBuffers / glNamedFramebufferDrawBuffers validation (GL 4.6 17.4.1, Mesa order).
 static void drawBuffers(Context* ctx, Framebuffer* fb, GLsizei n, const GLenum* bufs) {
     if (!fb) return ctx->setError(GL_INVALID_OPERATION);
     if (n < 0 || n > kMaxDrawBuffers) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) {
         GLenum b = bufs[i];
+        bool known = b == GL_NONE || b == GL_FRONT_LEFT || b == GL_FRONT_RIGHT || b == GL_BACK_LEFT || b == GL_BACK_RIGHT || b == GL_BACK ||
+                     isColorAttachmentEnum(b);
+        // FRONT, LEFT, RIGHT and FRONT_AND_BACK may name several buffers: never accepted here.
+        if (!known) return ctx->setError(GL_INVALID_ENUM, "draw buffer 0x%x", b);
+        if (b == GL_BACK && n != 1) return ctx->setError(GL_INVALID_OPERATION);
         if (fb->isDefault) {
-            if (b != GL_NONE && b != GL_BACK && b != GL_BACK_LEFT && b != GL_FRONT && b != GL_FRONT_LEFT && b != GL_LEFT)
-                return ctx->setError(n == 1 ? GL_INVALID_ENUM : GL_INVALID_OPERATION);
-            if (n > 1 && b != GL_NONE && b != GL_BACK_LEFT && b != GL_FRONT_LEFT) return ctx->setError(GL_INVALID_OPERATION);
+            if (isColorAttachmentEnum(b)) return ctx->setError(GL_INVALID_OPERATION);
+            if (b == GL_FRONT_RIGHT || b == GL_BACK_RIGHT) return ctx->setError(GL_INVALID_OPERATION);  // not stereo
         } else {
-            if (b != GL_NONE && (b < GL_COLOR_ATTACHMENT0 || b >= GL_COLOR_ATTACHMENT0 + 32)) return ctx->setError(GL_INVALID_ENUM);
+            if (b != GL_NONE && !isColorAttachmentEnum(b)) return ctx->setError(GL_INVALID_OPERATION);
             if (b != GL_NONE && b >= GL_COLOR_ATTACHMENT0 + kMaxDrawBuffers) return ctx->setError(GL_INVALID_OPERATION);
-            for (int j = 0; j < i; j++)
-                if (b != GL_NONE && bufs[j] == b) return ctx->setError(GL_INVALID_OPERATION);
         }
+        for (int j = 0; j < i; j++)
+            if (b != GL_NONE && bufs[j] == b) return ctx->setError(GL_INVALID_OPERATION);
     }
     if (fb == ctx->drawFb.get()) ctx->applyClearNow();
     for (int i = 0; i < kMaxDrawBuffers; i++) fb->drawBuffers[i] = i < n ? bufs[i] : GL_NONE;
@@ -654,7 +705,11 @@ static void drawBuffer(Context* ctx, Framebuffer* fb, GLenum buf) {
         if (fb == ctx->drawFb.get()) ctx->passDirty = true;
         return;
     }
-    if (buf == GL_BACK || buf == GL_FRONT || buf == GL_LEFT || buf == GL_FRONT_AND_BACK) return ctx->setError(GL_INVALID_OPERATION);
+    if (buf != GL_NONE && !isColorAttachmentEnum(buf)) {
+        bool known = buf == GL_FRONT_LEFT || buf == GL_FRONT_RIGHT || buf == GL_BACK_LEFT || buf == GL_BACK_RIGHT || buf == GL_BACK ||
+                     buf == GL_FRONT || buf == GL_LEFT || buf == GL_RIGHT || buf == GL_FRONT_AND_BACK;
+        return ctx->setError(known ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
+    }
     drawBuffers(ctx, fb, 1, &buf);
 }
 
