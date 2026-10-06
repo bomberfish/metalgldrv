@@ -291,7 +291,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
 
     // --- bindings ---
     case GL_ARRAY_BUFFER_BINDING: v = I(nameOf(ctx->arrayBuffer.get())); return true;
-    case GL_ELEMENT_ARRAY_BUFFER_BINDING: v = I(ctx->vao ? nameOf(ctx->vao->elementBuffer.get()) : 0); return true;
+    case GL_ELEMENT_ARRAY_BUFFER_BINDING: v = I(nameOf((ctx->vao ? ctx->vao : ctx->defaultVao)->elementBuffer.get())); return true;
     case GL_COPY_READ_BUFFER_BINDING: v = I(nameOf(ctx->copyReadBuffer.get())); return true;
     case GL_COPY_WRITE_BUFFER_BINDING: v = I(nameOf(ctx->copyWriteBuffer.get())); return true;
     case GL_PIXEL_PACK_BUFFER_BINDING: v = I(nameOf(ctx->pixelPackBuffer.get())); return true;

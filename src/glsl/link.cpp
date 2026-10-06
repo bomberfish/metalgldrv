@@ -274,11 +274,11 @@ static bool isCompatAttrib(BuiltinVar b) {
            b == BuiltinVar::MultiTexCoord || b == BuiltinVar::FogCoord;
 }
 
+// Vertex inputs: every scalar/vector (dvec3/dvec4 included) takes one location; a
+// matrix takes one per column (GLSL 4.60 section 4.4.1).
 static int locationsFor(const Type& t) {
-    int per = 1;
     Type b = t.stripArrays();
-    if (b.cols) per = b.cols * ((b.base == BT::Double && b.vec > 2) ? 2 : 1);
-    else if (b.base == BT::Double && b.vec > 2) per = 2;
+    int per = b.cols ? b.cols : 1;
     return per * t.totalArrayElements();
 }
 
@@ -1005,7 +1005,8 @@ void Linker::stageMetadata() {
                     if (!t.isArray() || elem >= t.dims[0]) { error("transform feedback varying '" + name + "' index out of range"); continue; }
                     t = t.elem();
                 }
-                if (t.stripArrays().base == BT::Double && (offset & 7)) offset = (offset + 7) & ~7;
+                // glTransformFeedbackVaryings packs tightly, doubles included (only xfb_offset
+                // qualifiers must be 8-byte aligned).
                 XfbVarying x;
                 x.name = name;
                 x.type = glTypeEnum(t);

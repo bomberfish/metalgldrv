@@ -551,6 +551,21 @@ API GLint APIENTRY glGetAttribLocation(GLuint program, const GLchar* name) {
     }
     for (auto& a : p->refl.attributes)
         if (a.name == name) return a.location;
+    // "attr[i]" names one element of an attribute array.
+    std::string n = name;
+    size_t lb = n.rfind('[');
+    if (lb != std::string::npos && lb > 0 && n.back() == ']') {
+        std::string idx = n.substr(lb + 1, n.size() - lb - 2);
+        if (idx.empty() || idx.find_first_not_of("0123456789") != std::string::npos || (idx.size() > 1 && idx[0] == '0')) return -1;
+        long i = strtol(idx.c_str(), nullptr, 10);
+        std::string base = n.substr(0, lb);
+        for (auto& a : p->refl.attributes) {
+            std::string an = a.name;
+            if (an.size() > 3 && an.compare(an.size() - 3, 3, "[0]") == 0) an.resize(an.size() - 3);
+            if (an != base || i >= std::max(1, a.arraySize)) continue;
+            return a.location + (int)i * std::max(1, a.locationsUsed / std::max(1, a.arraySize));
+        }
+    }
     return -1;
 }
 

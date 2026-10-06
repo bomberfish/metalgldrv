@@ -48,6 +48,8 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
         currentAttrib[i][0] = currentAttrib[i][1] = currentAttrib[i][2] = 0;
         currentAttrib[i][3] = 1;
         currentAttribType[i] = GL_FLOAT;
+        currentAttribL[i][0] = currentAttribL[i][1] = currentAttribL[i][2] = 0;
+        currentAttribL[i][3] = 1;
     }
     for (int i = 0; i < kNumTexTargets; i++) {
         Texture* t = new Texture();
@@ -143,7 +145,9 @@ Texture* Context::texForUnit(int unit, int targetIdx) { return textures[unit][ta
 Ref<Buffer>* Context::bufferBindingRef(GLenum target) {
     switch (target) {
     case GL_ARRAY_BUFFER: return &arrayBuffer;
-    case GL_ELEMENT_ARRAY_BUFFER: return vao ? &vao->elementBuffer : nullptr;
+    // Core profile with no VAO bound: like Mesa, the binding lands in the (otherwise
+    // undrawable) default VAO so buffer calls on ELEMENT_ARRAY_BUFFER still work.
+    case GL_ELEMENT_ARRAY_BUFFER: return &(vao ? vao : defaultVao)->elementBuffer;
     case GL_COPY_READ_BUFFER: return &copyReadBuffer;
     case GL_COPY_WRITE_BUFFER: return &copyWriteBuffer;
     case GL_PIXEL_PACK_BUFFER: return &pixelPackBuffer;

@@ -403,6 +403,26 @@ static bool wantManualFetch(Context* ctx) {
     return unaligned;
 }
 
+// dvec3/dvec4 (and matrices of them) occupy one GL location but don't fit one Metal
+// vertex attribute: such programs fetch their inputs in the shader.
+static bool wantManualFetch(Context* ctx, ProgramObj* prog) {
+    if (wantManualFetch(ctx)) return true;
+    VertexArray* vao = ctx->vao.get();
+    if (!vao) return false;
+    bool wide = false;
+    for (const auto& a : prog->refl.attributes) {
+        switch (a.type) {
+        case GL_DOUBLE_VEC3: case GL_DOUBLE_VEC4: case GL_DOUBLE_MAT2x3: case GL_DOUBLE_MAT2x4: case GL_DOUBLE_MAT3:
+        case GL_DOUBLE_MAT3x4: case GL_DOUBLE_MAT4: case GL_DOUBLE_MAT4x3: wide = true; break;
+        default: break;
+        }
+    }
+    if (!wide) return false;
+    for (int l = 0; l < kMaxVertexAttribs; l++)
+        if (vao->attribs[l].enabled && vao->attribs[l].clientPointer) return false;
+    return true;
+}
+
 // Builds the render pipeline key & binds vertex buffers. Returns false if the draw must be skipped.
 static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& key, id<MTL4ArgumentTable> table, const DrawParams& d,
                              uint32_t minIndex, uint32_t maxIndex) {
@@ -436,8 +456,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
             int loc = a.location + k;
             if (loc >= kMaxVertexAttribs) break;
             VertexAttribKey& ak = key.attribs[loc];
-            // dvec3/dvec4 span two locations but are specified through the first one.
-            const VertexAttrib* va = vao ? &vao->attribs[ts.base == BaseType::Double ? a.location : loc] : nullptr;
+            const VertexAttrib* va = vao ? &vao->attribs[loc] : nullptr;
             bool enabled = va && va->enabled;
             if (enabled) {
                 const VertexBinding& vb = vao->bindings[va->binding];
@@ -452,20 +471,9 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                     f = vertexFormatFor(va->type, va->size, false, true);
                 }
                 if (va->type == GL_DOUBLE && va->isLong) {
-                    // dvecN arrive as raw bits: double/dvec2 -> uint2/uint4 at `loc`; dvec3/4 span two
-                    // locations (uint4 + uint2/uint4). k indexes the location within the attribute.
-                    int comps = va->size;
-                    int dwords = comps * 2;
-                    int first = k == 0 ? std::min(dwords, 4) : dwords - 4;
-                    f = first == 2 ? MTLVertexFormatUInt2 : first == 4 ? MTLVertexFormatUInt4 : MTLVertexFormatInvalid;
-                    if (k > 0) {
-                        // second location of a dvec3/dvec4: same binding, +16 bytes
-                        ak.format = (uint8_t)f;
-                        ak.bufferIndex = glsl::kBufVertex0 + vao->attribs[a.location].binding;
-                        ak.offset = vao->attribs[a.location].relativeOffset + 16;
-                        bindingUsed |= 1u << vao->attribs[a.location].binding;
-                        continue;
-                    }
+                    // dvecN arrive as raw bits (uint2/uint4); dvec3/dvec4 only get their first two
+                    // components here (programs with them normally use manual fetch).
+                    f = va->size == 1 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4;
                 }
                 if (va->type == GL_FIXED || (va->type == GL_DOUBLE && !va->isLong)) {
                     static bool warned = false;
@@ -1073,6 +1081,9 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         uint32_t total = (uint32_t)ids.size() * d.instances;
         uint32_t tg = std::max(1, k->threadsPerThreadgroup[0]);
         [ce dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        // Later dispatches in this encoder may read what was captured (xfb ping-pong).
+        [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit
+                    visibilityOptions:MTL4VisibilityOptionDevice];
         x->verticesWritten += total;
         return true;  // rasterization (if enabled) is handled by the caller's classic draw
     }
@@ -1381,7 +1392,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
             MGL_INFO("layout prog %u mode %x indexed %d type %x flat %d:%s", prog->name, d.mode, d.indexed, d.indexType,
                      refl.usesFlatShading, desc.c_str());
     }
-    vk.manualFetch = wantManualFetch(ctx);
+    vk.manualFetch = wantManualFetch(ctx, prog);
     if (vk.manualFetch) fillVertexFetch(ctx, prog, vk);
     else vk.attribSignFlip = attribSignFlip(ctx, prog);
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);

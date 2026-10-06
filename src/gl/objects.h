@@ -247,6 +247,8 @@ struct VertexAttrib {
     bool normalized = false, integer = false, isLong = false;
     GLuint relativeOffset = 0;
     GLuint binding = 0;
+    const void* pointer = nullptr;  // VERTEX_ATTRIB_ARRAY_POINTER: as given to *Pointer
+    GLsizei stride = 0;  // VERTEX_ATTRIB_ARRAY_STRIDE: as given to *Pointer (the binding holds the effective stride)
     const void* clientPointer = nullptr;  // compat: client-side arrays (no buffer bound)
 };
 
