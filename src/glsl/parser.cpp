@@ -1041,12 +1041,18 @@ Expr* Parser::parseInitializer(const Type& t) {
             } else if (isMat) it = t.column();
             else if (isVec) it = t.scalarType();
             else it = t;
-            items.push_back(parseInitializer(it));
+            Expr* item = parseInitializer(it);
+            // initializer-list elements follow assignment conversion rules (no bool -> float etc.)
+            if (!it.isArray() && !item->type.isArray()) item = convert(item, it, "initializer list");
+            items.push_back(item);
             idx++;
         } while (accept(","));
         expect("}");
         Type tt = t;
         if (isArr && tt.dims[0] == 0) tt.dims[0] = (int)items.size();
+        if ((isVec && (int)items.size() != t.vec) || (isMat && (int)items.size() != t.cols) ||
+            (isStruct && items.size() != t.sdef->members.size()) || (isArr && (int)items.size() != tt.dims[0]))
+            fail("initializer list has the wrong number of elements");
         if (!isArr && !isStruct && !isMat && !isVec) {
             if (items.size() != 1) fail("invalid initializer list");
             return convert(items[0], t, "initializer");
