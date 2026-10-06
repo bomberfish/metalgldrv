@@ -490,8 +490,7 @@ bool Emitter::bufAccess(const Expr* e, Acc& a) {
             else idx = "uint(" + ex(ie) + ")";
             if (a.blockArray) {
                 a.blockArray = false;
-                // a block array of one element is declared as a single slot (not an array)
-                std::string sub = a.bb->count > 1 ? "[" + idx + "]" : "";
+                std::string sub = "[" + idx + "]";
                 a.ptr = "A->s" + std::to_string(a.bb->slot) + sub;
                 a.off = "0u";
                 a.type = e->type;
