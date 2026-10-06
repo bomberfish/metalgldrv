@@ -846,6 +846,35 @@ void Linker::assignUniforms() {
 }
 
 void Linker::checkVaryings() {
+    // Interfaces between consecutive pre-rasterization stages (GL 4.6 7.4.1): matching
+    // variables must have matching types (per-vertex arrays compared by element).
+    {
+        std::vector<Stage> chain;
+        for (Stage s : {Stage::Vertex, Stage::TessControl, Stage::TessEval, Stage::Geometry})
+            if (prog_->stages[(int)s].main) chain.push_back(s);
+        auto arrayedOut = [](Stage s, const Variable* v) { return s == Stage::TessControl && !v->q.patch; };
+        auto arrayedIn = [](Stage s, const Variable* v) { return s != Stage::Vertex && s != Stage::Fragment && !v->q.patch; };
+        for (size_t i = 0; i + 1 < chain.size(); i++) {
+            Stage ps = chain[i], cs = chain[i + 1];
+            std::map<std::string, const Variable*> outs;
+            for (auto* v : prog_->stages[(int)ps].globals)
+                if (v->q.storage == Storage::Out && v->builtin == BuiltinVar::None) outs[varyingKey(v, ps)] = v;
+            for (auto* v : prog_->stages[(int)cs].globals) {
+                if (v->q.storage != Storage::In || v->builtin != BuiltinVar::None) continue;
+                auto it = outs.find(varyingKey(v, cs));
+                if (it == outs.end()) continue;
+                Type a = it->second->type, b = v->type;
+                if (arrayedOut(ps, it->second) && a.isArray()) a = a.elem();
+                if (arrayedIn(cs, v) && b.isArray()) b = b.elem();
+                if (it->second->q.patch != v->q.patch) {
+                    error("per-patch qualifier mismatch for varying '" + v->name + "'");
+                    continue;
+                }
+                if (a.str() != b.str() && !(a.base == BT::Struct && b.base == BT::Struct && a.sdef->name == b.sdef->name))
+                    error("type mismatch for varying '" + v->name + "' ('" + a.str() + "' vs '" + b.str() + "')");
+            }
+        }
+    }
     // Find the last pre-rasterization stage and verify fragment inputs.
     Stage pre = Stage::Count;
     for (Stage s : {Stage::Geometry, Stage::TessEval, Stage::Vertex})

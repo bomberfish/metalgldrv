@@ -613,6 +613,12 @@ void Parser::applyStageLayout(const Qualifiers& q) {
     }
     Layout& T = (q.storage == Storage::Out) ? sh_.outLayout : sh_.inLayout;
     for (int i = 0; i < 3; i++) if (L.localSize[i] >= 0) T.localSize[i] = L.localSize[i];
+    // GLSL 4.60 4.4: repeated stage layout declarations must agree
+    if (L.maxVertices >= 0 && T.maxVertices >= 0 && L.maxVertices != T.maxVertices) fail("conflicting max_vertices declarations");
+    if (L.invocations >= 0 && T.invocations >= 0 && L.invocations != T.invocations) fail("conflicting invocations declarations");
+    if (L.vertices >= 0 && T.vertices >= 0 && L.vertices != T.vertices) fail("conflicting vertices declarations");
+    if (L.primitive != Layout::kNoPrimitive && T.primitive != Layout::kNoPrimitive && L.primitive != T.primitive)
+        fail("conflicting primitive type declarations");
     if (L.maxVertices >= 0) T.maxVertices = L.maxVertices;
     if (L.invocations >= 0) T.invocations = L.invocations;
     if (L.vertices >= 0) T.vertices = L.vertices;
@@ -1618,8 +1624,22 @@ Expr* Parser::mkVarRef(const std::string& name, int ln) {
 }
 
 void Parser::markWritten(Expr* e) {
-    while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
-    if (e->kind == EK::Var) e->var->written = true;
+    Expr* lastIndex = nullptr;
+    while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) {
+        if (e->kind == EK::Index && e->args[0]->kind == EK::Var) lastIndex = e;
+        e = e->args[0];
+    }
+    if (e->kind != EK::Var) return;
+    e->var->written = true;
+    // GLSL 4.60 4.3.6: per-vertex outputs of a tessellation control shader may only be written
+    // at the invocation's own vertex (index gl_InvocationID).
+    const Variable* v = e->var;
+    if (!preamble_ && sh_.stage == Stage::TessControl && v->global && v->q.storage == Storage::Out && !v->q.patch && v->type.isArray() &&
+        (v->builtin == BuiltinVar::None || v->builtin == BuiltinVar::Out)) {
+        const Expr* idx = lastIndex ? lastIndex->args[1] : nullptr;
+        if (!idx || idx->kind != EK::Var || idx->var->builtin != BuiltinVar::InvocationID)
+            fail("tessellation control shader per-vertex output '" + v->name + "' must be indexed with gl_InvocationID when written");
+    }
 }
 
 Expr* Parser::mkIndex(Expr* b, Expr* i, int ln) {
