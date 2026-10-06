@@ -1382,6 +1382,9 @@ std::string pipelineValidationError(ProgramPipelineObj* pp) {
             if (o != (int)glsl::Stage::Compute && (sp->refl.stageMask & (1u << o)) && pp->stages[o].get() != sp)
                 return "program " + std::to_string(sp->name) + " is not active for all the stages it was linked with";
     }
+    if (!pp->stages[(int)glsl::Stage::Vertex] &&
+        (pp->stages[(int)glsl::Stage::Geometry] || pp->stages[(int)glsl::Stage::TessControl] || pp->stages[(int)glsl::Stage::TessEval]))
+        return "pipeline has geometry or tessellation stages but no vertex program";
     if (!pp->stages[(int)glsl::Stage::Vertex] && !pp->stages[(int)glsl::Stage::Compute])
         return "pipeline has no vertex or compute program";
     return "";
