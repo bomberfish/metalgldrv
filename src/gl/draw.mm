@@ -2031,16 +2031,3 @@ API void APIENTRY glTextureBarrier(void) {
 }
 API void APIENTRY glTextureBarrierNV(void) { glTextureBarrier(); }
 
-// ARB/EXT aliases (glcts' extension-based tests resolve these names)
-API void APIENTRY glDrawArraysInstancedARB(GLenum mode, GLint first, GLsizei count, GLsizei primcount) {
-    glDrawArraysInstancedBaseInstance(mode, first, count, primcount, 0);
-}
-API void APIENTRY glDrawArraysInstancedEXT(GLenum mode, GLint first, GLsizei count, GLsizei primcount) {
-    glDrawArraysInstancedBaseInstance(mode, first, count, primcount, 0);
-}
-API void APIENTRY glDrawElementsInstancedARB(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei primcount) {
-    glDrawElementsInstanced(mode, count, type, indices, primcount);
-}
-API void APIENTRY glDrawElementsInstancedEXT(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei primcount) {
-    glDrawElementsInstanced(mode, count, type, indices, primcount);
-}
