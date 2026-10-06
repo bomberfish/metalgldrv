@@ -565,11 +565,21 @@ void uploadCompressedSubImage(Context* ctx, Texture* t, int level, int face, int
         ctx->setError(GL_INVALID_VALUE, "compressed image size mismatch");
         return;
     }
+    int dims = t->target == GL_TEXTURE_1D ? 1
+             : (t->target == GL_TEXTURE_3D || t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) ? 3
+                                                                                                                           : 2;
+    CompressedLayout cl = compressedLayout(f, w, h, dims, ctx->unpack);
     bool err;
-    const uint8_t* src = (const uint8_t*)resolveUnpackSource(ctx, data, imageSize, &err);
+    const uint8_t* src = (const uint8_t*)resolveUnpackSource(ctx, data, std::max((size_t)imageSize, cl.extent(d)), &err);
     if (err || !src) return;
     UploadAlloc up = ctx->upload(imgBytes * d, 16);
-    memcpy(up.cpu, src, imgBytes * d);
+    if (cl.skipBytes == 0 && cl.rowStride == rowBytes && cl.imageStride == imgBytes) {
+        memcpy(up.cpu, src, imgBytes * d);
+    } else {
+        for (int k = 0; k < d; k++)
+            for (int r = 0; r < cl.rows; r++)
+                memcpy(up.cpu + k * imgBytes + r * rowBytes, src + cl.skipBytes + k * cl.imageStride + r * cl.rowStride, rowBytes);
+    }
     int slice = face, mz = z;
     if (t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
         slice = z;

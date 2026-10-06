@@ -80,6 +80,18 @@ struct ClientLayout {
 ClientLayout clientLayout(GLenum format, GLenum type, int width, int height, const PixelStore& ps);
 size_t clientImageSize(GLenum format, GLenum type, int width, int height, int depth, const PixelStore& ps);
 
+// Client addressing of compressed image data (§8.7): the row length / skip / image
+// height modes apply in units of blocks when the matching COMPRESSED_BLOCK_* modes are set.
+struct CompressedLayout {
+    size_t rowBytes;     // bytes copied per block row
+    size_t rowStride;    // bytes between block rows
+    int rows;            // block rows per image
+    size_t imageStride;  // bytes between images
+    size_t skipBytes;
+    size_t extent(int depth) const { return skipBytes + (depth - 1) * imageStride + (rows - 1) * rowStride + rowBytes; }
+};
+CompressedLayout compressedLayout(const FormatInfo* f, int width, int height, int dims, const PixelStore& ps);
+
 // True if client data can be memcpy'd row-wise into the Metal format.
 bool directUploadCompatible(const FormatInfo* f, GLenum format, GLenum type);
 

@@ -125,6 +125,13 @@ static const FormatInfo kFormats[] = {
 {GL_COMPRESSED_SIGNED_R11_EAC,          MTLPixelFormatEAC_R11Snorm,     GL_RED,  FmtKind::Snorm, Comp::Compressed, 1,  8, 4, 4, 0, 0, 1, R001, {0,1,2,3}, 0,0,0,0,0,0, SN},
 {GL_COMPRESSED_RG11_EAC,                MTLPixelFormatEAC_RG11Unorm,    GL_RG,   FmtKind::Unorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, RG01, {0,1,2,3}, 0,0,0,0,0,0, UN},
 {GL_COMPRESSED_SIGNED_RG11_EAC,         MTLPixelFormatEAC_RG11Snorm,    GL_RG,   FmtKind::Snorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, RG01, {0,1,2,3}, 0,0,0,0,0,0, SN},
+// KHR_texture_compression_astc_ldr
+#define ASTC(w, h) \
+{GL_COMPRESSED_RGBA_ASTC_##w##x##h##_KHR,         MTLPixelFormatASTC_##w##x##h##_LDR,  GL_RGBA, FmtKind::Unorm, Comp::Compressed, 4, 16, w, h, 0, 0, 1, IDENT,{0,1,2,3}, 0,0,0,0,0,0, UN}, \
+{GL_COMPRESSED_SRGB8_ALPHA8_ASTC_##w##x##h##_KHR, MTLPixelFormatASTC_##w##x##h##_sRGB, GL_RGBA, FmtKind::Unorm, Comp::Compressed, 4, 16, w, h, 1, 0, 1, IDENT,{0,1,2,3}, 0,0,0,0,0,0, UN},
+ASTC(4, 4) ASTC(5, 4) ASTC(5, 5) ASTC(6, 5) ASTC(6, 6) ASTC(8, 5) ASTC(8, 6) ASTC(8, 8)
+ASTC(10, 5) ASTC(10, 6) ASTC(10, 8) ASTC(10, 10) ASTC(12, 10) ASTC(12, 12)
+#undef ASTC
 };
 // clang-format on
 
@@ -187,7 +194,13 @@ int viewClass(GLenum internalFormat) {
     case GL_COMPRESSED_RGB8_ETC2: case GL_COMPRESSED_SRGB8_ETC2: return 1011;
     case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2: case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2: return 1012;
     case GL_COMPRESSED_RGBA8_ETC2_EAC: case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC: return 1013;
-    default: return 0;
+    default:
+        // ASTC: one class per block size, LDR and sRGB together.
+        if (internalFormat >= GL_COMPRESSED_RGBA_ASTC_4x4_KHR && internalFormat <= GL_COMPRESSED_RGBA_ASTC_12x12_KHR)
+            return 1100 + (int)(internalFormat - GL_COMPRESSED_RGBA_ASTC_4x4_KHR);
+        if (internalFormat >= GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR && internalFormat <= GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR)
+            return 1100 + (int)(internalFormat - GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR);
+        return 0;
     }
 }
 
@@ -392,6 +405,29 @@ size_t storageRowBytes(const FormatInfo* f, int width) {
 size_t storageImageBytes(const FormatInfo* f, int width, int height) {
     int rows = f->comp == Comp::Compressed ? (height + f->blockH - 1) / f->blockH : height;
     return storageRowBytes(f, width) * rows;
+}
+
+CompressedLayout compressedLayout(const FormatInfo* f, int width, int height, int dims, const PixelStore& ps) {
+    CompressedLayout l;
+    l.rowBytes = storageRowBytes(f, width);
+    l.rowStride = l.rowBytes;
+    l.rows = (height + f->blockH - 1) / f->blockH;
+    int rowsPerImage = l.rows;
+    l.skipBytes = 0;
+    int bs = ps.compressedBlockSize;
+    if (bs && ps.compressedBlockWidth) {
+        int bw = ps.compressedBlockWidth;
+        if (ps.rowLength) l.rowStride = (size_t)bs * ((ps.rowLength + bw - 1) / bw);
+        l.skipBytes += (size_t)ps.skipPixels / bw * bs;
+    }
+    if (dims > 1 && bs && ps.compressedBlockHeight) {
+        int bh = ps.compressedBlockHeight;
+        l.skipBytes += (size_t)ps.skipRows / bh * l.rowStride;
+        if (ps.imageHeight) rowsPerImage = (ps.imageHeight + bh - 1) / bh;
+    }
+    l.imageStride = l.rowStride * rowsPerImage;
+    if (dims > 2 && bs && ps.compressedBlockDepth) l.skipBytes += (size_t)ps.skipImages / ps.compressedBlockDepth * l.imageStride;
+    return l;
 }
 
 bool directUploadCompatible(const FormatInfo* f, GLenum format, GLenum type) {
