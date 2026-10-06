@@ -464,3 +464,86 @@ void main() {
     glDeleteVertexArrays(1, &vao);
     CHECK_GL();
 }
+
+
+// Same as above with the CTS layout: 8 attachments, sampler/output arrays indexed in a loop.
+TEST(texture_barrier_feedback_mrt) {
+    const int W = 64, H = 64, B = 4, N = 8;
+    GLuint tex[N], fbo, vao;
+    glGenTextures(N, tex);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    GLenum bufs[N];
+    for (int i = 0; i < N; i++) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32UI, W, H, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, tex[i], 0);
+        bufs[i] = GL_COLOR_ATTACHMENT0 + i;
+    }
+    glDrawBuffers(N, bufs);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    const char* vs = "#version 400 core\nvoid main(){ vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4.0 - 1.0; gl_Position = vec4(p, 0, 1); }";
+    const char* fs = R"(#version 400 core
+#define NUM_TEXTURES 8
+uniform int blockSize; uniform int modulo;
+uniform usampler2D texInput[NUM_TEXTURES];
+out uvec4 fragOutput[NUM_TEXTURES];
+void main() {
+    ivec2 c = ivec2(gl_FragCoord.xy), b = c / blockSize;
+    ivec2 xo = ivec2(blockSize, 0), yo = ivec2(0, blockSize);
+    if (((b.x + b.y) % 2) == modulo) {
+        for (int i = 0; i < NUM_TEXTURES; ++i)
+            fragOutput[i] = texelFetch(texInput[i], c + xo, 0) + texelFetch(texInput[i], c - xo, 0) + texelFetch(texInput[i], c + yo, 0) +
+                            texelFetch(texInput[i], c - yo, 0);
+    } else {
+        discard;
+    }
+})";
+    std::string log;
+    GLuint p = compileProgram(vs, fs, &log);
+    if (!p) fprintf(stderr, "%s\n", log.c_str());
+    glUseProgram(p);
+    for (int i = 0; i < N; i++) glUniform1i(glGetUniformLocation(p, ("texInput[" + std::to_string(i) + "]").c_str()), i);
+    glUniform1i(glGetUniformLocation(p, "blockSize"), B);
+    glViewport(0, 0, W, H);
+    std::vector<std::vector<uint32_t>> ref(N, std::vector<uint32_t>(W * H));
+    std::vector<uint32_t> got(W * H);
+    auto at = [&](std::vector<uint32_t>& v, int x, int y) -> uint32_t { return x < 0 || y < 0 || x >= W || y >= H ? 0 : v[y * W + x]; };
+    for (int i = 0; i < N; i++) {
+        for (int k = 0; k < W * H; k++) ref[i][k] = (uint32_t)(k * 3 + i) & 0xff;
+        glActiveTexture(GL_TEXTURE0 + i);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RED_INTEGER, GL_UNSIGNED_INT, ref[i].data());
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        glUniform1i(glGetUniformLocation(p, "modulo"), pass & 1);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glTextureBarrier();
+        for (int i = 0; i < N; i++) {
+            std::vector<uint32_t> prev = ref[i];
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++)
+                    if ((((x / B) + (y / B)) % 2) == (pass & 1))
+                        ref[i][y * W + x] = at(prev, x + B, y) + at(prev, x - B, y) + at(prev, x, y + B) + at(prev, x, y - B);
+        }
+    }
+    for (int i = 0; i < N; i++) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, got.data());
+        int bad = 0, first = -1;
+        for (int k = 0; k < W * H; k++)
+            if (got[k] != ref[i][k]) { if (first < 0) first = k; bad++; }
+        if (bad) fprintf(stderr, "  tex %d: %d bad texels, first at (%d,%d): got %u want %u\n", i, bad, first % W, first / W, got[first], ref[i][first]);
+        CHECK(bad == 0);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(N, tex);
+    glDeleteProgram(p);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}
