@@ -2420,8 +2420,33 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
     const StageCode& fsc = SC(Stage::Fragment);
     bool fsClip = fsc.main && fsc.usedNames.count("gl_ClipDistance");
     bool fsCull = fsc.main && fsc.usedNames.count("gl_CullDistance");
+    // Mesh vertex outputs are limited (124 scalars): only pass varyings the fragment shader reads.
+    std::set<std::string> fsNames;
+    bool filter = mesh && fsc.main;
+    if (filter) {
+        Stage keep = stage_;
+        useStage(Stage::Fragment);
+        prepareStage(Stage::Fragment);
+        for (auto* v : sc_->globals) {
+            if (v->q.storage != Storage::In || v->builtin != BuiltinVar::None) continue;
+            std::vector<std::pair<Type, std::string>> leaves;
+            flatten(v->type, "", leaves);
+            splitDoubleLeaves(leaves);
+            std::string key = varyingKey(v, Stage::Fragment);
+            for (size_t i = 0; i < leaves.size(); i++) fsNames.insert(key + "_" + std::to_string(i));
+        }
+        for (auto& [k, v] : si_[(int)Stage::Fragment].bi)
+            if (k == BuiltinVar::FragColorIn || k == BuiltinVar::SecondaryColorIn || k == BuiltinVar::TexCoord || k == BuiltinVar::FogFragCoord) {
+                std::vector<std::pair<Type, std::string>> leaves;
+                flatten(v->type, "", leaves);
+                std::string key = builtinKey(k);
+                for (size_t i = 0; i < leaves.size(); i++) fsNames.insert(key + "_" + std::to_string(i));
+            }
+        useStage(keep);
+    }
     for (auto& f : fields) {
         if (f.key == "pos" || f.key == "psize" || f.key == "clipv") continue;
+        if (filter && f.key != "clipd" && f.key != "culld" && !fsNames.count(f.name)) continue;
         if (f.key == "clipd" && !fsClip) continue;
         if (f.key == "culld" && !fsCull) continue;
         if (f.type.base == BT::Bool) fail("boolean varyings are not allowed");
