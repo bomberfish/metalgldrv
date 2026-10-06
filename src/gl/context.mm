@@ -89,6 +89,8 @@ Context::~Context() {
     if (uploadChunk_) dev->releaseAfter(uploadChunk_, serial_);
 }
 
+thread_local const char* t_apiName = "";
+
 void Context::setError(GLenum e, const char* fmt, ...) {
     if (error == GL_NO_ERROR) error = e;
     char buf[512];
@@ -99,7 +101,7 @@ void Context::setError(GLenum e, const char* fmt, ...) {
         vsnprintf(buf, sizeof buf, fmt, ap);
         va_end(ap);
     }
-    MGL_DBG("GL error 0x%04x: %s", e, buf);
+    MGL_DBG("GL error 0x%04x in %s: %s", e, t_apiName, buf);
     if (debugOutput) debugMessage(GL_DEBUG_SOURCE_API, GL_DEBUG_TYPE_ERROR, e, GL_DEBUG_SEVERITY_HIGH, buf[0] ? buf : "GL error");
 }
 

@@ -341,8 +341,11 @@ id<MTLTexture> attachmentTexture(Context* ctx, const Attachment& a, const Format
 void markTextureWrite(Context* ctx, Texture* t);
 
 // Common entry-point prologue.
-#define MGL_CTX_RET(r)                     \
-    ::mgl::Context* ctx = ::mgl::currentContext(); \
+// The entry point's name is remembered for GL error logging (METALGLDRV_LOG=3) only.
+extern thread_local const char* t_apiName;
+#define MGL_CTX_RET(r)                                                         \
+    ::mgl::Context* ctx = ::mgl::currentContext();                         \
+    if (::mgl::g_logLevel >= ::mgl::LOG_DEBUG) ::mgl::t_apiName = __func__; \
     if (!ctx) return r
 #define MGL_CTX() MGL_CTX_RET()
 
