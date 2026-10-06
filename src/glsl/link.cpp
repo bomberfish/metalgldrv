@@ -202,6 +202,15 @@ void Linker::collectStage(Stage s) {
             if (l.pointMode) d.pointMode = true;
             if (l.earlyFragmentTests) d.earlyFragmentTests = true;
         };
+        const Layout& l = sh->inLayout;
+        bool has = l.localSize[0] >= 0 || l.localSize[1] >= 0 || l.localSize[2] >= 0;
+        bool had = sc.inLayout.localSize[0] >= 0 || sc.inLayout.localSize[1] >= 0 || sc.inLayout.localSize[2] >= 0;
+        if (s == Stage::Compute && has && had)
+            for (int i = 0; i < 3; i++)
+                if (std::max(1, l.localSize[i]) != std::max(1, sc.inLayout.localSize[i])) {
+                    error("compute shaders declare conflicting local sizes");
+                    break;
+                }
         merge(sc.inLayout, sh->inLayout);
         merge(sc.outLayout, sh->outLayout);
     }
@@ -674,6 +683,7 @@ void Linker::assignUniforms() {
     // --- opaque uniforms --------------------------------------------------------
     std::map<int, int> acbByBinding;
     std::map<int, uint32_t> acNextOffset;
+    std::map<int, std::vector<std::pair<uint32_t, uint32_t>>> acRanges;  // binding -> [offset, end) of each counter
     // expand opaque leaves (struct members / arrays of structs) into individual uniforms named by their path
     struct OpaqueLeaf { const Variable* v; std::string path; Type type; uint32_t mask; bool explicitLoc; };
     std::vector<OpaqueLeaf> leaves;
@@ -706,7 +716,9 @@ void Linker::assignUniforms() {
         u.arraySize = lf.type.isArray() ? lf.type.dims[0] : 1;
         u.stageMask = lf.mask;
         u.binding = lf.explicitLoc ? std::max(0, v->q.layout.binding) : 0;
-        if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location;
+        // Atomic counters have no uniform location (GL 4.6 §7.6.1).
+        if (bt.base == BT::AtomicUint) u.location = -1;
+        else if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location;
         else {
             int loc = location;
             for (;;) {
@@ -718,7 +730,8 @@ void Linker::assignUniforms() {
             u.location = loc;
             location = loc + n;
         }
-        for (int i = 0; i < n; i++) usedLocs.insert(u.location + i);
+        if (u.location >= 0)
+            for (int i = 0; i < n; i++) usedLocs.insert(u.location + i);
         int uidx = (int)refl.uniforms.size();
         ob.uniformIndex = uidx;
         if (bt.base == BT::Sampler) {
@@ -741,6 +754,13 @@ void Linker::assignUniforms() {
             int binding = u.binding;
             uint32_t aoff = v->q.layout.offset >= 0 ? (uint32_t)v->q.layout.offset : acNextOffset[binding];
             acNextOffset[binding] = aoff + 4 * n;
+            // Distinct counters may not share storage (GLSL 4.60 §4.4.6.3).
+            for (auto [lo, hi] : acRanges[binding])
+                if (aoff < hi && lo < aoff + 4 * n) {
+                    error("atomic counter '" + lf.path + "' overlaps another counter at binding " + std::to_string(binding));
+                    break;
+                }
+            acRanges[binding].push_back({aoff, aoff + 4 * n});
             if (!acbByBinding.count(binding)) {
                 acbByBinding[binding] = (int)refl.atomicCounterBuffers.size();
                 AtomicCounterBuffer acb;

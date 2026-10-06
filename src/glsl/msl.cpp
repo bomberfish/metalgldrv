@@ -1457,7 +1457,20 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     if (name == "texelFetch" || name == "texelFetchOffset") {
         std::string P = ex(A[1]);
         bool off = name == "texelFetchOffset";
-        if (off) P = "(" + P + " + " + ex(A.back()) + ")";
+        if (off) {
+            // Arrayed textures: the offset applies to the coordinates, not the layer.
+            const Type& Pt = A[1]->type;
+            int pn = Pt.isScalar() ? 1 : Pt.vec;
+            const Type& Ot = A.back()->type;
+            int on = Ot.isScalar() ? 1 : Ot.vec;
+            std::string o = ex(A.back());
+            if (on < pn) {
+                o = vecName(BT::Int, pn) + "(" + o;
+                for (int i = on; i < pn; i++) o += ", 0";
+                o += ")";
+            }
+            P = "(" + P + " + " + o + ")";
+        }
         std::string r;
         if (T.ms) {
             std::string s = "uint(" + ex(A[2]) + ")";
@@ -2811,7 +2824,11 @@ void Emitter::emitCS(std::string& o) {
             case BuiltinVar::WorkGroupID: e += "    g.bi_" + v->name + " = mgl_wid;\n"; break;
             case BuiltinVar::LocalInvocationID: e += "    g.bi_" + v->name + " = mgl_lid;\n"; break;
             case BuiltinVar::GlobalInvocationID: e += "    g.bi_" + v->name + " = mgl_gid;\n"; break;
-            case BuiltinVar::LocalInvocationIndex: e += "    g.bi_" + v->name + " = mgl_lidx;\n"; break;
+            case BuiltinVar::LocalInvocationIndex:
+                // GL's linearization of the local id (z * X * Y + y * X + x).
+                e += "    g.bi_" + v->name + " = (mgl_lid.z * " + std::to_string(r.localSize[1]) + "u + mgl_lid.y) * " +
+                     std::to_string(r.localSize[0]) + "u + mgl_lid.x;\n";
+                break;
             default: break;
         }
     }

@@ -2166,6 +2166,7 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
         return ctx->setError(GL_INVALID_OPERATION, "no compute program");
     if (gx > 65535 || gy > 65535 || gz > 65535) return ctx->setError(GL_INVALID_VALUE);
     if (!indirect && (!gx || !gy || !gz)) return;
+    if (!mglCheckDrawConditional(ctx)) return;  // conditional rendering covers compute dispatches too
     glsl::VariantKey vk;
     vk.kind = glsl::PipelineKind::Compute;
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);

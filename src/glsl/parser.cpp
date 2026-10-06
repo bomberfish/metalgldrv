@@ -16,6 +16,16 @@
 
 namespace glsl {
 
+namespace {
+// Implementation limits (gl_Max* constants), for compile-time checks.
+enum : int {
+#define X(name, glenum, value) kLimit_##name = value,
+#include "glsl/limits.def"
+#undef X
+};
+constexpr int kMaxAtomicCounterBufferSize = kLimit_gl_MaxAtomicCounterBufferSize;
+}  // namespace
+
 bool exprIsLvalue(const Expr* e) {
     switch (e->kind) {
         case EK::Var: {
@@ -293,6 +303,12 @@ bool Parser::run(const PPResult& pp) {
         // the preamble's globals are not emitted as user globals
         sh_.globals.clear();
         push();  // user global scope
+        if (sh_.stage == Stage::Compute) {
+            auto ext = sh_.extensions.find("GL_ARB_compute_shader");
+            bool viaExt = ext != sh_.extensions.end() && ext->second != "disable";
+            if (sh_.es ? sh_.version < 310 : (sh_.version < 430 && !viaExt))
+                fail("compute shaders require GLSL 4.30 (or GL_ARB_compute_shader) / GLSL ES 3.10", 0);
+        }
         parseTokens(pp.tokens);
         finalize();
     } catch (ParseError&) {
@@ -584,6 +600,12 @@ void Parser::applyStageLayout(const Qualifiers& q) {
         return;
     }
     Layout& T = (q.storage == Storage::Out) ? sh_.outLayout : sh_.inLayout;
+    if (q.storage == Storage::In && sh_.stage == Stage::Compute && (L.localSize[0] >= 0 || L.localSize[1] >= 0 || L.localSize[2] >= 0)) {
+        // Every local size declaration in a shader must agree (unspecified components are 1).
+        bool declared = T.localSize[0] >= 0 || T.localSize[1] >= 0 || T.localSize[2] >= 0;
+        for (int i = 0; i < 3 && declared; i++)
+            if (std::max(1, T.localSize[i]) != std::max(1, L.localSize[i])) fail("conflicting local_size declarations");
+    }
     for (int i = 0; i < 3; i++) if (L.localSize[i] >= 0) T.localSize[i] = L.localSize[i];
     if (L.maxVertices >= 0) T.maxVertices = L.maxVertices;
     if (L.invocations >= 0) T.invocations = L.invocations;
@@ -597,6 +619,13 @@ void Parser::applyStageLayout(const Qualifiers& q) {
     if (L.xfbBuffer >= 0) T.xfbBuffer = L.xfbBuffer;
     if (L.xfbStride >= 0) T.xfbStride = L.xfbStride;
     if (q.storage == Storage::In && sh_.stage == Stage::Compute && (L.localSize[0] >= 0 || L.localSize[1] >= 0 || L.localSize[2] >= 0)) {
+        static const int kMaxSize[3] = {1024, 1024, 64};  // GL_MAX_COMPUTE_WORK_GROUP_SIZE
+        int64_t total = 1;
+        for (int i = 0; i < 3; i++) {
+            if (L.localSize[i] == 0 || L.localSize[i] > kMaxSize[i]) fail("local_size exceeds GL_MAX_COMPUTE_WORK_GROUP_SIZE");
+            total *= std::max(1, T.localSize[i]);
+        }
+        if (total > 1024) fail("local size exceeds GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS");
         // update gl_WorkGroupSize constant
         Sym* s = &scopes_[0]["gl_WorkGroupSize"];
         if (s->var) {
@@ -780,7 +809,7 @@ void Parser::parseExternal() {
         expect(";");
         return;
     }
-    if (hasQ && peek().kind == PK::Ident && !isTypeName(peek().text) && isP("{", 1)) {
+    if (hasQ && peek().kind == PK::Ident && peek().text != "struct" && !isTypeName(peek().text) && isP("{", 1)) {
         parseBlock(q, nullptr);
         return;
     }
@@ -984,6 +1013,16 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             }
         } else if (q.storage == Storage::Const && !preamble_) {
             fail("'" + name + "' : const variables must be initialized");
+        }
+        if (global && !preamble_ && sh_.stage == Stage::Compute && (q.storage == Storage::In || q.storage == Storage::Out))
+            fail("'" + name + "' : compute shaders cannot declare input or output variables");
+        if (v->type.stripArrays().base == BT::AtomicUint && !preamble_) {
+            if (!v->type.dims.empty() && v->type.dims[0] == 0) fail("'" + name + "' : atomic counter arrays must be explicitly sized");
+            if (q.layout.offset >= 0) {
+                if (q.layout.offset % 4) fail("'" + name + "' : atomic counter offset must be a multiple of 4");
+                int64_t end = (int64_t)q.layout.offset + 4 * std::max(1, v->type.totalArrayElements());
+                if (end > kMaxAtomicCounterBufferSize) fail("'" + name + "' : atomic counter offset exceeds GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE");
+            }
         }
         // implicit storage for shared/in/out arrays sized by layout
         if (global && sh_.stage == Stage::Geometry && q.storage == Storage::In && !t.dims.empty() && t.dims[0] == 0 &&

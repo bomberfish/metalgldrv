@@ -362,6 +362,70 @@ void main() { uint i = gl_GlobalInvocationID.x; if (i < values.length()) values[
     CHECK_GL();
 }
 
+// gl_LocalInvocationIndex / gl_LocalInvocationID for multi-dimensional work groups
+// (compute_shader.one-work-group).
+static GLuint computeProgram(const std::string& src) {
+    const char* c = src.c_str();
+    GLuint s = glCreateShader(GL_COMPUTE_SHADER);
+    glShaderSource(s, 1, &c, nullptr);
+    glCompileShader(s);
+    GLuint p = glCreateProgram();
+    glAttachShader(p, s);
+    glDeleteShader(s);
+    glLinkProgram(p);
+    return p;
+}
+TEST(compute_local_ids_respecified_buffer) {
+    GLuint b = 0, ib = 0;
+    glGenBuffers(1, &b);
+    glGenBuffers(1, &ib);
+    struct It { int x, y, z, binding; bool indirect; } its[] = {{16, 1, 1, 0, true}, {8, 8, 1, 1, false}, {4, 4, 4, 2, true}, {1, 2, 3, 3, false}, {32, 1, 32, 7, true}};
+    for (const It& it : its) {
+        char src[1024];
+        snprintf(src, sizeof src,
+                 "#version 430 core\nlayout(local_size_x = %d, local_size_y = %d, local_size_z = %d) in;\n"
+                 "layout(std430, binding = %d) buffer Output { uvec4 local_id[]; } g_out;\n"
+                 "void main() {\n  if (gl_WorkGroupSize == uvec3(%d, %d, %d) && gl_WorkGroupID == uvec3(0) &&\n"
+                 "      gl_GlobalInvocationID == gl_LocalInvocationID) {\n"
+                 "    g_out.local_id[gl_LocalInvocationIndex] = uvec4(gl_LocalInvocationID, 0);\n"
+                 "  } else {\n    g_out.local_id[gl_LocalInvocationIndex] = uvec4(0xffff);\n  }\n}\n",
+                 it.x, it.y, it.z, it.binding, it.x, it.y, it.z);
+        GLuint p = computeProgram(src);
+        int n = it.x * it.y * it.z;
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, it.binding, b);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, 16 * n, nullptr, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        glUseProgram(p);
+        if (it.indirect) {
+            const GLuint groups[3] = {1, 1, 1};
+            glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, ib);
+            glBufferData(GL_DISPATCH_INDIRECT_BUFFER, sizeof groups, groups, GL_STATIC_DRAW);
+            glDispatchComputeIndirect(0);
+        } else {
+            glDispatchCompute(1, 1, 1);
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, b);
+        glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+        const GLuint* d = (const GLuint*)glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 16 * n, GL_MAP_READ_BIT);
+        CHECK(d != nullptr);
+        if (d) {
+            int bad = 0;
+            for (int i = 0; i < n; i++) {
+                int x = i % it.x, y = (i / it.x) % it.y, z = i / (it.x * it.y);
+                if (d[4 * i] != (GLuint)x || d[4 * i + 1] != (GLuint)y || d[4 * i + 2] != (GLuint)z) bad++;
+            }
+            CHECK_EQ(bad, 0);
+        }
+        glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        glUseProgram(0);
+        glDeleteProgram(p);
+    }
+    glDeleteBuffers(1, &b);
+    glDeleteBuffers(1, &ib);
+    CHECK_GL();
+}
+
 // 124 varying components into the fragment shader (Metal's limit; GL 4.6 asks for 128).
 static int kNV = getenv("NV") ? atoi(getenv("NV")) : 31;  // TODO: GL needs 32 (128 comps); Metal stops at 124
 TEST(varyings_124_components) {
