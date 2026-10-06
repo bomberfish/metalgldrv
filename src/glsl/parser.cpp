@@ -1,3 +1,4 @@
+#include <map>
 // Recursive-descent GLSL parser with integrated semantic analysis.
 #include "glsl/parser.h"
 
@@ -88,6 +89,7 @@ private:
     Qualifiers defaultUbo_, defaultSsbo_;
     std::unordered_map<const Builtin*, Function*> builtinFns_;
     std::unordered_map<Variable*, int> maxIndex_;
+    std::map<std::pair<StructDef*, int>, int> maxMemberIndex_;  // implicitly sized block members
 
     // ---- token helpers --------------------------------------------------
     const PPToken& peek(int k = 0) const {
@@ -306,6 +308,21 @@ void Parser::finalize() {
             v.type.dims[0] = bi ? (v.used || v.written ? 8 : 1) : 1;
         }
     }
+    // Unsized arrays that are not the last member of a block are sized by the largest
+    // constant index used (GLSL 4.60 §4.1.9); only the last member of a buffer block is runtime-sized.
+    for (auto& sd : sh_.sdefs) {
+        if (!sd.isBlock) continue;
+        for (size_t i = 0; i < sd.members.size(); i++) {
+            Type& mt = sd.members[i].type;
+            bool runtimeSized = i + 1 == sd.members.size() && sd.blockQ.storage == Storage::Buffer;
+            if (mt.dims.empty() || mt.dims[0] != 0 || runtimeSized) continue;
+            auto it = maxMemberIndex_.find({&sd, (int)i});
+            mt.dims[0] = it == maxMemberIndex_.end() ? 1 : it->second + 1;
+        }
+    }
+    for (auto& e : sh_.exprs)
+        if (e.kind == EK::Field && !e.type.dims.empty() && e.type.dims[0] == 0 && e.args[0]->type.sdef && e.args[0]->type.sdef->isBlock)
+            e.type = e.args[0]->type.sdef->members[e.field].type;
     // Fix up expression types that referenced implicitly sized arrays
     for (auto& e : sh_.exprs) {
         if (e.kind == EK::Var && e.var && e.type.base == e.var->type.base && !e.type.dims.empty() && e.type.dims[0] == 0)
@@ -327,7 +344,8 @@ bool Parser::isQualifierAt(int k) {
     if (!soft.count(t.text)) return true;
     Sym* s = lookup(t.text);
     if (s && s->var) return false;
-    return peek(k + 1).kind == PK::Ident;
+    // "<qualifier> <ident>", or a default-layout declaration such as "layout(std430) buffer;"
+    return peek(k + 1).kind == PK::Ident || isP(";", k + 1);
 }
 
 bool Parser::parseQualifiers(Qualifiers& q) {
@@ -1477,6 +1495,11 @@ Expr* Parser::mkIndex(Expr* b, Expr* i, int ln) {
         if (limit == 0 && b->kind == EK::Var) {
             int& m = maxIndex_[b->var];
             m = std::max(m, (int)idx);
+        }
+        if (limit == 0 && b->kind == EK::Field && b->args[0]->type.sdef && b->args[0]->type.sdef->isBlock) {
+            auto key = std::make_pair((StructDef*)b->args[0]->type.sdef, b->field);
+            auto it = maxMemberIndex_.find(key);
+            maxMemberIndex_[key] = it == maxMemberIndex_.end() ? (int)idx : std::max(it->second, (int)idx);
         }
         if (b->cv) e->cv = foldIndex(b, (int)idx, rt);
     } else if (limit == 0 && b->kind == EK::Var && b->var->q.storage != Storage::Buffer) {

@@ -57,6 +57,7 @@ struct OpaqueBinding {
 struct BlockBinding {
     int firstBlock = -1;  // index into Reflection::uniformBlocks / storageBlocks
     int count = 1;
+    bool isArray = false;  // declared as an array of blocks (even with one element)
     int slot = -1;        // first argument slot
     int sizeSlot = -1;
     Packing packing = Packing::Std140;

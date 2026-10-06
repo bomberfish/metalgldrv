@@ -1875,7 +1875,7 @@ void Emitter::emitArgs(std::string& o) {
     std::vector<bool> skip(slots.size(), false);
     if (P.defaultSlot >= 0) decl[P.defaultSlot] = "constant uchar* s" + std::to_string(P.defaultSlot) + ";";
     for (auto& [key, bb] : P.blocks) {
-        std::string arr = bb.count > 1 ? "[" + std::to_string(bb.count) + "]" : "";
+        std::string arr = bb.isArray ? "[" + std::to_string(bb.count) + "]" : "";
         decl[bb.slot] = std::string(bb.storage ? "device uchar* s" : "constant uchar* s") + std::to_string(bb.slot) + arr + ";";
         for (int i = 1; i < bb.count; i++) skip[bb.slot + i] = true;
         if (bb.storage) {

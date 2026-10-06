@@ -221,7 +221,11 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                 v = b.buffer->gpuAddress() + b.offset;
                 b.buffer->lastUse = serial;
                 b.buffer->lastGpuWrite = serial;
+                MGL_DBG("prog %u ssbo slot %d -> binding %d buffer %u (+%lld, %lld bytes) first word %08x", prog->name, s.index, binding,
+                        b.buffer->name, (long long)b.offset, (long long)b.buffer->size,
+                        b.buffer->cpu ? *(const uint32_t*)(b.buffer->cpu + b.offset) : 0xdeadbeefu);
             } else {
+                MGL_DBG("prog %u ssbo slot %d -> binding %d: nothing bound", prog->name, s.index, binding);
                 UploadAlloc z = ctx->upload(64, 16);
                 memset(z.cpu, 0, 64);
                 v = z.gpu;

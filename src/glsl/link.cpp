@@ -614,6 +614,7 @@ void Linker::assignUniforms() {
             bb.layout = computeBlockLayout(sd, pk, rm);
             int n = v->type.isArray() ? v->type.dims[0] : 1;
             bb.count = n;
+            bb.isArray = v->type.isArray();
             auto& list = storage ? refl.storageBlocks : refl.uniformBlocks;
             bb.firstBlock = (int)list.size();
             bb.slot = slot;

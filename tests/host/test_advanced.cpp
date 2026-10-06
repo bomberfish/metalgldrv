@@ -312,3 +312,97 @@ flat in vec4 c; out vec4 o; void main() { o = c; })";
     glDeleteVertexArrays(1, &vao);
     CHECK_GL();
 }
+
+// Vertex shader reading positions from and writing to a shader storage buffer.
+TEST(ssbo_in_vertex_shader) {
+    const char* vs = R"(#version 430 core
+layout(std430, binding = 0) buffer In { vec4 pos[3]; } g_in;
+layout(std430, binding = 1) buffer Out { int seen[3]; } g_out;
+void main() { gl_Position = g_in.pos[gl_VertexID]; g_out.seen[gl_VertexID] = gl_VertexID + 10; })";
+    const char* fs = "#version 430 core\nout vec4 o; void main(){ o = vec4(0,1,0,1); }";
+    std::string log;
+    GLuint p = compileProgram(vs, fs, &log);
+    if (!p) fprintf(stderr, "  %s\n", log.c_str());
+    CHECK(p != 0);
+    float pos[12] = {-1, -1, 0, 1, 3, -1, 0, 1, -1, 3, 0, 1};
+    int zero[3] = {0, 0, 0};
+    GLuint b[2], vao;
+    glGenBuffers(2, b);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, b[0]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof pos, pos, GL_STATIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, b[1]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof zero, zero, GL_DYNAMIC_READ);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(p);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    CHECK_PIXEL(8, 8, 0, 255, 0, 255);
+    int* r = (int*)glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, sizeof zero, GL_MAP_READ_BIT);
+    CHECK(r && r[0] == 10 && r[1] == 11 && r[2] == 12);
+    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+    glDeleteProgram(p);
+    glDeleteBuffers(2, b);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}
+
+// CTS-style program setup: attach, delete, then source+compile; SSBO without explicit binding.
+TEST(ssbo_vs_attach_delete_then_compile) {
+    const char* vsList[2] = {"#version 430 core\nlayout(std430) buffer Buffer {\n  vec4 position[3];\n} g_input_buffer;\n"
+                             "void main() {\n  gl_Position = g_input_buffer.position[gl_VertexID];\n}",
+                             // one-element array of blocks
+                             "#version 430 core\nbuffer Buffer {\n  vec4 position[3];\n} g_buffer[1];\n"
+                             "void main() {\n  gl_Position = g_buffer[0].position[gl_VertexID];\n}"};
+    std::vector<std::string> extra;
+    if (const char* dir = getenv("SSBO_VS_DIR"))  // debugging: more vertex shaders (vs0.vert ...)
+        for (int i = 0; i < 16; i++) {
+            FILE* f = fopen((std::string(dir) + "/vs" + std::to_string(i) + ".vert").c_str(), "rb");
+            if (!f) break;
+            std::string t;
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof buf, f)) > 0) t.append(buf, n);
+            fclose(f);
+            extra.push_back(t);
+        }
+    std::vector<const char*> all(vsList, vsList + 2);
+    for (auto& e : extra) all.push_back(e.c_str());
+    for (const char* vs : all) {
+        fprintf(stderr, "  [vs variant]\n");
+    const char* fs = "#version 430 core\nlayout(location = 0) out vec4 o_color;\nvoid main() {\n  o_color = vec4(0.0, 1.0, 0.0, 1.0);\n}";
+    float pos[12] = {-1, -1, 0, 1, 3, -1, 0, 1, -1, 3, 0, 1};
+    GLuint b, vao;
+    glGenBuffers(1, &b);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, b);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof pos, pos, GL_STATIC_DRAW);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    GLuint p = glCreateProgram();
+    const char* src[2] = {vs, fs};
+    GLenum types[2] = {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER};
+    for (int i = 0; i < 2; i++) {
+        GLuint s = glCreateShader(types[i]);
+        glAttachShader(p, s);
+        glDeleteShader(s);
+        glShaderSource(s, 1, &src[i], nullptr);
+        glCompileShader(s);
+    }
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(p);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_PIXEL(8, 8, 0, 255, 0, 255);
+    std::vector<float> rgb(64 * 64 * 3, -1.0f);
+    glReadPixels(0, 0, 64, 64, GL_RGB, GL_FLOAT, rgb.data());
+    CHECK(rgb[0] == 0.0f && rgb[1] == 1.0f && rgb[2] == 0.0f);
+    glDeleteProgram(p);
+    glDeleteBuffers(1, &b);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+    }
+}
