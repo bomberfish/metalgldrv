@@ -928,6 +928,7 @@ void Linker::stageMetadata() {
             if (v->q.layout.xfbStride > 0 && vb < 4) explicitStride[vb] = v->q.layout.xfbStride;
             auto addQ = [&](const std::string& name, const Type& t, int buffer, int offset) {
                 if (buffer < 0 || buffer > 3) { error("xfb_buffer out of range"); return; }
+                if (pre == Stage::Geometry) mp.xfbBufferStream[buffer] = (uint32_t)std::max(0, v->q.layout.stream);
                 XfbVarying x;
                 x.name = name;
                 x.type = glTypeEnum(t);
@@ -988,9 +989,11 @@ void Linker::stageMetadata() {
                 }
                 Type t;
                 bool found = false;
+                int foundStream = 0;
                 for (auto& sh : ps.shaders)
                     for (auto& v : sh->vars) {
                         if (found || !v.global || v.q.storage != Storage::Out) continue;
+                        foundStream = v.q.layout.stream;
                         if (member.empty() && v.name == base && !v.anonBlock) { t = v.type; found = true; }
                         else if (member.empty() && v.anonBlock && v.block->findMember(base) >= 0) {
                             t = v.block->members[v.block->findMember(base)].type;
@@ -1001,6 +1004,7 @@ void Linker::stageMetadata() {
                         }
                     }
                 if (!found) { error("transform feedback varying '" + name + "' is not an output of the last vertex stage"); continue; }
+                if (pre == Stage::Geometry) mp.xfbBufferStream[buffer] = (uint32_t)std::max(0, foundStream);
                 if (elem >= 0) {
                     if (!t.isArray() || elem >= t.dims[0]) { error("transform feedback varying '" + name + "' index out of range"); continue; }
                     t = t.elem();

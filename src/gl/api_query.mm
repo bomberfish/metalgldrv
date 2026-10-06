@@ -45,7 +45,10 @@ void mglQueryNotifyDraw(Context* ctx, GLenum mode, uint64_t vertices, uint64_t i
             ctx->encVisibilityOffset = want;
         }
     }
-    // Primitive counting on the CPU (no geometry amplification).
+}
+
+// Primitives a draw of `n` vertices in mode `m` assembles (no geometry amplification).
+uint64_t mglPrimitivesFor(GLenum m, uint64_t n) {
     auto prims = [&](GLenum m, uint64_t n) -> uint64_t {
         switch (m) {
         case GL_POINTS: return n;
@@ -62,7 +65,28 @@ void mglQueryNotifyDraw(Context* ctx, GLenum mode, uint64_t vertices, uint64_t i
         default: return 0;
         }
     };
-    if (Query* pq = ctx->activeQueries[4][0].get()) pq->cpuCount += prims(mode, vertices) * instances;
+    return prims(m, n);
+}
+
+// Primitive query bookkeeping (all counts are known on the CPU, see draw.mm):
+// PRIMITIVES_GENERATED / TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN per vertex stream, and the
+// overflow queries (any stream / one stream) while transform feedback is active.
+void mglQueryAddPrimitives(Context* ctx, int stream, uint64_t generated, uint64_t written, bool xfbActive, bool overflow) {
+    if (stream < 0 || stream > 3) return;
+    if (Query* q = ctx->activeQueries[4][stream].get()) q->cpuCount += generated;
+    if (!xfbActive) return;
+    if (Query* q = ctx->activeQueries[5][stream].get()) q->cpuCount += written;
+    if (overflow) {
+        if (Query* q = ctx->activeQueries[6][0].get()) q->cpuCount = 1;
+        if (Query* q = ctx->activeQueries[7][stream].get()) q->cpuCount = 1;
+    }
+}
+
+bool mglQueryPrimitivesActive(Context* ctx) {
+    for (int ti = 4; ti < 8; ti++)
+        for (int i = 0; i < 4; i++)
+            if (ctx->activeQueries[ti][i]) return true;
+    return false;
 }
 
 // Ensures render passes started from now on carry the visibility buffer of `q`.
@@ -171,7 +195,7 @@ static void endQuery(Context* ctx, GLenum target, GLuint index) {
     if (target == GL_PRIMITIVES_GENERATED || target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_TRANSFORM_FEEDBACK_OVERFLOW ||
         target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW) {
         q->result = q->cpuCount;
-        if (target == GL_TRANSFORM_FEEDBACK_OVERFLOW || target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW) q->result = 0;
+        if (target == GL_TRANSFORM_FEEDBACK_OVERFLOW || target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW) q->result = q->cpuCount != 0;
         q->resultAvailable = true;
     }
 }

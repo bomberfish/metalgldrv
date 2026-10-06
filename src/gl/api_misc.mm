@@ -316,7 +316,7 @@ API void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
     x->paused = false;
     x->primitiveMode = primitiveMode;
     x->program = p;
-    x->verticesWritten = 0;
+    for (auto& w : x->written) w = 0;
     static bool warned = false;
     warned = true;
 }

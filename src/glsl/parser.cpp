@@ -871,6 +871,8 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     v->block = sd;
     v->anonBlock = inst.empty();
     v->global = true;
+    // GS outputs belong to the vertex stream of their layout(stream) or the current default
+    if (sh_.stage == Stage::Geometry && q.storage == Storage::Out && v->q.layout.stream < 0) v->q.layout.stream = std::max(0, sh_.outLayout.stream);
     if (preamble_) {
         v->builtin = builtinVarId(inst, sh_.stage);
         if ((sh_.stage == Stage::TessControl || sh_.stage == Stage::TessEval) && inst == "gl_in") v->type.dims[0] = 32;
@@ -968,6 +970,8 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
         Variable* v = newVar(name, t, q);
         v->global = global;
         v->line = ln;
+        if (global && sh_.stage == Stage::Geometry && q.storage == Storage::Out && v->q.layout.stream < 0)
+            v->q.layout.stream = std::max(0, sh_.outLayout.stream);
         if (preamble_) v->builtin = builtinVarId(name, sh_.stage);
         if (accept("=")) {
             Expr* init = parseInitializer(t);

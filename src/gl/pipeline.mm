@@ -195,6 +195,21 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
     return pso;
 }
 
+id<MTLComputePipelineState> PipelineCache::computePipeline(ProgramVariant* v, const std::string& name) {
+    auto it = v->computeByName.find(name);
+    if (it != v->computeByName.end()) return it->second;
+    const glsl::EntryPoint* cs = v->entry(name);
+    if (!cs || cs->kind != glsl::EntryPoint::Kernel) return nil;
+    MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
+    d.computeFunctionDescriptor = fn(v->lib, cs->name);
+    d.requiredThreadsPerThreadgroup = MTLSizeMake(cs->threadsPerThreadgroup[0], cs->threadsPerThreadgroup[1], cs->threadsPerThreadgroup[2]);
+    NSError* err = nil;
+    id<MTLComputePipelineState> p = [ctx_->dev->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
+    if (!p) MGL_ERR("compute pipeline %s creation failed: %s", name.c_str(), err.localizedDescription.UTF8String);
+    v->computeByName[name] = p;
+    return p;
+}
+
 id<MTLComputePipelineState> PipelineCache::computePipeline(ProgramVariant* v) {
     if (v->compute) return v->compute;
     const glsl::EntryPoint* cs = v->entry(glsl::EntryPoint::Kernel);
