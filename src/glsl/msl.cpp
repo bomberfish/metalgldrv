@@ -1,3 +1,4 @@
+#include <cstdlib>
 // GLSL AST -> Metal Shading Language.
 #include <algorithm>
 #include <cmath>
@@ -49,6 +50,7 @@ public:
 
 private:
     const LinkedProgram& P;
+    int discardCount_ = 0;  // METALGLDRV_DEBUG_NODISCARD bisecting
     const VariantKey& K;
     MSLOutput out_;
 
@@ -223,12 +225,12 @@ private:
     // ---- temporaries -------------------------------------------------------------
     std::string newTemp(const Type& t) {
         std::string n = "_t" + std::to_string(tempN_++);
-        temps_.push_back(mt(t) + " " + n + ";");
+        temps_.push_back(mt(t) + " " + n + " = {};");  // zeroed: see SK::Decl
         return n;
     }
     std::string newTempS(const std::string& type) {
         std::string n = "_t" + std::to_string(tempN_++);
-        temps_.push_back(type + " " + n + ";");
+        temps_.push_back(type + " " + n + " = {};");
         return n;
     }
     std::string bind(const std::string& expr, const std::string& type, std::string& pre) {
@@ -1628,7 +1630,9 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
             for (auto* v : s->vars) {
                 if (v->type.isOpaque()) fail("local variables of opaque type are not supported");
                 o += ind(in) + mt(v->type) + " " + varName(v);
-                if (v->init) o += " = " + ex(v->init);
+                // GLSL leaves uninitialized locals undefined; in MSL reading one is UB that the
+                // optimizer may exploit (e.g. treating a path as unreachable), so zero them.
+                o += v->init ? " = " + ex(v->init) : " = {}";
                 o += ";\n";
             }
             return;
@@ -1664,7 +1668,7 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
             o += ind(in) + "{\n";
             for (auto* b : s->body)
                 if (b->kind == SK::Decl)
-                    for (auto* v : b->vars) o += ind(in + 1) + mt(v->type) + " " + varName(v) + ";\n";
+                    for (auto* v : b->vars) o += ind(in + 1) + mt(v->type) + " " + varName(v) + " = {};\n";
             o += ind(in + 1) + "switch (" + ex(s->expr) + ") {\n";
             for (auto* b : s->body) {
                 if (b->kind == SK::Decl) {
@@ -1688,7 +1692,14 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
         case SK::Return:
             o += ind(in) + "return" + (s->expr ? " " + ex(s->expr) : "") + ";\n";
             return;
-        case SK::Discard: o += ind(in) + "discard_fragment();\n"; return;
+        case SK::Discard: {
+            // Field-debugging bisect switch (METALGLDRV_DEBUG_NODISCARD=1): drop shader discards.
+            // 1 = all; N >= 2 = only the (N-1)th discard statement of each shader.
+            static const int noDiscard = getenv("METALGLDRV_DEBUG_NODISCARD") ? atoi(getenv("METALGLDRV_DEBUG_NODISCARD")) : 0;
+            int k = ++discardCount_;
+            if (!(noDiscard == 1 || (noDiscard >= 2 && k == noDiscard - 1))) o += ind(in) + "discard_fragment();\n";
+            return;
+        }
     }
 }
 
@@ -1986,7 +1997,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         fnNames_[f] = "f_" + f->name + "_" + std::to_string(counts[f->name]++);
     }
 
-    std::string structs, members, funcs, init;
+    std::string structs, members, funcs, init, zero;
     std::vector<const StructDef*> order;
     collectStructs(order);
     for (auto* sd : order) {
@@ -2011,13 +2022,20 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
             continue;
         }
         members += "    " + mt(v->type) + " " + varName(v) + ";\n";
+        // inputs are copied in by the entry point and initialized globals are set by mgl_init
+        if (!v->init && v->q.storage != Storage::In) zero += "        " + varName(v) + " = {};\n";
     }
     for (auto* v : si.builtins) {
         if (inThreadgroup(v)) sharedDecl += "    " + mt(v->type) + " bi_" + v->name + ";\n";
-        else members += "    " + mt(v->type) + " bi_" + v->name + ";\n";
+        else {
+            members += "    " + mt(v->type) + " bi_" + v->name + ";\n";
+            if (v->q.storage != Storage::In) zero += "        bi_" + v->name + " = {};\n";
+        }
     }
-    if ((s == Stage::Vertex || s == Stage::Geometry || s == Stage::TessEval) && !si.bi.count(BuiltinVar::Position))
+    if ((s == Stage::Vertex || s == Stage::Geometry || s == Stage::TessEval) && !si.bi.count(BuiltinVar::Position)) {
         members += "    float4 bi_gl_Position;\n";
+        zero += "        bi_gl_Position = {};\n";
+    }
     si.hasShared = hasShared_ = !sharedDecl.empty();
     if (hasShared_) members += "    threadgroup MGLShared* S;\n";
 
@@ -2036,6 +2054,11 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     init = "    void mgl_init() {\n";
     for (auto& t : temps_) init += "        " + t + "\n";
     init += initBody + "    }\n";
+    // Zeroes the members nothing else initializes (outputs, globals without initializer). Entry
+    // points call this instead of value-initializing G: on Apple GPUs, zeroing all of a large G
+    // (whether `G g = {}` or member by member) broke fragment shaders that can discard, which
+    // then lost every fragment of the draw (Complementary's gbuffers_terrain).
+    init += "    void mgl_zero() {\n" + zero + "    }\n";
 
     o += "namespace " + ns_ + " {\n";
     if (needEq_) o += "using ::mgl_eq;\n";
@@ -2363,7 +2386,7 @@ void Emitter::emitClassicVS(std::string& o) {
     e += ", uint mgl_bi [[base_instance]]";
     if (K.manualFetch) e += ", constant MGLDrawInfo& D [[buffer(22)]]";
     if (si.bi.count(BuiltinVar::BaseVertex)) e += ", uint mgl_bv [[base_vertex]]";
-    e += ") {\n    vs::G g = {};\n    g.A = &A;\n    g.sys = &sys;\n";
+    e += ") {\n    vs::G g;\n    g.mgl_zero();\n    g.A = &A;\n    g.sys = &sys;\n";
     e += copyIn;
     for (auto* v : si.builtins) {
         if (v->builtin == BuiltinVar::VertexID) e += "    g.bi_" + v->name + " = int(mgl_vid);\n";
@@ -2610,7 +2633,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     e += std::string("fragment ") + (anyOut ? "fs::Out" : "void") + " mgl_fs(";
     if (anyIn) e += "fs::In in [[stage_in]], ";
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
-    e += "    fs::G g = {};\n    g.A = &A;\n    g.sys = &sys;\n" + copyIn;
+    e += "    fs::G g;\n    g.mgl_zero();\n    g.A = &A;\n    g.sys = &sys;\n" + copyIn;
     e += "    g.mgl_init();\n    g." + si.mainName + "();\n";
     if (anyOut) e += "    fs::Out o;\n" + copyOut + alpha + "    return o;\n";
     e += "}\n\n";

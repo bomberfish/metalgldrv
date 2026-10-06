@@ -44,6 +44,8 @@ cat > "$APP/Info.plist" <<PLIST
   </dict>
 </dict></plist>
 PLIST
+# Optional files for the replay test (tests/host/test_replay.cpp), shipped in the bundle.
+if [ -n "${MGL_REPLAY_FILES:-}" ]; then mkdir -p "$APP/replay" && cp $MGL_REPLAY_FILES "$APP/replay/"; fi
 TMP="$BUILD/sign"
 mkdir -p "$TMP"
 security cms -D -i "$PROFILE" > "$TMP/profile.plist"
@@ -55,5 +57,6 @@ codesign -f -s "$IDENTITY" "$APP/Frameworks/libmetalgldrv.dylib" >/dev/null
 codesign -f -s "$IDENTITY" --entitlements "$TMP/ent.plist" "$APP" >/dev/null
 xcrun devicectl device install app --device "$DEVICE" "$APP" >/dev/null
 echo "== running on device $DEVICE"
+RUN_ENV=${MGL_RUN_ENV:-'{"METALGLDRV_LOG":"2"}'}
 xcrun devicectl device process launch --device "$DEVICE" --console --terminate-existing \
-  --environment-variables '{"METALGLDRV_LOG":"2"}' "$BUNDLE_ID" "$@" 2>&1 | grep -v "^Waiting\|^Launched\|^$"
+  --environment-variables "$RUN_ENV" "$BUNDLE_ID" "$@" 2>&1 | grep -v "^Waiting\|^Launched\|^$"
