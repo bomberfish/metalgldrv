@@ -564,9 +564,12 @@ API const GLubyte* APIENTRY glGetString(GLenum name) {
     case GL_VERSION: return (const GLubyte*)(ctx->coreProfile ? "4.6.0 Core Profile metalgldrv 0.1" : "4.6.0 Compatibility Profile metalgldrv 0.1");
     case GL_SHADING_LANGUAGE_VERSION: return (const GLubyte*)"4.60 metalgldrv";
     case GL_EXTENSIONS:
-        // Core profiles must raise INVALID_ENUM here; we still return the string because
-        // widely used GLFW shims (e.g. Amethyst/Pojav's glfwExtensionSupported) dereference it.
-        if (ctx->coreProfile) ctx->setError(GL_INVALID_ENUM);
+        // Removed from core profiles (use glGetStringi). Clients whose GLFW shim still calls this,
+        // like Amethyst's, should create a compatibility context.
+        if (ctx->coreProfile) {
+            ctx->setError(GL_INVALID_ENUM);
+            return nullptr;
+        }
         return (const GLubyte*)extensionString().c_str();
     default: ctx->setError(GL_INVALID_ENUM); return nullptr;
     }

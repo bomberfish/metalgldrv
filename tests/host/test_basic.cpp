@@ -156,3 +156,29 @@ TEST(depth_clear_readback) {
     CHECK_EQ(s, 0x5a);
     CHECK_GL();
 }
+
+// GL_EXTENSIONS through glGetString is removed from core profiles; compatibility keeps it.
+TEST(core_profile_rejects_glgetstring_extensions) {
+    CHECK(glGetString(GL_EXTENSIONS) != nullptr);  // the harness context is compatibility
+    EGLDisplay dpy = eglGetCurrentDisplay();
+    EGLSurface surf = eglGetCurrentSurface(EGL_DRAW);
+    EGLContext prev = eglGetCurrentContext();
+    EGLint cfgId = 0;
+    eglQueryContext(dpy, prev, EGL_CONFIG_ID, &cfgId);
+    EGLint want[] = {EGL_CONFIG_ID, cfgId, EGL_NONE};
+    EGLConfig cfg;
+    EGLint n = 0;
+    eglChooseConfig(dpy, want, &cfg, 1, &n);
+    EGLint attr[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 2, EGL_CONTEXT_OPENGL_PROFILE_MASK,
+                     EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, EGL_NONE};
+    EGLContext core = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, attr);
+    CHECK(core != EGL_NO_CONTEXT);
+    eglMakeCurrent(dpy, surf, surf, core);
+    CHECK(glGetString(GL_EXTENSIONS) == nullptr);
+    CHECK(glGetError() == GL_INVALID_ENUM);
+    GLint num = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &num);
+    CHECK(num > 0 && glGetStringi(GL_EXTENSIONS, 0) != nullptr);
+    eglMakeCurrent(dpy, surf, surf, prev);
+    eglDestroyContext(dpy, core);
+}
