@@ -149,6 +149,7 @@ private:
     std::shared_ptr<LinkedProgram> prog_;
     LinkResult res_;
     bool ok_ = true;
+    std::map<std::string, int> explicitLoc_;  // uniform leaf path -> location derived from layout(location)
 
     void error(const std::string& m) {
         ok_ = false;
@@ -427,6 +428,22 @@ void Linker::assignFragOutputs() {
     }
 }
 
+static const int kMaxUniformLocations = 16384;  // GL_MAX_UNIFORM_LOCATIONS
+
+// Leaves of a uniform in GL location order: (path, number of locations).
+static void uniformLeaves(const Type& t, const std::string& path, std::vector<std::pair<std::string, int>>& out) {
+    if (t.base == BT::Struct && t.dims.empty()) {
+        for (auto& m : t.sdef->members) uniformLeaves(m.type, path + "." + m.name, out);
+        return;
+    }
+    Type et = t.elem();
+    if (!t.dims.empty() && (et.base == BT::Struct || !et.dims.empty())) {
+        for (int i = 0; i < t.dims[0]; i++) uniformLeaves(et, path + "[" + std::to_string(i) + "]", out);
+        return;
+    }
+    out.push_back({path, t.dims.empty() ? 1 : std::max(1, t.dims[0])});
+}
+
 void Linker::addUniformEntries(const std::string& name, const Type& t, TL L, uint32_t off, int blockIndex,
                                uint32_t stageMask, bool ssbo, int topArraySize, uint32_t topArrayStride, int& location,
                                std::set<int>& usedLocs, const Qualifiers* q) {
@@ -484,8 +501,10 @@ void Linker::addUniformEntries(const std::string& name, const Type& t, TL L, uin
             u.location = -1;
         } else {
             int n = u.arraySize;
-            if (q && q->layout.location >= 0) {
-                u.location = q->layout.location;
+            auto ex = explicitLoc_.find(name);
+            (void)q;
+            if (ex != explicitLoc_.end()) {
+                u.location = ex->second;
             } else {
                 int loc = location;
                 for (;;) {
@@ -588,8 +607,14 @@ void Linker::assignUniforms() {
                     Entry& e = vec[it->second];
                     if (e.v->type != v->type && e.v->type.str() != v->type.str())
                         error("uniform '" + v->name + "' declared with different types in different stages");
-                    else if (v->type.stripArrays().base == BT::Image && e.v->q.layout.format != v->q.layout.format)
+                    if (v->type.stripArrays().base == BT::Image && e.v->q.layout.format != v->q.layout.format)
                         error("image uniform '" + v->name + "' declared with different format qualifiers in different stages");
+                    if (v->q.layout.location >= 0) {
+                        if (e.v->q.layout.location >= 0 && e.v->q.layout.location != v->q.layout.location)
+                            error("uniform '" + v->name + "' declared with different locations in different stages");
+                        else if (e.v->q.layout.location < 0)
+                            e.v = v;  // the explicit location applies to the whole program
+                    }
                     e.mask |= 1u << s;
                 }
             };
@@ -600,13 +625,51 @@ void Linker::assignUniforms() {
     }
     int slot = 0;
     std::set<int> usedLocs;
-    // explicit locations reserve first
-    for (auto& e : defaults)
-        if (e.v->q.layout.location >= 0)
-            for (int i = 0; i < std::max(1, e.v->type.totalArrayElements()); i++) usedLocs.insert(e.v->q.layout.location + i);
-    for (auto& e : opaques)
-        if (e.v->q.layout.location >= 0)
-            for (int i = 0; i < std::max(1, e.v->type.totalArrayElements()); i++) usedLocs.insert(e.v->q.layout.location + i);
+    // Explicit locations reserve first. An aggregate with layout(location = L) assigns consecutive locations to its
+    // leaves (struct members / array elements in declaration order), each leaf array taking one location per element.
+    {
+        std::set<std::string> seenVar;
+        std::vector<const Variable*> vars;
+        for (auto& e : defaults) if (seenVar.insert(e.v->name).second) vars.push_back(e.v);
+        for (auto& e : opaques) if (seenVar.insert(e.v->name).second) vars.push_back(e.v);
+        // An explicit location given in any shader applies to the program-wide uniform, and inactive uniforms
+        // with explicit locations still reserve them.
+        std::map<std::string, int> declLoc;
+        for (int st = 0; st < (int)Stage::Count; st++)
+            for (auto& sh : prog_->stages[st].shaders)
+                for (auto& g : sh->globals) {
+                    const Variable* gv = g.var;
+                    if (g.kind != GlobalDecl::Var || gv->q.storage != Storage::Uniform || gv->block ||
+                        gv->type.base == BT::Subroutine || gv->q.layout.location < 0)
+                        continue;
+                    auto it = declLoc.find(gv->name);
+                    if (it != declLoc.end() && it->second != gv->q.layout.location)
+                        error("uniform '" + gv->name + "' declared with different locations in different shaders");
+                    declLoc[gv->name] = gv->q.layout.location;
+                    if (seenVar.insert(gv->name).second) vars.push_back(gv);
+                }
+        for (auto* v : vars) {
+            auto dl = declLoc.find(v->name);
+            if (dl == declLoc.end()) continue;
+            std::vector<std::pair<std::string, int>> leaves;
+            uniformLeaves(v->type, v->name, leaves);
+            int loc = dl->second;
+            for (auto& [path, n] : leaves) {
+                explicitLoc_[path] = loc;
+                for (int i = 0; i < n; i++) {
+                    if (loc + i >= kMaxUniformLocations) {
+                        error("uniform '" + v->name + "' location exceeds GL_MAX_UNIFORM_LOCATIONS");
+                        return;
+                    }
+                    if (!usedLocs.insert(loc + i).second) {
+                        error("location " + std::to_string(loc + i) + " is assigned to more than one uniform");
+                        return;
+                    }
+                }
+                loc += n;
+            }
+        }
+    }
     int location = 0;
 
     // --- default block ---------------------------------------------------
@@ -741,7 +804,7 @@ void Linker::assignUniforms() {
         u.binding = lf.explicitLoc ? std::max(0, v->q.layout.binding) : 0;
         // Atomic counters have no uniform location (GL 4.6 §7.6.1).
         if (bt.base == BT::AtomicUint) u.location = -1;
-        else if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location;
+        else if (explicitLoc_.count(lf.path)) u.location = explicitLoc_[lf.path];
         else {
             int loc = location;
             for (;;) {
@@ -833,6 +896,11 @@ void Linker::assignUniforms() {
         if (combined > k_gl_MaxCombinedImageUniforms)
             error("too many image uniforms in the program (" + std::to_string(combined) + " > " + std::to_string(k_gl_MaxCombinedImageUniforms) + ")");
     }
+    for (auto& u : refl.uniforms)
+        if (u.location >= 0 && u.location + u.arraySize > kMaxUniformLocations) {
+            error("the program uses more than GL_MAX_UNIFORM_LOCATIONS uniform locations");
+            return;
+        }
     // subroutines (per stage)
     for (int s = 0; s < (int)Stage::Count; s++) {
         StageCode& sc = prog_->stages[s];
@@ -860,8 +928,29 @@ void Linker::assignUniforms() {
             }
         int maxIdx = 0;
         for (int i : index) maxIdx = std::max(maxIdx, i);
+        if (maxIdx >= 256) error("subroutine index exceeds GL_MAX_SUBROUTINES");
         ss.functions.assign(maxIdx + 1, "");
         for (size_t i = 0; i < fns.size(); i++) ss.functions[index[i]] = fns[i]->name;
+        {
+            // every declared subroutine uniform (active or not) must fit GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS
+            std::set<std::string> seenU;
+            int explicitEnd = 0, implicitCount = 0;
+            std::set<int> explicitLocs;
+            for (auto& sh : sc.shaders)
+                for (auto& g : sh->globals)
+                    if (g.kind == GlobalDecl::Var && g.var->type.base == BT::Subroutine && g.var->q.storage == Storage::Uniform &&
+                        seenU.insert(g.var->name).second) {
+                        int n = std::max(1, g.var->type.totalArrayElements());
+                        if (g.var->q.layout.location >= 0) {
+                            explicitEnd = std::max(explicitEnd, g.var->q.layout.location + n);
+                            for (int i = 0; i < n; i++) explicitLocs.insert(g.var->q.layout.location + i);
+                        } else {
+                            implicitCount += n;
+                        }
+                    }
+            if (explicitEnd > 1024 || (int)explicitLocs.size() + implicitCount > 1024)
+                error("subroutine uniforms exceed GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS");
+        }
         std::vector<const Variable*> unis;
         for (auto* v : sc.used)
             if (v->type.base == BT::Subroutine && v->q.storage == Storage::Uniform) unis.push_back(v);
@@ -869,12 +958,15 @@ void Linker::assignUniforms() {
         std::set<int> takenLoc;
         for (auto* v : unis)
             if (v->q.layout.location >= 0)
-                for (int i = 0; i < v->type.arraySize(); i++) takenLoc.insert(v->q.layout.location + i);
+                for (int i = 0; i < std::max(1, v->type.totalArrayElements()); i++)
+                    if (!takenLoc.insert(v->q.layout.location + i).second)
+                        error("subroutine uniform location " + std::to_string(v->q.layout.location + i) + " is used more than once");
         int nextLoc = 0;
         for (auto* v : unis) {
             SubroutineUniform su;
             su.name = v->name;
-            su.arraySize = v->type.isArray() ? v->type.dims[0] : 1;
+            su.arraySize = v->type.isArray() ? std::max(1, v->type.totalArrayElements()) : 1;
+            su.dims = v->type.dims;
             if (v->q.layout.location >= 0) su.location = v->q.layout.location;
             else {
                 for (;;) {
@@ -891,6 +983,7 @@ void Linker::assignUniforms() {
                 if (std::find(fns[i]->subroutineTypes.begin(), fns[i]->subroutineTypes.end(), v->type.subr->name) != fns[i]->subroutineTypes.end())
                     su.compatible.push_back(index[i]);
             ss.numLocations = std::max(ss.numLocations, su.location + su.arraySize);
+            if (ss.numLocations > 1024) error("subroutine uniform locations exceed GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS");
             ss.uniforms.push_back(su);
             prog_->subroutineLocation[{s, v->name}] = su.location;
         }

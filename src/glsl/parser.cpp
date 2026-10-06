@@ -549,11 +549,19 @@ void Parser::parseLayout(Qualifiers& q) {
         int64_t val = 0;
         bool hasVal = false;
         if (accept("=")) {
+            // Before GLSL 4.40 (ARB_enhanced_layouts) layout values must be integer literals.
+            if (!preamble_ && sh_.version < (sh_.es ? 310 : 440) && !extEnabled("GL_ARB_enhanced_layouts") &&
+                !(peek().kind == PK::Number && (isP(",", 1) || isP(")", 1))))
+                fail("layout qualifier '" + id + "' requires an integer literal before GLSL 4.40");
             Expr* e = parseConditional();
             val = constInt(e, "layout qualifier value");
             hasVal = true;
         }
-        auto need = [&]() { if (!hasVal) fail("layout qualifier '" + id + "' requires a value"); return (int)val; };
+        auto need = [&]() {
+            if (!hasVal) fail("layout qualifier '" + id + "' requires a value");
+            if (val < 0) fail("layout qualifier '" + id + "' cannot be negative");
+            return (int)val;
+        };
         if (lid == "location") L.location = need();
         else if (lid == "component") L.component = need();
         else if (lid == "binding") {
@@ -1583,12 +1591,28 @@ Expr* Parser::parsePostfix(Expr* e) {
         if (accept("[")) {
             Expr* i = parseExpression();
             expect("]");
-            if (e->kind == EK::Var && e->type.isArray() && e->type.base == BT::Subroutine && isP("(")) {
-                auto args = parseArgs();
-                e = mkSubroutineCall(e->var, i, args, ln);
-                continue;
-            }
             e = mkIndex(e, i, ln);
+            if (e->type.base == BT::Subroutine && !e->type.isArray() && isP("(")) {
+                // call through an element of a subroutine uniform array (of arrays): flatten the index
+                std::vector<Expr*> idx;
+                Expr* b = e;
+                while (b->kind == EK::Index) { idx.insert(idx.begin(), b->args[1]); b = b->args[0]; }
+                if (b->kind != EK::Var) fail("invalid subroutine call", ln);
+                Expr* flat = nullptr;
+                const std::vector<int>& dims = b->var->type.dims;
+                for (size_t k = 0; k < idx.size(); k++) {
+                    Expr* ik = idx[k]->type.base == BT::Int ? idx[k] : mkCtor(Type::scalar(BT::Int), {idx[k]}, ln);
+                    if (!flat) { flat = ik; continue; }
+                    Expr* d = E(EK::Const, Type::scalar(BT::Int), ln);
+                    d->cv = std::make_shared<ConstVal>();
+                    Scalar sc;
+                    sc.i = dims[k];
+                    d->cv->c.push_back(sc);
+                    flat = mkBinary(Op::Add, mkBinary(Op::Mul, flat, d, ln), ik, ln);
+                }
+                auto args = parseArgs();
+                e = mkSubroutineCall(b->var, flat, args, ln);
+            }
         } else if (accept(".")) {
             std::string f = expectIdent();
             if (f == "length" && isP("(")) {

@@ -159,7 +159,8 @@ struct MultiPassInfo {
 struct SubroutineUniform {
     std::string name;
     int location = -1;               // GL subroutine uniform location (per stage); arrays occupy [location, location+arraySize)
-    int arraySize = 1;
+    int arraySize = 1;               // total elements (arrays of arrays are flattened)
+    std::vector<int> dims;           // array dimensions, outermost first (empty: not an array)
     std::vector<int> compatible;     // indices into StageSubroutines::functions
 };
 struct StageSubroutines {
