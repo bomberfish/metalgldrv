@@ -326,7 +326,8 @@ void Parser::finalize() {
         if (!v->type.dims.empty() && v->type.dims[0] == 0 && !(v->q.storage == Storage::Buffer)) v->type.dims[0] = mx + 1;
     }
     for (auto& v : sh_.vars) {
-        if (v.global && !v.type.dims.empty() && v.type.dims[0] == 0 && v.q.storage != Storage::Buffer && !v.param) {
+        // implicitly sized globals and locals (float[] x = ..., y;) that were never indexed
+        if (!v.type.dims.empty() && v.type.dims[0] == 0 && v.q.storage != Storage::Buffer && !v.param && !v.block) {
             bool bi = v.builtin == BuiltinVar::ClipDistance || v.builtin == BuiltinVar::CullDistance || v.builtin == BuiltinVar::TexCoord ||
                       v.builtin == BuiltinVar::FragData;
             // dynamically indexed builtin arrays get the implementation maximum; unused ones stay minimal
@@ -670,6 +671,8 @@ StructDef* Parser::parseStruct() {
             parseArrayDims(nd);
             if (!nd.dims.empty()) m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end());
             m.q = mq;
+            for (int d : m.type.dims)
+                if (d == 0 && !preamble_) fail("'" + m.name + "' : structure members must have a declared array size");
             if (sd->findMember(m.name) >= 0) fail("duplicate struct member '" + m.name + "'");
             sd->members.push_back(m);
         } while (accept(","));
@@ -830,6 +833,8 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
             parseArrayDims(nd);
             if (!nd.dims.empty()) m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end());
             m.q = mq;
+            for (size_t i = 1; i < m.type.dims.size(); i++)
+                if (m.type.dims[i] == 0 && !preamble_) fail("'" + m.name + "' : only the outermost array dimension may be unsized");
             if (!m.q.interpExplicit) { m.q.interp = q.interp; m.q.interpExplicit = q.interpExplicit; }
             if (q.centroid) m.q.centroid = true;
             if (q.sample) m.q.sample = true;
@@ -1219,6 +1224,10 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             }
         } else if (q.storage == Storage::Const && !preamble_) {
             fail("'" + name + "' : const variables must be initialized");
+        } else if (!preamble_) {
+            // without an initializer only the outermost dimension may be left unsized (GLSL 4.60 §4.1.9)
+            for (size_t i = 1; i < t.dims.size(); i++)
+                if (t.dims[i] == 0) fail("'" + name + "' : only the outermost array dimension may be unsized", ln);
         }
         // implicit storage for shared/in/out arrays sized by layout
         if (global && sh_.stage == Stage::Geometry && q.storage == Storage::In && !t.dims.empty() && t.dims[0] == 0 &&

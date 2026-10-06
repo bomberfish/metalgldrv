@@ -17,6 +17,18 @@ std::string fillMultipassRecords(const LinkedProgram& prog, MultiPassInfo& mp); 
 // ---------------------------------------------------------------------------
 uint32_t scalarSize(BT b) { return b == BT::Double ? 8 : 4; }
 
+// Value of a GLSL built-in limit constant (src/glsl/limits.def).
+static int limitValue(const char* name) {
+    static const std::pair<const char*, int> kLimits[] = {
+#define X(n, glenum, value) {#n, value},
+#include "glsl/limits.def"
+#undef X
+    };
+    for (auto& [n, v] : kLimits)
+        if (!std::strcmp(n, name)) return v;
+    return 1 << 30;
+}
+
 static uint32_t roundUp(uint32_t v, uint32_t a) { return a ? (v + a - 1) / a * a : v; }
 
 static TL computeLayoutImpl(const Type& t, Packing packing, bool rowMajor, int blockAlign);
@@ -765,54 +777,84 @@ void Linker::assignUniforms() {
         for (auto& m : t.sdef->members) expand(e, path + "." + m.name, m.type);
     };
     for (auto& e : opaques) expand(e, e.v->name, e.v->type);
+    {
+        // GL_MAX_<stage>_ATOMIC_COUNTERS
+        static const int kMax[(int)Stage::Count] = {
+            limitValue("gl_MaxVertexAtomicCounters"), limitValue("gl_MaxTessControlAtomicCounters"),
+            limitValue("gl_MaxTessEvaluationAtomicCounters"), limitValue("gl_MaxGeometryAtomicCounters"),
+            limitValue("gl_MaxFragmentAtomicCounters"), limitValue("gl_MaxComputeAtomicCounters")};
+        int counters[(int)Stage::Count] = {};
+        for (auto& e : opaques)
+            if (e.v->type.stripArrays().base == BT::AtomicUint)
+                for (int s = 0; s < (int)Stage::Count; s++)
+                    if (e.mask & (1u << s)) counters[s] += std::max(1, e.v->type.totalArrayElements());
+        for (int s = 0; s < (int)Stage::Count; s++)
+            if (counters[s] > kMax[s]) error("too many atomic counters in one shader stage");
+    }
     for (auto& lf : leaves) {
         const Variable* v = lf.v;
         Type bt = lf.type.stripArrays();
         int n = std::max(1, lf.type.totalArrayElements());
-        if (lf.type.dims.size() > 1) error("arrays of arrays of opaque types are not supported ('" + lf.path + "')");
+        // Arrays of arrays of opaque types occupy one flattened run of slots (row-major); GL enumerates
+        // one active uniform per innermost array: x[i][j][0] (GL 4.6 §7.3.1.1).
+        int inner = lf.type.isArray() ? std::max(1, lf.type.dims.back()) : 1;
+        int groups = n / inner;
         OpaqueBinding ob;
         ob.type = bt;
         ob.count = n;
         ob.memory = v->q.memory;
-        Uniform u;
-        u.name = lf.type.isArray() ? lf.path + "[0]" : lf.path;
-        u.type = glTypeEnum(bt);
-        u.arraySize = lf.type.isArray() ? lf.type.dims[0] : 1;
-        u.stageMask = lf.mask;
-        u.binding = lf.explicitLoc ? std::max(0, v->q.layout.binding) : 0;
-        if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location;
-        else {
-            int loc = location;
-            for (;;) {
-                bool free = true;
-                for (int i = 0; i < n; i++) if (usedLocs.count(loc + i)) free = false;
-                if (free) break;
-                loc++;
+        int firstUidx = (int)refl.uniforms.size();
+        ob.uniformIndex = firstUidx;
+        std::vector<Uniform> us;
+        for (int gi = 0; gi < groups; gi++) {
+            Uniform u;
+            std::string sub;
+            for (size_t d = 0, rem = gi; d + 1 < lf.type.dims.size(); d++) {
+                int stride = 1;
+                for (size_t k = d + 1; k + 1 < lf.type.dims.size(); k++) stride *= std::max(1, lf.type.dims[k]);
+                sub += "[" + std::to_string(rem / stride) + "]";
+                rem %= stride;
             }
-            u.location = loc;
-            location = loc + n;
+            u.name = lf.type.isArray() ? lf.path + sub + "[0]" : lf.path;
+            u.type = glTypeEnum(bt);
+            u.arraySize = lf.type.isArray() ? inner : 1;
+            u.stageMask = lf.mask;
+            u.binding = lf.explicitLoc ? std::max(0, v->q.layout.binding) + gi * inner : 0;
+            if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location + gi * inner;
+            else {
+                int loc = location;
+                for (;;) {
+                    bool free = true;
+                    for (int i = 0; i < inner; i++) if (usedLocs.count(loc + i)) free = false;
+                    if (free) break;
+                    loc++;
+                }
+                u.location = loc;
+                location = loc + inner;
+            }
+            for (int i = 0; i < inner; i++) usedLocs.insert(u.location + i);
+            us.push_back(u);
         }
-        for (int i = 0; i < n; i++) usedLocs.insert(u.location + i);
-        int uidx = (int)refl.uniforms.size();
-        ob.uniformIndex = uidx;
+        auto pushSlots = [&](SlotKind kind) {
+            for (int gi = 0; gi < groups; gi++)
+                for (int i = 0; i < inner; i++) refl.slots.push_back({kind, (uint32_t)(firstUidx + gi), (uint32_t)i, textureTargetFor(bt)});
+            slot += n;
+        };
         if (bt.base == BT::Sampler) {
             ob.kind = SlotKind::Texture;
             ob.slot = slot;
-            u.slot = slot;
-            for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::Texture, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
-            slot += n;
+            for (int gi = 0; gi < groups; gi++) us[gi].slot = slot + gi * inner;
+            pushSlots(SlotKind::Texture);
             ob.samplerSlot = slot;
-            for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::Sampler, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
-            slot += n;
+            pushSlots(SlotKind::Sampler);
         } else if (bt.base == BT::Image) {
             ob.kind = SlotKind::Image;
             ob.slot = slot;
-            u.slot = slot;
-            for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::Image, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
-            slot += n;
+            for (int gi = 0; gi < groups; gi++) us[gi].slot = slot + gi * inner;
+            pushSlots(SlotKind::Image);
         } else {  // atomic_uint
             ob.kind = SlotKind::AtomicCounter;
-            int binding = u.binding;
+            int binding = std::max(0, v->q.layout.binding);
             uint32_t aoff = v->q.layout.offset >= 0 ? (uint32_t)v->q.layout.offset : acNextOffset[binding];
             acNextOffset[binding] = aoff + 4 * n;
             if (!acbByBinding.count(binding)) {
@@ -827,15 +869,18 @@ void Linker::assignUniforms() {
             int ai = acbByBinding[binding];
             auto& acb = refl.atomicCounterBuffers[ai];
             acb.dataSize = std::max(acb.dataSize, aoff + 4 * n);
-            acb.activeUniforms.push_back(uidx);
             acb.stageMask |= lf.mask;
             ob.acbIndex = ai;
             ob.acOffset = aoff;
-            u.offset = (int)aoff;
-            u.arrayStride = lf.type.isArray() ? 4 : 0;
-            u.atomicCounterBufferIndex = ai;
+            for (int gi = 0; gi < groups; gi++) {
+                acb.activeUniforms.push_back(firstUidx + gi);
+                us[gi].binding = binding;
+                us[gi].offset = (int)(aoff + 4 * gi * inner);
+                us[gi].arrayStride = lf.type.isArray() ? 4 : 0;
+                us[gi].atomicCounterBufferIndex = ai;
+            }
         }
-        refl.uniforms.push_back(u);
+        for (auto& u : us) refl.uniforms.push_back(u);
         prog_->opaque[lf.path] = ob;
     }
     // subroutines (per stage)
@@ -934,7 +979,6 @@ void Linker::checkVaryings() {
             continue;
         }
         Type a = it->second->type, b = v->type;
-        if (pre != Stage::Vertex && !a.dims.empty()) a = a.elem();
         if (a.str() != b.str() && !(a.base == BT::Struct && b.base == BT::Struct && a.sdef->name == b.sdef->name))
             error("type mismatch for varying '" + v->name + "' ('" + a.str() + "' vs '" + b.str() + "')");
     }

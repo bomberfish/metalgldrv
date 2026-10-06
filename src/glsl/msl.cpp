@@ -298,6 +298,7 @@ private:
     bool addressable(const Expr* e);
     bool isBufferRooted(const Expr* e);
     std::pair<std::string, std::string> texRef(const Expr* e);
+    std::string opaqueIndex(const Expr* e, const Expr*& base);
     std::string withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs, const std::vector<Type>& ptypes,
                          const Type& ret, const std::function<std::string(size_t, const Expr*)>& argFn, const std::string& firstArg = "");
     std::string subroutineDispatchers();
@@ -604,6 +605,10 @@ bool Emitter::addressable(const Expr* e) {
 // ===========================================================================
 std::string Emitter::binaryF64(Op op, std::string a, const Type& ta, std::string b, const Type& tb) {
     bool ma = ta.isMatrix(), mb = tb.isMatrix();
+    if ((op == Op::Eq || op == Op::Ne) && (ta.isArray() || tb.isArray())) {  // arrays of doubles compare element-wise
+        needEq_ = true;
+        return op == Op::Eq ? "mgl_eq(" + a + ", " + b + ")" : "(!mgl_eq(" + a + ", " + b + "))";
+    }
     if (ma || mb) {
         switch (op) {
             case Op::Add: return (ma && mb ? "mgl_dmat_add(" : "mgl_dmat_adds(") + a + ", " + b + ")";
@@ -1035,12 +1040,37 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         const OpaqueBinding& ob = it->second;
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
     }
-    if (e->kind == EK::Index && e->args[0]->kind == EK::Var) {
-        auto r = texRef(e->args[0]);
-        std::string idx = ex(e->args[1]);
+    if (e->kind == EK::Index) {
+        const Expr* base = nullptr;
+        std::string idx = opaqueIndex(e, base);
+        auto r = texRef(base);
         return {r.first + "[" + idx + "]", r.second.empty() ? "" : r.second + "[" + idx + "]"};
     }
     fail("unsupported sampler/image expression");
+}
+
+// Flattened (row-major) element index of an indexed opaque array variable, incl. arrays of arrays,
+// whose bindings occupy one run of slots. `base` receives the indexed variable reference.
+std::string Emitter::opaqueIndex(const Expr* e, const Expr*& base) {
+    std::vector<const Expr*> idx;
+    const Expr* b = e;
+    while (b->kind == EK::Index) {
+        idx.insert(idx.begin(), b->args[1]);
+        b = b->args[0];
+    }
+    if (b->kind != EK::Var) fail("unsupported sampler/image expression");
+    const std::vector<int>& dims = b->var->type.dims;
+    if (idx.size() != dims.size()) fail("arrays of opaque types must be indexed down to a single element");
+    base = b;
+    std::string r;
+    for (size_t i = 0; i < idx.size(); i++) {
+        int stride = 1;
+        for (size_t k = i + 1; k < dims.size(); k++) stride *= std::max(1, dims[k]);
+        std::string term = idx.size() == 1 ? ex(idx[i]) : "int(" + ex(idx[i]) + ")";
+        if (stride != 1) term += " * " + std::to_string(stride);
+        r += (r.empty() ? "" : " + ") + term;
+    }
+    return r;
 }
 
 std::string Emitter::callUser(const Expr* e) {
@@ -1071,7 +1101,7 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
     if (a->type.base == BT::AtomicUint) {
         const Expr* base = a;
         std::string idx;
-        if (a->kind == EK::Index) { base = a->args[0]; idx = "uint(" + ex(a->args[1]) + ")"; }
+        if (a->kind == EK::Index) idx = "uint(" + opaqueIndex(a, base) + ")";
         if (base->kind != EK::Var) fail("unsupported atomic counter expression");
         const Variable* v = base->var;
         if (v->param) return varName(v);
