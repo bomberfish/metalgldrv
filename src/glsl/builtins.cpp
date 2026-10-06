@@ -448,82 +448,8 @@ Ctx& ctx() {
 // Builtin variable preambles
 // ---------------------------------------------------------------------------
 const char* kCommonPreamble = R"(
-const int gl_MaxVertexAttribs = 16;
-const int gl_MaxVertexUniformComponents = 4096;
-const int gl_MaxVaryingFloats = 124;
-const int gl_MaxVaryingComponents = 124;
-const int gl_MaxVertexOutputComponents = 124;
-const int gl_MaxGeometryInputComponents = 124;
-const int gl_MaxGeometryOutputComponents = 128;
-const int gl_MaxFragmentInputComponents = 124;
-const int gl_MaxVertexTextureImageUnits = 16;
-const int gl_MaxCombinedTextureImageUnits = 80;
-const int gl_MaxTextureImageUnits = 16;
-const int gl_MaxImageUnits = 8;
-const int gl_MaxCombinedImageUnitsAndFragmentOutputs = 16;
-const int gl_MaxImageSamples = 0;
-const int gl_MaxVertexImageUniforms = 8;
-const int gl_MaxTessControlImageUniforms = 8;
-const int gl_MaxTessEvaluationImageUniforms = 8;
-const int gl_MaxGeometryImageUniforms = 8;
-const int gl_MaxFragmentImageUniforms = 8;
-const int gl_MaxComputeImageUniforms = 8;
-const int gl_MaxCombinedImageUniforms = 48;
-const int gl_MaxFragmentUniformComponents = 4096;
-const int gl_MaxDrawBuffers = 8;
-const int gl_MaxClipDistances = 8;
-const int gl_MaxCullDistances = 8;
-const int gl_MaxCombinedClipAndCullDistances = 8;
-const int gl_MaxGeometryTextureImageUnits = 16;
-const int gl_MaxGeometryOutputVertices = 256;
-const int gl_MaxGeometryTotalOutputComponents = 1024;
-const int gl_MaxGeometryUniformComponents = 4096;
-const int gl_MaxGeometryVaryingComponents = 124;
-const int gl_MaxTessControlInputComponents = 124;
-const int gl_MaxTessControlOutputComponents = 124;
-const int gl_MaxTessControlTextureImageUnits = 16;
-const int gl_MaxTessControlUniformComponents = 4096;
-const int gl_MaxTessControlTotalOutputComponents = 4096;
-const int gl_MaxTessEvaluationInputComponents = 124;
-const int gl_MaxTessEvaluationOutputComponents = 124;
-const int gl_MaxTessEvaluationTextureImageUnits = 16;
-const int gl_MaxTessEvaluationUniformComponents = 4096;
-const int gl_MaxTessPatchComponents = 120;
-const int gl_MaxPatchVertices = 32;
-const int gl_MaxTessGenLevel = 64;
-const int gl_MaxViewports = 16;
-const int gl_MaxVertexUniformVectors = 1024;
-const int gl_MaxFragmentUniformVectors = 1024;
-const int gl_MaxVaryingVectors = 31;
-const int gl_MaxVertexAtomicCounters = 8;
-const int gl_MaxTessControlAtomicCounters = 8;
-const int gl_MaxTessEvaluationAtomicCounters = 8;
-const int gl_MaxGeometryAtomicCounters = 8;
-const int gl_MaxFragmentAtomicCounters = 8;
-const int gl_MaxCombinedAtomicCounters = 8;
-const int gl_MaxAtomicCounterBindings = 8;
-const int gl_MaxVertexAtomicCounterBuffers = 8;
-const int gl_MaxTessControlAtomicCounterBuffers = 8;
-const int gl_MaxTessEvaluationAtomicCounterBuffers = 8;
-const int gl_MaxGeometryAtomicCounterBuffers = 8;
-const int gl_MaxFragmentAtomicCounterBuffers = 8;
-const int gl_MaxCombinedAtomicCounterBuffers = 8;
-const int gl_MaxAtomicCounterBufferSize = 32;
-const int gl_MinProgramTexelOffset = -8;
-const int gl_MaxProgramTexelOffset = 7;
-const int gl_MaxTransformFeedbackBuffers = 4;
-const int gl_MaxTransformFeedbackInterleavedComponents = 64;
 const ivec3 gl_MaxComputeWorkGroupCount = ivec3(65535, 65535, 65535);
 const ivec3 gl_MaxComputeWorkGroupSize = ivec3(1024, 1024, 64);
-const int gl_MaxComputeUniformComponents = 4096;
-const int gl_MaxComputeTextureImageUnits = 16;
-const int gl_MaxComputeAtomicCounters = 8;
-const int gl_MaxComputeAtomicCounterBuffers = 8;
-const int gl_MaxSamples = 4;
-const int gl_MaxLights = 8;
-const int gl_MaxClipPlanes = 8;
-const int gl_MaxTextureUnits = 8;
-const int gl_MaxTextureCoords = 8;
 struct gl_DepthRangeParameters { float near; float far; float diff; };
 uniform gl_DepthRangeParameters gl_DepthRange;
 uniform mat4 gl_ModelViewMatrix;
@@ -709,7 +635,11 @@ const std::string& builtinPreamble(Stage stage) {
     if (!init) {
         init = true;
         for (int s = 0; s < (int)Stage::Count; s++) {
-            std::string p = kCommonPreamble;
+            std::string p;
+#define X(name, glenum, value) p += "const int " #name " = " + std::to_string(value) + ";\n";
+#include "limits.def"
+#undef X
+            p += kCommonPreamble;
             switch ((Stage)s) {
                 case Stage::Vertex: p += kVertexPreamble; break;
                 case Stage::TessControl: p += kPerVertexInTess; p += kTessControlPreamble; break;

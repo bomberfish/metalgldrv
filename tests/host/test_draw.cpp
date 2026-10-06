@@ -361,3 +361,40 @@ void main() { uint i = gl_GlobalInvocationID.x; if (i < values.length()) values[
     glDeleteProgram(p);
     CHECK_GL();
 }
+
+// 124 varying components into the fragment shader (Metal's limit; GL 4.6 asks for 128).
+static int kNV = getenv("NV") ? atoi(getenv("NV")) : 31;  // TODO: GL needs 32 (128 comps); Metal stops at 124
+TEST(varyings_124_components) {
+    std::string vs = "#version 460 core\nlayout(location=0) in vec2 p;\n", fs = "#version 460 core\nout vec4 o;\n";
+    std::string vb = "void main(){ gl_Position = vec4(p,0,1);\n", fb = "void main(){ vec4 s = vec4(0);\n";
+    for (int i = 0; i < kNV; i++) {
+        vs += "out vec4 v" + std::to_string(i) + ";\n";
+        fs += "in vec4 v" + std::to_string(i) + ";\n";
+        vb += " v" + std::to_string(i) + " = vec4(" + std::to_string(i) + ".0/1024.0);\n";
+        fb += " s += v" + std::to_string(i) + ";\n";
+    }
+    vs += vb + "}\n";
+    fs += fb + " o = s; }\n";
+    std::string log;
+    GLuint p = compileProgram(vs.c_str(), fs.c_str(), &log);
+    if (!p) fprintf(stderr, "  %s\n", log.c_str());
+    CHECK(p != 0);
+    GLuint vao, vb2;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    float q[] = {-1, -1, 1, -1, -1, 1, 1, 1};
+    glGenBuffers(1, &vb2);
+    glBindBuffer(GL_ARRAY_BUFFER, vb2);
+    glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glEnableVertexAttribArray(0);
+    glUseProgram(p);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // sum of i/1024 for i<31 = 465/1024 -> 116
+    CHECK_PIXEL(8, 8, 116, 116, 116, 116);
+    glDeleteProgram(p);
+    glDeleteBuffers(1, &vb2);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}

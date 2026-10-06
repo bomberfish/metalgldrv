@@ -110,6 +110,19 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
 
 static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     const int idx = index < 0 ? 0 : index;
+    // Limits that GLSL also exposes as gl_Max* constants come from the shared table.
+    static const std::pair<GLenum, int> kShaderLimits[] = {
+#define X(name, glenum, value) {glenum, value},
+#include "glsl/limits.def"
+#undef X
+    };
+    if (pname != 0)
+        for (auto& [e, val] : kShaderLimits)
+            if (e == pname) {
+                if (pname == GL_MAX_CLIP_PLANES && ctx->coreProfile) break;  // compatibility-only
+                v = I(val);
+                return true;
+            }
     switch (pname) {
     // --- implementation limits ---
     case GL_MAJOR_VERSION: v = I(4); return true;
