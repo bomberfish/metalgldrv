@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 // RGB9_E5 data must round-trip bit-exactly (non-canonical encodings included)
 // through mutable multi-level 3D textures and glCopyImageSubData.
@@ -71,6 +72,77 @@ static GLuint tex2D(GLenum ifmt, int w, int h, GLenum fmt, GLenum type, const vo
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     return t;
 }
+
+// imageSize()/imageStore() from graphics stages of a separable program pipeline.
+static void imageSizeStage(GLenum stageBit, bool pipeline) {
+    const char* vsPlain = "#version 430 core\nout gl_PerVertex { vec4 gl_Position; float gl_PointSize; };\n"
+                          "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); gl_PointSize = 1.0; }";
+    const char* body =
+        "layout(binding = 0, rgba32i) writeonly uniform iimage2D g_result;\n"
+        "layout(binding = 1, rgba32f) uniform image2D g_image_2d;\n"
+        "layout(binding = 2, rgba32f) uniform image3D g_image_3d;\n"
+        "void main() {\n"
+        "  imageStore(g_result, ivec2(0, 0), ivec4(imageSize(g_image_2d), 0, 0));\n"
+        "  imageStore(g_result, ivec2(0, 1), ivec4(imageSize(g_image_3d), 0));\n";
+    std::string vs = std::string("#version 430 core\n") + body + "  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n";
+    std::string fs = std::string("#version 430 core\n") + body + "}\n";
+    GLuint t[3];
+    glGenTextures(3, t);
+    glBindTexture(GL_TEXTURE_2D, t[1]);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 32, 16);
+    glBindImageTexture(1, t[1], 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA32F);
+    glBindTexture(GL_TEXTURE_3D, t[2]);
+    glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA32F, 8, 4, 2);
+    glBindImageTexture(2, t[2], 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+    int init[8];
+    for (int& v : init) v = 100000;
+    glBindTexture(GL_TEXTURE_2D, t[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32I, 1, 2, 0, GL_RGBA_INTEGER, GL_INT, init);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glBindImageTexture(0, t[0], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32I);
+    GLuint vao, pipe = 0, p1 = 0, p2 = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    if (pipeline) {
+        glGenProgramPipelines(1, &pipe);
+        const char* s1 = stageBit == GL_VERTEX_SHADER_BIT ? vs.c_str() : vsPlain;
+        p1 = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &s1);
+        glUseProgramStages(pipe, GL_VERTEX_SHADER_BIT, p1);
+        if (stageBit == GL_FRAGMENT_SHADER_BIT) {
+            const char* s2 = fs.c_str();
+            p2 = glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &s2);
+            glUseProgramStages(pipe, GL_FRAGMENT_SHADER_BIT, p2);
+        }
+        glBindProgramPipeline(pipe);
+    } else {
+        std::string fsPlain = "#version 430 core\nout vec4 c; void main() { c = vec4(1.0); }";
+        p1 = stageBit == GL_VERTEX_SHADER_BIT ? compileProgram(vs.c_str(), fsPlain.c_str()) : compileProgram(vsPlain, fs.c_str());
+        glUseProgram(p1);
+    }
+    if (stageBit == GL_VERTEX_SHADER_BIT) glEnable(GL_RASTERIZER_DISCARD);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_GL();
+    glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+    int out[8] = {};
+    glBindTexture(GL_TEXTURE_2D, t[0]);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_INT, out);
+    CHECK_EQ(out[0], 32);
+    CHECK_EQ(out[1], 16);
+    CHECK_EQ(out[4], 8);
+    CHECK_EQ(out[6], 2);
+    glUseProgram(0);
+    glBindProgramPipeline(0);
+    if (pipe) glDeleteProgramPipelines(1, &pipe);
+    glDeleteProgram(p1);
+    if (p2) glDeleteProgram(p2);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTextures(3, t);
+}
+
+TEST(image_size_vs_program) { imageSizeStage(GL_VERTEX_SHADER_BIT, false); }
+TEST(image_size_fs_program) { imageSizeStage(GL_FRAGMENT_SHADER_BIT, false); }
+TEST(image_size_vs_pipeline) { imageSizeStage(GL_VERTEX_SHADER_BIT, true); }
 
 // Raw bit reinterpretation between same-size formats of one view class.
 TEST(copy_image_reinterpret) {

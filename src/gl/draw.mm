@@ -1034,7 +1034,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         uint32_t total = (uint32_t)ids.size() * d.instances;
         uint32_t tg = std::max(1, k->threadsPerThreadgroup[0]);
         [ce dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        x->verticesWritten += total;
+        if (xfbCapture && x) x->verticesWritten += total;
         return true;  // rasterization (if enabled) is handled by the caller's classic draw
     }
     // --- GS + transform feedback: a single-thread kernel walks primitives in GL order ---
@@ -1278,6 +1278,18 @@ static bool validateDraw(Context* ctx, GLenum mode) {
     return true;
 }
 
+// Whether the vertex stage writes images, storage buffers or atomic counters.
+static bool vertexStageHasSideEffects(const glsl::Reflection& r) {
+    const uint32_t vs = 1u << (int)glsl::Stage::Vertex;
+    for (const auto& b : r.storageBlocks)
+        if (b.stageMask & vs) return true;
+    for (const auto& b : r.atomicCounterBuffers)
+        if (b.stageMask & vs) return true;
+    for (const auto& s : r.slots)
+        if (s.kind == glsl::SlotKind::Image && s.index < r.uniforms.size() && (r.uniforms[s.index].stageMask & vs)) return true;
+    return false;
+}
+
 static void executeDraw(Context* ctx, const DrawParams& d) {
     MGL_STAT("draw");
     ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
@@ -1308,7 +1320,16 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         executeMultiPass(ctx, prog, d, xk, true);
         if (ctx->rasterizerDiscard) return;
     }
-    if (ctx->rasterizerDiscard) return;
+    if (ctx->rasterizerDiscard) {
+        // Rasterizer discard drops primitives, but the vertex shader still runs: when it
+        // has side effects, run it as the (capture-less) vertex kernel.
+        if (!xfbActive && vertexStageHasSideEffects(refl)) {
+            glsl::VariantKey xk = vk;
+            xk.kind = glsl::PipelineKind::XfbCapture;
+            executeMultiPass(ctx, prog, d, xk, false);
+        }
+        return;
+    }
     if (envFlag("METALGLDRV_DUMP_LAYOUT")) {
         // One line per (program, layout) for diagnosing vertex input issues in the field.
         static std::set<std::string> seen;

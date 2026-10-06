@@ -437,28 +437,34 @@ API void APIENTRY glLinkProgram(GLuint program) {
     }
 }
 
+// Subroutine selections are reset when the program used for a stage changes (GL 4.6 §7.10):
+// each subroutine uniform defaults to its first compatible subroutine.
+static void resetSubroutineSelection(Context* ctx, int st, const ProgramObj* p) {
+    ctx->subroutineSelection[st].clear();
+    if (!p) return;
+    const auto& ss = p->refl.subroutines[st];
+    for (int l = 0; l < ss.numLocations; l++) {
+        uint32_t def = 0;
+        for (auto& u : ss.uniforms)
+            if (l >= u.location && l < u.location + u.arraySize && !u.compatible.empty()) def = u.compatible[0];
+        ctx->subroutineSelection[st].push_back(def);
+    }
+}
+
 API void APIENTRY glUseProgram(GLuint program) {
     MGL_CTX();
     if (ctx->xfb->active && !ctx->xfb->paused) return ctx->setError(GL_INVALID_OPERATION);
     if (!program) {
         ctx->program = nullptr;
+        if (ctx->pipeline)
+            for (int st = 0; st < (int)glsl::Stage::Count; st++) resetSubroutineSelection(ctx, st, ctx->pipeline->stages[st].get());
         return;
     }
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
     if (!p->linked) return ctx->setError(GL_INVALID_OPERATION, "program not linked");
     ctx->program = p;
-    // Subroutine selections are reset when the current program changes (GL 4.6 §7.10).
-    for (int st = 0; st < (int)glsl::Stage::Count; st++) {
-        const auto& ss = p->refl.subroutines[st];
-        ctx->subroutineSelection[st].clear();
-        for (int l = 0; l < ss.numLocations; l++) {
-            uint32_t def = 0;
-            for (auto& u : ss.uniforms)
-                if (l >= u.location && l < u.location + u.arraySize && !u.compatible.empty()) def = u.compatible[0];
-            ctx->subroutineSelection[st].push_back(def);
-        }
-    }
+    for (int st = 0; st < (int)glsl::Stage::Count; st++) resetSubroutineSelection(ctx, st, p);
 }
 
 API void APIENTRY glValidateProgram(GLuint program) {
@@ -1374,7 +1380,10 @@ API void APIENTRY glBindProgramPipeline(GLuint pipeline) {
         return;
     }
     ProgramPipelineObj* pp = pipelineObj(ctx, pipeline, true);
-    if (pp) ctx->pipeline = pp;
+    if (!pp) return;
+    ctx->pipeline = pp;
+    if (!ctx->program)
+        for (int st = 0; st < (int)glsl::Stage::Count; st++) resetSubroutineSelection(ctx, st, pp->stages[st].get());
 }
 
 API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program) {
@@ -1397,6 +1406,7 @@ API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint 
     for (auto& [bit, st] : map) {
         if (!(stages & bit)) continue;
         pp->stages[(int)st] = (p && (p->refl.stageMask & (1u << (int)st))) ? p : nullptr;
+        if (ctx->pipeline.get() == pp && !ctx->program) resetSubroutineSelection(ctx, (int)st, pp->stages[(int)st].get());
     }
     pp->validated = false;
 }
