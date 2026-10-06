@@ -271,6 +271,7 @@ public:
     }
     UploadAlloc upload(size_t size, size_t align = 256);
     id<MTL4ArgumentTable> renderArgTable, computeArgTable;
+    id<MTL4ArgumentTable> renderArgTableFS;  // fragment stage of a program pipeline whose FS comes from another program
 
     // render pass tracking
     PassDesc curPass;
@@ -292,6 +293,7 @@ public:
         float depthBias[3] = {NAN, NAN, NAN};
         float blendColor[4] = {NAN, NAN, NAN, NAN};
         uint32_t stencilRef[2] = {~0u, ~0u};
+        bool fsTableSplit = false;  // fragment stage bound to renderArgTableFS (pipeline mixing programs)
         void reset() { *this = EncState(); }
     } enc;
     // Visibility (occlusion query) buffer for the current pass

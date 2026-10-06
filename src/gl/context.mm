@@ -75,6 +75,7 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
     ad.initializeBindings = NO;
     NSError* err = nil;
     renderArgTable = [dev->mtl newArgumentTableWithDescriptor:ad error:&err];
+    renderArgTableFS = [dev->mtl newArgumentTableWithDescriptor:ad error:&err];
     if (!renderArgTable) MGL_ERR("render argument table: %s", err.localizedDescription.UTF8String);
     ad.supportAttributeStrides = NO;
     computeArgTable = [dev->mtl newArgumentTableWithDescriptor:ad error:&err];

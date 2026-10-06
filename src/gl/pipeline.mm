@@ -98,15 +98,23 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
     RenderPipelineKey key = keyIn;
     key.variantUid = key.variant->uid;
     const ProgramVariant* vptr = key.variant;
+    const ProgramVariant* fptr = key.fsVariant;
     key.variant = nullptr;
+    key.fsVariant = nullptr;
     std::string k((const char*)&key, sizeof key);
     key.variant = vptr;
+    key.fsVariant = fptr;
     auto it = render_.find(k);
     if (it != render_.end()) return it->second;
     const ProgramVariant* v = key.variant;
     MTL4PipelineDescriptor* desc = nil;
     const glsl::EntryPoint* vs = v->entry(glsl::EntryPoint::Vertex);
     const glsl::EntryPoint* fs = v->entry(glsl::EntryPoint::Fragment);
+    id<MTLLibrary> fsLib = v->lib;
+    if (key.fsVariantUid) {  // program pipeline: fragment stage from another program (or none)
+        fs = key.fsVariant ? key.fsVariant->entry(glsl::EntryPoint::Fragment) : nullptr;
+        fsLib = key.fsVariant ? key.fsVariant->lib : nil;
+    }
     const glsl::EntryPoint* ms = v->entry(glsl::EntryPoint::Mesh);
     const glsl::EntryPoint* os = v->entry(glsl::EntryPoint::Object);
     MTL4RenderPipelineColorAttachmentDescriptorArray* colors = nil;
@@ -119,7 +127,7 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
         }
         d.meshFunctionDescriptor = fn(v->lib, ms->name);
         d.maxTotalThreadsPerMeshThreadgroup = ms->threadsPerThreadgroup[0] * ms->threadsPerThreadgroup[1] * ms->threadsPerThreadgroup[2];
-        if (fs && key.rasterEnabled) d.fragmentFunctionDescriptor = fn(v->lib, fs->name);
+        if (fs && key.rasterEnabled) d.fragmentFunctionDescriptor = fn(fsLib, fs->name);
         d.rasterSampleCount = key.sampleCount;
         d.alphaToCoverageState = key.alphaToCoverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
         d.alphaToOneState = key.alphaToOne ? MTL4AlphaToOneStateEnabled : MTL4AlphaToOneStateDisabled;
@@ -130,7 +138,7 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
         MTL4RenderPipelineDescriptor* d = [MTL4RenderPipelineDescriptor new];
         if (!vs) return nil;
         d.vertexFunctionDescriptor = fn(v->lib, vs->name);
-        if (fs && key.rasterEnabled) d.fragmentFunctionDescriptor = fn(v->lib, fs->name);
+        if (fs && key.rasterEnabled) d.fragmentFunctionDescriptor = fn(fsLib, fs->name);
         MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
         bool anyAttr = false;
         for (int i = 0; i < 16; i++) {
