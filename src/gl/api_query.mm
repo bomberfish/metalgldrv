@@ -181,7 +181,8 @@ static void beginQuery(Context* ctx, GLenum target, GLuint index, GLuint id) {
 static void endQuery(Context* ctx, GLenum target, GLuint index) {
     int ti = queryTargetIndex(target);
     if (ti < 0) return ctx->setError(GL_INVALID_ENUM);
-    if (index >= 4) return ctx->setError(GL_INVALID_VALUE);
+    bool indexedT = target == GL_PRIMITIVES_GENERATED || target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW;
+    if (index >= (indexedT ? 4u : 1u)) return ctx->setError(GL_INVALID_VALUE);
     Ref<Query> q = ctx->activeQueries[ti][index];
     if (!q) return ctx->setError(GL_INVALID_OPERATION, "query not active");
     ctx->activeQueries[ti][index] = nullptr;
@@ -326,7 +327,9 @@ static void getQueryiv(Context* ctx, GLenum target, GLuint index, GLenum pname, 
     }
     int ti = queryTargetIndex(target);
     if (ti < 0) return ctx->setError(GL_INVALID_ENUM);
-    if (index >= 4) return ctx->setError(GL_INVALID_VALUE);
+    bool indexed = target == GL_PRIMITIVES_GENERATED || target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN ||
+                   target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW;
+    if (index >= (indexed ? 4u : 1u)) return ctx->setError(GL_INVALID_VALUE);
     switch (pname) {
     case GL_CURRENT_QUERY: *params = ctx->activeQueries[ti][index] ? ctx->activeQueries[ti][index]->name : 0; break;
     case GL_QUERY_COUNTER_BITS: *params = target == GL_ANY_SAMPLES_PASSED || target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE ? 1 : 64; break;
@@ -350,7 +353,8 @@ API void APIENTRY glBeginConditionalRender(GLuint id, GLenum mode) {
     default: return ctx->setError(GL_INVALID_ENUM);
     }
     Query* q = ctx->queries.get(id);
-    if (!q || q->active || !isOcclusion(q->target)) return ctx->setError(GL_INVALID_OPERATION);
+    bool overflowQ = q && (q->target == GL_TRANSFORM_FEEDBACK_OVERFLOW || q->target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW);
+    if (!q || q->active || !(isOcclusion(q->target) || overflowQ)) return ctx->setError(GL_INVALID_OPERATION);
     bool inverted = mode == GL_QUERY_WAIT_INVERTED || mode == GL_QUERY_NO_WAIT_INVERTED || mode == GL_QUERY_BY_REGION_WAIT_INVERTED ||
                     mode == GL_QUERY_BY_REGION_NO_WAIT_INVERTED;
     bool noWait = mode == GL_QUERY_NO_WAIT || mode == GL_QUERY_BY_REGION_NO_WAIT || mode == GL_QUERY_NO_WAIT_INVERTED ||
