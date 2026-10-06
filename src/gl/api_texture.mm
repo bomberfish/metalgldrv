@@ -808,7 +808,10 @@ API void APIENTRY glGetTextureParameteriv(GLuint texture, GLenum pname, GLint* p
 }
 
 static bool getLevelParam(Context* ctx, Texture* t, int face, GLint level, GLenum pname, double* out) {
-    if (level < 0 || level >= Texture::kMaxLevels) {
+    // buffer textures (and other single-level targets) only have level 0
+    bool single = t->target == GL_TEXTURE_BUFFER || t->target == GL_TEXTURE_RECTANGLE || t->target == GL_TEXTURE_2D_MULTISAMPLE ||
+                  t->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    if (level < 0 || level >= Texture::kMaxLevels || (single && level != 0)) {
         ctx->setError(GL_INVALID_VALUE);
         return false;
     }

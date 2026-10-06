@@ -319,6 +319,8 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                 MTLPixelFormat pf = f ? f->mtl : t->mtl.pixelFormat;
                 if (t->target == GL_TEXTURE_BUFFER) {
                     view = t->mtl;
+                    // image stores go to the buffer's memory: CPU access must wait for them
+                    if (t->buffer) t->buffer->lastUse = t->buffer->lastGpuWrite = serial;
                 } else {
                     MTLTextureType vt = mtlTextureType(s.textureTarget, t->samples);
                     // imageCube / imageCubeArray are declared as texture2d_array in MSL.
