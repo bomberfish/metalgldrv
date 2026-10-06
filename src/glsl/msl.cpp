@@ -1408,20 +1408,42 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
             else r = tex + ".read(uint2(" + P + "), " + s + ")";
             return finish(r);
         }
-        if (dim == Dim::Buffer) return finish(tex + ".read(uint(" + P + "))");
-        std::string lod = (dim == Dim::Rect || A.size() < 3 || (off && A.size() < 4)) ? "" : ", " + lodArg(2);
+        // Out-of-range texel coordinates or levels read as zero (as robust GL implementations
+        // do; Metal's read() is undefined there). Casting to uint folds the < 0 test in.
+        if (dim == Dim::Buffer) {
+            P = bind(P, "int", pre);
+            r = tex + ".read(uint(" + P + "))";
+            return finish("(uint(" + P + ") < " + tex + ".get_width() ? " + r + " : decltype(" + r + ")(0))");
+        }
+        bool hasLod = !(dim == Dim::Rect || A.size() < 3 || (off && A.size() < 4));
+        std::string L = hasLod ? bind("uint(" + ex(A[2]) + ")", "uint", pre) : "0u";
+        std::string lod = hasLod ? ", " + L : "";
+        std::string inb;
         if (dim == Dim::D1) {
-            if (arr) { P = bind(P, "int2", pre); r = tex + ".read(uint2(uint(" + P + ".x), 0u), uint(" + P + ".y)" + lod + ")"; }
-            else r = tex + ".read(uint2(uint(" + P + "), 0u)" + lod + ")";
+            if (arr) {
+                P = bind(P, "int2", pre);
+                r = tex + ".read(uint2(uint(" + P + ".x), 0u), uint(" + P + ".y)" + lod + ")";
+                inb = "uint(" + P + ".x) < " + tex + ".get_width(" + L + ") && uint(" + P + ".y) < " + tex + ".get_array_size()";
+            } else {
+                P = bind(P, "int", pre);
+                r = tex + ".read(uint2(uint(" + P + "), 0u)" + lod + ")";
+                inb = "uint(" + P + ") < " + tex + ".get_width(" + L + ")";
+            }
         } else if (dim == Dim::D3) {
+            P = bind(P, "int3", pre);
             r = tex + ".read(uint3(" + P + ")" + lod + ")";
+            inb = "all(uint3(" + P + ") < uint3(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + "), " + tex + ".get_depth(" + L + ")))";
         } else if (arr) {
             P = bind(P, "int3", pre);
             r = tex + ".read(uint2(" + P + ".xy), uint(" + P + ".z)" + lod + ")";
+            inb = "all(uint3(" + P + ") < uint3(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + "), " + tex + ".get_array_size()))";
         } else {
+            P = bind(P, "int2", pre);
             r = tex + ".read(uint2(" + P + ")" + lod + ")";
+            inb = "all(uint2(" + P + ") < uint2(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + ")))";
         }
-        return finish(r);
+        if (hasLod) inb = L + " < " + tex + ".get_num_mip_levels() && " + inb;
+        return finish("(" + inb + " ? " + r + " : decltype(" + r + ")(0))");
     }
     // --- sampling functions ---
     bool proj = name.find("Proj") != std::string::npos;

@@ -406,3 +406,61 @@ TEST(ssbo_vs_attach_delete_then_compile) {
     CHECK_GL();
     }
 }
+
+// Texture barrier feedback loop: each pass reads neighbouring texels of an attached R32UI
+// texture (written in the previous pass) and writes its own block.
+TEST(texture_barrier_feedback) {
+    const int W = 64, H = 64, B = 4;
+    GLuint tex, fbo, vao;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32UI, W, H);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    const char* vs = "#version 400 core\nvoid main(){ vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4.0 - 1.0; gl_Position = vec4(p, 0, 1); }";
+    const char* fs = R"(#version 400 core
+uniform usampler2D t; uniform int modulo; out uint o;
+void main() {
+    ivec2 c = ivec2(gl_FragCoord.xy), b = c / 4;
+    if (((b.x + b.y) % 2) != modulo) discard;
+    o = texelFetch(t, c + ivec2(4, 0), 0).r + texelFetch(t, c - ivec2(4, 0), 0).r + 1u;
+})";
+    std::string log;
+    GLuint p = compileProgram(vs, fs, &log);
+    if (!p) fprintf(stderr, "%s\n", log.c_str());
+    glUseProgram(p);
+    glUniform1i(glGetUniformLocation(p, "t"), 0);
+    glViewport(0, 0, W, H);
+    std::vector<uint32_t> ref(W * H), got(W * H);
+    auto at = [&](std::vector<uint32_t>& v, int x, int y) -> uint32_t { return x < 0 || y < 0 || x >= W || y >= H ? 0 : v[y * W + x]; };
+    for (int test = 0; test < 2; test++) {
+        for (int i = 0; i < W * H; i++) ref[i] = (uint32_t)(i * 7 + test);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RED_INTEGER, GL_UNSIGNED_INT, ref.data());
+        for (int pass = 0; pass < 4; pass++) {
+            glUniform1i(glGetUniformLocation(p, "modulo"), pass & 1);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glTextureBarrier();
+            std::vector<uint32_t> prev = ref;
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++)
+                    if ((((x / B) + (y / B)) % 2) == (pass & 1)) ref[y * W + x] = at(prev, x + 4, y) + at(prev, x - 4, y) + 1;
+        }
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, got.data());
+        int bad = 0, first = -1;
+        for (int i = 0; i < W * H; i++)
+            if (got[i] != ref[i]) { if (first < 0) first = i; bad++; }
+        if (bad) fprintf(stderr, "  test %d: %d bad texels, first at (%d,%d): got %u want %u\n", test, bad, first % W, first / W, got[first], ref[first]);
+        CHECK(bad == 0);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(p);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}
