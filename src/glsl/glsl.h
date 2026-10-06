@@ -130,7 +130,18 @@ struct XfbVarying {
     int buffer, offset;
 };
 
-struct SubroutineInfo;  // TODO: ARB_shader_subroutine
+// GL_PROGRAM_INPUT / GL_PROGRAM_OUTPUT resources: active inputs of the first stage and active
+// outputs of the last stage, built-ins included (gl_VertexID, gl_PerVertex.gl_Position, ...).
+struct InterfaceVar {
+    std::string name;      // arrays end in "[0]"; block members are "Block.member"
+    uint32_t type = 0;
+    int arraySize = 1;
+    int location = -1;     // -1 for built-ins and variables without a location
+    int locationIndex = -1;  // fragment outputs: dual-source index; -1 otherwise
+    int component = 0;
+    bool perPatch = false;
+    uint32_t stageMask = 0;
+};
 
 struct LinkInput {
     std::vector<std::shared_ptr<const Shader>> shaders;
@@ -176,7 +187,8 @@ struct Reflection {
     std::vector<Block> storageBlocks;
     std::vector<BufferVariable> bufferVariables;
     std::vector<AtomicCounterBuffer> atomicCounterBuffers;
-    std::vector<XfbVarying> xfbVaryings;
+    std::vector<XfbVarying> xfbVaryings;  // gl_NextBuffer / gl_SkipComponentsN entries have type 0
+    std::vector<InterfaceVar> programInputs, programOutputs;
     std::vector<Slot> slots;              // argument buffer layout (slot i at byte offset 8*i)
     uint32_t defaultUniformSize = 0;      // bytes of the default uniform block (MSL layout)
     int localSize[3] = {1, 1, 1};         // compute

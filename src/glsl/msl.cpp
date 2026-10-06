@@ -2958,6 +2958,7 @@ void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tupl
     useStage(st);
     StageInfo& si = si_[(int)st];
     for (auto& x : R.xfbVaryings) {
+        if (!x.type) continue;  // gl_NextBuffer / gl_SkipComponents
         const std::string& name = x.name;
         size_t p = 0;
         while (p < name.size() && name[p] != '.' && name[p] != '[') p++;

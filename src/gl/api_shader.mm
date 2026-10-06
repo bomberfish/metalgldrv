@@ -626,7 +626,7 @@ static GLint uniformLocation(ProgramObj* p, const char* name) {
         if (u.blockIndex >= 0 || u.location < 0) continue;
         bool isArray = u.name.size() > 3 && u.name.compare(u.name.size() - 3, 3, "[0]") == 0;
         std::string ubase = isArray ? u.name.substr(0, u.name.size() - 3) : u.name;
-        if (n == u.name) return u.location;
+        if (n == u.name || (isArray && n == ubase)) return u.location;
         if (isArray && base == ubase) {
             if (elem >= std::max(1, u.arraySize)) return -1;
             return u.location + elem;
@@ -1051,31 +1051,119 @@ namespace {
 struct Resource {
     std::string name;
     GLenum type = 0;
-    int arraySize = 1, location = -1, locationIndex = -1, blockIndex = -1, offset = -1, arrayStride = -1, matrixStride = -1;
+    int arraySize = 1, location = -1, locationIndex = -1, locationComponent = 0, blockIndex = -1, offset = -1, arrayStride = -1,
+        matrixStride = -1;
     int isRowMajor = 0, bufferBinding = -1, bufferDataSize = 0, atomicIndex = -1, topLevelArraySize = 1, topLevelArrayStride = 0;
+    int xfbBufferIndex = -1, xfbStride = 0;
     uint32_t stageMask = 0;
-    std::vector<int> activeVariables;
-    bool isBlock = false, isPerPatch = false;
+    std::vector<int> activeVariables;   // also COMPATIBLE_SUBROUTINES for subroutine uniforms
+    bool isPerPatch = false;
 };
+
+// Subroutine interfaces: GL_VERTEX_SUBROUTINE.. / GL_VERTEX_SUBROUTINE_UNIFORM.. -> stage (or -1).
+int subroutineStage(GLenum iface, bool* isUniform) {
+    static const GLenum subs[] = {GL_VERTEX_SUBROUTINE, GL_TESS_CONTROL_SUBROUTINE, GL_TESS_EVALUATION_SUBROUTINE,
+                                  GL_GEOMETRY_SUBROUTINE, GL_FRAGMENT_SUBROUTINE, GL_COMPUTE_SUBROUTINE};
+    static const GLenum unis[] = {GL_VERTEX_SUBROUTINE_UNIFORM, GL_TESS_CONTROL_SUBROUTINE_UNIFORM,
+                                  GL_TESS_EVALUATION_SUBROUTINE_UNIFORM, GL_GEOMETRY_SUBROUTINE_UNIFORM,
+                                  GL_FRAGMENT_SUBROUTINE_UNIFORM, GL_COMPUTE_SUBROUTINE_UNIFORM};
+    static const glsl::Stage stages[] = {glsl::Stage::Vertex, glsl::Stage::TessControl, glsl::Stage::TessEval,
+                                         glsl::Stage::Geometry, glsl::Stage::Fragment, glsl::Stage::Compute};
+    for (int i = 0; i < 6; i++) {
+        if (iface == subs[i]) { *isUniform = false; return (int)stages[i]; }
+        if (iface == unis[i]) { *isUniform = true; return (int)stages[i]; }
+    }
+    return -1;
+}
+
+bool validInterface(GLenum iface) {
+    bool u;
+    switch (iface) {
+    case GL_UNIFORM: case GL_UNIFORM_BLOCK: case GL_ATOMIC_COUNTER_BUFFER: case GL_PROGRAM_INPUT: case GL_PROGRAM_OUTPUT:
+    case GL_TRANSFORM_FEEDBACK_VARYING: case GL_TRANSFORM_FEEDBACK_BUFFER: case GL_BUFFER_VARIABLE: case GL_SHADER_STORAGE_BLOCK:
+        return true;
+    default: return subroutineStage(iface, &u) >= 0;
+    }
+}
+
+// GL 4.6 table 7.2: which properties each interface supports. Returns -1 for a value that is not
+// a property at all (INVALID_ENUM), 0 when unsupported by the interface (INVALID_OPERATION).
+int propertySupported(GLenum iface, GLenum prop) {
+    bool subUniform = false;
+    int subStage = subroutineStage(iface, &subUniform);
+    bool isSubUniform = subStage >= 0 && subUniform;
+    bool uni = iface == GL_UNIFORM, bv = iface == GL_BUFFER_VARIABLE, in = iface == GL_PROGRAM_INPUT, out = iface == GL_PROGRAM_OUTPUT;
+    bool tfv = iface == GL_TRANSFORM_FEEDBACK_VARYING, tfb = iface == GL_TRANSFORM_FEEDBACK_BUFFER;
+    bool ub = iface == GL_UNIFORM_BLOCK, sb = iface == GL_SHADER_STORAGE_BLOCK, acb = iface == GL_ATOMIC_COUNTER_BUFFER;
+    switch (prop) {
+    case GL_NAME_LENGTH: return !acb && !tfb;
+    case GL_TYPE: return uni || bv || in || out || tfv;
+    case GL_ARRAY_SIZE: return uni || bv || in || out || tfv || isSubUniform;
+    case GL_OFFSET: return uni || bv || tfv;
+    case GL_BLOCK_INDEX: case GL_ARRAY_STRIDE: case GL_MATRIX_STRIDE: case GL_IS_ROW_MAJOR: return uni || bv;
+    case GL_ATOMIC_COUNTER_BUFFER_INDEX: return uni;
+    case GL_BUFFER_BINDING: case GL_NUM_ACTIVE_VARIABLES: case GL_ACTIVE_VARIABLES: return ub || sb || acb || tfb;
+    case GL_BUFFER_DATA_SIZE: return ub || sb || acb;
+    case GL_REFERENCED_BY_VERTEX_SHADER: case GL_REFERENCED_BY_TESS_CONTROL_SHADER: case GL_REFERENCED_BY_TESS_EVALUATION_SHADER:
+    case GL_REFERENCED_BY_GEOMETRY_SHADER: case GL_REFERENCED_BY_FRAGMENT_SHADER: case GL_REFERENCED_BY_COMPUTE_SHADER:
+        return uni || ub || acb || sb || bv || in || out;
+    case GL_TOP_LEVEL_ARRAY_SIZE: case GL_TOP_LEVEL_ARRAY_STRIDE: return bv;
+    case GL_NUM_COMPATIBLE_SUBROUTINES: case GL_COMPATIBLE_SUBROUTINES: return isSubUniform;
+    case GL_LOCATION: return uni || in || out || isSubUniform;
+    case GL_LOCATION_INDEX: return out;
+    case GL_IS_PER_PATCH: case GL_LOCATION_COMPONENT: return in || out;
+    case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX: return tfv;
+    case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE: return tfb;
+    default: return -1;
+    }
+}
+
+// Locations taken by one element of an input/output of GL type `t`.
+int locationsPerElement(GLenum t) {
+    switch (t) {
+    case GL_FLOAT_MAT2: case GL_FLOAT_MAT2x3: case GL_FLOAT_MAT2x4: case GL_DOUBLE_MAT2: return 2;
+    case GL_FLOAT_MAT3: case GL_FLOAT_MAT3x2: case GL_FLOAT_MAT3x4: case GL_DOUBLE_MAT3x2: return 3;
+    case GL_FLOAT_MAT4: case GL_FLOAT_MAT4x2: case GL_FLOAT_MAT4x3: case GL_DOUBLE_MAT4x2: return 4;
+    case GL_DOUBLE_VEC3: case GL_DOUBLE_VEC4: return 2;
+    case GL_DOUBLE_MAT2x3: case GL_DOUBLE_MAT2x4: return 4;
+    case GL_DOUBLE_MAT3: case GL_DOUBLE_MAT3x4: return 6;
+    case GL_DOUBLE_MAT4: case GL_DOUBLE_MAT4x3: return 8;
+    default: return 1;
+    }
+}
+
+Resource fromInterfaceVar(const glsl::InterfaceVar& v) {
+    Resource x;
+    x.name = v.name;
+    x.type = v.type;
+    x.arraySize = v.arraySize;
+    x.location = v.location;
+    x.locationIndex = v.locationIndex;
+    x.locationComponent = v.component;
+    x.isPerPatch = v.perPatch;
+    x.stageMask = v.stageMask;
+    return x;
+}
 }  // namespace
 
-static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface, bool* ok) {
-    *ok = true;
+// The active resources of `iface` (an empty list when the program has no successful link).
+static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface) {
     std::vector<Resource> out;
+    if (!p->linked) return out;
     const glsl::Reflection& r = p->refl;
     switch (iface) {
     case GL_UNIFORM:
         for (auto& u : r.uniforms) {
             Resource x;
+            bool atomic = typeShape(u.type).base == BaseType::AtomicCounter;
             x.name = u.name;
             x.type = u.type;
             x.arraySize = u.arraySize;
-            x.location = u.blockIndex < 0 && !(typeShape(u.type).base == BaseType::AtomicCounter) ? u.location : -1;
+            x.location = u.blockIndex < 0 && !atomic ? u.location : -1;
             x.blockIndex = u.blockIndex;
-            x.offset = u.offset;
-            x.arrayStride = u.blockIndex >= 0 || typeShape(u.type).base == BaseType::AtomicCounter ? u.arrayStride : -1;
+            x.offset = u.blockIndex >= 0 || atomic ? u.offset : -1;
+            x.arrayStride = u.blockIndex >= 0 || atomic ? u.arrayStride : -1;
             x.matrixStride = u.blockIndex >= 0 ? u.matrixStride : -1;
-            if (u.blockIndex < 0) x.offset = typeShape(u.type).base == BaseType::AtomicCounter ? u.offset : -1;
             x.isRowMajor = u.rowMajor;
             x.atomicIndex = u.atomicCounterBufferIndex;
             x.stageMask = u.stageMask;
@@ -1089,11 +1177,10 @@ static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface, bool* ok)
         for (size_t i = 0; i < blocks.size(); i++) {
             Resource x;
             x.name = blocks[i].name;
-            x.bufferBinding = bindings[i];
+            x.bufferBinding = i < bindings.size() ? bindings[i] : blocks[i].binding;
             x.bufferDataSize = blocks[i].dataSize;
             x.activeVariables = blocks[i].activeUniforms;
             x.stageMask = blocks[i].stageMask;
-            x.isBlock = true;
             out.push_back(x);
         }
         break;
@@ -1116,38 +1203,43 @@ static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface, bool* ok)
         }
         break;
     case GL_PROGRAM_INPUT:
-        for (auto& a : r.attributes) {
-            Resource x;
-            x.name = a.name;
-            x.type = a.type;
-            x.arraySize = a.arraySize;
-            x.location = a.location;
-            x.stageMask = 1 << (int)glsl::Stage::Vertex;
-            out.push_back(x);
-        }
+        for (auto& v : r.programInputs) out.push_back(fromInterfaceVar(v));
         break;
     case GL_PROGRAM_OUTPUT:
-        for (auto& o : r.fragOutputs) {
-            Resource x;
-            x.name = o.name;
-            x.type = o.type;
-            x.arraySize = o.arraySize;
-            x.location = o.location;
-            x.locationIndex = o.index;
-            x.stageMask = 1 << (int)glsl::Stage::Fragment;
-            out.push_back(x);
-        }
+        for (auto& v : r.programOutputs) out.push_back(fromInterfaceVar(v));
         break;
     case GL_TRANSFORM_FEEDBACK_VARYING:
-        for (auto& v : r.xfbVaryings) {
+    case GL_TRANSFORM_FEEDBACK_BUFFER: {
+        // TRANSFORM_FEEDBACK_BUFFER resources: the buffers holding captured varyings, in binding order
+        int bufIndex[4] = {-1, -1, -1, -1};
+        std::vector<Resource> buffers;
+        bool used[4] = {false, false, false, false};
+        for (const auto& v : r.xfbVaryings)
+            if (v.type && v.buffer >= 0 && v.buffer < 4) used[v.buffer] = true;
+        for (int b = 0; b < 4; b++)
+            if (used[b]) {
+                bufIndex[b] = (int)buffers.size();
+                Resource x;
+                x.bufferBinding = b;
+                x.xfbStride = (int)r.multipass.xfbStride[b];
+                buffers.push_back(x);
+            }
+        for (size_t i = 0; i < r.xfbVaryings.size(); i++) {
+            const auto& v = r.xfbVaryings[i];
             Resource x;
             x.name = v.name;
             x.type = v.type;
             x.arraySize = v.arraySize;
-            x.offset = v.offset;
+            x.offset = v.type ? v.offset : -1;
+            if (v.type && v.buffer >= 0 && v.buffer < 4) {
+                x.xfbBufferIndex = bufIndex[v.buffer];
+                buffers[bufIndex[v.buffer]].activeVariables.push_back((int)i);
+            }
             out.push_back(x);
         }
+        if (iface == GL_TRANSFORM_FEEDBACK_BUFFER) out = std::move(buffers);
         break;
+    }
     case GL_ATOMIC_COUNTER_BUFFER:
         for (auto& a : r.atomicCounterBuffers) {
             Resource x;
@@ -1158,74 +1250,98 @@ static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface, bool* ok)
             out.push_back(x);
         }
         break;
-    case GL_TRANSFORM_FEEDBACK_BUFFER:
-    case GL_VERTEX_SUBROUTINE: case GL_TESS_CONTROL_SUBROUTINE: case GL_TESS_EVALUATION_SUBROUTINE: case GL_GEOMETRY_SUBROUTINE:
-    case GL_FRAGMENT_SUBROUTINE: case GL_COMPUTE_SUBROUTINE: case GL_VERTEX_SUBROUTINE_UNIFORM: case GL_TESS_CONTROL_SUBROUTINE_UNIFORM:
-    case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM: case GL_GEOMETRY_SUBROUTINE_UNIFORM: case GL_FRAGMENT_SUBROUTINE_UNIFORM:
-    case GL_COMPUTE_SUBROUTINE_UNIFORM:
+    default: {
+        bool isUniform;
+        int st = subroutineStage(iface, &isUniform);
+        if (st < 0) break;
+        const glsl::StageSubroutines& ss = r.subroutines[st];
+        if (!isUniform) {
+            for (auto& f : ss.functions) {
+                Resource x;
+                x.name = f;
+                out.push_back(x);
+            }
+        } else {
+            for (auto& u : ss.uniforms) {
+                Resource x;
+                x.name = u.arraySize > 1 ? u.name + "[0]" : u.name;
+                x.arraySize = u.arraySize;
+                x.location = u.location;
+                x.activeVariables = u.compatible;
+                out.push_back(x);
+            }
+        }
         break;
-    default: *ok = false;
+    }
     }
     return out;
+}
+
+// Index of the resource named `name`: an exact match, or `name` + "[0]" for arrays.
+static int findResource(const std::vector<Resource>& res, const std::string& n) {
+    for (size_t i = 0; i < res.size(); i++) {
+        const std::string& rn = res[i].name;
+        if (rn == n) return (int)i;
+        if (rn.size() == n.size() + 3 && rn.compare(n.size(), 3, "[0]") == 0 && rn.compare(0, n.size(), n) == 0) return (int)i;
+    }
+    return -1;
 }
 
 API void APIENTRY glGetProgramInterfaceiv(GLuint program, GLenum iface, GLenum pname, GLint* params) {
     MGL_CTX();
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
-    bool ok;
-    auto res = resourcesFor(p, iface, &ok);
-    if (!ok) return ctx->setError(GL_INVALID_ENUM);
+    if (!validInterface(iface)) return ctx->setError(GL_INVALID_ENUM, "bad program interface 0x%x", iface);
+    bool isSubUniform = false;
+    bool isSub = subroutineStage(iface, &isSubUniform) >= 0;
     switch (pname) {
-    case GL_ACTIVE_RESOURCES: *params = (GLint)res.size(); break;
-    case GL_MAX_NAME_LENGTH: {
-        if (iface == GL_ATOMIC_COUNTER_BUFFER || iface == GL_TRANSFORM_FEEDBACK_BUFFER) return ctx->setError(GL_INVALID_OPERATION);
-        GLint m = 0;
-        for (auto& x : res) m = std::max<GLint>(m, (GLint)x.name.size() + 1);
-        *params = m;
-        break;
+    case GL_ACTIVE_RESOURCES: case GL_MAX_NAME_LENGTH: case GL_MAX_NUM_ACTIVE_VARIABLES: case GL_MAX_NUM_COMPATIBLE_SUBROUTINES: break;
+    default: return ctx->setError(GL_INVALID_ENUM, "bad program interface pname 0x%x", pname);
     }
-    case GL_MAX_NUM_ACTIVE_VARIABLES: {
-        if (iface != GL_UNIFORM_BLOCK && iface != GL_SHADER_STORAGE_BLOCK && iface != GL_ATOMIC_COUNTER_BUFFER &&
-            iface != GL_TRANSFORM_FEEDBACK_BUFFER)
-            return ctx->setError(GL_INVALID_OPERATION);
-        GLint m = 0;
-        for (auto& x : res) m = std::max<GLint>(m, (GLint)x.activeVariables.size());
-        *params = m;
-        break;
+    if (pname == GL_MAX_NAME_LENGTH && (iface == GL_ATOMIC_COUNTER_BUFFER || iface == GL_TRANSFORM_FEEDBACK_BUFFER))
+        return ctx->setError(GL_INVALID_OPERATION);
+    if (pname == GL_MAX_NUM_ACTIVE_VARIABLES && iface != GL_UNIFORM_BLOCK && iface != GL_SHADER_STORAGE_BLOCK &&
+        iface != GL_ATOMIC_COUNTER_BUFFER && iface != GL_TRANSFORM_FEEDBACK_BUFFER)
+        return ctx->setError(GL_INVALID_OPERATION);
+    if (pname == GL_MAX_NUM_COMPATIBLE_SUBROUTINES && !(isSub && isSubUniform)) return ctx->setError(GL_INVALID_OPERATION);
+    auto res = resourcesFor(p, iface);
+    GLint m = 0;
+    for (auto& x : res) {
+        switch (pname) {
+        case GL_MAX_NAME_LENGTH: m = std::max<GLint>(m, (GLint)x.name.size() + 1); break;
+        case GL_MAX_NUM_ACTIVE_VARIABLES:
+        case GL_MAX_NUM_COMPATIBLE_SUBROUTINES: m = std::max<GLint>(m, (GLint)x.activeVariables.size()); break;
+        default: break;
+        }
     }
-    case GL_MAX_NUM_COMPATIBLE_SUBROUTINES: *params = 0; break;
-    default: ctx->setError(GL_INVALID_ENUM);
-    }
+    *params = pname == GL_ACTIVE_RESOURCES ? (GLint)res.size() : m;
 }
 
 API GLuint APIENTRY glGetProgramResourceIndex(GLuint program, GLenum iface, const GLchar* name) {
     MGL_CTX_RET(GL_INVALID_INDEX);
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return GL_INVALID_INDEX;
-    bool ok;
-    auto res = resourcesFor(p, iface, &ok);
-    if (!ok || iface == GL_ATOMIC_COUNTER_BUFFER || iface == GL_TRANSFORM_FEEDBACK_BUFFER) {
+    if (!validInterface(iface) || iface == GL_ATOMIC_COUNTER_BUFFER || iface == GL_TRANSFORM_FEEDBACK_BUFFER) {
         ctx->setError(GL_INVALID_ENUM);
         return GL_INVALID_INDEX;
     }
-    std::string n = name;
-    for (size_t i = 0; i < res.size(); i++) {
-        const std::string& rn = res[i].name;
-        if (rn == n) return (GLuint)i;
-        if (rn.size() > 3 && rn.compare(rn.size() - 3, 3, "[0]") == 0 && rn.substr(0, rn.size() - 3) == n) return (GLuint)i;
-    }
-    return GL_INVALID_INDEX;
+    if (!name) return GL_INVALID_INDEX;
+    auto res = resourcesFor(p, iface);
+    int i = findResource(res, name);
+    // gl_NextBuffer / gl_SkipComponentsN are listed but are not names of active resources
+    if (i >= 0 && iface == GL_TRANSFORM_FEEDBACK_VARYING && !res[i].type) return GL_INVALID_INDEX;
+    return i < 0 ? GL_INVALID_INDEX : (GLuint)i;
 }
 
 API void APIENTRY glGetProgramResourceName(GLuint program, GLenum iface, GLuint index, GLsizei bufSize, GLsizei* length, GLchar* name) {
     MGL_CTX();
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
-    bool ok;
-    auto res = resourcesFor(p, iface, &ok);
-    if (!ok) return ctx->setError(GL_INVALID_ENUM);
-    if (index >= res.size()) return ctx->setError(GL_INVALID_VALUE);
+    if (!validInterface(iface) || iface == GL_ATOMIC_COUNTER_BUFFER || iface == GL_TRANSFORM_FEEDBACK_BUFFER)
+        return ctx->setError(GL_INVALID_ENUM);
+    auto res = resourcesFor(p, iface);
+    if (index >= res.size()) return ctx->setError(GL_INVALID_VALUE, "resource index %u out of range", index);
+    if (bufSize < 0) return ctx->setError(GL_INVALID_VALUE);
     copyLog(res[index].name, bufSize, length, name);
 }
 
@@ -1234,10 +1350,15 @@ API void APIENTRY glGetProgramResourceiv(GLuint program, GLenum iface, GLuint in
     MGL_CTX();
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
-    bool ok;
-    auto res = resourcesFor(p, iface, &ok);
-    if (!ok) return ctx->setError(GL_INVALID_ENUM);
-    if (index >= res.size()) return ctx->setError(GL_INVALID_VALUE);
+    if (!validInterface(iface)) return ctx->setError(GL_INVALID_ENUM);
+    if (propCount <= 0 || bufSize < 0) return ctx->setError(GL_INVALID_VALUE);
+    auto res = resourcesFor(p, iface);
+    if (index >= res.size()) return ctx->setError(GL_INVALID_VALUE, "resource index %u out of range", index);
+    for (int i = 0; i < propCount; i++) {
+        int s = propertySupported(iface, props[i]);
+        if (s < 0) return ctx->setError(GL_INVALID_ENUM, "bad resource property 0x%x", props[i]);
+        if (s == 0) return ctx->setError(GL_INVALID_OPERATION, "property 0x%x not supported by interface 0x%x", props[i], iface);
+    }
     const Resource& x = res[index];
     std::vector<GLint> vals;
     using S = glsl::Stage;
@@ -1254,8 +1375,10 @@ API void APIENTRY glGetProgramResourceiv(GLuint program, GLenum iface, GLuint in
         case GL_ATOMIC_COUNTER_BUFFER_INDEX: vals.push_back(x.atomicIndex); break;
         case GL_BUFFER_BINDING: vals.push_back(x.bufferBinding); break;
         case GL_BUFFER_DATA_SIZE: vals.push_back(x.bufferDataSize); break;
-        case GL_NUM_ACTIVE_VARIABLES: vals.push_back((GLint)x.activeVariables.size()); break;
-        case GL_ACTIVE_VARIABLES: for (int v : x.activeVariables) vals.push_back(v); break;
+        case GL_NUM_ACTIVE_VARIABLES:
+        case GL_NUM_COMPATIBLE_SUBROUTINES: vals.push_back((GLint)x.activeVariables.size()); break;
+        case GL_ACTIVE_VARIABLES:
+        case GL_COMPATIBLE_SUBROUTINES: for (int v : x.activeVariables) vals.push_back(v); break;
         case GL_REFERENCED_BY_VERTEX_SHADER: vals.push_back(!!(x.stageMask & (1 << (int)S::Vertex))); break;
         case GL_REFERENCED_BY_TESS_CONTROL_SHADER: vals.push_back(!!(x.stageMask & (1 << (int)S::TessControl))); break;
         case GL_REFERENCED_BY_TESS_EVALUATION_SHADER: vals.push_back(!!(x.stageMask & (1 << (int)S::TessEval))); break;
@@ -1267,10 +1390,9 @@ API void APIENTRY glGetProgramResourceiv(GLuint program, GLenum iface, GLuint in
         case GL_LOCATION: vals.push_back(x.location); break;
         case GL_LOCATION_INDEX: vals.push_back(x.locationIndex); break;
         case GL_IS_PER_PATCH: vals.push_back(x.isPerPatch); break;
-        case GL_LOCATION_COMPONENT: vals.push_back(0); break;
-        case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX: vals.push_back(0); break;
-        case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE: vals.push_back(0); break;
-        default: return ctx->setError(GL_INVALID_ENUM);
+        case GL_LOCATION_COMPONENT: vals.push_back(x.locationComponent); break;
+        case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX: vals.push_back(x.xfbBufferIndex); break;
+        case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE: vals.push_back(x.xfbStride); break;
         }
     }
     GLsizei n = std::min<GLsizei>(bufSize, (GLsizei)vals.size());
@@ -1278,32 +1400,62 @@ API void APIENTRY glGetProgramResourceiv(GLuint program, GLenum iface, GLuint in
     if (length) *length = n;
 }
 
+// Location of `name` among inputs/outputs/subroutine uniforms: "x", "x[0]" or "x[i]" of an array.
+static GLint resourceLocation(const std::vector<Resource>& res, const std::string& n, bool ioStride, const Resource** match) {
+    *match = nullptr;
+    int i = findResource(res, n);
+    if (i >= 0) {
+        *match = &res[i];
+        return res[i].location;
+    }
+    std::string base;
+    int elem;
+    bool had;
+    if (!parseArrayName(n, base, elem, had) || !had) return -1;
+    i = findResource(res, base);
+    if (i < 0 || res[i].name != base + "[0]" || elem >= res[i].arraySize) return -1;
+    *match = &res[i];
+    if (res[i].location < 0) return -1;
+    return res[i].location + elem * (ioStride ? locationsPerElement(res[i].type) : 1);
+}
+
 API GLint APIENTRY glGetProgramResourceLocation(GLuint program, GLenum iface, const GLchar* name) {
     MGL_CTX_RET(-1);
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return -1;
-    if (!p->linked) {
-        ctx->setError(GL_INVALID_OPERATION);
-        return -1;
-    }
-    switch (iface) {
-    case GL_UNIFORM: return uniformLocation(p, name);
-    case GL_PROGRAM_INPUT: return glGetAttribLocation(program, name);
-    case GL_PROGRAM_OUTPUT: return glGetFragDataLocation(program, name);
-    default:
-        if (iface >= GL_VERTEX_SUBROUTINE_UNIFORM && iface <= GL_COMPUTE_SUBROUTINE_UNIFORM) return -1;
+    bool isSubUniform = false;
+    bool isSub = subroutineStage(iface, &isSubUniform) >= 0;
+    if (iface != GL_UNIFORM && iface != GL_PROGRAM_INPUT && iface != GL_PROGRAM_OUTPUT && !(isSub && isSubUniform)) {
         ctx->setError(GL_INVALID_ENUM);
         return -1;
     }
+    if (!p->linked) {
+        ctx->setError(GL_INVALID_OPERATION, "program not linked");
+        return -1;
+    }
+    if (!name) return -1;
+    if (iface == GL_UNIFORM) return uniformLocation(p, name);
+    const Resource* m;
+    return resourceLocation(resourcesFor(p, iface), name, !isSub, &m);
 }
 
 API GLint APIENTRY glGetProgramResourceLocationIndex(GLuint program, GLenum iface, const GLchar* name) {
     MGL_CTX_RET(-1);
+    ProgramObj* p = getProgram(ctx, program);
+    if (!p) return -1;
     if (iface != GL_PROGRAM_OUTPUT) {
         ctx->setError(GL_INVALID_ENUM);
         return -1;
     }
-    return glGetFragDataIndex(program, name);
+    if (!p->linked) {
+        ctx->setError(GL_INVALID_OPERATION, "program not linked");
+        return -1;
+    }
+    if (!name) return -1;
+    const Resource* m;
+    auto res = resourcesFor(p, iface);
+    resourceLocation(res, name, true, &m);
+    return m && m->location >= 0 ? m->locationIndex : -1;
 }
 
 // ---------------------------------------------------------------------------
