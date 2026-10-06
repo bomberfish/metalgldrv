@@ -104,7 +104,8 @@ static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLen
         es.sc[0] = sc;
     }
     int cull = MTLCullModeNone;
-    if (ctx->cullFace) cull = ctx->cullMode == GL_FRONT ? MTLCullModeFront : ctx->cullMode == GL_BACK ? MTLCullModeBack : MTLCullModeNone;
+    static const bool noCull = envFlag("METALGLDRV_DEBUG_NOCULL");  // bisect switch
+    if (ctx->cullFace && !noCull) cull = ctx->cullMode == GL_FRONT ? MTLCullModeFront : ctx->cullMode == GL_BACK ? MTLCullModeBack : MTLCullModeNone;
     if (es.cull != cull) {
         [e setCullMode:(MTLCullMode)cull];
         es.cull = cull;
@@ -269,6 +270,14 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                     // Kind mismatch (e.g. float sampler on int texture) is undefined; keep the view.
                 }
             }
+            if (!view && t) {
+                // A bound but unusable texture (incomplete / wrong target) samples as a dummy.
+                thread_local std::set<std::pair<GLuint, GLuint>> warned;
+                if (warned.insert({prog->name, t->name}).second)
+                    MGL_WARN("program %u sampler '%s' (unit %d): texture %u target %x incomplete or mismatched (immutable levels %d, min filter %x, base %d max %d, %dx%d fmt %x); sampling a dummy",
+                             prog->name, u.name.c_str(), unit, t->name, t->target, t->immutableLevels, t->sampler.minFilter, t->baseLevel,
+                             t->maxLevel, t->levels[0][std::clamp(t->baseLevel, 0, 15)].width, t->levels[0][std::clamp(t->baseLevel, 0, 15)].height, t->levels[0][std::clamp(t->baseLevel, 0, 15)].internalFormat);
+            }
             if (!view) {
                 MTLTextureType tt = mtlTextureType(s.textureTarget, 0);
                 FmtKind k = isUint ? FmtKind::UInt : isInt ? FmtKind::SInt : isShadow ? FmtKind::Depth : FmtKind::Unorm;
@@ -369,6 +378,8 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     memcpy(s->currentAttrib, ctx->currentAttrib, sizeof(float) * 4 * kMaxVertexAttribs);
     return sa.gpu;
 }
+
+namespace mgl { void debugCaptureBeforeDraw(Context* ctx, ProgramObj* prog); }  // debug_capture.mm
 
 // Buffer-backed vertex layouts Metal's fetch can't express (attribute offsets or strides
 // not 4-byte aligned) are pulled by the vertex shader itself (VariantKey::manualFetch).
@@ -1275,6 +1286,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     if (!prog) return;
     if (!prog->linked) return;
     if (!mglCheckDrawConditional(ctx)) return;
+    mgl::debugCaptureBeforeDraw(ctx, prog);
     if (d.count <= 0 && !d.indirect) return;
     if (d.instances <= 0 && !d.indirect) return;
     const glsl::Reflection& refl = prog->refl;
@@ -1391,6 +1403,30 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         // Should not happen (see above); never encode into an ended encoder.
         MGL_ERR("render encoder changed during draw setup; dropping draw");
         return;
+    }
+    static const int dumpStateProg = envInt("METALGLDRV_DUMP_STATE", 0);
+    if (dumpStateProg && (int)prog->name == dumpStateProg) {
+        // Field debugging: full draw state of one program, logged once per distinct state.
+        static std::set<std::string> seen;
+        char b[512];
+        std::string st;
+        const PassDesc& p = ctx->curPass;
+        snprintf(b, sizeof b, "pass %dx%d samples %d;", p.width, p.height, p.samples);
+        st += b;
+        for (int i = 0; i < kMaxDrawBuffers; i++) {
+            if (!p.color[i].tex && !key.colorFormats[i]) continue;
+            snprintf(b, sizeof b, " c%d[fmt %d keyfmt %u blend %d (%d,%d,%d,%d eq %d,%d) mask %x]", i, p.color[i].tex ? (int)p.color[i].tex.pixelFormat : -1,
+                     key.colorFormats[i], key.blend[i].enabled, key.blend[i].srcRGB, key.blend[i].dstRGB, key.blend[i].srcA, key.blend[i].dstA,
+                     key.blend[i].eqRGB, key.blend[i].eqA, key.blend[i].writeMask);
+            st += b;
+        }
+        snprintf(b, sizeof b, " depth[fmt %d test %d func %x write %d] stencil[%d] cull %d/%x front %x clamp %d offset %d(%g,%g) a2c %d drawbuf0 %x vp %g,%g,%g,%g scissor %d [%d %d %d %d]",
+                 p.depth.tex ? (int)p.depth.tex.pixelFormat : -1, ctx->depthTest, ctx->depthFunc, ctx->depthWrite, ctx->stencilTest, ctx->cullFace,
+                 ctx->cullMode, ctx->frontFace, ctx->depthClamp, ctx->polygonOffsetFill, ctx->polygonOffsetFactor, ctx->polygonOffsetUnits,
+                 key.alphaToCoverage, ctx->drawFb ? ctx->drawFb->drawBuffers[0] : 0, ctx->viewport[0][0], ctx->viewport[0][1], ctx->viewport[0][2],
+                 ctx->viewport[0][3], ctx->scissorEnabled & 1, ctx->scissor[0][0], ctx->scissor[0][1], ctx->scissor[0][2], ctx->scissor[0][3]);
+        st += b;
+        if (seen.insert(st).second) MGL_INFO("draw state prog %u mode %x count %d: %s", prog->name, d.mode, d.count, st.c_str());
     }
     id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
     if (!pso) return;

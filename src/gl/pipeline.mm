@@ -47,6 +47,24 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
             v->error = v->msl.error;
         } else {
             NSString* err = nil;
+            // Debugging aid: METALGLDRV_MSL_OVERRIDE=<file> applies literal edits to the generated MSL
+            // (read at every compile so tests can switch it between programs). The file holds blocks
+            // "old\n----\nnew" separated by "\n====\n".
+            if (const char* ov = getenv("METALGLDRV_MSL_OVERRIDE"); ov && *ov) {
+                NSString* f = [NSString stringWithContentsOfFile:@(ov) encoding:NSUTF8StringEncoding error:nil];
+                for (NSString* blk in [f componentsSeparatedByString:@"\n====\n"]) {
+                    NSArray* parts = [blk componentsSeparatedByString:@"\n----\n"];
+                    if (parts.count != 2) continue;
+                    std::string from = [parts[0] UTF8String], to = [parts[1] UTF8String];
+                    size_t at = v->msl.source.find(from);
+                    if (at == std::string::npos) {
+                        MGL_WARN("MSL override: pattern not found: %s", from.c_str());
+                        continue;
+                    }
+                    for (; at != std::string::npos; at = v->msl.source.find(from, at + to.size()))
+                        v->msl.source.replace(at, from.size(), to);
+                }
+            }
             v->lib = ctx_->dev->compileLibrary(@(v->msl.source.c_str()), &err);
             if (!v->lib) {
                 v->error = err ? err.UTF8String : "MSL compile failed";

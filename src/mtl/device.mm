@@ -256,6 +256,11 @@ id<MTLLibrary> Device::compileLibrary(NSString* source, NSString** errorOut, boo
     co.languageVersion = MTLLanguageVersion4_0;
     co.mathMode = fastMath ? MTLMathModeFast : MTLMathModeSafe;
     co.preserveInvariance = YES;
+    // Debugging aid, read per compile: METALGLDRV_MSL_OPTS containing "noinv" and/or "size".
+    if (const char* o = getenv("METALGLDRV_MSL_OPTS")) {
+        if (strstr(o, "noinv")) co.preserveInvariance = NO;
+        if (strstr(o, "size")) co.optimizationLevel = MTLLibraryOptimizationLevelSize;
+    }
     ld.options = co;
     NSError* err = nil;
     id<MTLLibrary> lib = [compiler newLibraryWithDescriptor:ld error:&err];

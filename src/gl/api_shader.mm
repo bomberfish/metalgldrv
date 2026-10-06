@@ -136,6 +136,24 @@ API void APIENTRY glShaderSource(GLuint shader, GLsizei count, const GLchar* con
         if (lengths && lengths[i] >= 0) s->sources.emplace_back(strings[i], lengths[i]);
         else s->sources.emplace_back(strings[i]);
     }
+    // Field debugging: METALGLDRV_GLSL_PATCH="find=>replace[;;find=>replace...]" edits sources.
+    if (const char* patch = getenv("METALGLDRV_GLSL_PATCH")) {
+        std::string all = patch;
+        size_t pos = 0;
+        while (pos < all.size()) {
+            size_t end = all.find(";;", pos);
+            std::string rule = all.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            pos = end == std::string::npos ? all.size() : end + 2;
+            size_t arrow = rule.find("=>");
+            if (arrow == std::string::npos) continue;
+            std::string find = rule.substr(0, arrow), repl = rule.substr(arrow + 2);
+            for (auto& src : s->sources)
+                for (size_t at = src.find(find); at != std::string::npos; at = src.find(find, at + repl.size())) {
+                    src.replace(at, find.size(), repl);
+                    MGL_INFO("shader %u: applied GLSL patch '%s'", shader, find.c_str());
+                }
+        }
+    }
 }
 
 API void APIENTRY glCompileShader(GLuint shader) {
