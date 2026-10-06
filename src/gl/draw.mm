@@ -1754,7 +1754,14 @@ API void APIENTRY glDispatchComputeGroupSizeARB(GLuint x, GLuint y, GLuint z, GL
 // ---------------------------------------------------------------------------
 API void APIENTRY glMemoryBarrier(GLbitfield barriers) {
     MGL_CTX();
-    if (ctx->renderEnc) {
+    const GLbitfield shaderWrites = GL_SHADER_STORAGE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
+                                    GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_ELEMENT_ARRAY_BARRIER_BIT | GL_UNIFORM_BARRIER_BIT |
+                                    GL_COMMAND_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT;
+    if (ctx->renderEnc && (barriers & shaderWrites)) {
+        // Intra-pass vertex->vertex barriers don't order shader writes between draws on Apple
+        // GPUs; end the pass (the next encoder starts with a full barrier).
+        ctx->endEncoder();
+    } else if (ctx->renderEnc) {
         [ctx->renderEnc barrierAfterEncoderStages:MTLStageVertex | MTLStageFragment | MTLStageObject | MTLStageMesh
                               beforeEncoderStages:MTLStageVertex | MTLStageFragment | MTLStageObject | MTLStageMesh
                                 visibilityOptions:MTL4VisibilityOptionDevice];

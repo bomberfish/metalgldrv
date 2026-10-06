@@ -538,6 +538,9 @@ void Linker::assignUniforms() {
             if (v->block && (v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer)) {
                 std::string key = std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name;
                 if (!blockVars.count(key)) { blockVars[key] = {v, 0u}; blockOrder.push_back(key); }
+                else if (blockVars[key].v->anonBlock != v->anonBlock)
+                    // GLSL 4.60 §4.3.9: matched blocks must all have an instance name or all lack one
+                    error("block '" + v->block->name + "' has an instance name in one stage but not in another");
                 blockVars[key].mask |= 1u << s;
                 continue;
             }
