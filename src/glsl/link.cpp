@@ -374,7 +374,8 @@ void Linker::assignAttributes() {
     auto mark = [&](int loc, int n, const std::string& name, int kind) {
         for (int i = loc; i < loc + n; i++) {
             if (i >= 32) { error("attribute '" + name + "' location out of range"); return; }
-            if (taken[i] == kind || (taken[i] && kind == 1 && taken[i] != 2))
+            // desktop GLSL allows attribute aliasing (explicit locations / bindings, incl. component packing)
+            if (taken[i] == 2 && kind == 2)
                 error("attribute '" + name + "' location " + std::to_string(i) + " overlaps another attribute");
             if (!taken[i] || kind == 1) taken[i] = kind;
         }

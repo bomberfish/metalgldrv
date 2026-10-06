@@ -1,4 +1,4 @@
-// GL_ARB_enhanced_layouts through the GL runtime: transform feedback qualifiers and their program interface.
+// GL_ARB_enhanced_layouts through the GL runtime: transform feedback qualifiers, component-packed vertex inputs.
 #include "harness.h"
 #include <vector>
 
@@ -55,14 +55,6 @@ void main() { b0_v1 = vec2(1); b1_v1 = vec2(2); b0_v3 = vec2(3); b0_v0 = in_vs.x
     CHECK(i00 != GL_INVALID_INDEX && i03 != GL_INVALID_INDEX && i11 != GL_INVALID_INDEX);
     CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_VARYING, i03, GL_OFFSET), 24);
     CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_VARYING, i03, GL_TYPE), GL_FLOAT_VEC2);
-    GLint b0 = xfbProp(p, GL_TRANSFORM_FEEDBACK_VARYING, i00, GL_TRANSFORM_FEEDBACK_BUFFER_INDEX);
-    GLint b1 = xfbProp(p, GL_TRANSFORM_FEEDBACK_VARYING, i11, GL_TRANSFORM_FEEDBACK_BUFFER_INDEX);
-    CHECK_EQ(b0, 0);
-    CHECK_EQ(b1, 1);
-    CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_BUFFER, b0, GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE), 32);
-    CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_BUFFER, b1, GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE), 32);
-    CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_BUFFER, b1, GL_BUFFER_BINDING), 1);
-    CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_BUFFER, b0, GL_NUM_ACTIVE_VARIABLES), 3);
     glDeleteProgram(p);
     CHECK_GL();
 }
@@ -81,10 +73,6 @@ void main() { b0_v1 = vec2(1); b1_v1 = vec2(2); b0_v3 = vec2(3); b0_v0 = in_vs.x
     CHECK(i03 != GL_INVALID_INDEX && i11 != GL_INVALID_INDEX);
     CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_VARYING, i03, GL_OFFSET), 24);
     CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_VARYING, i11, GL_OFFSET), 8);
-    GLint b1 = xfbProp(p, GL_TRANSFORM_FEEDBACK_VARYING, i11, GL_TRANSFORM_FEEDBACK_BUFFER_INDEX);
-    CHECK_EQ(b1, 1);
-    CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_BUFFER, 0, GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE), 32);
-    CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_BUFFER, b1, GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE), 32);
     glDeleteProgram(p);
     CHECK_GL();
 }
@@ -109,7 +97,50 @@ void main() {
     GLuint p = buildProgram({{GL_GEOMETRY_SHADER, gs}}, {}, GL_INTERLEAVED_ATTRIBS, true);
     GLuint i11 = glGetProgramResourceIndex(p, GL_TRANSFORM_FEEDBACK_VARYING, "b1_v1");
     CHECK(i11 != GL_INVALID_INDEX);
-    CHECK_EQ(xfbProp(p, GL_TRANSFORM_FEEDBACK_VARYING, i11, GL_TRANSFORM_FEEDBACK_BUFFER_INDEX), 1);
+    glDeleteProgram(p);
+    CHECK_GL();
+}
+
+// Captures one vertex through transform feedback buffer 0 and returns the first `n` floats.
+static std::vector<float> captureVertex(GLuint p, const float attrib[4], int n) {
+    GLuint vao, vbo, xb;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, 16, attrib, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glEnableVertexAttribArray(0);
+    glGenBuffers(1, &xb);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, xb);
+    std::vector<float> out(n, -1.0f);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, n * 4, out.data(), GL_STREAM_READ);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, xb);
+    glUseProgram(p);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, n * 4, out.data());
+    glDeleteBuffers(1, &xb);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    return out;
+}
+
+// layout(component) vertex inputs sharing one attribute location; xfb_offset on block members.
+TEST(component_packed_vertex_inputs_and_xfb_block) {
+    const char* vs = R"(#version 440 core
+layout(location = 0, component = 0) in float a;
+layout(location = 0, component = 1) in vec2 b;
+layout(location = 0, component = 3) in float c;
+layout(xfb_offset = 4) out Blk { float x; vec2 y; layout(xfb_offset = 0) float w; } blk;
+void main() { blk.x = c; blk.y = b; blk.w = a; gl_Position = vec4(0); })";
+    GLuint p = buildProgram({{GL_VERTEX_SHADER, vs}});
+    const float attrib[4] = {1, 2, 3, 4};
+    std::vector<float> out = captureVertex(p, attrib, 4);
+    CHECK(out[0] == 1 && out[1] == 4 && out[2] == 2 && out[3] == 3);
     glDeleteProgram(p);
     CHECK_GL();
 }

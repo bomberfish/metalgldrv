@@ -2186,26 +2186,60 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
     useStage(Stage::Vertex);
     std::string code;
     anyIn = false;
-    std::map<int, Type> declaredLoc;  // compatibility attributes may alias generic ones
+    std::map<int, Type> declaredLoc;  // compatibility attributes and component-packed inputs may alias
     std::vector<const Variable*> attrs(sc_->used.begin(), sc_->used.end());
     std::sort(attrs.begin(), attrs.end(), [](const Variable* a, const Variable* b) { return a->id < b->id; });
+    auto isInput = [](const Variable* v) {
+        return v->q.storage == Storage::In && (v->builtin == BuiltinVar::None || v->builtin == BuiltinVar::Vertex ||
+                                               v->builtin == BuiltinVar::Normal || v->builtin == BuiltinVar::Color ||
+                                               v->builtin == BuiltinVar::SecondaryColor || v->builtin == BuiltinVar::MultiTexCoord ||
+                                               v->builtin == BuiltinVar::FogCoord);
+    };
+    // layout(component = c) inputs share a location: the attribute is declared wide enough for all of them
+    std::map<int, int> declWidth;
     for (auto* v : attrs) {
-        if (v->q.storage != Storage::In || !(v->builtin == BuiltinVar::None || v->builtin == BuiltinVar::Vertex ||
-                                              v->builtin == BuiltinVar::Normal || v->builtin == BuiltinVar::Color ||
-                                              v->builtin == BuiltinVar::SecondaryColor || v->builtin == BuiltinVar::MultiTexCoord ||
-                                              v->builtin == BuiltinVar::FogCoord))
-            continue;
+        if (!isInput(v)) continue;
+        auto it = P.attribLocations.find(v->name);
+        if (it == P.attribLocations.end()) continue;
+        int loc = it->second, comp = std::max(0, v->q.layout.component);
+        std::vector<std::pair<Type, std::string>> leaves;
+        flatten(v->type, "", leaves);
+        for (auto& [lt, a] : leaves) {
+            if (lt.base == BT::Double) {
+                if (lt.vec <= 2) declWidth[loc] = std::max(declWidth[loc], comp + 2 * lt.vec);
+                loc += lt.vec > 2 ? 2 : 1;
+                continue;
+            }
+            declWidth[loc] = std::max(declWidth[loc], comp + lt.vec);
+            loc++;
+        }
+    }
+    for (auto* v : attrs) {
+        if (!isInput(v)) continue;
         auto it = P.attribLocations.find(v->name);
         if (it == P.attribLocations.end()) continue;
         int loc = it->second;
+        int comp = std::max(0, v->q.layout.component);
         std::vector<std::pair<Type, std::string>> leaves;
         flatten(v->type, g + varName(v), leaves);
         for (auto& [lt, a] : leaves) {
             std::string L0 = std::to_string(loc);
             if (lt.base == BT::Bool) fail("boolean vertex attributes are not allowed");
             int n = lt.vec;
-            std::string sw = n == 1 ? ".x" : n == 4 ? "" : "." + std::string(kSwz, n);
+            int sc = lt.base == BT::Double ? comp / 2 : comp;  // first component in units of the leaf's scalar type
+            std::string sw = (n == 4 && sc == 0) ? "" : "." + std::string(kSwz + sc, n);
             if (stageIn) {
+                if (lt.base == BT::Double && n <= 2 && declWidth[loc] > 2 * n) {
+                    // packed with other components: uint4 attribute, this double at 32-bit component `comp`
+                    if (!declaredLoc.count(loc)) {
+                        inS += "    uint4 a" + L0 + " [[attribute(" + L0 + ")]];\n";
+                        declaredLoc[loc] = Type::vector(BT::UInt, 4);
+                    }
+                    code += "    " + a + " = as_type<" + vecName(BT::Double, n) + ">(in.a" + L0 + "." + std::string(kSwz + comp, 2 * n) + ");\n";
+                    loc++;
+                    anyIn = true;
+                    continue;
+                }
                 if (lt.base == BT::Double) {
                     std::string L1 = std::to_string(loc + 1);
                     if (n <= 2) {
@@ -2226,17 +2260,22 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                 if (dl != declaredLoc.end()) {
                     std::string src = "in.a" + L0;
                     int dn = dl->second.vec;
-                    if (dn > n) src += "." + std::string(kSwz, n);
+                    if (dn > n || comp) src += "." + std::string(kSwz + comp, n);
                     code += "    " + a + " = " + mt(lt) + "(" + src + ");\n";
                     loc++;
                     continue;
                 }
-                declaredLoc[loc] = lt;
+                int w = std::max(n, std::min(4, declWidth[loc]));
+                Type dt = lt;
+                dt.vec = (uint8_t)w;
+                declaredLoc[loc] = dt;
                 BT declBase = lt.base;
                 if (loc < 32 && (K.attribSignFlip >> loc & 1) && (lt.base == BT::Int || lt.base == BT::UInt))
                     declBase = lt.base == BT::Int ? BT::UInt : BT::Int;
-                inS += "    " + vecName(declBase, n) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
-                code += "    " + a + " = " + mt(lt) + "(in.a" + L0 + ");\n";
+                inS += "    " + vecName(declBase, w) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
+                std::string src = "in.a" + L0;
+                if (w > n || comp) src += "." + std::string(kSwz + comp, n);
+                code += "    " + a + " = " + mt(lt) + "(" + src + ");\n";
                 loc++;
                 anyIn = true;
                 continue;
