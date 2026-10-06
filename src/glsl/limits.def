@@ -21,7 +21,7 @@ X(gl_MaxTessEvaluationImageUniforms, GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS, 8)
 X(gl_MaxGeometryImageUniforms, GL_MAX_GEOMETRY_IMAGE_UNIFORMS, 8)
 X(gl_MaxFragmentImageUniforms, GL_MAX_FRAGMENT_IMAGE_UNIFORMS, 8)
 X(gl_MaxComputeImageUniforms, GL_MAX_COMPUTE_IMAGE_UNIFORMS, 8)
-X(gl_MaxCombinedImageUniforms, GL_MAX_COMBINED_IMAGE_UNIFORMS, 8)
+X(gl_MaxCombinedImageUniforms, GL_MAX_COMBINED_IMAGE_UNIFORMS, 48)  // 8 per stage, summed over the 6 stages
 X(gl_MaxFragmentUniformComponents, GL_MAX_FRAGMENT_UNIFORM_COMPONENTS, 16384)
 X(gl_MaxDrawBuffers, GL_MAX_DRAW_BUFFERS, 8)
 X(gl_MaxClipDistances, GL_MAX_CLIP_DISTANCES, 8)
