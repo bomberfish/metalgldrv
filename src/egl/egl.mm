@@ -453,7 +453,7 @@ EGLAPI_EXPORT EGLContext EGLAPIENTRY eglCreateContext(EGLDisplay dpy, EGLConfig 
     const Config* c = configFromHandle(config);
     if (!c && config != EGL_NO_CONFIG_KHR) return fail(EGL_BAD_CONFIG, EGL_NO_CONTEXT);
     EGLint major = 0, minor = 0, profile = 0, flags = 0, clientVersion = 0;
-    bool debug = false, fwd = false, robust = false, noError = false;
+    bool debug = false, fwd = false, robust = false, noError = false, loseOnReset = false;
     for (const EGLint* a = attrib_list; a && *a != EGL_NONE; a += 2) {
         switch (a[0]) {
         case EGL_CONTEXT_MAJOR_VERSION: major = a[1]; break;  // == EGL_CONTEXT_CLIENT_VERSION
@@ -464,7 +464,8 @@ EGLAPI_EXPORT EGLContext EGLAPIENTRY eglCreateContext(EGLDisplay dpy, EGLConfig 
         case EGL_CONTEXT_OPENGL_ROBUST_ACCESS: robust = a[1]; break;
         case EGL_CONTEXT_FLAGS_KHR: flags = a[1]; break;
         case EGL_CONTEXT_OPENGL_NO_ERROR_KHR: noError = a[1]; break;
-        case EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY: break;
+        case EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY:
+        case 0x3138 /* EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT */: loseOnReset = a[1] == EGL_LOSE_CONTEXT_ON_RESET; break;
         default: return fail(EGL_BAD_ATTRIBUTE, EGL_NO_CONTEXT);
         }
     }
@@ -493,6 +494,7 @@ EGLAPI_EXPORT EGLContext EGLAPIENTRY eglCreateContext(EGLDisplay dpy, EGLConfig 
     }
     auto* impl = new EGLContextImpl();
     impl->ctx = new Context(share, 4, 6, core, debug, fwd, robust, noError);
+    impl->ctx->loseContextOnReset = loseOnReset;
     impl->config = c;
     impl->clientVersion = clientVersion;
     impl->api = t_egl.api;

@@ -135,6 +135,7 @@ public:
     Ref<ShareGroup> share;
     int majorVersion, minorVersion;
     bool coreProfile, debugContext, forwardCompatible, robustAccess, noErrorMode;
+    bool loseContextOnReset = false;  // RESET_NOTIFICATION_STRATEGY requested at creation
     bool everCurrent = false;
 
     // ---- errors / debug ----
