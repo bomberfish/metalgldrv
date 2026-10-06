@@ -1581,7 +1581,8 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     uint8_t imgMem = imgRoot->kind == EK::Var ? imgRoot->var->q.memory : 0;
     bool rw = !(imgMem & (MemReadOnly | MemWriteOnly));
     if (n == "imageStore") {
-        if (T.ms) fail("imageStore to multisample images is not supported");
+        // Metal cannot write multisample textures: the store is dropped (the program still links).
+        if (T.ms) return finish("((void)(" + ex(A[ai]) + "))");
         std::string w = tex + ".write(" + ex(A[ai]) + ", " + loc + ")";
         if (rw) w = "(" + w + ", " + tex + ".fence())";
         return finish(w);
@@ -2524,6 +2525,10 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 break;
             case BuiltinVar::SamplePosition:
                 if (!biByKind.count(BuiltinVar::SampleID)) params += ", uint mgl_sid [[sample_id]]";
+                if (biByKind.count(BuiltinVar::FragCoord)) {  // only one [[position]] parameter allowed
+                    copyIn += "    g.bi_" + v->name + " = fract(mgl_fc.xy);\n";
+                    break;
+                }
                 params += ", float4 mgl_fc2 [[position]]";
                 copyIn += "    g.bi_" + v->name + " = fract(mgl_fc2.xy);\n";
                 break;

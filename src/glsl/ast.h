@@ -266,6 +266,7 @@ struct Shader {
     std::map<std::string, std::string> extensions;
     Layout inLayout, outLayout;          // stage-level layout(...) in/out; declarations
     bool hasMain = false;
+    bool spirv = false;                  // decompiled from a SPIR-V module (interfaces match by location)
     // arenas
     std::deque<Expr> exprs;
     std::deque<Stmt> stmts;

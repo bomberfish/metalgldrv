@@ -45,6 +45,32 @@ struct CompileOptions {
 CompileResult compile(Stage stage, const std::vector<std::string>& sources, const CompileOptions& opts = {});
 
 // ---------------------------------------------------------------------------
+// SPIR-V shader modules (ARB_gl_spirv). glShaderBinary stores a parsed module;
+// glSpecializeShader selects an entry point, applies specialization constants and
+// decompiles it to GLSL 4.60 that compile() consumes (src/glsl/spirv.cpp).
+// ---------------------------------------------------------------------------
+struct SpirvModule;  // opaque, immutable
+
+// Checks the header and instruction stream; null (and *error) when malformed.
+std::shared_ptr<const SpirvModule> parseSpirv(const void* data, size_t bytes, std::string* error);
+
+enum class SpecializeStatus : uint8_t {
+    Ok,             // result.compile.shader is set
+    BadEntryPoint,  // no entry point with that name for the stage (GL_INVALID_VALUE)
+    BadConstantId,  // a constant index names no specialization constant (GL_INVALID_VALUE)
+    Failed,         // module could not be translated (compile status FALSE, see infoLog)
+};
+struct SpecializeResult {
+    SpecializeStatus status = SpecializeStatus::Failed;
+    CompileResult compile;
+    std::string glsl;  // generated GLSL (debugging; METALGLDRV_DUMP_SPIRV prints it)
+};
+SpecializeResult specializeSpirv(const SpirvModule& module, Stage stage, const std::string& entryPoint,
+                                 const std::vector<std::pair<uint32_t, uint32_t>>& constants, const CompileOptions& opts = {});
+// SPIR-V extensions accepted in OpExtension (GL_SPIR_V_EXTENSIONS).
+const std::vector<std::string>& supportedSpirvExtensions();
+
+// ---------------------------------------------------------------------------
 // Program reflection. All "type" fields are GL enums (GL_FLOAT_VEC4, GL_SAMPLER_2D...).
 // ---------------------------------------------------------------------------
 

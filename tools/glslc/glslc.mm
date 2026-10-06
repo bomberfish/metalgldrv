@@ -1,5 +1,6 @@
 // glslc: host tool for the metalgldrv GLSL compiler.
 //   glslc -S vert a.vert -S frag a.frag [--msl out.metal] [--no-validate] [-q]
+//   (*.spv inputs are SPIR-V modules: decompiled via specializeSpirv, entry point --entry NAME, default main)
 // Compiles, links, prints reflection + MSL, and validates the MSL with the
 // host Metal compiler (MTLLanguageVersion4_0).
 #import <Foundation/Foundation.h>
@@ -106,6 +107,7 @@ int main(int argc, char** argv) {
     std::vector<std::pair<Stage, std::string>> inputs;
     std::vector<std::string> xfbNames;
     bool xfbSeparate = false;
+    std::string entry = "main";
     std::string mslOut;
     bool validate = true, quiet = false, compileOnly = false, timing = false, xfb = false;
     auto now = [] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
@@ -121,6 +123,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-validate") validate = false;
         else if (a == "-q") quiet = true;
         else if (a == "--compile-only") compileOnly = true;
+        else if (a == "--entry" && i + 1 < argc) entry = argv[++i];
         else if (a == "--time") timing = true;
         else if (a == "--xfb" && i + 1 < argc) {
             // comma separated varying names for glTransformFeedbackVaryings (interleaved)
@@ -140,12 +143,24 @@ int main(int argc, char** argv) {
     li.xfbVaryings = xfbNames;
     li.xfbInterleaved = !xfbSeparate;
     for (auto& [st, path] : inputs) {
-        std::ifstream f(path);
+        std::ifstream f(path, std::ios::binary);
         if (!f) { fprintf(stderr, "cannot read %s\n", path.c_str()); return 2; }
         std::stringstream ss;
         ss << f.rdbuf();
         t0 = now();
-        CompileResult cr = compile(st, {ss.str()});
+        CompileResult cr;
+        if (path.size() > 4 && path.compare(path.size() - 4, 4, ".spv") == 0) {
+            // SPIR-V module: entry point "main" (or the name after ':' in --entry), no specialization
+            std::string data = ss.str(), perr;
+            auto mod = parseSpirv(data.data(), data.size(), &perr);
+            if (!mod) { fprintf(stderr, "%s: %s\n", path.c_str(), perr.c_str()); return 1; }
+            SpecializeResult sr = specializeSpirv(*mod, st, entry, {});
+            if (!quiet) printf("== %s as GLSL ==\n%s\n", path.c_str(), sr.glsl.c_str());
+            if (sr.status == SpecializeStatus::BadEntryPoint) { fprintf(stderr, "%s: no entry point '%s'\n", path.c_str(), entry.c_str()); return 1; }
+            cr = sr.compile;
+        } else {
+            cr = compile(st, {ss.str()});
+        }
         tc += now() - t0;
         if (!cr.infoLog.empty()) fprintf(stderr, "%s: %s", path.c_str(), cr.infoLog.c_str());
         if (!cr.shader) { fprintf(stderr, "%s: compile FAILED\n", path.c_str()); return 1; }

@@ -19,7 +19,7 @@ const char* kExtensions[] = {
     "GL_ARB_enhanced_layouts", "GL_ARB_explicit_attrib_location", "GL_ARB_explicit_uniform_location",
     "GL_ARB_fragment_coord_conventions", "GL_ARB_fragment_layer_viewport", "GL_ARB_fragment_shader",
     "GL_ARB_framebuffer_no_attachments", "GL_ARB_framebuffer_object", "GL_ARB_framebuffer_sRGB", "GL_ARB_geometry_shader4",
-    "GL_ARB_get_program_binary", "GL_ARB_get_texture_sub_image", "GL_ARB_gpu_shader5", "GL_ARB_gpu_shader_fp64",
+    "GL_ARB_get_program_binary", "GL_ARB_get_texture_sub_image", "GL_ARB_gl_spirv", "GL_ARB_gpu_shader5", "GL_ARB_gpu_shader_fp64",
     "GL_ARB_half_float_pixel", "GL_ARB_half_float_vertex", "GL_ARB_indirect_parameters", "GL_ARB_instanced_arrays",
     "GL_ARB_internalformat_query", "GL_ARB_internalformat_query2", "GL_ARB_invalidate_subdata", "GL_ARB_map_buffer_alignment",
     "GL_ARB_map_buffer_range", "GL_ARB_multi_bind", "GL_ARB_multi_draw_indirect", "GL_ARB_multisample",
@@ -139,7 +139,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_CONTEXT_PROFILE_MASK: v = I(ctx->coreProfile ? GL_CONTEXT_CORE_PROFILE_BIT : GL_CONTEXT_COMPATIBILITY_PROFILE_BIT); return true;
     case GL_NUM_EXTENSIONS: v = I(kNumExtensions); return true;
     case GL_NUM_SHADING_LANGUAGE_VERSIONS: v = I(17); return true;
-    case GL_NUM_SPIR_V_EXTENSIONS: v = I(0); return true;
+    case GL_NUM_SPIR_V_EXTENSIONS: v = I((int)glsl::supportedSpirvExtensions().size()); return true;
     case GL_RESET_NOTIFICATION_STRATEGY: v = E(ctx->loseContextOnReset ? GL_LOSE_CONTEXT_ON_RESET : GL_NO_RESET_NOTIFICATION); return true;
     case GL_CONTEXT_RELEASE_BEHAVIOR: v = E(GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH); return true;
     case GL_MAX_TEXTURE_SIZE: case GL_MAX_CUBE_MAP_TEXTURE_SIZE: case GL_MAX_RENDERBUFFER_SIZE: case GL_MAX_RECTANGLE_TEXTURE_SIZE:
@@ -268,8 +268,10 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_POINT_SIZE_GRANULARITY: v = F(0.125); return true;
     case GL_NUM_COMPRESSED_TEXTURE_FORMATS: v = I(0); return true;
     case GL_COMPRESSED_TEXTURE_FORMATS: v = I(0); v.n = 0; return true;
-    case GL_NUM_PROGRAM_BINARY_FORMATS: case GL_NUM_SHADER_BINARY_FORMATS: v = I(0); return true;
-    case GL_PROGRAM_BINARY_FORMATS: case GL_SHADER_BINARY_FORMATS: v = I(0); v.n = 0; return true;
+    case GL_NUM_PROGRAM_BINARY_FORMATS: v = I(0); return true;
+    case GL_PROGRAM_BINARY_FORMATS: v = I(0); v.n = 0; return true;
+    case GL_NUM_SHADER_BINARY_FORMATS: v = I(1); return true;
+    case GL_SHADER_BINARY_FORMATS: v = E(GL_SHADER_BINARY_FORMAT_SPIR_V); return true;
     case GL_SHADER_COMPILER: v = B(true); return true;
     case GL_IMPLEMENTATION_COLOR_READ_FORMAT: v = E(GL_RGBA); return true;
     case GL_IMPLEMENTATION_COLOR_READ_TYPE: v = E(GL_UNSIGNED_BYTE); return true;
@@ -606,8 +608,12 @@ API const GLubyte* APIENTRY glGetStringi(GLenum name, GLuint index) {
         return (const GLubyte*)glslVersions[index];
     }
     if (name == GL_SPIR_V_EXTENSIONS) {
-        ctx->setError(GL_INVALID_VALUE);
-        return nullptr;
+        const auto& exts = glsl::supportedSpirvExtensions();
+        if (index >= exts.size()) {
+            ctx->setError(GL_INVALID_VALUE);
+            return nullptr;
+        }
+        return (const GLubyte*)exts[index].c_str();
     }
     ctx->setError(GL_INVALID_ENUM);
     return nullptr;
