@@ -2,6 +2,7 @@
 #import "gl/texture.h"
 #include <cmath>
 #include <mutex>
+#include "mtl/compress.h"
 #include "util/log.h"
 #include "util/stats.h"
 
@@ -545,6 +546,22 @@ void uploadTexSubImage(Context* ctx, Texture* t, int level, int face, int x, int
             copyStagingToTexture(ctx, t, dp, (size_t)w * 4, (size_t)w * 4 * h, level, sliceBase, mx, my, mz, mw, mh, md, MTLBlitOptionDepthFromDepthStencil);
         if (hasStencil)
             copyStagingToTexture(ctx, t, sp, (size_t)w, (size_t)w * h, level, sliceBase, mx, my, mz, mw, mh, md, MTLBlitOptionStencilFromDepthStencil);
+        return;
+    }
+    if (f->comp == Comp::Compressed) {
+        // Compressed image from uncompressed data: decode to RGBA float, then block-encode.
+        const FormatInfo* ff = formatInfo(GL_RGBA32F);
+        size_t cRow = storageRowBytes(f, w), cImg = storageImageBytes(f, w, h);
+        std::vector<float> tmp((size_t)w * h * 4);
+        UploadAlloc up = ctx->upload(cImg * d, 16);
+        for (int i = 0; i < d; i++) {
+            convertToStorage(ff, format, type, src + i * cl.imageStride, cl.rowStride, cl.imageStride, tmp.data(), (size_t)w * 16,
+                             (size_t)w * h * 16, w, h, 1, ctx->unpack.swapBytes);
+            compressImage(f, tmp.data(), w, h, up.cpu + i * cImg);
+        }
+        // Metal copy sizes: block-aligned, clamped to the level size.
+        int lw = std::max(1, t->storageW >> level), lh = std::max(1, t->storageH >> level);
+        copyStagingToTexture(ctx, t, up, cRow, cImg, level, sliceBase, mx, my, mz, std::min(w, lw - x), std::min(h, lh - y), md);
         return;
     }
     UploadAlloc up = ctx->upload(imageBytes * d, 16);

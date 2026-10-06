@@ -1,6 +1,7 @@
 // Texture copy / pixel storage / format tests.
 #include "harness.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -250,4 +251,82 @@ TEST(copy_image_compressed_uncompressed) {
     CHECK_EQ(glGetError(), (GLenum)GL_INVALID_VALUE);
     GLuint ts[2] = {c, u};
     glDeleteTextures(2, ts);
+}
+
+// Uncompressed data specified for compressed internal formats is CPU-encoded: the level
+// reports the compressed format and samples back close to the source.
+TEST(compressed_from_uncompressed_data) {
+    struct Case { GLenum fmt; int channels; bool sgn; bool hdr; float tol; };
+    const Case cases[] = {
+        {GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 3, false, false, 0.08f}, {GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, 3, false, false, 0.08f},
+        {GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 4, false, false, 0.08f}, {GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, false, false, 0.08f},
+        {GL_COMPRESSED_RED_RGTC1, 1, false, false, 0.03f}, {GL_COMPRESSED_SIGNED_RED_RGTC1, 1, true, false, 0.06f},
+        {GL_COMPRESSED_RG_RGTC2, 2, false, false, 0.03f}, {GL_COMPRESSED_SIGNED_RG_RGTC2, 2, true, false, 0.06f},
+        {GL_COMPRESSED_RGBA_BPTC_UNORM, 4, false, false, 0.05f}, {GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT, 3, false, true, 0.15f},
+        {GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT, 3, true, true, 0.15f}, {GL_COMPRESSED_RGB8_ETC2, 3, false, false, 0.12f},
+        {GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2, 3, false, false, 0.2f}, {GL_COMPRESSED_RGBA8_ETC2_EAC, 4, false, false, 0.12f},
+        {GL_COMPRESSED_R11_EAC, 1, false, false, 0.03f}, {GL_COMPRESSED_SIGNED_R11_EAC, 1, true, false, 0.03f},
+        {GL_COMPRESSED_RG11_EAC, 2, false, false, 0.03f}, {GL_COMPRESSED_SIGNED_RG11_EAC, 2, true, false, 0.03f},
+        {GL_COMPRESSED_RGBA, 4, false, false, 0.08f},
+    };
+    const int N = 8;
+    // Smooth per-block content compresses near-losslessly.
+    std::vector<float> src(N * N * 4);
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+            float* p = &src[(y * N + x) * 4];
+            p[0] = x / 7.0f;
+            p[1] = x / 14.0f + 0.25f;
+            p[2] = 0.6f - x / 28.0f;
+            p[3] = 1.0f;
+        }
+    const char* vs = "#version 430 core\nvoid main() { vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4.0 - 1.0; gl_Position = vec4(p, 0, 1); }";
+    GLuint prog = compileProgram(vs, "#version 430 core\nuniform sampler2D s; out vec4 c;\n"
+                                     "void main() { c = texelFetch(s, ivec2(gl_FragCoord.xy), 0); }");
+    GLuint vao, fbo, rt;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenTextures(1, &rt);
+    glBindTexture(GL_TEXTURE_2D, rt);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, N, N);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+    glViewport(0, 0, N, N);
+    glUseProgram(prog);
+    for (const Case& c : cases) {
+        std::vector<float> in = src;
+        for (size_t i = 0; i < in.size(); i++) {
+            if (i % 4 == 3) continue;
+            if (c.sgn) in[i] = in[i] * 2 - 1;
+            if (c.hdr) in[i] *= 4;
+        }
+        GLuint t;
+        glGenTextures(1, &t);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, c.fmt, N, N, 0, GL_RGBA, GL_FLOAT, in.data());
+        CHECK_GL();
+        GLint compressed = 0, size = 0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_COMPRESSED, &compressed);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_COMPRESSED_IMAGE_SIZE, &size);
+        CHECK_EQ(compressed, 1);
+        CHECK(size > 0);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        std::vector<float> out(N * N * 4);
+        glReadPixels(0, 0, N, N, GL_RGBA, GL_FLOAT, out.data());
+        float worst = 0;
+        for (int i = 0; i < N * N; i++)
+            for (int k = 0; k < c.channels; k++)
+                worst = std::max(worst, std::fabs(out[i * 4 + k] - in[i * 4 + k]) / (c.hdr ? 4.0f : 1.0f));
+        if (worst > c.tol) testFail(__FILE__, __LINE__, "format 0x" + std::to_string(c.fmt) + " max error " + std::to_string(worst));
+        glDeleteTextures(1, &t);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &rt);
+    glDeleteVertexArrays(1, &vao);
 }

@@ -204,6 +204,15 @@ int viewClass(GLenum internalFormat) {
     }
 }
 
+bool compressedSupports3D(const FormatInfo* f) {
+    switch (f->internalFormat) {
+    case GL_COMPRESSED_RGBA_BPTC_UNORM: case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM: case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+    case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+        return true;
+    default: return f->comp != Comp::Compressed;
+    }
+}
+
 bool copyImageCompatible(const FormatInfo* a, const FormatInfo* b) {
     if (a->internalFormat == b->internalFormat) return true;
     int ca = viewClass(a->internalFormat), cb = viewClass(b->internalFormat);
@@ -225,20 +234,27 @@ const FormatInfo* resolveInternalFormat(GLenum internalFormat, GLenum format, GL
     bool isHalf = type == GL_HALF_FLOAT;
     bool isShortN = type == GL_UNSIGNED_SHORT || type == GL_SHORT;
     switch (internalFormat) {
-    case 1: case GL_RED: case GL_COMPRESSED_RED:
+    // Generic compressed formats pick a specific compressed format (CPU-encoded on upload).
+    case GL_COMPRESSED_RED: return formatInfo(GL_COMPRESSED_RED_RGTC1);
+    case GL_COMPRESSED_RG: return formatInfo(GL_COMPRESSED_RG_RGTC2);
+    case GL_COMPRESSED_RGB: return formatInfo(GL_COMPRESSED_RGB_S3TC_DXT1_EXT);
+    case GL_COMPRESSED_RGBA: return formatInfo(GL_COMPRESSED_RGBA_S3TC_DXT5_EXT);
+    case GL_COMPRESSED_SRGB: return formatInfo(GL_COMPRESSED_SRGB_S3TC_DXT1_EXT);
+    case GL_COMPRESSED_SRGB_ALPHA: return formatInfo(GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT);
+    case 1: case GL_RED:
         return formatInfo(isFloat ? GL_R32F : isHalf ? GL_R16F : isShortN ? GL_R16 : GL_R8);
-    case 2: case GL_RG: case GL_COMPRESSED_RG:
+    case 2: case GL_RG:
         return formatInfo(isFloat ? GL_RG32F : isHalf ? GL_RG16F : isShortN ? GL_RG16 : GL_RG8);
-    case 3: case GL_RGB: case GL_COMPRESSED_RGB:
+    case 3: case GL_RGB:
         if (type == GL_UNSIGNED_INT_10F_11F_11F_REV) return formatInfo(GL_R11F_G11F_B10F);
         if (type == GL_UNSIGNED_INT_5_9_9_9_REV) return formatInfo(GL_RGB9_E5);
         return formatInfo(isFloat ? GL_RGB32F : isHalf ? GL_RGB16F : isShortN ? GL_RGB16 : GL_RGB8);
-    case 4: case GL_RGBA: case GL_COMPRESSED_RGBA:
+    case 4: case GL_RGBA:
         if (type == GL_UNSIGNED_INT_2_10_10_10_REV) return formatInfo(GL_RGB10_A2);
         return formatInfo(isFloat ? GL_RGBA32F : isHalf ? GL_RGBA16F : isShortN ? GL_RGBA16 : GL_RGBA8);
     case GL_BGRA: return formatInfo(GL_RGBA8);
-    case GL_SRGB: case GL_COMPRESSED_SRGB: return formatInfo(GL_SRGB8);
-    case GL_SRGB_ALPHA: case GL_COMPRESSED_SRGB_ALPHA: return formatInfo(GL_SRGB8_ALPHA8);
+    case GL_SRGB: return formatInfo(GL_SRGB8);
+    case GL_SRGB_ALPHA: return formatInfo(GL_SRGB8_ALPHA8);
     case GL_DEPTH_COMPONENT:
         return formatInfo(isFloat ? GL_DEPTH_COMPONENT32F : type == GL_UNSIGNED_SHORT ? GL_DEPTH_COMPONENT16 : GL_DEPTH_COMPONENT24);
     case GL_DEPTH_STENCIL:

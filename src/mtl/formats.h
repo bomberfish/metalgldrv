@@ -54,6 +54,9 @@ int viewClass(GLenum internalFormat);
 inline bool losslessCompressionSafe(MTLPixelFormat f) {
     return f != MTLPixelFormatRGB9E5Float && f != MTLPixelFormatRG11B10Float;
 }
+// Whether a compressed format may be used for TEXTURE_3D images (only BPTC: RGTC, ETC2/EAC,
+// S3TC and ASTC LDR are 2D/array-only).
+bool compressedSupports3D(const FormatInfo* f);
 // glCopyImageSubData format compatibility (§18.3.3).
 bool copyImageCompatible(const FormatInfo* a, const FormatInfo* b);
 
