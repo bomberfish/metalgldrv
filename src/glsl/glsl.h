@@ -252,6 +252,7 @@ struct EntryPoint {
     int threadsPerThreadgroup[3] = {1, 1, 1};
     uint32_t payloadBytes = 0;   // object -> mesh
     uint32_t maxMeshVertices = 0, maxMeshPrimitives = 0;
+    uint32_t scratchWordsPerItem = 0;  // mgl_gs_copy: size of each item's MGLDrawInfo::gsRecord area
 };
 
 struct MSLOutput {
@@ -341,7 +342,8 @@ struct alignas(16) MGLDrawInfo {
     uint32_t xfbPrimLimit[4];     // per stream: output primitives that fit in the bound buffers (capture stops there)
     uint32_t xfbStreamBase[4];    // per stream: vertices already captured in this session
     uint32_t xfbBufferStream[4];  // stream feeding each buffer
-    uint32_t pad1[2];
+    uint64_t gsRecord;            // optional: mgl_gs_count stores each item's captured primitives here
+                                  // (EntryPoint::scratchWordsPerItem uint32 per item); mgl_gs_copy places them
 };
 
 
