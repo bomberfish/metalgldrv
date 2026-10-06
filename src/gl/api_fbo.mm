@@ -177,7 +177,7 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
         }
         td.storageMode = MTLStorageModePrivate;
         td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
-        td.usage = (f->renderable ? MTLTextureUsageRenderTarget : 0) | MTLTextureUsageShaderRead | (f->kind == FmtKind::DepthStencil ? MTLTextureUsagePixelFormatView : 0);
+        td.usage = (f->renderable ? MTLTextureUsageRenderTarget : 0) | MTLTextureUsageShaderRead | (f->kind == FmtKind::DepthStencil || f->srgb ? MTLTextureUsagePixelFormatView : 0);
         rb->mtl = [ctx->dev->mtl newTextureWithDescriptor:td];
         if (!rb->mtl) return ctx->setError(GL_OUT_OF_MEMORY);
         ctx->dev->makeResident(rb->mtl);
@@ -848,21 +848,38 @@ id<MTLTexture> readDepthStencilTexture(Context* ctx, Framebuffer* fb, bool stenc
 // Resolves a multisampled texture region into a temporary single-sample texture.
 static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
     if (src.sampleCount <= 1) return src;
+    const FormatInfo* f = formatInfoForMTL(src.pixelFormat);
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
     td.storageMode = MTLStorageModePrivate;
-    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+               (f && (f->srgb || f->kind == FmtKind::DepthStencil) ? MTLTextureUsagePixelFormatView : 0);
     id<MTLTexture> dst = [ctx->dev->mtl newTextureWithDescriptor:td];
     ctx->dev->makeResident(dst);
     ctx->endEncoder();
+    if (f && (f->kind == FmtKind::UInt || f->kind == FmtKind::SInt)) {
+        // Integer samples can't be averaged: GL takes a single sample (we use sample 0).
+        resolveSample0(ctx, src, dst, f->kind == FmtKind::SInt);
+        ctx->dev->releaseAfter(dst, ctx->serial());
+        return dst;
+    }
     MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
-    bool depth = src.pixelFormat == MTLPixelFormatDepth32Float || src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
-                 src.pixelFormat == MTLPixelFormatDepth16Unorm;
-    if (depth) {
+    bool hasDepth = f && (f->kind == FmtKind::Depth || f->kind == FmtKind::DepthStencil);
+    bool hasStencil = f && (f->kind == FmtKind::Stencil || f->kind == FmtKind::DepthStencil);
+    if (hasDepth) {
         rp.depthAttachment.texture = src;
         rp.depthAttachment.loadAction = MTLLoadActionLoad;
         rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
         rp.depthAttachment.resolveTexture = dst;
-    } else {
+        rp.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+    }
+    if (hasStencil) {
+        rp.stencilAttachment.texture = src;
+        rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+        rp.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
+        rp.stencilAttachment.resolveTexture = dst;
+        rp.stencilAttachment.stencilResolveFilter = MTLMultisampleStencilResolveFilterSample0;
+    }
+    if (!hasDepth && !hasStencil) {
         rp.colorAttachments[0].texture = src;
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
         rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
@@ -1020,6 +1037,13 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
     auto blitOne = [&](id<MTLTexture> src, int slevel, int sslice, id<MTLTexture> dst, int dlevel, int dslice, BlitParams::What what, bool linear) {
         if (!src || !dst) return;
         src = resolveForRead(ctx, src);
+        if (!ctx->framebufferSRGB && what == BlitParams::Color && (src.usage & MTLTextureUsagePixelFormatView) &&
+            (src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB || src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)) {
+            // FRAMEBUFFER_SRGB disabled: copy encoded values as they are (no sRGB decode on read).
+            src = [src newTextureViewWithPixelFormat:src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm
+                                                                                                       : MTLPixelFormatBGRA8Unorm];
+            ctx->dev->retainUntil(src, ctx->serial());
+        }
         BlitParams bp;
         bp.src = src;
         bp.srcLevel = slevel;

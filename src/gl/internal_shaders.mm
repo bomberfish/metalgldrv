@@ -78,6 +78,11 @@ fragment StencilOut blit_fs_stencil(QuadOut in [[stage_in]], constant BlitStenci
     o.s = a.src.read(uint2(in.uv), q.slice, uint(q.lod)).r;
     return o;
 }
+// Multisample -> single-sample copy of sample 0 (integer formats have no Metal resolve).
+struct MSIntArgs { texture2d_ms<int> src; };
+struct MSUintArgs { texture2d_ms<uint> src; };
+fragment int4 resolve_fs_int(QuadOut in [[stage_in]], constant MSIntArgs& a [[buffer(1)]]) { return a.src.read(uint2(in.uv), 0); }
+fragment uint4 resolve_fs_uint(QuadOut in [[stage_in]], constant MSUintArgs& a [[buffer(1)]]) { return a.src.read(uint2(in.uv), 0); }
 // GL_RGB32{F,I,UI} buffer textures: tightly packed 12-byte texels -> RGBA32 (alpha = 1).
 kernel void expand_rgb32(device const uint* src [[buffer(0)]], device uint4* dst [[buffer(1)]], constant uint2& p [[buffer(2)]],
                          uint i [[thread_position_in_grid]]) {
@@ -345,6 +350,46 @@ void clearWithQuad(Context* ctx, const QuadClear& q) {
     [ctx->renderArgTable setAddress:qa.gpu atIndex:0];
     [ctx->renderArgTable setAddress:va.gpu atIndex:1];
     [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+}
+
+void resolveSample0(Context* ctx, id<MTLTexture> src, id<MTLTexture> dst, bool isSigned) {
+    ctx->endEncoder();
+    MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
+    rp.colorAttachments[0].texture = dst;
+    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    rp.renderTargetWidth = dst.width;
+    rp.renderTargetHeight = dst.height;
+    MTLPixelFormat colors[kMaxDrawBuffers];
+    for (int i = 0; i < kMaxDrawBuffers; i++) colors[i] = MTLPixelFormatInvalid;
+    colors[0] = dst.pixelFormat;
+    NSString* fs = isSigned ? @"resolve_fs_int" : @"resolve_fs_uint";
+    std::string key = std::string("resolve_") + fs.UTF8String + "_" + std::to_string(colors[0]);
+    id<MTLRenderPipelineState> pso = internalPipeline(key, internalLibrary(), @"quad_vs", fs, colors, nullptr, 1);
+    id<MTL4RenderCommandEncoder> e = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rp];
+    [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment | MTLStageVertex visibilityOptions:MTL4VisibilityOptionDevice];
+    if (pso) {
+        [e setArgumentTable:ctx->renderArgTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [e setRenderPipelineState:pso];
+        MTLViewport vp = {0, 0, (double)dst.width, (double)dst.height, 0, 1};
+        [e setViewport:vp];
+        UploadAlloc qa = ctx->upload(sizeof(QuadArgsCPU));
+        QuadArgsCPU q;
+        q.rect[0] = -1; q.rect[1] = -1; q.rect[2] = 1; q.rect[3] = 1;
+        q.srcRect[0] = 0; q.srcRect[1] = 0; q.srcRect[2] = (float)src.width; q.srcRect[3] = (float)src.height;
+        q.depth = 0;
+        q.lod = 0;
+        q.slice = 0;
+        q.pad = 0;
+        memcpy(qa.cpu, &q, sizeof q);
+        UploadAlloc pa = ctx->upload(8);
+        MTLResourceID rid = src.gpuResourceID;
+        memcpy(pa.cpu, &rid, 8);
+        [ctx->renderArgTable setAddress:qa.gpu atIndex:0];
+        [ctx->renderArgTable setAddress:pa.gpu atIndex:1];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    }
+    [e endEncoding];
 }
 
 void expandRgb32(Context* ctx, uint64_t srcAddr, uint64_t dstAddr, uint32_t texels, uint32_t alphaBits) {

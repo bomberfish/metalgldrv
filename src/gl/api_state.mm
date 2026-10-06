@@ -69,7 +69,13 @@ static bool setCap(Context* ctx, GLenum cap, bool v, int index = -1) {
     case GL_SAMPLE_SHADING: ctx->sampleShading = v; return true;
     case GL_COLOR_LOGIC_OP: ctx->colorLogicOp = v; return true;
     case GL_DITHER: ctx->dither = v; return true;
-    case GL_FRAMEBUFFER_SRGB: ctx->framebufferSRGB = v; return true;
+    case GL_FRAMEBUFFER_SRGB:
+        if (ctx->framebufferSRGB != v) {
+            ctx->applyClearNow();  // pending clears belong to the current attachment views
+            ctx->framebufferSRGB = v;
+            ctx->passDirty = true;
+        }
+        return true;
     case GL_LINE_SMOOTH: ctx->lineSmooth = v; return true;
     case GL_POLYGON_SMOOTH: ctx->polygonSmooth = v; return true;
     case GL_TEXTURE_CUBE_MAP_SEAMLESS: ctx->textureCubeSeamless = v; return true;
