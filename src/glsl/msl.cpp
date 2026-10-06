@@ -1472,6 +1472,12 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         std::string refZ;
         if (sh) refZ = ex(A[ai++]);
         std::string offset;
+        // Metal's gather offsets are limited to [-8, 7] (GL allows MIN/MAX_PROGRAM_TEXTURE_GATHER_OFFSET
+        // = [-32, 31]): other offsets shift the coordinate by whole texels instead.
+        auto inMetalRange = [](int64_t v) { return v >= -8 && v <= 7; };
+        auto shifted = [&](const std::string& off) {
+            return "(" + coord + " + float2(" + off + ") / float2(" + tex + ".get_width(), " + tex + ".get_height()))";
+        };
         if (isOffset) {
             if (name == "textureGatherOffsets") {
                 // each result texel k is texel i0j0 (.w) of the footprint selected by offsets[k]
@@ -1486,17 +1492,25 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
                 if (T.sampled == BT::Int) r = "int4(";
                 if (T.sampled == BT::UInt) r = "uint4(";
                 for (int k = 0; k < 4; k++) {
-                    std::string o2 = "int2(" + std::to_string((int)offs->cv->c[2 * k].i) + ", " + std::to_string((int)offs->cv->c[2 * k + 1].i) + ")";
-                    std::string args = smp + ", " + coord;
+                    int64_t offX = offs->cv->c[2 * k].i, offY = offs->cv->c[2 * k + 1].i;
+                    std::string o2 = "int2(" + std::to_string((int)offX) + ", " + std::to_string((int)offY) + ")";
+                    bool direct = inMetalRange(offX) && inMetalRange(offY);
+                    std::string args = smp + ", " + (direct ? coord : shifted(o2));
                     if (!layer.empty()) args += ", " + layer;
                     if (sh) args += ", " + ex(A[2]);
-                    args += ", " + o2;
+                    args += ", " + (direct ? o2 : std::string("int2(0)"));
                     if (!sh) args += std::string(", component::") + kSwz[compIdx2];
                     r += (k ? ", " : "") + tex + (sh ? ".gather_compare(" : ".gather(") + args + ").w";
                 }
                 return finish(r + ")");
             }
-            offset = ex(A[ai++]);
+            const Expr* oe = A[ai++];
+            offset = ex(oe);
+            bool direct = oe->cv && oe->cv->c.size() >= 2 && inMetalRange(oe->cv->c[0].i) && inMetalRange(oe->cv->c[1].i);
+            if (!direct && dim != Dim::Cube) {
+                coord = shifted(bind(offset, "int2", pre));
+                offset.clear();
+            }
         }
         int compIdx = 0;
         if (!sh && ai < A.size()) {
@@ -1777,11 +1791,42 @@ std::string Emitter::fnSignature(const Function* f) {
     return r + ")";
 }
 
+// GLSL `precise`: functions computing a precise value are compiled without FP contraction
+// (no fused multiply-add), so the result is invariant to operand order (GLSL 4.60 §4.7).
+static bool usesPrecise(const Function* f) {
+    for (auto* p : f->params)
+        if (p->q.precise) return true;
+    bool found = false;
+    std::function<void(const Expr*)> ex = [&](const Expr* e) {
+        if (!e || found) return;
+        if (e->kind == EK::Var && e->var && e->var->q.precise) found = true;
+        for (auto* a : e->args) ex(a);
+        ex(e->aux);
+    };
+    std::function<void(const Stmt*)> st = [&](const Stmt* s) {
+        if (!s || found) return;
+        for (auto* v : s->vars)
+            if (v->q.precise) found = true;
+        for (auto* b : s->body) st(b);
+        ex(s->expr);
+        st(s->init);
+        ex(s->cond);
+        st(s->condDecl);
+        ex(s->incr);
+        st(s->then);
+        st(s->els);
+        for (auto* v : s->vars) ex(v->init);
+    };
+    st(f->body);
+    return found;
+}
+
 std::string Emitter::emitFunction(const Function* f) {
     temps_.clear();
     std::string bodyText;
     for (auto* s : f->body->body) stmt(s, bodyText, 2);
     std::string r = "    " + fnSignature(f) + " {\n";
+    if (usesPrecise(f)) r += "#pragma METAL fp contract(off)\n";
     for (auto& t : temps_) r += "        " + t + "\n";
     r += bodyText;
     r += "    }\n";
