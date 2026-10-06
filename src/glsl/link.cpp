@@ -550,6 +550,16 @@ void Linker::assignUniforms() {
                 else if (blockVars[key].v->anonBlock != v->anonBlock)
                     // GLSL 4.60 §4.3.9: matched blocks must all have an instance name or all lack one
                     error("block '" + v->block->name + "' has an instance name in one stage but not in another");
+                else if (blockVars[key].v->block != v->block) {
+                    // Matched blocks need the same members: names, types and order (GLSL 4.60 §4.3.9).
+                    const auto& m0 = blockVars[key].v->block->members;
+                    const auto& m1 = v->block->members;
+                    bool same = m0.size() == m1.size();
+                    for (size_t i = 0; same && i < m0.size(); i++)
+                        same = m0[i].name == m1[i].name && m0[i].type.str() == m1[i].type.str() &&
+                               m0[i].type.dims == m1[i].type.dims;
+                    if (!same) error("block '" + v->block->name + "' is declared with different members in different stages");
+                }
                 blockVars[key].mask |= 1u << s;
                 continue;
             }
@@ -567,6 +577,8 @@ void Linker::assignUniforms() {
                     Entry& e = vec[it->second];
                     if (e.v->type != v->type && e.v->type.str() != v->type.str())
                         error("uniform '" + v->name + "' declared with different types in different stages");
+                    else if (v->type.stripArrays().base == BT::Image && e.v->q.layout.format != v->q.layout.format)
+                        error("image uniform '" + v->name + "' declared with different format qualifiers in different stages");
                     e.mask |= 1u << s;
                 }
             };
@@ -783,6 +795,32 @@ void Linker::assignUniforms() {
         }
         refl.uniforms.push_back(u);
         prog_->opaque[lf.path] = ob;
+    }
+    // Image uniform limits per stage and combined (GL 4.6 §7.6.1 / table 23.62).
+    {
+        enum : int {
+#define X(name, glenum, value) k_##name = value,
+#include "glsl/limits.def"
+#undef X
+        };
+        static const int stageMax[(int)Stage::Count] = {k_gl_MaxVertexImageUniforms, k_gl_MaxTessControlImageUniforms,
+                                                        k_gl_MaxTessEvaluationImageUniforms, k_gl_MaxGeometryImageUniforms,
+                                                        k_gl_MaxFragmentImageUniforms, k_gl_MaxComputeImageUniforms};
+        static const char* stageName[(int)Stage::Count] = {"vertex", "tessellation control", "tessellation evaluation",
+                                                           "geometry", "fragment", "compute"};
+        int perStage[(int)Stage::Count] = {}, combined = 0;
+        for (auto& lf : leaves) {
+            if (lf.type.stripArrays().base != BT::Image) continue;
+            int n = std::max(1, lf.type.totalArrayElements());
+            for (int s = 0; s < (int)Stage::Count; s++)
+                if (lf.mask & (1u << s)) perStage[s] += n, combined += n;
+        }
+        for (int s = 0; s < (int)Stage::Count; s++)
+            if (perStage[s] > stageMax[s])
+                error(std::string("too many image uniforms in the ") + stageName[s] + " shader (" + std::to_string(perStage[s]) + " > " +
+                      std::to_string(stageMax[s]) + ")");
+        if (combined > k_gl_MaxCombinedImageUniforms)
+            error("too many image uniforms in the program (" + std::to_string(combined) + " > " + std::to_string(k_gl_MaxCombinedImageUniforms) + ")");
     }
     // subroutines (per stage)
     for (int s = 0; s < (int)Stage::Count; s++) {
