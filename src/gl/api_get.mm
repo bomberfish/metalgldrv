@@ -110,6 +110,19 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
 
 static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     const int idx = index < 0 ? 0 : index;
+    // Limits that GLSL also exposes as gl_Max* constants come from the shared table.
+    static const std::pair<GLenum, int> kShaderLimits[] = {
+#define X(name, glenum, value) {glenum, value},
+#include "glsl/limits.def"
+#undef X
+    };
+    if (pname != 0)
+        for (auto& [e, val] : kShaderLimits)
+            if (e == pname) {
+                if (pname == GL_MAX_CLIP_PLANES && ctx->coreProfile) break;  // compatibility-only
+                v = I(val);
+                return true;
+            }
     switch (pname) {
     // --- implementation limits ---
     case GL_MAJOR_VERSION: v = I(4); return true;
@@ -127,7 +140,8 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_NUM_EXTENSIONS: v = I(kNumExtensions); return true;
     case GL_NUM_SHADING_LANGUAGE_VERSIONS: v = I(17); return true;
     case GL_NUM_SPIR_V_EXTENSIONS: v = I(0); return true;
-    case GL_RESET_NOTIFICATION_STRATEGY: v = E(GL_NO_RESET_NOTIFICATION); return true;
+    case GL_PRIMITIVE_RESTART_FOR_PATCHES_SUPPORTED: v = B(false); return true;  // tess path ignores restart
+    case GL_RESET_NOTIFICATION_STRATEGY: v = E(ctx->loseContextOnReset ? GL_LOSE_CONTEXT_ON_RESET : GL_NO_RESET_NOTIFICATION); return true;
     case GL_CONTEXT_RELEASE_BEHAVIOR: v = E(GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH); return true;
     case GL_MAX_TEXTURE_SIZE: case GL_MAX_CUBE_MAP_TEXTURE_SIZE: case GL_MAX_RENDERBUFFER_SIZE: case GL_MAX_RECTANGLE_TEXTURE_SIZE:
         v = I(16384); return true;
@@ -329,7 +343,12 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_READ_FRAMEBUFFER_BINDING: v = I(ctx->readFb && !ctx->readFb->isDefault ? nameOf(ctx->readFb.get()) : 0); return true;
     case GL_RENDERBUFFER_BINDING: v = I(nameOf(ctx->renderbuffer.get())); return true;
     case GL_ACTIVE_TEXTURE: v = E(GL_TEXTURE0 + ctx->activeTexture); return true;
-    case GL_SAMPLER_BINDING: v = I(nameOf(ctx->samplers[ctx->activeTexture].get())); return true;
+    case GL_SAMPLER_BINDING: {  // indexed form (ARB_multi_bind) selects the texture unit
+        int unit = index >= 0 ? index : ctx->activeTexture;
+        if (unit >= kMaxTextureUnits) return false;
+        v = I(nameOf(ctx->samplers[unit].get()));
+        return true;
+    }
     case GL_TEXTURE_BINDING_1D: case GL_TEXTURE_BINDING_2D: case GL_TEXTURE_BINDING_3D: case GL_TEXTURE_BINDING_1D_ARRAY:
     case GL_TEXTURE_BINDING_2D_ARRAY: case GL_TEXTURE_BINDING_RECTANGLE: case GL_TEXTURE_BINDING_CUBE_MAP:
     case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY: case GL_TEXTURE_BINDING_BUFFER: case GL_TEXTURE_BINDING_2D_MULTISAMPLE:

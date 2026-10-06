@@ -10,6 +10,7 @@
 #include "util/stats.h"
 
 using namespace mgl;
+std::string pipelineValidationError(ProgramPipelineObj* pp);  // api_shader.mm
 #define API extern "C" __attribute__((visibility("default")))
 
 GLenum framebufferStatus(Context* ctx, Framebuffer* fb);
@@ -221,7 +222,11 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                 v = b.buffer->gpuAddress() + b.offset;
                 b.buffer->lastUse = serial;
                 b.buffer->lastGpuWrite = serial;
+                MGL_DBG("prog %u ssbo slot %d -> binding %d buffer %u (+%lld, %lld bytes) first word %08x", prog->name, s.index, binding,
+                        b.buffer->name, (long long)b.offset, (long long)b.buffer->size,
+                        b.buffer->cpu ? *(const uint32_t*)(b.buffer->cpu + b.offset) : 0xdeadbeefu);
             } else {
+                MGL_DBG("prog %u ssbo slot %d -> binding %d: nothing bound", prog->name, s.index, binding);
                 UploadAlloc z = ctx->upload(64, 16);
                 memset(z.cpu, 0, 64);
                 v = z.gpu;
@@ -610,6 +615,10 @@ struct IndexInfo {
     bool generated = false;  // indices produced on CPU (fans/loops/quads/u8)
 };
 
+namespace {
+void decomposeToList(Context* ctx, const DrawParams& d, const uint8_t* src, std::vector<uint32_t>& out);
+}  // namespace
+
 // Expands primitives Metal lacks and converts u8 / custom restart indices.
 static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, uint32_t* minIdx, uint32_t* maxIdx) {
     GLenum mode = d.mode;
@@ -662,6 +671,36 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
         }
         *minIdx = mn == UINT32_MAX ? 0 : mn + d.baseVertex;
         *maxIdx = mx + d.baseVertex;
+    }
+    // Adjacency topologies without a geometry shader draw their non-adjacent vertices, and list
+    // topologies with primitive restart drop the incomplete primitive before each restart
+    // (Metal only restarts strips): decompose to a plain list on the CPU.
+    bool adjacency = mode == GL_LINES_ADJACENCY || mode == GL_LINE_STRIP_ADJACENCY || mode == GL_TRIANGLES_ADJACENCY ||
+                     mode == GL_TRIANGLE_STRIP_ADJACENCY;
+    bool listRestart = restart && d.indexed && (mode == GL_POINTS || mode == GL_LINES || mode == GL_TRIANGLES);
+    if (adjacency || listRestart) {
+        if (d.indexed && ib && ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+        std::vector<uint32_t> list, idx;
+        decomposeToList(ctx, d, d.indexed ? src : nullptr, list);
+        if (mode == GL_LINES_ADJACENCY || mode == GL_LINE_STRIP_ADJACENCY) {
+            for (size_t i = 0; i + 3 < list.size(); i += 4) idx.insert(idx.end(), {list[i + 1], list[i + 2]});
+            out.prim = MTLPrimitiveTypeLine;
+        } else if (adjacency) {
+            for (size_t i = 0; i + 5 < list.size(); i += 6) idx.insert(idx.end(), {list[i], list[i + 2], list[i + 4]});
+            out.prim = MTLPrimitiveTypeTriangle;
+        } else {
+            idx = std::move(list);
+            out.prim = mode == GL_POINTS ? MTLPrimitiveTypePoint : mode == GL_LINES ? MTLPrimitiveTypeLine : MTLPrimitiveTypeTriangle;
+        }
+        out.generated = true;
+        out.count = (uint32_t)idx.size();
+        if (idx.empty()) return true;
+        UploadAlloc u = ctx->upload(idx.size() * 4, 16);
+        memcpy(u.cpu, idx.data(), idx.size() * 4);
+        out.addr = u.gpu;
+        out.length = idx.size() * 4;
+        out.type = MTLIndexTypeUInt32;
+        return true;
     }
     switch (mode) {
     case GL_POINTS: out.prim = MTLPrimitiveTypePoint; break;
@@ -1239,7 +1278,7 @@ static bool validateDraw(Context* ctx, GLenum mode) {
         ctx->setError(GL_INVALID_ENUM);
         return false;
     }
-    if (!ctx->vao) {
+    if (!ctx->vao || (ctx->coreProfile && ctx->vao == ctx->defaultVao)) {
         ctx->setError(GL_INVALID_OPERATION, "no VAO bound");
         return false;
     }
@@ -1248,12 +1287,17 @@ static bool validateDraw(Context* ctx, GLenum mode) {
         ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
         return false;
     }
-    ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
-    if (!prog && ctx->coreProfile) {
-        ctx->setError(GL_INVALID_OPERATION, "no program");
-        return false;
+    if (ctx->pipeline && !ctx->program) {
+        ProgramPipelineObj* pp = ctx->pipeline.get();
+        std::string err = pp->stages[(int)glsl::Stage::Vertex] || pp->stages[(int)glsl::Stage::Fragment] ? pipelineValidationError(pp) : "";
+        if (!err.empty() && err != "pipeline has no vertex or compute program") {
+            ctx->setError(GL_INVALID_OPERATION, "%s", err.c_str());
+            return false;
+        }
+        if (!pp->stages[(int)glsl::Stage::Vertex]) return false;  // missing stages: undefined rendering, no error
     }
-    if (ctx->pipeline && !ctx->program && !ctx->pipeline->stages[(int)glsl::Stage::Vertex]) return false;
+    ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
+    if (!prog && ctx->coreProfile) return false;  // no program/pipeline: undefined rendering, not an error
     bool hasTess = prog && (prog->refl.stageMask & (1u << (int)glsl::Stage::TessEval));
     if (mode == GL_PATCHES && !hasTess) {
         ctx->setError(GL_INVALID_OPERATION);
@@ -1278,15 +1322,10 @@ static bool validateDraw(Context* ctx, GLenum mode) {
     return true;
 }
 
-// Whether the vertex stage writes images, storage buffers or atomic counters.
-static bool vertexStageHasSideEffects(const glsl::Reflection& r) {
-    const uint32_t vs = 1u << (int)glsl::Stage::Vertex;
-    for (const auto& b : r.storageBlocks)
-        if (b.stageMask & vs) return true;
-    for (const auto& b : r.atomicCounterBuffers)
-        if (b.stageMask & vs) return true;
-    for (const auto& s : r.slots)
-        if (s.kind == glsl::SlotKind::Image && s.index < r.uniforms.size() && (r.uniforms[s.index].stageMask & vs)) return true;
+static bool programHasSideEffects(const glsl::Reflection& r) {
+    if (!r.storageBlocks.empty() || !r.atomicCounterBuffers.empty()) return true;
+    for (auto& sl : r.slots)
+        if (sl.kind == glsl::SlotKind::Image) return true;
     return false;
 }
 
@@ -1296,7 +1335,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     // Compatibility profile: fixed-function emulation (prog == null) and gl_* state uniforms.
     if (!ctx->coreProfile) prog = mglCompatPrepareDraw(ctx, prog);
     if (!prog) return;
-    if (!prog->linked) return;
+    if (!prog->program) return;  // last successfully linked executable
     if (!mglCheckDrawConditional(ctx)) return;
     mgl::debugCaptureBeforeDraw(ctx, prog);
     if (d.count <= 0 && !d.indirect) return;
@@ -1320,16 +1359,9 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         executeMultiPass(ctx, prog, d, xk, true);
         if (ctx->rasterizerDiscard) return;
     }
-    if (ctx->rasterizerDiscard) {
-        // Rasterizer discard drops primitives, but the vertex shader still runs: when it
-        // has side effects, run it as the (capture-less) vertex kernel.
-        if (!xfbActive && vertexStageHasSideEffects(refl)) {
-            glsl::VariantKey xk = vk;
-            xk.kind = glsl::PipelineKind::XfbCapture;
-            executeMultiPass(ctx, prog, d, xk, false);
-        }
-        return;
-    }
+    // With rasterization discarded the draw only matters for vertex-stage side effects
+    // (storage buffer / image / atomic counter writes); run it without a fragment stage then.
+    if (ctx->rasterizerDiscard && !programHasSideEffects(refl)) return;
     if (envFlag("METALGLDRV_DUMP_LAYOUT")) {
         // One line per (program, layout) for diagnosing vertex input issues in the field.
         static std::set<std::string> seen;
@@ -1354,6 +1386,26 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     else vk.attribSignFlip = attribSignFlip(ctx, prog);
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
     if (!var || !var->ok) return;
+    // Program pipeline whose fragment stage comes from a different separable program (or none).
+    ProgramObj* fsProg = prog;
+    ProgramVariant* fsVar = nullptr;
+    bool mixedFs = false;
+    if (ctx->pipeline && !ctx->program) {
+        ProgramObj* f = ctx->pipeline->stages[(int)glsl::Stage::Fragment].get();
+        if (f != prog) {
+            mixedFs = true;
+            fsProg = f;
+            if (f) {
+                glsl::VariantKey fk;
+                fk.kind = glsl::PipelineKind::Classic;
+                fk.primitive = vk.primitive;
+                fk.flatshadeLastVertex = vk.flatshadeLastVertex;
+                fsVar = ctx->pipelines_->variant(f, fk);
+                if (!fsVar || !fsVar->ok) return;
+            }
+        }
+    }
+    const glsl::Reflection& frefl = fsProg ? fsProg->refl : refl;
     // Cull FRONT_AND_BACK discards all polygons.
     if (ctx->cullFace && ctx->cullMode == GL_FRONT_AND_BACK && isTriangleMode(d.mode)) return;
 
@@ -1361,7 +1413,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     uint32_t minIdx = 0, maxIdx = 0;
     // GL's default provoking vertex is the LAST vertex; Metal uses the first. When the
     // program has flat varyings, rotate every primitive so Metal's first is GL's last.
-    bool rotate = refl.usesFlatShading && ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION && !d.indirect &&
+    bool rotate = frefl.usesFlatShading && ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION && !d.indirect &&
                   d.mode != GL_POINTS && d.mode != GL_PATCHES;
     if (rotate) {
         // The vertex range is only needed for CPU-side vertex copies (client arrays / repacks).
@@ -1411,12 +1463,17 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     // Resolving bindings can allocate/migrate texture storage (a copy that ends the render
     // pass), so build the argument buffer before acquiring the render encoder.
     uint64_t argAddr = buildArguments(ctx, prog, false);
+    uint64_t fsArgAddr = mixedFs && fsProg ? buildArguments(ctx, fsProg, false) : 0;
     id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
     if (!e) return;
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
     RenderPipelineKey key;
     key.variant = var;
-    fillColorKey(ctx, key, refl);
+    if (mixedFs) {
+        key.fsVariant = fsVar;
+        key.fsVariantUid = fsVar ? fsVar->uid : ~0ull;
+    }
+    fillColorKey(ctx, key, frefl);
     key.rasterEnabled = !ctx->rasterizerDiscard;
     key.topologyClass = (uint8_t)MTLPrimitiveTopologyClassUnspecified;  // point size is always written; only layered rendering needs a class
     if (!setupVertexInput(ctx, prog, key, table, d, minIdx, maxIdx)) return;
@@ -1457,7 +1514,21 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     }
     applyDynamicState(ctx, e, d.mode);
     [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
-    [table setAddress:buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first) atIndex:glsl::kBufSys];
+    uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
+    [table setAddress:sysAddr atIndex:glsl::kBufSys];
+    if (mixedFs) {
+        // The fragment stage reads its own program's arguments.
+        if (!ctx->enc.fsTableSplit) {
+            [e setArgumentTable:ctx->renderArgTableFS atStages:MTLRenderStageFragment];
+            ctx->enc.fsTableSplit = true;
+        }
+        [ctx->renderArgTableFS setAddress:fsArgAddr ? fsArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+        [ctx->renderArgTableFS setAddress:fsProg ? buildSys(ctx, fsProg, d.drawID, d.baseVertex, d.baseInstance, d.first) : sysAddr
+                                  atIndex:glsl::kBufSys];
+    } else if (ctx->enc.fsTableSplit) {
+        [e setArgumentTable:table atStages:MTLRenderStageFragment];
+        ctx->enc.fsTableSplit = false;
+    }
     mglQueryNotifyDraw(ctx, d.mode, d.indirect ? 0 : (d.indexed || ii.generated ? (d.indexed ? d.count : d.count) : d.count), d.instances);
 
     if (d.indirect) {
@@ -1714,7 +1785,7 @@ API void APIENTRY glMultiDrawElementsIndirectCountARB(GLenum mode, GLenum type, 
 // ---------------------------------------------------------------------------
 static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indirect, GLintptr indirectOffset) {
     ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Compute);
-    if (!prog || !prog->linked || !(prog->refl.stageMask & (1u << (int)glsl::Stage::Compute)))
+    if (!prog || !prog->program || !(prog->refl.stageMask & (1u << (int)glsl::Stage::Compute)))
         return ctx->setError(GL_INVALID_OPERATION, "no compute program");
     if (gx > 65535 || gy > 65535 || gz > 65535) return ctx->setError(GL_INVALID_VALUE);
     if (!indirect && (!gx || !gy || !gz)) return;
@@ -1762,7 +1833,14 @@ API void APIENTRY glDispatchComputeGroupSizeARB(GLuint x, GLuint y, GLuint z, GL
 // ---------------------------------------------------------------------------
 API void APIENTRY glMemoryBarrier(GLbitfield barriers) {
     MGL_CTX();
-    if (ctx->renderEnc) {
+    const GLbitfield shaderWrites = GL_SHADER_STORAGE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
+                                    GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_ELEMENT_ARRAY_BARRIER_BIT | GL_UNIFORM_BARRIER_BIT |
+                                    GL_COMMAND_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT;
+    if (ctx->renderEnc && (barriers & shaderWrites)) {
+        // Intra-pass vertex->vertex barriers don't order shader writes between draws on Apple
+        // GPUs; end the pass (the next encoder starts with a full barrier).
+        ctx->endEncoder();
+    } else if (ctx->renderEnc) {
         [ctx->renderEnc barrierAfterEncoderStages:MTLStageVertex | MTLStageFragment | MTLStageObject | MTLStageMesh
                               beforeEncoderStages:MTLStageVertex | MTLStageFragment | MTLStageObject | MTLStageMesh
                                 visibilityOptions:MTL4VisibilityOptionDevice];

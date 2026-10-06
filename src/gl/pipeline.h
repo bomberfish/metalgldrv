@@ -48,6 +48,10 @@ struct BlendKey {
 struct RenderPipelineKey {
     uint64_t variantUid = 0;
     const ProgramVariant* variant = nullptr;  // not part of the hashed identity
+    // Program pipelines: fragment function from another program's variant (0 = same variant,
+    // ~0 = no fragment shader).
+    uint64_t fsVariantUid = 0;
+    const ProgramVariant* fsVariant = nullptr;  // not hashed
     uint32_t colorFormats[8] = {};
     BlendKey blend[8];
     VertexAttribKey attribs[16];

@@ -1,3 +1,5 @@
+#include <functional>
+#include <map>
 // Recursive-descent GLSL parser with integrated semantic analysis.
 #include "glsl/parser.h"
 
@@ -31,8 +33,12 @@ bool exprIsLvalue(const Expr* e) {
                     return true;
             }
         }
+        case EK::Field: {
+            const StructDef* sd = e->args[0]->type.sdef;
+            if (sd && sd->isBlock && e->field >= 0 && (sd->members[e->field].q.memory & MemReadOnly)) return false;
+            return exprIsLvalue(e->args[0]);
+        }
         case EK::Index:
-        case EK::Field:
             return exprIsLvalue(e->args[0]);
         case EK::Swizzle: {
             for (int i = 0; i < e->nswz; i++)
@@ -88,6 +94,7 @@ private:
     Qualifiers defaultUbo_, defaultSsbo_;
     std::unordered_map<const Builtin*, Function*> builtinFns_;
     std::unordered_map<Variable*, int> maxIndex_;
+    std::map<std::pair<StructDef*, int>, int> maxMemberIndex_;  // implicitly sized block members
 
     // ---- token helpers --------------------------------------------------
     const PPToken& peek(int k = 0) const {
@@ -230,6 +237,7 @@ private:
     std::vector<Variable*> parseParamList();
     Expr* mkSubroutineCall(Variable* v, Expr* index, std::vector<Expr*> args, int ln);
     void parseDeclarators(Qualifiers q, const Type& t, std::string name, bool global, std::vector<Variable*>* out);
+    void checkWriteOnlyReads();
     Expr* parseInitializer(const Type& t);
     void applyStageLayout(const Qualifiers& q);
     bool redeclareBuiltin(const Qualifiers& q, const Type& t, const std::string& name);
@@ -306,6 +314,21 @@ void Parser::finalize() {
             v.type.dims[0] = bi ? (v.used || v.written ? 8 : 1) : 1;
         }
     }
+    // Unsized arrays that are not the last member of a block are sized by the largest
+    // constant index used (GLSL 4.60 §4.1.9); only the last member of a buffer block is runtime-sized.
+    for (auto& sd : sh_.sdefs) {
+        if (!sd.isBlock) continue;
+        for (size_t i = 0; i < sd.members.size(); i++) {
+            Type& mt = sd.members[i].type;
+            bool runtimeSized = i + 1 == sd.members.size() && sd.blockQ.storage == Storage::Buffer;
+            if (mt.dims.empty() || mt.dims[0] != 0 || runtimeSized) continue;
+            auto it = maxMemberIndex_.find({&sd, (int)i});
+            mt.dims[0] = it == maxMemberIndex_.end() ? 1 : it->second + 1;
+        }
+    }
+    for (auto& e : sh_.exprs)
+        if (e.kind == EK::Field && !e.type.dims.empty() && e.type.dims[0] == 0 && e.args[0]->type.sdef && e.args[0]->type.sdef->isBlock)
+            e.type = e.args[0]->type.sdef->members[e.field].type;
     // Fix up expression types that referenced implicitly sized arrays
     for (auto& e : sh_.exprs) {
         if (e.kind == EK::Var && e.var && e.type.base == e.var->type.base && !e.type.dims.empty() && e.type.dims[0] == 0)
@@ -313,6 +336,65 @@ void Parser::finalize() {
     }
     for (auto* f : sh_.functions)
         if (f->name == "main" && f->body) sh_.hasMain = true;
+    checkWriteOnlyReads();
+}
+
+// GLSL 4.60 §4.10: a writeonly buffer variable or member can't be read. Walks the real
+// statement trees (not the expression arena, which holds speculative nodes too).
+void Parser::checkWriteOnlyReads() {
+    std::function<void(const Expr*, bool)> visitE;
+    auto writeOnly = [](const Expr* e) {
+        if (e->kind == EK::Var) return e->var->q.storage == Storage::Buffer && (e->var->q.memory & MemWriteOnly);
+        if (e->kind == EK::Field) {
+            const StructDef* sd = e->args[0]->type.sdef;
+            return sd && sd->isBlock && e->field >= 0 && (sd->members[e->field].q.memory & MemWriteOnly);
+        }
+        return false;
+    };
+    visitE = [&](const Expr* e, bool target) {
+        if (!e) return;
+        if (!target && writeOnly(e)) fail("cannot read a writeonly buffer variable", e->line);
+        switch (e->kind) {
+            case EK::Assign:
+                visitE(e->args[0], e->op == Op::Assign);
+                visitE(e->args[1], false);
+                return;
+            case EK::Index:
+                visitE(e->args[0], target);
+                visitE(e->args[1], false);
+                return;
+            case EK::Field:
+            case EK::Swizzle:
+                visitE(e->args[0], target);
+                return;
+            case EK::Length:  // .length() doesn't read the array
+                for (auto* a : e->args) visitE(a, true);
+                return;
+            case EK::Call:
+                for (size_t i = 0; i < e->args.size(); i++) {
+                    bool out = e->fn && i < e->fn->params.size() && e->fn->params[i]->q.storage == Storage::Out;
+                    visitE(e->args[i], out);
+                }
+                return;
+            default:
+                for (auto* a : e->args) visitE(a, false);
+                if (e->aux) visitE(e->aux, false);
+                return;
+        }
+    };
+    std::function<void(const Stmt*)> visitS = [&](const Stmt* st) {
+        if (!st) return;
+        for (auto* b : st->body) visitS(b);
+        visitE(st->expr, false);
+        visitS(st->init);
+        visitE(st->cond, false);
+        visitS(st->condDecl);
+        visitE(st->incr, false);
+        visitS(st->then);
+        visitS(st->els);
+        for (auto* v : st->vars) visitE(v->init, false);
+    };
+    for (auto* f : sh_.functions) visitS(f->body);
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +409,8 @@ bool Parser::isQualifierAt(int k) {
     if (!soft.count(t.text)) return true;
     Sym* s = lookup(t.text);
     if (s && s->var) return false;
-    return peek(k + 1).kind == PK::Ident;
+    // "<qualifier> <ident>", or a default-layout declaration such as "layout(std430) buffer;"
+    return peek(k + 1).kind == PK::Ident || isP(";", k + 1);
 }
 
 bool Parser::parseQualifiers(Qualifiers& q) {
@@ -395,7 +478,10 @@ void Parser::parseLayout(Qualifiers& q) {
         auto need = [&]() { if (!hasVal) fail("layout qualifier '" + id + "' requires a value"); return (int)val; };
         if (lid == "location") L.location = need();
         else if (lid == "component") L.component = need();
-        else if (lid == "binding") L.binding = need();
+        else if (lid == "binding") {
+            L.binding = need();
+            if (L.binding < 0) fail("'binding' : must be a non-negative integer");
+        }
         else if (lid == "offset") L.offset = need();
         else if (lid == "align") L.align = need();
         else if (lid == "index") L.index = need();
@@ -651,6 +737,13 @@ void Parser::parseExternal() {
     }
     if (hasQ && isP(";")) {
         p_++;
+        if (q.storage == Storage::Uniform || q.storage == Storage::Buffer) {
+            // default block layouts only take packing and matrix layout (GLSL 4.60 §4.4.5)
+            if (q.layout.binding >= 0 || q.layout.offset >= 0 || q.layout.align >= 0 || q.layout.location >= 0)
+                fail("only packing and matrix layout qualifiers are allowed in a default block layout");
+            if (q.storage == Storage::Uniform && q.layout.packing == Packing::Std430)
+                fail("'std430' : only allowed on shader storage blocks");
+        }
         applyStageLayout(q);
         return;
     }
@@ -689,6 +782,8 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     sd->isBlock = true;
     sd->id = nextId_++;
     const Qualifiers& def = q.storage == Storage::Buffer ? defaultSsbo_ : defaultUbo_;
+    if (q.storage == Storage::Uniform && q.layout.packing == Packing::Std430 && !preamble_)
+        fail("'std430' : only allowed on shader storage blocks");
     if (q.storage == Storage::Uniform || q.storage == Storage::Buffer) {
         if (q.layout.packing == Packing::None) q.layout.packing = def.layout.packing;
         if (!q.layout.matrix) q.layout.matrix = def.layout.matrix;
@@ -697,6 +792,9 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     while (!accept("}")) {
         Qualifiers mq;
         parseQualifiers(mq);
+        if ((q.storage == Storage::Uniform || q.storage == Storage::Buffer) && !preamble_ &&
+            (mq.layout.packing != Packing::None || mq.layout.binding >= 0))
+            fail("packing and binding layout qualifiers are not allowed on block members");
         Type mt = parseTypeSpecifier(false);
         do {
             Member m;
@@ -727,6 +825,13 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
         t.dims = nd.dims;
     }
     expect(";");
+    if ((q.storage == Storage::Uniform || q.storage == Storage::Buffer) && q.layout.binding >= 0 && !preamble_) {
+        // binding + array size must fit the binding points (MAX_SHADER_STORAGE_BUFFER_BINDINGS = 16,
+        // MAX_UNIFORM_BUFFER_BINDINGS = 84 in src/gl/context.h)
+        int count = t.dims.empty() ? 1 : std::max(1, t.dims[0]);
+        int maxBindings = q.storage == Storage::Buffer ? 16 : 84;
+        if (q.layout.binding + count > maxBindings) fail("'binding' : exceeds the maximum number of binding points");
+    }
     if (!t.dims.empty() && t.dims[0] == 0) {
         if (sh_.stage == Stage::Geometry && q.storage == Storage::In && sh_.inLayout.primitive != Layout::kNoPrimitive)
             t.dims[0] = primitiveVertexCount(sh_.inLayout.primitive);
@@ -821,6 +926,7 @@ Expr* Parser::parseInitializer(const Type& t) {
 }
 
 void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name, bool global, std::vector<Variable*>* out) {
+    if (q.storage == Storage::Buffer && !preamble_) fail("'buffer' : only allowed on interface blocks");
     for (;;) {
         Type t = baseT;
         Type nd;
@@ -888,6 +994,8 @@ std::vector<Variable*> Parser::parseParamList() {
         for (;;) {
             Qualifiers pq;
             parseQualifiers(pq);
+            if (pq.storage == Storage::Buffer || pq.storage == Storage::Uniform || pq.storage == Storage::Shared)
+                fail("invalid storage qualifier on a function parameter");
             if (pq.storage == Storage::Temp) pq.storage = Storage::In;
             Type pt = parseTypeSpecifier(false);
             std::string pn;
@@ -1477,6 +1585,11 @@ Expr* Parser::mkIndex(Expr* b, Expr* i, int ln) {
         if (limit == 0 && b->kind == EK::Var) {
             int& m = maxIndex_[b->var];
             m = std::max(m, (int)idx);
+        }
+        if (limit == 0 && b->kind == EK::Field && b->args[0]->type.sdef && b->args[0]->type.sdef->isBlock) {
+            auto key = std::make_pair((StructDef*)b->args[0]->type.sdef, b->field);
+            auto it = maxMemberIndex_.find(key);
+            maxMemberIndex_[key] = it == maxMemberIndex_.end() ? (int)idx : std::max(it->second, (int)idx);
         }
         if (b->cv) e->cv = foldIndex(b, (int)idx, rt);
     } else if (limit == 0 && b->kind == EK::Var && b->var->q.storage != Storage::Buffer) {

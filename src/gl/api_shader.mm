@@ -186,6 +186,7 @@ API void APIENTRY glGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
     case GL_SHADER_TYPE: *params = s->type; break;
     case GL_DELETE_STATUS: *params = s->deleted; break;
     case GL_COMPILE_STATUS: *params = s->compiled; break;
+    case GL_COMPLETION_STATUS_ARB: *params = GL_TRUE; break;  // compiles are synchronous
     case GL_INFO_LOG_LENGTH: *params = s->infoLog.empty() ? 0 : (GLint)s->infoLog.size() + 1; break;
     case GL_SHADER_SOURCE_LENGTH: {
         size_t n = 0;
@@ -367,11 +368,10 @@ API void APIENTRY glProgramParameteri(GLuint program, GLenum pname, GLint value)
     MGL_CTX();
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
-    switch (pname) {
-    case GL_PROGRAM_SEPARABLE: p->separable = value; break;
-    case GL_PROGRAM_BINARY_RETRIEVABLE_HINT: p->retrievableHint = value; break;
-    default: ctx->setError(GL_INVALID_ENUM);
-    }
+    if (pname != GL_PROGRAM_SEPARABLE && pname != GL_PROGRAM_BINARY_RETRIEVABLE_HINT) return ctx->setError(GL_INVALID_ENUM);
+    if (value != GL_TRUE && value != GL_FALSE) return ctx->setError(GL_INVALID_VALUE);
+    if (pname == GL_PROGRAM_SEPARABLE) p->separable = value;
+    else p->retrievableHint = value;
 }
 
 API void APIENTRY glLinkProgram(GLuint program) {
@@ -392,9 +392,10 @@ API void APIENTRY glLinkProgram(GLuint program) {
     in.xfbInterleaved = p->xfbBufferMode == GL_INTERLEAVED_ATTRIBS;
     in.separable = p->separable;
     p->linkGeneration++;
+    // A failed (re)link keeps the previous executable (p->program, refl, variants): GL keeps
+    // using it while the program stays current (§7.3); only LINK_STATUS turns false.
     if (!allCompiled || in.shaders.empty()) {
         p->linked = false;
-        p->program = nullptr;
         p->infoLog = in.shaders.empty() ? "error: no shaders attached\n" : "error: attached shader not successfully compiled\n";
         return;
     }
@@ -402,11 +403,11 @@ API void APIENTRY glLinkProgram(GLuint program) {
     p->infoLog = r.infoLog;
     if (!r.program) {
         p->linked = false;
-        p->program = nullptr;
         MGL_DBG("program %u link failed:\n%s", program, r.infoLog.c_str());
         return;
     }
     p->linked = true;
+    p->linkedSeparable = p->separable;
     // METALGLDRV_DUMP_GLSL=<substring>: log the sources of linked programs containing it.
     if (const char* dump = getenv("METALGLDRV_DUMP_GLSL")) {
         std::string all;
@@ -488,6 +489,7 @@ API void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
     switch (pname) {
     case GL_DELETE_STATUS: *params = p->deleted; break;
     case GL_LINK_STATUS: *params = p->linked; break;
+    case GL_COMPLETION_STATUS_ARB: *params = GL_TRUE; break;
     case GL_VALIDATE_STATUS: *params = p->validated; break;
     case GL_INFO_LOG_LENGTH: *params = p->infoLog.empty() ? 0 : (GLint)p->infoLog.size() + 1; break;
     case GL_ATTACHED_SHADERS: *params = (GLint)p->attached.size(); break;
@@ -516,7 +518,7 @@ API void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
         params[1] = r.localSize[1];
         params[2] = r.localSize[2];
         break;
-    case GL_PROGRAM_SEPARABLE: *params = p->separable; break;
+    case GL_PROGRAM_SEPARABLE: *params = p->linked && p->linkedSeparable; break;
     case GL_PROGRAM_BINARY_RETRIEVABLE_HINT: *params = p->retrievableHint; break;
     case GL_PROGRAM_BINARY_LENGTH: *params = 0; break;
     default: ctx->setError(GL_INVALID_ENUM);
@@ -1317,7 +1319,11 @@ API GLint APIENTRY glGetProgramResourceLocationIndex(GLuint program, GLenum ifac
 // ---------------------------------------------------------------------------
 API GLuint APIENTRY glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar* const* strings) {
     MGL_CTX_RET(0);
-    GLuint s = glCreateShader(type);
+    if (count < 0) {
+        ctx->setError(GL_INVALID_VALUE);
+        return 0;
+    }
+    GLuint s = glCreateShader(type);  // INVALID_ENUM for a bad type
     if (!s) return 0;
     glShaderSource(s, count, strings, nullptr);
     glCompileShader(s);
@@ -1366,11 +1372,30 @@ API GLboolean APIENTRY glIsProgramPipeline(GLuint pipeline) {
     return pipeline && ctx->pipelines.get(pipeline) != nullptr;
 }
 
-static ProgramPipelineObj* pipelineObj(Context* ctx, GLuint name, bool create) {
+static ProgramPipelineObj* pipelineObj(Context* ctx, GLuint name, bool create, GLenum err = GL_INVALID_OPERATION) {
     ProgramPipelineObj* pp = ctx->pipelines.get(name);
     if (!pp && create && ctx->pipelines.isName(name)) pp = ctx->pipelines.create(name, new ProgramPipelineObj());
-    if (!pp) ctx->setError(GL_INVALID_OPERATION);
+    if (!pp) ctx->setError(err);
     return pp;
+}
+
+// GL 4.6 §11.1.3.11 program pipeline validation; empty string when valid.
+std::string pipelineValidationError(ProgramPipelineObj* pp) {
+    for (int st = 0; st < (int)glsl::Stage::Count; st++) {
+        ProgramObj* sp = pp->stages[st].get();
+        if (!sp) continue;
+        if (!sp->program || !sp->linkedSeparable) return "program " + std::to_string(sp->name) + " is not a linked separable program";
+        if (st == (int)glsl::Stage::Compute) continue;
+        for (int o = 0; o < (int)glsl::Stage::Count; o++)
+            if (o != (int)glsl::Stage::Compute && (sp->refl.stageMask & (1u << o)) && pp->stages[o].get() != sp)
+                return "program " + std::to_string(sp->name) + " is not active for all the stages it was linked with";
+    }
+    if (!pp->stages[(int)glsl::Stage::Vertex] &&
+        (pp->stages[(int)glsl::Stage::Geometry] || pp->stages[(int)glsl::Stage::TessControl] || pp->stages[(int)glsl::Stage::TessEval]))
+        return "pipeline has geometry or tessellation stages but no vertex program";
+    if (!pp->stages[(int)glsl::Stage::Vertex] && !pp->stages[(int)glsl::Stage::Compute])
+        return "pipeline has no vertex or compute program";
+    return "";
 }
 
 API void APIENTRY glBindProgramPipeline(GLuint pipeline) {
@@ -1397,7 +1422,7 @@ API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint 
     if (program) {
         p = getProgram(ctx, program);
         if (!p) return;
-        if (!p->separable || !p->linked) return ctx->setError(GL_INVALID_OPERATION);
+        if (!p->linkedSeparable || !p->linked) return ctx->setError(GL_INVALID_OPERATION);
     }
     const std::pair<GLbitfield, glsl::Stage> map[] = {
         {GL_VERTEX_SHADER_BIT, glsl::Stage::Vertex}, {GL_TESS_CONTROL_SHADER_BIT, glsl::Stage::TessControl},
@@ -1425,8 +1450,9 @@ API void APIENTRY glValidateProgramPipeline(GLuint pipeline) {
     MGL_CTX();
     ProgramPipelineObj* pp = pipelineObj(ctx, pipeline, true);
     if (!pp) return;
-    pp->validated = pp->stages[(int)glsl::Stage::Vertex] || pp->stages[(int)glsl::Stage::Compute];
-    pp->infoLog = pp->validated ? "" : "pipeline has no vertex or compute program\n";
+    std::string err = pipelineValidationError(pp);
+    pp->validated = err.empty();
+    pp->infoLog = err.empty() ? "" : err + "\n";
 }
 
 API void APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* params) {
@@ -1450,7 +1476,7 @@ API void APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* p
 
 API void APIENTRY glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize, GLsizei* length, GLchar* infoLog) {
     MGL_CTX();
-    ProgramPipelineObj* pp = pipelineObj(ctx, pipeline, true);
+    ProgramPipelineObj* pp = pipelineObj(ctx, pipeline, true, GL_INVALID_VALUE);
     if (pp) copyLog(pp->infoLog, bufSize, length, infoLog);
 }
 

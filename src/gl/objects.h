@@ -293,6 +293,7 @@ public:
     std::vector<std::string> xfbVaryings;
     GLenum xfbBufferMode = GL_INTERLEAVED_ATTRIBS;
     bool separable = false, retrievableHint = false;
+    bool linkedSeparable = false;  // PROGRAM_SEPARABLE as of the last successful link (what queries report)
 
     // link results
     bool linked = false, validated = false;

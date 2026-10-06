@@ -63,7 +63,7 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
         for (int i = 0; i < kNumTexTargets; i++) textures[u][i] = defaultTextures[i];
     defaultVao = new VertexArray();
     for (int i = 0; i < kMaxVertexBindings; i++) defaultVao->attribs[i].binding = i;
-    if (!coreProfile) vao = defaultVao;
+    vao = defaultVao;  // hidden in core profiles (see api_vertex.mm specVao)
     defaultXfb = new TransformFeedbackObj();
     xfb = defaultXfb;
 
@@ -75,6 +75,7 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
     ad.initializeBindings = NO;
     NSError* err = nil;
     renderArgTable = [dev->mtl newArgumentTableWithDescriptor:ad error:&err];
+    renderArgTableFS = [dev->mtl newArgumentTableWithDescriptor:ad error:&err];
     if (!renderArgTable) MGL_ERR("render argument table: %s", err.localizedDescription.UTF8String);
     ad.supportAttributeStrides = NO;
     computeArgTable = [dev->mtl newArgumentTableWithDescriptor:ad error:&err];

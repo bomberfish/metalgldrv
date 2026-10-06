@@ -1082,12 +1082,19 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
     }
     std::string T = a->type.base == BT::Int ? "atomic_int" : "atomic_uint";
     Acc acc;
+    if (a->kind == EK::Swizzle && a->nswz == 1 && bufAccess(a->args[0], acc) && acc.type.isVector()) {
+        // single component of a buffer vector, e.g. atomicAdd(buf.v.y, 1)
+        uint32_t step = acc.compStride ? acc.compStride : scalarSize(acc.type.base);
+        if (!acc.device) fail("atomic operation on a uniform");
+        return "((device " + T + "*)(" + acc.ptr + " + (" + acc.off + " + " + std::to_string(a->swz[0] * step) + "u)))";
+    }
+    acc = Acc();
     if (bufAccess(a, acc)) {
         if (!acc.device) fail("atomic operation on a uniform");
         return "((device " + T + "*)(" + acc.ptr + " + " + acc.off + "))";
     }
     const Expr* r = a;
-    while (r->kind == EK::Index || r->kind == EK::Field) r = r->args[0];
+    while (r->kind == EK::Index || r->kind == EK::Field || r->kind == EK::Swizzle) r = r->args[0];
     if (r->kind == EK::Var && inThreadgroup(r->var)) return "((threadgroup " + T + "*)&(" + ex(a) + "))";
     fail("atomic operation requires a buffer or shared variable");
 }
@@ -1221,7 +1228,8 @@ std::string Emitter::callBuiltin(const Expr* e) {
     if (n == "allInvocationsEqual" || n == "allInvocationsEqualARB") {
         std::string pre;
         std::string v = bind(a(0), "bool", pre);
-        return "(" + pre + "simd_all(" + v + " == simd_broadcast_first(" + v + ")))";
+        // simd_broadcast_first has no bool overload
+        return "(" + pre + "simd_all(int(" + v + ") == simd_broadcast_first(int(" + v + "))))";
     }
     if (n == "modf" || n == "frexp" || n == "uaddCarry" || n == "usubBorrow" || n == "umulExtended" || n == "imulExtended") {
         std::string callee = n == "modf" ? "modf" : n == "frexp" ? "frexp" : n == "uaddCarry" ? "mgl_uaddCarry"
@@ -1880,7 +1888,7 @@ void Emitter::emitArgs(std::string& o) {
     std::vector<bool> skip(slots.size(), false);
     if (P.defaultSlot >= 0) decl[P.defaultSlot] = "constant uchar* s" + std::to_string(P.defaultSlot) + ";";
     for (auto& [key, bb] : P.blocks) {
-        std::string arr = bb.count > 1 ? "[" + std::to_string(bb.count) + "]" : "";
+        std::string arr = bb.isArray ? "[" + std::to_string(bb.count) + "]" : "";
         decl[bb.slot] = std::string(bb.storage ? "device uchar* s" : "constant uchar* s") + std::to_string(bb.slot) + arr + ";";
         for (int i = 1; i < bb.count; i++) skip[bb.slot + i] = true;
         if (bb.storage) {
@@ -2385,7 +2393,8 @@ void Emitter::emitClassicVS(std::string& o) {
     }
     RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, true);
     o += "struct In {\n" + inS + "};\nstruct Out {\n" + ro.vertexStruct + "};\n}  // namespace vs\n\n";
-    std::string e = "vertex vs::Out mgl_vs(";
+    // Rasterizer discard: Metal needs a void vertex function when rasterization is disabled.
+    std::string e = K.rasterDiscard ? "vertex void mgl_vs(" : "vertex vs::Out mgl_vs(";
     if (anyIn) e += "vs::In in [[stage_in]], ";
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint mgl_vid [[vertex_id]], uint mgl_iid [[instance_id]]";
     e += ", uint mgl_bi [[base_instance]]";
@@ -2401,7 +2410,8 @@ void Emitter::emitClassicVS(std::string& o) {
         if (v->builtin == BuiltinVar::DrawID) e += "    g.bi_" + v->name + " = sys.drawID;\n";
         if (v->builtin == BuiltinVar::PointSize) e += "    g.bi_" + v->name + " = sys.pointSize;\n";
     }
-    e += "    g.mgl_init();\n    g." + si.mainName + "();\n    vs::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
+    if (K.rasterDiscard) e += "    g.mgl_init();\n    g." + si.mainName + "();\n}\n\n";
+    else e += "    g.mgl_init();\n    g." + si.mainName + "();\n    vs::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
     entries_ += e;
     fragInputsAvailable_ = ro.names;
     haveVsOutputs_ = true;
