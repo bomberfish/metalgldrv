@@ -47,6 +47,7 @@ struct OpaqueBinding {
     int slot = -1;   // first texture/image slot
     int samplerSlot = -1;
     int count = 1;   // array elements
+    bool isArray = false;  // declared as an array (also when count == 1)
     int uniformIndex = -1;
     int acbIndex = -1;
     uint32_t acOffset = 0;

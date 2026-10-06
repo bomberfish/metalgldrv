@@ -2029,7 +2029,7 @@ void Emitter::emitArgs(std::string& o) {
     }
     for (auto& [name, ob] : P->opaque) {
         auto group = [&](int slot, const std::string& type) {
-            if (ob.count > 1) decl[slot] = "array<" + type + ", " + std::to_string(ob.count) + "> s" + std::to_string(slot) + ";";
+            if (ob.count > 1 || ob.isArray) decl[slot] = "array<" + type + ", " + std::to_string(ob.count) + "> s" + std::to_string(slot) + ";";
             else decl[slot] = type + " s" + std::to_string(slot) + ";";
             for (int i = 1; i < ob.count; i++) skip[slot + i] = true;
         };

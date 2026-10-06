@@ -1071,6 +1071,7 @@ static void getUniform(Context* ctx, GLuint program, GLint location, GLsizei buf
     if (ts.base == BaseType::Sampler || ts.base == BaseType::Image) {
         for (size_t s = 0; s < p->refl.slots.size(); s++) {
             const auto& sl = p->refl.slots[s];
+            if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Image) continue;
             if ((int)sl.index == loc.uniform && (int)sl.element == loc.element) {
                 out[0] = (T)p->samplerUnits[s];
                 return;

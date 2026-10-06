@@ -101,7 +101,9 @@ private:
     Function* curFn_ = nullptr;
     int loopDepth_ = 0, switchDepth_ = 0;
     int nextId_ = 1;
-    int nonPrecisionQuals_ = 0;  // qualifiers other than precision seen by the last parseQualifiers()
+    int nonPrecisionQuals_ = 0;
+    std::map<int, int> atomicNextOffset_;  // atomic counter binding -> next default offset
+    std::map<int, std::vector<std::pair<int, int>>> atomicRanges_;  // binding -> [begin, end) byte ranges  // qualifiers other than precision seen by the last parseQualifiers()
     Qualifiers defaultUbo_, defaultSsbo_;
     std::unordered_map<const Builtin*, Function*> builtinFns_;
     std::unordered_map<Variable*, int> maxIndex_;
@@ -226,6 +228,17 @@ private:
     bool extEnabled(const char* name) const {
         auto it = sh_.extensions.find(name);
         return it != sh_.extensions.end() && it->second != "disable";
+    }
+    // binding + array size must stay within the implementation's binding points
+    void checkBinding(const Type& t, int binding, const std::string& name) {
+        BT b = t.stripArrays().base;
+        int n = t.isArray() ? std::max(1, t.totalArrayElements()) : 1;
+        int limit = 0;
+        if (b == BT::Sampler) limit = kMaxCombinedTextureImageUnits;
+        else if (b == BT::Image) limit = kMaxImageUnits;
+        else if (b == BT::AtomicUint) { limit = kMaxAtomicCounterBufferBindings; n = 1; }
+        else return;
+        if (binding + n > limit) fail("'" + name + "' : binding " + std::to_string(binding) + " exceeds the maximum binding point");
     }
     void checkArrayOfArrays(const Type& t) {
         if (t.dims.size() > 1 && !preamble_ && sh_.version < (sh_.es ? 310 : 430) && !extEnabled("GL_ARB_arrays_of_arrays"))
@@ -871,6 +884,12 @@ void Parser::parseExternal() {
         return;
     }
     Type t = parseTypeSpecifier();
+    if (t.base == BT::AtomicUint && isP(";")) {
+        // "layout(binding = B, offset = O) uniform atomic_uint;" sets the next offset for binding B
+        p_++;
+        if (q.hasLayout && q.layout.offset >= 0) atomicNextOffset_[std::max(0, q.layout.binding)] = q.layout.offset;
+        return;
+    }
     if (accept(";")) return;  // struct declaration
     if (accept(",")) {
         // "type , a;" : a declaration list may start with a bare type
@@ -935,12 +954,12 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
         t.dims = nd.dims;
     }
     expect(";");
-    if ((q.storage == Storage::Uniform || q.storage == Storage::Buffer) && q.layout.binding >= 0 && !preamble_) {
-        // binding + array size must fit the binding points (MAX_SHADER_STORAGE_BUFFER_BINDINGS = 16,
-        // MAX_UNIFORM_BUFFER_BINDINGS = 84 in src/gl/context.h)
-        int count = t.dims.empty() ? 1 : std::max(1, t.dims[0]);
-        int maxBindings = q.storage == Storage::Buffer ? 16 : 84;
-        if (q.layout.binding + count > maxBindings) fail("'binding' : exceeds the maximum number of binding points");
+    if (q.hasLayout && q.layout.binding >= 0 && !preamble_) {
+        int n = t.isArray() ? std::max(1, t.totalArrayElements()) : 1;
+        int limit = q.storage == Storage::Uniform ? kMaxUniformBufferBindings
+                  : q.storage == Storage::Buffer ? kMaxShaderStorageBufferBindings : 0;
+        if (!limit) fail("the binding layout qualifier only applies to uniform and buffer blocks");
+        if (q.layout.binding + n > limit) fail("block '" + blockName + "' : binding exceeds the maximum binding point");
     }
     if (!t.dims.empty() && t.dims[0] == 0) {
         if (sh_.stage == Stage::Geometry && q.storage == Storage::In && sh_.inLayout.primitive != Layout::kNoPrimitive)
@@ -1056,6 +1075,24 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             fail("'" + name + "' : identifiers starting with \"gl_\" are reserved");
         }
         if (t.base == BT::Void) fail("'" + name + "' : illegal use of type 'void'");
+        if (q.hasLayout && q.layout.binding >= 0 && !preamble_) {
+            if (!t.stripArrays().isOpaque()) fail("'" + name + "' : the binding layout qualifier only applies to opaque types and blocks");
+            checkBinding(t, q.layout.binding, name);
+        }
+        if (t.stripArrays().base == BT::AtomicUint && global && !preamble_) {
+            // atomic counter offsets are assigned in declaration order per binding
+            if (q.layout.binding < 0) fail("'" + name + "' : atomic counters require a binding layout qualifier");
+            int b = q.layout.binding;
+            int off = q.layout.offset >= 0 ? q.layout.offset : atomicNextOffset_[b];
+            if (off % 4) fail("'" + name + "' : atomic counter offset must be a multiple of 4");
+            int size = 4 * (t.isArray() ? std::max(1, t.totalArrayElements()) : 1);
+            for (auto& r : atomicRanges_[b])
+                if (off < r.second && r.first < off + size) fail("'" + name + "' : atomic counter overlaps another counter");
+            atomicRanges_[b].push_back({off, off + size});
+            q.hasLayout = true;
+            q.layout.offset = off;
+            atomicNextOffset_[b] = off + size;
+        }
         Variable* v = newVar(name, t, q);
         v->global = global;
         v->line = ln;

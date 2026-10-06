@@ -644,6 +644,8 @@ void Linker::assignUniforms() {
                         error("uniform '" + v->name + "' declared with different types in different stages");
                     if (v->type.stripArrays().base == BT::Image && e.v->q.layout.format != v->q.layout.format)
                         error("image uniform '" + v->name + "' declared with different format qualifiers in different stages");
+                    if (v->q.layout.binding >= 0 && e.v->q.layout.binding >= 0 && v->q.layout.binding != e.v->q.layout.binding)
+                        error("uniform '" + v->name + "' declared with different bindings in different stages");
                     if (v->q.layout.location >= 0) {
                         if (e.v->q.layout.location >= 0 && e.v->q.layout.location != v->q.layout.location)
                             error("uniform '" + v->name + "' declared with different locations in different stages");
@@ -830,6 +832,7 @@ void Linker::assignUniforms() {
         OpaqueBinding ob;
         ob.type = bt;
         ob.count = n;
+        ob.isArray = lf.type.isArray();
         ob.memory = v->q.memory;
         Uniform u;
         u.name = lf.type.isArray() ? lf.path + "[0]" : lf.path;
@@ -1310,7 +1313,9 @@ void Linker::checkBlockInterfaces() {
                         bool same = o->anonBlock == v->anonBlock && o->type.dims == v->type.dims &&
                                     od.members.size() == sd.members.size() &&
                                     od.blockQ.layout.packing == sd.blockQ.layout.packing &&
-                                    od.blockQ.layout.matrix == sd.blockQ.layout.matrix;
+                                    od.blockQ.layout.matrix == sd.blockQ.layout.matrix &&
+                                    !(od.blockQ.layout.binding >= 0 && sd.blockQ.layout.binding >= 0 &&
+                                      od.blockQ.layout.binding != sd.blockQ.layout.binding);
                         for (size_t i = 0; same && i < sd.members.size(); i++) {
                             const Member& a = od.members[i];
                             const Member& b = sd.members[i];
