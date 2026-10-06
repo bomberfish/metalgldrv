@@ -101,51 +101,64 @@ template <int C, int R> inline bool mgl_eq(mgl_dmat<C, R> a, mgl_dmat<C, R> b) {
     return true;
 }
 // LU decomposition with partial pivoting (determinant / inverse of square double matrices)
+// Determinant and inverse by cofactor expansion (exact when every product/sum is
+// representable, e.g. det == 0 for exactly singular matrices), in the usual
+// det2/det3/det4 evaluation order. m[c][r] is column c, row r.
+inline ulong mgl_f64_det2(ulong a00, ulong a10, ulong a01, ulong a11) {
+    return mgl_f64_sub(mgl_f64_mul(a00, a11), mgl_f64_mul(a01, a10));
+}
+inline ulong mgl_f64_det3(ulong a00, ulong a10, ulong a20, ulong a01, ulong a11, ulong a21, ulong a02, ulong a12, ulong a22) {
+    ulong t0 = mgl_f64_mul(a00, mgl_f64_det2(a11, a21, a12, a22));
+    ulong t1 = mgl_f64_mul(a10, mgl_f64_det2(a01, a21, a02, a22));
+    ulong t2 = mgl_f64_mul(a20, mgl_f64_det2(a01, a11, a02, a12));
+    return mgl_f64_add(mgl_f64_sub(t0, t1), t2);
+}
+// E(r, c): row r, column c. Arguments are passed row-major as det2/det3/det4(mat(0,0), mat(0,1), ...).
 template <int N> inline ulong mgl_dmat_det(mgl_dmat<N, N> m) {
-    ulong a[N][N];
-    for (int c = 0; c < N; c++)
-        for (int r = 0; r < N; r++) a[r][c] = m[c][r];
-    ulong det = 0x3FF0000000000000ul;
-    for (int k = 0; k < N; k++) {
-        int p = k;
-        for (int r = k + 1; r < N; r++)
-            if (mgl_f64_gt(mgl_f64_abs(a[r][k]), mgl_f64_abs(a[p][k]))) p = r;
-        if (p != k) {
-            for (int c = 0; c < N; c++) { ulong t = a[k][c]; a[k][c] = a[p][c]; a[p][c] = t; }
-            det = mgl_f64_neg(det);
-        }
-        if (mgl_f64_eq(a[k][k], 0ul)) return 0ul;
-        det = mgl_f64_mul(det, a[k][k]);
-        for (int r = k + 1; r < N; r++) {
-            ulong f = mgl_f64_div(a[r][k], a[k][k]);
-            for (int c = k; c < N; c++) a[r][c] = mgl_f64_sub(a[r][c], mgl_f64_mul(f, a[k][c]));
-        }
+#define E(r, c) m[(c) < N ? (c) : 0][(r) < N ? (r) : 0]
+    if (N == 1) return E(0, 0);
+    if (N == 2) return mgl_f64_det2(E(0, 0), E(0, 1), E(1, 0), E(1, 1));
+    if (N == 3) return mgl_f64_det3(E(0, 0), E(0, 1), E(0, 2), E(1, 0), E(1, 1), E(1, 2), E(2, 0), E(2, 1), E(2, 2));
+    // det4(_00.._33) = _00*det3(_11,_21,_31,_12,_22,_32,_13,_23,_33) - _10*det3(...) + _20*det3(...) - _30*det3(...)
+    // where _ij is the i-th argument group element: _ij = E(j, i).
+    ulong t[4];
+    for (int k = 0; k < 4; k++) {
+        ulong e[9];
+        int n = 0;
+        for (int j = 1; j < 4; j++)
+            for (int i = 0; i < 4; i++)
+                if (i != k) e[n++] = E(j, i);
+        t[k] = mgl_f64_mul(E(0, k), mgl_f64_det3(e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8]));
     }
-    return det;
+#undef E
+    return mgl_f64_sub(mgl_f64_add(mgl_f64_sub(t[0], t[1]), t[2]), t[3]);
 }
 template <int N> inline mgl_dmat<N, N> mgl_dmat_inverse(mgl_dmat<N, N> m) {
-    ulong a[N][2 * N];
-    for (int r = 0; r < N; r++)
-        for (int c = 0; c < N; c++) {
-            a[r][c] = m[c][r];
-            a[r][N + c] = r == c ? 0x3FF0000000000000ul : 0ul;
-        }
-    for (int k = 0; k < N; k++) {
-        int p = k;
-        for (int r = k + 1; r < N; r++)
-            if (mgl_f64_gt(mgl_f64_abs(a[r][k]), mgl_f64_abs(a[p][k]))) p = r;
-        for (int c = 0; c < 2 * N; c++) { ulong t = a[k][c]; a[k][c] = a[p][c]; a[p][c] = t; }
-        ulong inv = mgl_f64_div(0x3FF0000000000000ul, a[k][k]);
-        for (int c = 0; c < 2 * N; c++) a[k][c] = mgl_f64_mul(a[k][c], inv);
-        for (int r = 0; r < N; r++) {
-            if (r == k) continue;
-            ulong f = a[r][k];
-            for (int c = 0; c < 2 * N; c++) a[r][c] = mgl_f64_sub(a[r][c], mgl_f64_mul(f, a[k][c]));
-        }
-    }
+    // inverse = transpose(cofactors) * (1 / det)
+    ulong invDet = mgl_f64_div(0x3FF0000000000000ul, mgl_dmat_det(m));
     mgl_dmat<N, N> out;
     for (int c = 0; c < N; c++)
-        for (int r = 0; r < N; r++) out[c][r] = a[r][N + c];
+        for (int r = 0; r < N; r++) {
+            ulong mi;
+            if (N == 1) mi = 0x3FF0000000000000ul;
+            else {
+                // minor of element (row r, column c) = determinant without row r and column c
+                mgl_dmat<N == 1 ? 1 : N - 1, N == 1 ? 1 : N - 1> sub;
+                int sc = 0;
+                for (int cc = 0; cc < N; cc++) {
+                    if (cc == c) continue;
+                    int sr = 0;
+                    for (int rr = 0; rr < N; rr++) {
+                        if (rr == r) continue;
+                        sub[sc][sr++] = m[cc][rr];
+                    }
+                    sc++;
+                }
+                mi = mgl_dmat_det(sub);
+            }
+            ulong cof = ((r + c) & 1) ? mgl_f64_neg(mi) : mi;
+            out[r][c] = mgl_f64_mul(cof, invDet);  // adjugate: transpose of the cofactors
+        }
     return out;
 }
 )DMAT";
