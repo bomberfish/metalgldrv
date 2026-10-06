@@ -98,6 +98,8 @@ private:
     std::map<std::string, std::string> helperByKey_;
     int helperN_ = 0;
     std::vector<std::string> temps_;
+    std::string retWriteback_;  // copy-out of out/inout parameters, emitted before every return
+    const Function* curFn_ = nullptr;
     int tempN_ = 0;
     std::map<const Function*, std::string> fnNames_;
     std::set<std::string> fragInputsAvailable_;  // from the vertex stage
@@ -488,11 +490,13 @@ bool Emitter::bufAccess(const Expr* e, Acc& a) {
             else idx = "uint(" + ex(ie) + ")";
             if (a.blockArray) {
                 a.blockArray = false;
-                a.ptr = "A->s" + std::to_string(a.bb->slot) + "[" + idx + "]";
+                // a block array of one element is declared as a single slot (not an array)
+                std::string sub = a.bb->count > 1 ? "[" + idx + "]" : "";
+                a.ptr = "A->s" + std::to_string(a.bb->slot) + sub;
                 a.off = "0u";
                 a.type = e->type;
                 a.layout = a.bb->layout;
-                if (a.bb->storage) a.sizeExpr = "A->s" + std::to_string(a.bb->sizeSlot) + "[" + idx + "]";
+                if (a.bb->storage) a.sizeExpr = "A->s" + std::to_string(a.bb->sizeSlot) + sub;
                 return true;
             }
             const Type& bt = a.type;
@@ -1800,6 +1804,15 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
         case SK::Break: o += ind(in) + "break;\n"; return;
         case SK::Continue: o += ind(in) + "continue;\n"; return;
         case SK::Return:
+            if (!retWriteback_.empty()) {
+                // out/inout parameters are copied back on return (GLSL value-return semantics)
+                if (s->expr) {
+                    o += ind(in) + "{ " + mt(curFn_->ret) + " mgl_ret = " + ex(s->expr) + "; " + retWriteback_ + "return mgl_ret; }\n";
+                } else {
+                    o += ind(in) + "{ " + retWriteback_ + "return; }\n";
+                }
+                return;
+            }
             o += ind(in) + "return" + (s->expr ? " " + ex(s->expr) : "") + ";\n";
             return;
         case SK::Discard: {
@@ -1874,7 +1887,7 @@ std::string Emitter::fnSignature(const Function* f) {
             continue;
         }
         if (t.isArray() && t.dims[0] == 0) fail("unsized array parameter");
-        if (p->q.storage == Storage::Out || p->q.storage == Storage::InOut) r += "thread " + mt(t) + "& " + n;
+        if (p->q.storage == Storage::Out || p->q.storage == Storage::InOut) r += "thread " + mt(t) + "& " + n + "_ref";
         else r += mt(t) + " " + n;
     }
     return r + ")";
@@ -1882,12 +1895,27 @@ std::string Emitter::fnSignature(const Function* f) {
 
 std::string Emitter::emitFunction(const Function* f) {
     temps_.clear();
+    // out/inout parameters are local copies (copy-in for inout) written back on return, so that a
+    // global passed as an argument is not aliased by the parameter inside the function.
+    std::string prologue;
+    retWriteback_.clear();
+    for (auto* p : f->params) {
+        if (p->type.isOpaque() || !(p->q.storage == Storage::Out || p->q.storage == Storage::InOut)) continue;
+        std::string n = varName(p);
+        prologue += "        " + mt(p->type) + " " + n + (p->q.storage == Storage::InOut ? " = " + n + "_ref;\n" : "{};\n");
+        retWriteback_ += n + "_ref = " + n + "; ";
+    }
+    curFn_ = f;
     std::string bodyText;
     for (auto* s : f->body->body) stmt(s, bodyText, 2);
     std::string r = "    " + fnSignature(f) + " {\n";
+    r += prologue;
     for (auto& t : temps_) r += "        " + t + "\n";
     r += bodyText;
+    if (!retWriteback_.empty() && f->ret.isVoid()) r += "        " + retWriteback_ + "\n";
     r += "    }\n";
+    retWriteback_.clear();
+    curFn_ = nullptr;
     return r;
 }
 

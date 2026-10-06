@@ -101,6 +101,7 @@ private:
     Function* curFn_ = nullptr;
     int loopDepth_ = 0, switchDepth_ = 0;
     int nextId_ = 1;
+    int nonPrecisionQuals_ = 0;  // qualifiers other than precision seen by the last parseQualifiers()
     Qualifiers defaultUbo_, defaultSsbo_;
     std::unordered_map<const Builtin*, Function*> builtinFns_;
     std::unordered_map<Variable*, int> maxIndex_;
@@ -220,6 +221,15 @@ private:
         if (baseConvCost(a, b) >= 0) return b;
         if (baseConvCost(b, a) >= 0) return a;
         fail("type mismatch between operands", ln);
+    }
+
+    bool extEnabled(const char* name) const {
+        auto it = sh_.extensions.find(name);
+        return it != sh_.extensions.end() && it->second != "disable";
+    }
+    void checkArrayOfArrays(const Type& t) {
+        if (t.dims.size() > 1 && !preamble_ && sh_.version < (sh_.es ? 310 : 430) && !extEnabled("GL_ARB_arrays_of_arrays"))
+            fail("arrays of arrays require GLSL 4.30 or GL_ARB_arrays_of_arrays");
     }
 
     // ---- constant expressions ------------------------------------------------------
@@ -481,6 +491,7 @@ bool Parser::isQualifierAt(int k) {
 
 bool Parser::parseQualifiers(Qualifiers& q) {
     bool any = false;
+    nonPrecisionQuals_ = 0;
     for (;;) {
         const auto& t = peek();
         if (!isQualifierAt(0)) break;
@@ -488,6 +499,7 @@ bool Parser::parseQualifiers(Qualifiers& q) {
         const std::string k = t.text;
         p_++;
         any = true;
+        if (k != "lowp" && k != "mediump" && k != "highp") nonPrecisionQuals_++;
         if (k == "const") q.storage = Storage::Const;
         else if (k == "in") q.storage = (q.storage == Storage::Out) ? Storage::InOut : Storage::In;
         else if (k == "out") q.storage = (q.storage == Storage::In) ? Storage::InOut : Storage::Out;
@@ -706,6 +718,7 @@ void Parser::parseArrayDims(Type& t) {
     }
     // appended dims are innermost relative to existing name dims; caller handles order
     t.dims.insert(t.dims.end(), d.begin(), d.end());
+    checkArrayOfArrays(t);
 }
 
 StructDef* Parser::parseStruct() {
@@ -720,6 +733,7 @@ StructDef* Parser::parseStruct() {
     while (!accept("}")) {
         Qualifiers mq;
         parseQualifiers(mq);
+        if (nonPrecisionQuals_ && !preamble_) fail("structure members may only have precision qualifiers");
         Type mt = parseTypeSpecifier();
         do {
             Member m;
@@ -728,7 +742,7 @@ StructDef* Parser::parseStruct() {
             m.type = mt;
             Type nd;
             parseArrayDims(nd);
-            if (!nd.dims.empty()) m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end());
+            if (!nd.dims.empty()) { m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end()); checkArrayOfArrays(m.type); }
             m.q = mq;
             if (sd->findMember(m.name) >= 0) fail("duplicate struct member '" + m.name + "'");
             sd->members.push_back(m);
@@ -850,6 +864,9 @@ void Parser::parseExternal() {
     }
     Type t = parseTypeSpecifier();
     if (accept(";")) return;  // struct declaration
+    if (accept(",")) {
+        // "type , a;" : a declaration list may start with a bare type
+    }
     std::string name = expectIdent();
     if (isP("(")) {
         parseFunction(q, t, name);
@@ -888,7 +905,7 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
             m.type = mt;
             Type nd;
             parseArrayDims(nd);
-            if (!nd.dims.empty()) m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end());
+            if (!nd.dims.empty()) { m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end()); checkArrayOfArrays(m.type); }
             m.q = mq;
             if (!m.q.interpExplicit) { m.q.interp = q.interp; m.q.interpExplicit = q.interpExplicit; }
             if (q.centroid) m.q.centroid = true;
@@ -1019,7 +1036,7 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
         Type t = baseT;
         Type nd;
         parseArrayDims(nd);
-        if (!nd.dims.empty()) t.dims.insert(t.dims.begin(), nd.dims.begin(), nd.dims.end());
+        if (!nd.dims.empty()) { t.dims.insert(t.dims.begin(), nd.dims.begin(), nd.dims.end()); checkArrayOfArrays(t); }
         int ln = line();
         if (global && !preamble_ && name.compare(0, 3, "gl_") == 0) {
             if (redeclareBuiltin(q, t, name)) {
@@ -1104,7 +1121,7 @@ std::vector<Variable*> Parser::parseParamList() {
                 pn = expectIdent();
                 Type nd;
                 parseArrayDims(nd);
-                if (!nd.dims.empty()) pt.dims.insert(pt.dims.begin(), nd.dims.begin(), nd.dims.end());
+                if (!nd.dims.empty()) { pt.dims.insert(pt.dims.begin(), nd.dims.begin(), nd.dims.end()); checkArrayOfArrays(pt); }
             }
             Qualifiers vq = pq;
             if (vq.storage == Storage::Const) vq.storage = Storage::In;
@@ -1231,6 +1248,7 @@ Stmt* Parser::parseLocalDeclaration() {
     Type t = parseTypeSpecifier();
     Stmt* s = S(SK::Decl);
     if (accept(";")) return s;  // struct definition
+    accept(",");  // "type , a;" : a declaration list may start with a bare type
     std::string name = expectIdent();
     parseDeclarators(q, t, name, false, &s->vars);
     return s;
@@ -2138,6 +2156,9 @@ Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
     e->fn = best.user ? best.user : builtinFn(best.bi);
     if (!best.user) {
         e->cv = foldBuiltin(name, ret, args);
+        if (name == "mix" && !best.bi->params[0].isFloatLike() && sh_.version < (sh_.es ? 310 : 450) &&
+            !extEnabled("GL_EXT_shader_integer_mix"))
+            fail("mix() with integer or boolean operands requires GLSL 4.50 or GL_EXT_shader_integer_mix", ln);
         if (name == "ftransform" && sh_.stage != Stage::Vertex) fail("ftransform() is only available in vertex shaders", ln);
         if (name.compare(0, 6, "atomic") == 0 && name.compare(0, 13, "atomicCounter") != 0) {
             Expr* b = args[0];

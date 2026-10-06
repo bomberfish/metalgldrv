@@ -162,6 +162,7 @@ private:
                            bool topLevelSsbo, int topArraySize, uint32_t topArrayStride, int& location,
                            std::set<int>& usedLocs, const Qualifiers* q);
     void checkVaryings();
+    void checkBlockInterfaces();
     void writeInit(const Type& t, const TL& L, const ConstVal& cv, size_t& ci, uint8_t* dst);
     void stageMetadata();
 };
@@ -265,6 +266,10 @@ void Linker::collectStage(Stage s) {
                 seen.insert(g.var->name);
                 sc.globals.push_back(g.var);
                 if (g.var->init) w.expr(g.var->init);
+                // Uniform/storage blocks with a shared/std140/std430 layout are active even when not referenced.
+                if (g.var->block && (g.var->q.storage == Storage::Uniform || g.var->q.storage == Storage::Buffer) &&
+                    g.var->block->blockQ.layout.packing != Packing::Packed)
+                    sc.used.insert(g.var);
             }
     while (!work.empty()) {
         const Function* f = work.back();
@@ -1152,6 +1157,60 @@ void Linker::stageMetadata() {
     }
 }
 
+// Uniform/storage blocks with the same block name must match across the program (GLSL 4.60 4.3.9), and the
+// global names exposed by anonymous uniform blocks must not collide with other uniforms.
+void Linker::checkBlockInterfaces() {
+    struct BlockInfo { const Variable* v; };
+    std::map<std::string, BlockInfo> blocks;                 // "U:Name" / "B:Name"
+    std::map<std::string, std::string> uniformNames;         // global uniform name -> owner ("" = plain uniform)
+    for (int s = 0; s < (int)Stage::Count; s++) {
+        for (auto& sh : prog_->stages[s].shaders) {
+            for (auto& g : sh->globals) {
+                if (g.kind != GlobalDecl::Var) continue;
+                const Variable* v = g.var;
+                if (v->q.storage != Storage::Uniform && v->q.storage != Storage::Buffer) continue;
+                bool ubo = v->q.storage == Storage::Uniform;
+                if (v->block) {
+                    const StructDef& sd = *v->block;
+                    std::string key = std::string(ubo ? "U:" : "B:") + sd.name;
+                    auto it = blocks.find(key);
+                    if (it == blocks.end()) {
+                        blocks[key] = {v};
+                    } else {
+                        const Variable* o = it->second.v;
+                        const StructDef& od = *o->block;
+                        bool same = o->anonBlock == v->anonBlock && o->type.dims == v->type.dims &&
+                                    od.members.size() == sd.members.size() &&
+                                    od.blockQ.layout.packing == sd.blockQ.layout.packing &&
+                                    od.blockQ.layout.matrix == sd.blockQ.layout.matrix;
+                        for (size_t i = 0; same && i < sd.members.size(); i++) {
+                            const Member& a = od.members[i];
+                            const Member& b = sd.members[i];
+                            same = a.name == b.name && a.type.str() == b.type.str() && a.q.layout.matrix == b.q.layout.matrix &&
+                                   a.q.layout.offset == b.q.layout.offset && a.q.layout.align == b.q.layout.align;
+                        }
+                        if (!same) error(std::string(ubo ? "uniform" : "shader storage") + " block '" + sd.name +
+                                         "' is declared differently in different shaders");
+                    }
+                    if (ubo && v->anonBlock) {
+                        for (auto& m : sd.members) {
+                            auto u = uniformNames.find(m.name);
+                            if (u == uniformNames.end()) uniformNames[m.name] = sd.name;
+                            else if (u->second != sd.name)
+                                error("uniform name '" + m.name + "' is used by different uniform declarations");
+                        }
+                    }
+                    continue;
+                }
+                if (!ubo) continue;
+                auto u = uniformNames.find(v->name);
+                if (u == uniformNames.end()) uniformNames[v->name] = "";
+                else if (!u->second.empty()) error("uniform name '" + v->name + "' is also a member of uniform block '" + u->second + "'");
+            }
+        }
+    }
+}
+
 LinkResult Linker::run() {
     prog_ = std::make_shared<LinkedProgram>();
     prog_->separable = in_.separable;
@@ -1173,7 +1232,8 @@ LinkResult Linker::run() {
     if (ok_) {
         assignAttributes();
         assignFragOutputs();
-        assignUniforms();
+        checkBlockInterfaces();
+        if (ok_) assignUniforms();
         checkVaryings();
         stageMetadata();
     }
