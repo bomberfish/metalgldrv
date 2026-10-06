@@ -383,7 +383,9 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     s->clipDistanceMask = ctx->clipDistanceMask;
     for (int k = 0; k < 4; k++) s->viewport[k] = ctx->viewport[0][k];
     s->pointSize = ctx->pointSize;
-    s->flags = (ctx->programPointSize ? 1u : 0u) | (ctx->pointSpriteOrigin == GL_LOWER_LEFT ? 2u : 0u) | (ctx->clipOrigin == GL_UPPER_LEFT ? 4u : 0u);
+    s->flags = (ctx->programPointSize ? 1u : 0u) | (ctx->pointSpriteOrigin == GL_LOWER_LEFT ? 2u : 0u) | (ctx->clipOrigin == GL_UPPER_LEFT ? 4u : 0u) |
+               (ctx->sampleCoverage && ctx->sampleCoverageInvert ? 8u : 0u);
+    s->sampleCoverage = ctx->sampleCoverage ? ctx->sampleCoverageValue : 1.0f;
     s->baseVertex = baseVertex;
     s->baseInstance = baseInstance;
     s->drawID = drawID;
@@ -1685,6 +1687,8 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     vk.primitive = (uint8_t)d.mode;
     vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
     vk.rasterDiscard = ctx->rasterizerDiscard;
+    vk.sampleShading = ctx->sampleShading && ctx->minSampleShading > 0;
+    vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     bool primQueries = mglQueryPrimitivesActive(ctx);
     if (vk.kind != glsl::PipelineKind::Classic) {

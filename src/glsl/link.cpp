@@ -545,7 +545,7 @@ void Linker::assignUniforms() {
                 continue;
             }
             if (v->q.storage != Storage::Uniform) continue;
-            if (v->builtin == BuiltinVar::DepthRange) continue;  // fed from MGLSys
+            if (v->builtin == BuiltinVar::DepthRange || v->builtin == BuiltinVar::NumSamples) continue;  // system values
             if (v->type.base == BT::Subroutine) continue;         // subroutine uniforms have their own interface
             bool opq = v->type.containsOpaque();
             bool aggregate = v->type.stripArrays().base == BT::Struct;

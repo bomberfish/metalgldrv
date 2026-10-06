@@ -157,7 +157,7 @@ enum class BuiltinVar : uint16_t {
     // compute
     NumWorkGroups, WorkGroupID, LocalInvocationID, GlobalInvocationID, LocalInvocationIndex, WorkGroupSize,
     // uniforms
-    DepthRange, CompatUniform,
+    DepthRange, NumSamples, CompatUniform,
 };
 
 struct Expr;

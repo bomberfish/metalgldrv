@@ -284,7 +284,8 @@ private:
         if (v->q.storage == Storage::Shared) return true;
         bool perThread = v->builtin == BuiltinVar::InvocationID || v->builtin == BuiltinVar::PrimitiveID ||
                          v->builtin == BuiltinVar::PatchVerticesIn || v->builtin == BuiltinVar::TessCoord ||
-                         v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange;
+                         v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange ||
+                         v->builtin == BuiltinVar::NumSamples;
         if (perThread) return false;
         if (stage_ == Stage::TessControl) return v->q.storage == Storage::In || v->q.storage == Storage::Out;
         if (stage_ == Stage::TessEval) return v->q.storage == Storage::In;
@@ -302,7 +303,7 @@ private:
     bool isDefaultUniform(const Variable* v) {
         return v->global && v->q.storage == Storage::Uniform && !v->block &&
                (!v->type.containsOpaque() || v->type.stripArrays().base == BT::Struct) && v->type.base != BT::Subroutine &&
-               v->builtin != BuiltinVar::DepthRange;
+               v->builtin != BuiltinVar::DepthRange && v->builtin != BuiltinVar::NumSamples;
     }
     const BlockBinding* blockOf(const Variable* v) {
         if (!v->block || !(v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer)) return nullptr;
@@ -829,6 +830,7 @@ std::string Emitter::ex(const Expr* e) {
                 const Variable* v = e->var;
                 if (v->builtin == BuiltinVar::DepthRange)
                     return "S_gl_DepthRangeParameters{sys->depthRangeNear, sys->depthRangeFar, sys->depthRangeFar - sys->depthRangeNear}";
+                if (v->builtin == BuiltinVar::NumSamples) return "int(get_num_samples())";
                 if (v->builtin == BuiltinVar::WorkGroupSize) {
                     const auto& r = P->refl;
                     return "uint3(" + std::to_string(r.localSize[0]) + "u, " + std::to_string(r.localSize[1]) + "u, " +
@@ -2026,7 +2028,7 @@ void Emitter::prepareStage(Stage s) {
     std::vector<const Variable*> cand;
     for (auto* v : sc_->used) {
         if (v->builtin == BuiltinVar::None || v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange ||
-            v->builtin == BuiltinVar::WorkGroupSize || v->q.storage == Storage::Const || v->q.storage == Storage::Uniform)
+            v->builtin == BuiltinVar::NumSamples || v->builtin == BuiltinVar::WorkGroupSize || v->q.storage == Storage::Const || v->q.storage == Storage::Uniform)
             continue;
         cand.push_back(v);
     }
@@ -2564,6 +2566,15 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     auto& biByKind = si.bi;
     std::string inS = "struct In {\n", outS = "struct Out {\n", copyIn, copyOut, params;
     bool anyIn = false, anyOut = false;
+    // Per-sample shading: forced by the state (GL_SAMPLE_SHADING), by gl_SampleID /
+    // gl_SamplePosition, or by sample-qualified inputs. Metal runs a fragment function at
+    // sample rate when it takes [[sample_id]].
+    bool perSample = K.sampleShading || biByKind.count(BuiltinVar::SampleID) || biByKind.count(BuiltinVar::SamplePosition);
+    bool haveSid = false;
+    auto needSid = [&]() {
+        if (!haveSid) params += ", uint mgl_sid [[sample_id]]";
+        haveSid = true;
+    };
     std::vector<const Variable*> ins;
     for (auto* v : sc_->globals)
         if (v->q.storage == Storage::In && v->builtin == BuiltinVar::None) ins.push_back(v);
@@ -2603,10 +2614,17 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 anyIn = true;
                 continue;
             }
+            // Sample shading evaluates every interpolated input at the invocation's sample.
+            if (K.sampleShading && lq.interp != Interp::Flat) lq.sample = true, lq.centroid = false;
+            if (lq.sample && lq.interp != Interp::Flat) perSample = true;
             if (interpVars.count(v) && lt.base == BT::Float && lq.interp != Interp::Flat) {
                 std::string mode = lq.interp == Interp::NoPerspective ? "no_perspective" : "perspective";
                 inS += "    interpolant<" + mt(lt) + ", interpolation::" + mode + "> " + nm + " [[user(" + nm + ")]];\n";
                 std::string at = lq.centroid ? "interpolate_at_centroid()" : "interpolate_at_center()";
+                if (lq.sample) {
+                    needSid();
+                    at = "interpolate_at_sample(mgl_sid)";
+                }
                 copyIn += "    " + leaves[i].second + " = in." + nm + "." + at + ";\n";
                 interpLeaf_[leaves[i].second.substr(2)] = nm;  // strip "g."
                 anyIn = true;
@@ -2636,17 +2654,22 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 copyIn += "    g.bi_" + v->name + " = float2(mgl_pc.x, (sys.flags & 2u) != 0u ? mgl_pc.y : 1.0f - mgl_pc.y);\n";
                 break;
             case BuiltinVar::SampleID:
-                params += ", uint mgl_sid [[sample_id]]";
+                needSid();
                 copyIn += "    g.bi_" + v->name + " = int(mgl_sid);\n";
                 break;
             case BuiltinVar::SamplePosition:
-                if (!biByKind.count(BuiltinVar::SampleID)) params += ", uint mgl_sid [[sample_id]]";
-                params += ", float4 mgl_fc2 [[position]]";
-                copyIn += "    g.bi_" + v->name + " = fract(mgl_fc2.xy);\n";
+                needSid();
+                copyIn += "    g.bi_" + v->name + " = get_sample_position(mgl_sid);\n";
                 break;
             case BuiltinVar::SampleMaskIn:
                 params += ", uint mgl_smi [[sample_mask]]";
-                copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi);\n";
+                // With per-sample shading each invocation covers only its own sample.
+                if (perSample) {
+                    needSid();
+                    copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi & (1u << mgl_sid));\n";
+                } else {
+                    copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi);\n";
+                }
                 break;
             case BuiltinVar::PrimitiveID:
                 if (meshInput) {
@@ -2688,6 +2711,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             default: break;
         }
     }
+    if (K.sampleShading) needSid();
     bool fragDepth = biByKind.count(BuiltinVar::FragDepth) && sc_->writesFragDepth;
     if (fragDepth && !biByKind.count(BuiltinVar::FragCoord)) params += ", float4 mgl_fc [[position]]";
     if (fragDepth) copyIn += "    g.bi_gl_FragDepth = mgl_fc.z;\n";
@@ -2740,9 +2764,12 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
         copyOut += "    o.mgl_depth = g.bi_gl_FragDepth;\n";
         anyOut = true;
     }
-    if (biByKind.count(BuiltinVar::SampleMask)) {
+    if (biByKind.count(BuiltinVar::SampleMask) || K.sampleMask) {
+        // gl_SampleMask and GL_SAMPLE_MASK only apply to multisample framebuffers.
+        std::string m = biByKind.count(BuiltinVar::SampleMask) ? "uint(g.bi_gl_SampleMask[0])" : "0xffffffffu";
+        if (K.sampleMask) m = "(" + m + " & sys.sampleMask & mgl_coverage_mask(sys.sampleCoverage, (sys.flags & 8u) != 0u))";
         outS += "    uint mgl_mask [[sample_mask]];\n";
-        copyOut += "    o.mgl_mask = uint(g.bi_gl_SampleMask[0]);\n";
+        copyOut += "    o.mgl_mask = get_num_samples() > 1u ? " + m + " : 0xffffffffu;\n";
         anyOut = true;
     }
     outS += "};\n";

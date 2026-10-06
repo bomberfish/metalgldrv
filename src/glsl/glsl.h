@@ -243,6 +243,11 @@ struct VariantKey {
     // Classic path: pull vertex attributes from MGLDrawInfo (buffer 22, formats in
     // `attribs`) instead of [[stage_in]]; used for layouts Metal's vertex fetch rejects.
     bool manualFetch = false;
+    // Fragment: run at sample rate (GL_SAMPLE_SHADING with MIN_SAMPLE_SHADING_VALUE > 0).
+    bool sampleShading = false;
+    // Fragment: AND the coverage with MGLSys::sampleMask (GL_SAMPLE_MASK) and the
+    // GL_SAMPLE_COVERAGE mask derived from MGLSys::sampleCoverage.
+    bool sampleMask = false;
 };
 
 struct EntryPoint {
@@ -286,7 +291,7 @@ struct alignas(16) MGLSys {
     uint32_t clipDistanceMask;             // glEnable(GL_CLIP_DISTANCEi)
     float viewport[4];                     // x, y, w, h of viewport 0
     float pointSize;                       // glPointSize (when program doesn't write gl_PointSize)
-    uint32_t flags;                        // bit0: program point size, bit1: point sprite origin lower-left
+    uint32_t flags;                        // bit0: program point size, bit1: point sprite origin lower-left, bit2: upper-left clip origin, bit3: invert sample coverage
     int32_t baseVertex, baseInstance;      // gl_BaseVertex / gl_BaseInstance / gl_DrawID support
     int32_t drawID, firstVertex;
     uint32_t sampleMask;
@@ -294,7 +299,7 @@ struct alignas(16) MGLSys {
     uint32_t alphaFunc;                    // compat alpha test (GL_ALWAYS -> disabled)
     float minSampleShading;
     float renderTargetHeight;              // height of the bound framebuffer (layout(origin_upper_left) gl_FragCoord)
-    uint32_t pad1;
+    float sampleCoverage;                  // GL_SAMPLE_COVERAGE value (1 when disabled); flags bit3: invert
     float tessDefaultOuter[4];             // GL_PATCH_DEFAULT_OUTER_LEVEL (used when there is no TCS)
     float tessDefaultInner[2];             // GL_PATCH_DEFAULT_INNER_LEVEL
     uint32_t pad2[2];

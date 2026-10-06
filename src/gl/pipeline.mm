@@ -22,6 +22,8 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     h = hashBytes(&key.rasterDiscard, 1, h);
     h = hashBytes(&key.attribSignFlip, sizeof key.attribSignFlip, h);
     h = hashBytes(&key.manualFetch, 1, h);
+    h = hashBytes(&key.sampleShading, 1, h);
+    h = hashBytes(&key.sampleMask, 1, h);
     if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch) {
         // Field by field: VertexFetch has padding bytes with indeterminate contents.
         for (const glsl::VertexFetch& f : key.attribs) {
