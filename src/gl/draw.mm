@@ -1443,6 +1443,40 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         return true;
     }
 
+    // --- transform feedback captured by the rasterizing vertex shader (VariantKey::xfbInVertex):
+    // a non-indexed draw over the decomposed list, so side effects of the VS happen once ---
+    if (vk.kind == glsl::PipelineKind::Classic && vk.xfbInVertex) {
+        uint64_t generated[4] = {(uint64_t)s.prims * d.instances, 0, 0, 0};
+        mpXfbLimits(s, s.vpp);
+        mpUpload(s);
+        id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
+        if (!e) return true;
+        RenderPipelineKey key;
+        key.variant = var;
+        fillColorKey(ctx, key, refl);
+        key.rasterEnabled = true;
+        id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+        if (!pso) return true;
+        if (ctx->enc.pipeline != pso) {
+            [e setRenderPipelineState:pso];
+            ctx->enc.pipeline = pso;
+        }
+        applyDynamicState(ctx, e, s.listMode);
+        id<MTL4ArgumentTable> table = ctx->renderArgTable;
+        [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
+        [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
+        [table setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
+        if (ctx->enc.fsTableSplit) {
+            [e setArgumentTable:table atStages:MTLRenderStageFragment];
+            ctx->enc.fsTableSplit = false;
+        }
+        mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts are added by the caller
+        MTLPrimitiveType prim = s.listMode == GL_POINTS ? MTLPrimitiveTypePoint : s.listMode == GL_LINES ? MTLPrimitiveTypeLine
+                                                                                                           : MTLPrimitiveTypeTriangle;
+        [e drawPrimitives:prim vertexStart:0 vertexCount:s.ids.size() instanceCount:d.instances baseInstance:0];
+        mpFinishCounts(s, generated, s.vpp, false);
+        return true;
+    }
     // --- tessellation pass 1: VS+TCS compute ---
     if (vk.kind == glsl::PipelineKind::Tessellation) {
         if (!mpTessControl(s)) { retire(); return false; }
@@ -1721,6 +1755,18 @@ static bool validateDraw(Context* ctx, GLenum mode) {
     return true;
 }
 
+// Whether the vertex shader may write memory (SSBOs, images, atomic counters).
+static bool vertexSideEffects(const glsl::Reflection& r) {
+    const uint32_t vs = 1u << (int)glsl::Stage::Vertex;
+    for (const auto& b : r.storageBlocks)
+        if (b.stageMask & vs) return true;
+    for (const auto& a : r.atomicCounterBuffers)
+        if (a.stageMask & vs) return true;
+    for (const auto& s : r.slots)
+        if (s.kind == glsl::SlotKind::Image && s.index < r.uniforms.size() && (r.uniforms[s.index].stageMask & vs)) return true;
+    return false;
+}
+
 static bool programHasSideEffects(const glsl::Reflection& r) {
     if (!r.storageBlocks.empty() || !r.atomicCounterBuffers.empty()) return true;
     for (auto& sl : r.slots)
@@ -1772,10 +1818,19 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
         uint64_t n = d.count;
         mglQueryAddPrimitives(ctx, 0, mglPrimitivesFor(d.mode, n) * (uint64_t)std::max(0, d.instances), 0, false, false);
     }
+    if (xfbActive && !ctx->rasterizerDiscard && !d.indirect && vertexSideEffects(refl)) {
+        // Capture from the rasterizing vertex shader so its side effects happen once.
+        glsl::VariantKey xk = vk;
+        xk.xfbInVertex = true;
+        executeMultiPass(ctx, prog, d, xk, true);
+        return;
+    }
     if (xfbActive) {
         glsl::VariantKey xk = vk;
         xk.kind = glsl::PipelineKind::XfbCapture;
         executeMultiPass(ctx, prog, d, xk, true);
+        // The capture kernel already ran the vertex shader (and its side effects).
+        if (ctx->rasterizerDiscard) return;
     }
     // With rasterization discarded the draw only matters for vertex-stage side effects
     // (storage buffer / image / atomic counter writes); run it without a fragment stage then.

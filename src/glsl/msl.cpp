@@ -418,6 +418,7 @@ private:
     void emitTesXfb(std::string& o);
     void emitXfb(std::string& o);
     void emitGeometryXfb(std::string& o, bool fromTes);
+    std::string xfbVertexStores();
     void captureWords(Stage st, const std::string& g, std::vector<std::tuple<int, uint32_t, std::string>>& out);
 
     void collectStructs(std::vector<const StructDef*>& order);
@@ -2528,6 +2529,22 @@ void Emitter::emitClassicVS(std::string& o) {
     }
     RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, true);
     o += "struct In {\n" + inS + "};\nstruct Out {\n" + ro.vertexStruct + "};\n}  // namespace vs\n\n";
+    if (K.xfbInVertex) {
+        // Transform feedback with vertex shader side effects: the vertex shader runs once per
+        // vertex of the decomposed primitive list (non-indexed draw) and captures its outputs
+        // itself, so its side effects happen exactly once.
+        std::string e = "vertex vs::Out mgl_vs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], "
+                        "constant MGLDrawInfo& D [[buffer(22)]], uint mgl_lv [[vertex_id]], uint mgl_li [[instance_id]]) {\n";
+        e += "    uint mgl_t = mgl_li * D.count + mgl_lv;\n";
+        e += indentBy(runVS("g", "D.indexBuffer[mgl_lv] + uint(D.baseVertex)", "mgl_li"), 4);
+        e += xfbVertexStores();
+        e += "    vs::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
+        entries_ += e;
+        fragInputsAvailable_ = ro.names;
+        haveVsOutputs_ = true;
+        out_.entryPoints.push_back({"mgl_vs", Stage::Vertex, EntryPoint::Vertex});
+        return;
+    }
     // Rasterizer discard: Metal needs a void vertex function when rasterization is disabled.
     std::string e = K.rasterDiscard ? "vertex void mgl_vs(" : "vertex vs::Out mgl_vs(";
     if (anyIn) e += "vs::In in [[stage_in]], ";
@@ -3326,6 +3343,20 @@ void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tupl
     }
 }
 
+// Transform feedback capture of the vertex shader outputs in `g` for list position mgl_t
+// (instance-major) of the decomposed primitive list described by D. Primitives past
+// D.xfbPrimLimit[0] (the CPU-computed buffer capacity) are not recorded.
+std::string Emitter::xfbVertexStores() {
+    const MultiPassInfo& mp = RF(lastPreRaster()).multipass;
+    std::string e = "    uint vpp = max(D.verticesPerPrimitive, 1u);\n    if (mgl_t / vpp < D.xfbPrimLimit[0]) {\n";
+    e += "        uint vtx = D.xfbVertexBase + mgl_t;\n";
+    std::vector<std::tuple<int, uint32_t, std::string>> words;
+    captureWords(Stage::Vertex, "g.", words);
+    for (auto& [b, off, w] : words)
+        e += "        mgl_st_uint(D.xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " + std::to_string(off) + "u, " + w + ");\n";
+    e += "    }\n";
+    return e;
+}
 
 void Emitter::emitXfb(std::string& o) {
     const Reflection& R = RF(lastPreRaster());
@@ -3349,13 +3380,7 @@ void Emitter::emitXfb(std::string& o) {
     e += "    uint mgl_total = D.count * D.instanceCount;\n    if (mgl_t >= mgl_total) return;\n";
     e += "    uint mgl_pos = mgl_t % D.count, mgl_ii = mgl_t / D.count;\n";
     e += indentBy(runVS("g", "D.indexBuffer[mgl_pos] + uint(D.baseVertex)", "mgl_ii"), 4);
-    e += "    uint vpp = max(D.verticesPerPrimitive, 1u);\n    if (mgl_t / vpp >= D.xfbPrimLimit[0]) return;\n";
-    e += "    uint vtx = D.xfbVertexBase + mgl_t;\n";
-    const MultiPassInfo& mp = R.multipass;
-    std::vector<std::tuple<int, uint32_t, std::string>> words;
-    captureWords(Stage::Vertex, "g.", words);
-    for (auto& [b, off, w] : words)
-        e += "    mgl_st_uint(D.xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " + std::to_string(off) + "u, " + w + ");\n";
+    e += xfbVertexStores();
     e += "}\n\n";
     entries_ += e;
     EntryPoint k{"mgl_xfb", Stage::Vertex, EntryPoint::Kernel};

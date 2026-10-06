@@ -243,6 +243,9 @@ struct VariantKey {
     // Classic path: pull vertex attributes from MGLDrawInfo (buffer 22, formats in
     // `attribs`) instead of [[stage_in]]; used for layouts Metal's vertex fetch rejects.
     bool manualFetch = false;
+    // Classic path: the vertex shader also writes transform feedback (MGLDrawInfo at buffer 22,
+    // non-indexed draw over the decomposed primitive list); used when it has side effects.
+    bool xfbInVertex = false;
     // Fragment: run at sample rate (GL_SAMPLE_SHADING with MIN_SAMPLE_SHADING_VALUE > 0).
     bool sampleShading = false;
     // Fragment: AND the coverage with MGLSys::sampleMask (GL_SAMPLE_MASK) and the
