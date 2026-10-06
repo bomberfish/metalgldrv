@@ -622,6 +622,30 @@ void markTextureWrite(Context* ctx, Texture* t) {
     t->lastGpuWrite = t->lastUse;
 }
 
+id<MTLTexture> attachmentWriteView(Context* ctx, const Attachment& a, id<MTLTexture> t) {
+    if (ctx->framebufferSRGB || !t || !(t.usage & MTLTextureUsagePixelFormatView)) return t;
+    MTLPixelFormat lin;
+    switch (t.pixelFormat) {
+    case MTLPixelFormatRGBA8Unorm_sRGB: lin = MTLPixelFormatRGBA8Unorm; break;
+    case MTLPixelFormatBGRA8Unorm_sRGB: lin = MTLPixelFormatBGRA8Unorm; break;
+    default: return t;
+    }
+    if (a.type == GL_RENDERBUFFER && a.rb) {
+        if (!a.rb->linearView) a.rb->linearView = [t newTextureViewWithPixelFormat:lin];
+        return a.rb->linearView;
+    }
+    if (a.type == GL_TEXTURE && a.tex) {
+        Texture* tx = a.tex.get();
+        const Texture::ViewKey key{~0ull, (uint64_t)lin};  // not produced by sampling views
+        auto it = tx->views.find(key);
+        if (it != tx->views.end()) return it->second;
+        id<MTLTexture> v = [t newTextureViewWithPixelFormat:lin];
+        tx->views[key] = v;
+        return v;
+    }
+    return t;
+}
+
 id<MTLTexture> attachmentTexture(Context* ctx, const Attachment& a, const FormatInfo** fmt, int* w, int* h) {
     if (a.type == GL_RENDERBUFFER && a.rb) {
         Renderbuffer* rb = a.rb.get();

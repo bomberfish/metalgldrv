@@ -1392,7 +1392,12 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     if (name == "texelFetch" || name == "texelFetchOffset") {
         std::string P = ex(A[1]);
         bool off = name == "texelFetchOffset";
-        if (off) P = "(" + P + " + " + ex(A.back()) + ")";
+        if (off) {
+            // The offset has no layer component for array textures.
+            std::string o = ex(A.back());
+            if (arr) o = (dim == Dim::D1 ? "int2(" : "int3(") + o + ", 0)";
+            P = "(" + P + " + " + o + ")";
+        }
         std::string r;
         if (T.ms) {
             std::string s = "uint(" + ex(A[2]) + ")";

@@ -2,6 +2,7 @@
 #include "harness.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -143,6 +144,53 @@ static void imageSizeStage(GLenum stageBit, bool pipeline) {
 TEST(image_size_vs_program) { imageSizeStage(GL_VERTEX_SHADER_BIT, false); }
 TEST(image_size_fs_program) { imageSizeStage(GL_FRAGMENT_SHADER_BIT, false); }
 TEST(image_size_vs_pipeline) { imageSizeStage(GL_VERTEX_SHADER_BIT, true); }
+
+// Rendering into an sRGB multisample texture without FRAMEBUFFER_SRGB stores the value
+// as is; texelFetch decodes it.
+TEST(srgb_multisample_texel_fetch) {
+    GLuint ms, fbo[2], out;
+    glGenTextures(1, &ms);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, ms);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_SRGB8_ALPHA8, 4, 4, GL_FALSE);
+    glGenFramebuffers(2, fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, ms, 0);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), (GLenum)GL_FRAMEBUFFER_COMPLETE);
+    glViewport(0, 0, 4, 4);
+    const char* vs = "#version 430 core\nvoid main() { vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4.0 - 1.0; gl_Position = vec4(p, 0, 1); }";
+    GLuint fill = compileProgram(vs, "#version 430 core\nout vec4 c; void main() { c = vec4(0.5, 0.25, 0.75, 1.0); }");
+    GLuint vao;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(fill);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glGenTextures(1, &out);
+    glBindTexture(GL_TEXTURE_2D, out);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo[1]);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out, 0);
+    GLuint rd = compileProgram(vs, "#version 430 core\nuniform sampler2DMS s; out vec4 c;\n"
+                                   "void main() { c = texelFetch(s, ivec2(gl_FragCoord.xy), 1); }");
+    glUseProgram(rd);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, ms);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    uint8_t px[4] = {};
+    glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    // sRGB decode of 128/255, 64/255, 191/255
+    CHECK(abs(px[0] - 55) <= 2);
+    CHECK(abs(px[1] - 13) <= 2);
+    CHECK(abs(px[2] - 133) <= 2);
+    CHECK_GL();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glDeleteProgram(fill);
+    glDeleteProgram(rd);
+    glDeleteFramebuffers(2, fbo);
+    glDeleteTextures(1, &ms);
+    glDeleteTextures(1, &out);
+    glDeleteVertexArrays(1, &vao);
+}
 
 // Raw bit reinterpretation between same-size formats of one view class.
 TEST(copy_image_reinterpret) {

@@ -25,6 +25,20 @@ static Texture* texForTarget(Context* ctx, GLenum target) {
     return t;
 }
 
+// glTexParameter* / glGetTexParameter* accept texture binding targets only
+// (no cube map faces, proxies or buffer textures).
+static Texture* paramTexForTarget(Context* ctx, GLenum target) {
+    switch (target) {
+    case GL_TEXTURE_1D: case GL_TEXTURE_2D: case GL_TEXTURE_3D: case GL_TEXTURE_1D_ARRAY: case GL_TEXTURE_2D_ARRAY:
+    case GL_TEXTURE_RECTANGLE: case GL_TEXTURE_CUBE_MAP: case GL_TEXTURE_CUBE_MAP_ARRAY: case GL_TEXTURE_2D_MULTISAMPLE:
+    case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+        return texForTarget(ctx, target);
+    default:
+        ctx->setError(GL_INVALID_ENUM, "invalid texture parameter target 0x%x", target);
+        return nullptr;
+    }
+}
+
 static Texture* namedTex(Context* ctx, GLuint name) {
     Texture* t = ctx->share->textures.get(name);
     if (!t) ctx->setError(GL_INVALID_OPERATION, "texture %u does not exist", name);
@@ -577,7 +591,7 @@ static bool validWrap(GLenum w, bool core) {
 
 // Applies a sampler parameter; returns false if pname isn't a sampler parameter.
 static bool samplerParam(Context* ctx, SamplerState& s, GLenum pname, const double* v, bool isInt, bool rect) {
-    GLenum e = (GLenum)v[0];
+    GLenum e = (GLenum)(int64_t)v[0];
     switch (pname) {
     case GL_TEXTURE_MIN_FILTER:
         if (e != GL_NEAREST && e != GL_LINEAR && e != GL_NEAREST_MIPMAP_NEAREST && e != GL_LINEAR_MIPMAP_NEAREST &&
@@ -628,7 +642,7 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
         if (ms) ctx->setError(GL_INVALID_ENUM);
         return;
     }
-    GLenum e = (GLenum)v[0];
+    GLenum e = (GLenum)(int64_t)v[0];
     switch (pname) {
     case GL_TEXTURE_BASE_LEVEL:
         if (v[0] < 0) return ctx->setError(GL_INVALID_VALUE);
@@ -649,10 +663,10 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
         break;
     case GL_TEXTURE_SWIZZLE_RGBA:
         for (int k = 0; k < 4; k++) {
-            GLenum s = (GLenum)v[k];
+            GLenum s = (GLenum)(int64_t)v[k];
             if (s != GL_RED && s != GL_GREEN && s != GL_BLUE && s != GL_ALPHA && s != GL_ZERO && s != GL_ONE) return ctx->setError(GL_INVALID_ENUM);
         }
-        for (int k = 0; k < 4; k++) t->swizzle[k] = (GLenum)v[k];
+        for (int k = 0; k < 4; k++) t->swizzle[k] = (GLenum)(int64_t)v[k];
         t->dropViews();
         break;
     case GL_DEPTH_STENCIL_TEXTURE_MODE:
@@ -679,7 +693,7 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
 #define TEXPARAM_IMPL(Name, Type, IsInt, count)                                           \
     API void APIENTRY glTexParameter##Name(GLenum target, GLenum pname, Type param) {   \
         MGL_CTX();                                                                        \
-        Texture* t = texForTarget(ctx, target);                                           \
+        Texture* t = paramTexForTarget(ctx, target);                                           \
         if (!t) return;                                                                   \
         if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA)         \
             return ctx->setError(GL_INVALID_ENUM);                                        \
@@ -704,7 +718,7 @@ static void texParamVec(Context* ctx, Texture* t, GLenum pname, const double* v,
 #define TEXPARAMV_IMPL(Name, Type, IsInt, Norm, IntBorder)                                          \
     API void APIENTRY glTexParameter##Name(GLenum target, GLenum pname, const Type* params) {     \
         MGL_CTX();                                                                                  \
-        Texture* t = texForTarget(ctx, target);                                                     \
+        Texture* t = paramTexForTarget(ctx, target);                                                     \
         if (!t) return;                                                                             \
         double v[4];                                                                                \
         int n = (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) ? 4 : 1;    \
@@ -767,7 +781,7 @@ static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int
 #define GETTEXPARAM_IMPL(Name, Type)                                                         \
     API void APIENTRY glGetTexParameter##Name(GLenum target, GLenum pname, Type* params) {  \
         MGL_CTX();                                                                           \
-        Texture* t = texForTarget(ctx, target);                                              \
+        Texture* t = paramTexForTarget(ctx, target);                                              \
         if (!t) return;                                                                      \
         double v[4];                                                                         \
         int n;                                                                               \
@@ -789,7 +803,7 @@ GETTEXPARAM_IMPL(Iuiv, GLuint)
 
 API void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
     MGL_CTX();
-    Texture* t = texForTarget(ctx, target);
+    Texture* t = paramTexForTarget(ctx, target);
     if (!t) return;
     double v[4];
     int n;
@@ -1534,53 +1548,70 @@ static void clearTexImage(Context* ctx, Texture* t, GLint level, int x, int y, i
     if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE);
     const TexImageLevel& L = t->levels[0][level];
     if (!L.defined()) return ctx->setError(GL_INVALID_OPERATION);
-    if (whole) {
-        w = L.width;
-        h = L.height;
-        d = t->target == GL_TEXTURE_CUBE_MAP ? 6 : L.depth;
+    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
+    const FormatInfo* lf = L.fmt;
+    if (lf->comp == Comp::Compressed) return ctx->setError(GL_INVALID_OPERATION, "clearing a compressed texture");
+    {
+        // §8.21: the client format must match the internal format's kind.
+        bool bad;
+        switch (lf->baseFormat) {
+        case GL_DEPTH_COMPONENT: bad = format != GL_DEPTH_COMPONENT; break;
+        case GL_DEPTH_STENCIL: bad = format != GL_DEPTH_STENCIL; break;
+        case GL_STENCIL_INDEX: bad = format != GL_STENCIL_INDEX; break;
+        default:
+            bad = format == GL_DEPTH_COMPONENT || format == GL_DEPTH_STENCIL || format == GL_STENCIL_INDEX ||
+                  (lf->kind == FmtKind::UInt || lf->kind == FmtKind::SInt) != isIntegerFormat(format);
+            break;
+        }
+        if (bad) return ctx->setError(GL_INVALID_OPERATION, "format 0x%x incompatible with internal format 0x%x", format, lf->internalFormat);
     }
+    // Level extent in GL terms: 1D arrays keep layers in y, cube maps have 6 faces in z.
+    int W = L.width, H = L.height, D = L.depth;
+    switch (t->target) {
+    case GL_TEXTURE_1D: H = 1; D = 1; break;
+    case GL_TEXTURE_1D_ARRAY: D = 1; break;
+    case GL_TEXTURE_CUBE_MAP: D = 6; break;
+    case GL_TEXTURE_2D: case GL_TEXTURE_RECTANGLE: case GL_TEXTURE_2D_MULTISAMPLE: D = 1; break;
+    default: break;
+    }
+    if (whole) {
+        x = y = z = 0;
+        w = W;
+        h = H;
+        d = D;
+    } else {
+        if (w < 0 || h < 0 || d < 0) return ctx->setError(GL_INVALID_VALUE);
+        if (x < 0 || y < 0 || z < 0 || (int64_t)x + w > W || (int64_t)y + h > H || (int64_t)z + d > D)
+            return ctx->setError(GL_INVALID_OPERATION, "clear region outside the image");
+    }
+    if (w == 0 || h == 0 || d == 0) return;
     if (!ensureTextureStorage(ctx, t)) return;
     const FormatInfo* f = t->storageFmt;
-    if (f->comp == Comp::Compressed) return ctx->setError(GL_INVALID_OPERATION);
-    // Build one row of the fill pattern and replicate via staged upload.
+    // One texel of the fill value in storage layout (zeros when data is NULL).
     uint8_t px[16] = {};
-    if (data) {
-        if (f->comp == Comp::D32F_S8) {
-            uint8_t tmp[16];
-            convertToStorage(f, format, type, data, 0, 0, tmp, 0, 0, 1, 1, 1, false);
-            memcpy(px, tmp, 8);
-        } else {
-            convertToStorage(f, format, type, data, 0, 0, px, 0, 0, 1, 1, 1, false);
-        }
-    }
-    int bpp = f->bytesPerPixel;
-    size_t rowBytes = (size_t)w * bpp;
-    std::vector<uint8_t> image(rowBytes * h);
-    for (size_t i = 0; i < (size_t)w * h; i++) memcpy(&image[i * bpp], px, bpp);
-    PixelStore saved = ctx->unpack;
-    Ref<Buffer> savedPbo = ctx->pixelUnpackBuffer;
-    ctx->unpack = PixelStore();
-    ctx->unpack.alignment = 1;
-    ctx->pixelUnpackBuffer = nullptr;
-    // Feed the already-converted data through an identity client format when possible.
-    for (int i = 0; i < d; i++) {
-        int face = t->target == GL_TEXTURE_CUBE_MAP ? z + i : 0;
-        int zz = t->target == GL_TEXTURE_CUBE_MAP ? 0 : z + i;
-        UploadAlloc up = ctx->upload(image.size(), 16);
-        memcpy(up.cpu, image.data(), image.size());
+    if (data) convertToStorage(f, format, type, data, 0, 0, px, 0, 0, 1, 1, 1, false);
+    bool ds = f->comp == Comp::D32F_S8;
+    // Depth/stencil storage is filled one aspect at a time.
+    int planes = ds ? 2 : 1;
+    bool is3D = t->target == GL_TEXTURE_3D, is1DArray = t->target == GL_TEXTURE_1D_ARRAY;
+    int rows = is1DArray ? 1 : h, slices = is1DArray ? h : d;
+    for (int p = 0; p < planes; p++) {
+        int bpp = ds ? (p == 0 ? 4 : 1) : f->bytesPerPixel;
+        const uint8_t* val = ds && p == 1 ? px + 4 : px;
+        size_t rowBytes = (size_t)w * bpp, imgBytes = rowBytes * rows;
+        UploadAlloc up = ctx->upload(imgBytes, 16);
+        for (size_t i = 0; i < (size_t)w * rows; i++) memcpy(up.cpu + i * bpp, val, bpp);
+        MTLBlitOption opt = !ds ? MTLBlitOptionNone : p == 0 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionStencilFromDepthStencil;
         id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
-        int slice = (t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) ? zz : face;
-        bool is3D = t->target == GL_TEXTURE_3D;
-        if (f->comp == Comp::D32F_S8) {
-            MGL_WARN("glClearTexImage on depth-stencil textures: depth only");
+        for (int i = 0; i < slices; i++) {
+            NSUInteger slice = is3D ? 0 : is1DArray ? y + i : z + i;
+            MTLOrigin o = MTLOriginMake(x, is1DArray ? 0 : y, is3D ? z + i : 0);
+            [e copyFromBuffer:up.buffer sourceOffset:up.offset sourceBytesPerRow:rowBytes sourceBytesPerImage:imgBytes
+                   sourceSize:MTLSizeMake(w, rows, 1) toTexture:t->mtl destinationSlice:slice destinationLevel:level
+            destinationOrigin:o options:opt];
         }
-        if (f->comp != Comp::D32F_S8)
-            [e copyFromBuffer:up.buffer sourceOffset:up.offset sourceBytesPerRow:rowBytes sourceBytesPerImage:rowBytes * h
-                    sourceSize:MTLSizeMake(w, h, 1) toTexture:t->mtl destinationSlice:is3D ? 0 : slice destinationLevel:level
-             destinationOrigin:MTLOriginMake(x, y, is3D ? zz : 0)];
+        [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
     }
-    ctx->unpack = saved;
-    ctx->pixelUnpackBuffer = savedPbo;
     markTextureWrite(ctx, t);
 }
 

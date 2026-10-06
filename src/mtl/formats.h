@@ -68,6 +68,8 @@ struct PixelStore {
 // Bytes per pixel of client data (format,type), 0 if invalid combination.
 int clientPixelSize(GLenum format, GLenum type);
 bool isValidFormatType(GLenum format, GLenum type);
+// GL_RED_INTEGER etc.
+bool isIntegerFormat(GLenum format);
 // 0, GL_INVALID_ENUM (unknown enums) or GL_INVALID_OPERATION (incompatible pair).
 GLenum pixelFormatTypeError(GLenum format, GLenum type);
 // Also checks the client format against the texture's internal format (integer-ness,

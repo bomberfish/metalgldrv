@@ -296,7 +296,7 @@ static int packedSize(GLenum type, int& comps) {
     }
 }
 
-static bool isIntegerFormat(GLenum format) {
+bool isIntegerFormat(GLenum format) {
     switch (format) {
     case GL_RED_INTEGER: case GL_GREEN_INTEGER: case GL_BLUE_INTEGER: case GL_ALPHA_INTEGER:
     case GL_RG_INTEGER: case GL_RGB_INTEGER: case GL_BGR_INTEGER: case GL_RGBA_INTEGER: case GL_BGRA_INTEGER:
