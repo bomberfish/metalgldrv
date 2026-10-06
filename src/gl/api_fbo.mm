@@ -357,6 +357,7 @@ static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment,
         Texture* t = ctx->share->textures.get(texture);
         if (!t) return ctx->setError(GL_INVALID_OPERATION, "texture %u does not exist", texture);
         if (level < 0) return ctx->setError(GL_INVALID_VALUE);
+        if (t->immutable && level >= t->immutableLevels) return ctx->setError(GL_INVALID_VALUE, "level %d beyond the texture's storage", level);
         if (textarget && textarget != t->target &&
             !(t->target == GL_TEXTURE_CUBE_MAP && textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z))
             return ctx->setError(GL_INVALID_OPERATION);
