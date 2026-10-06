@@ -270,15 +270,32 @@ API void APIENTRY glDeleteProgram(GLuint program) {
     std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
-    // A program in use stays alive via ctx->program until unbound.
-    if (ctx->program.get() != p) {
-        for (auto& a : p->attached) {
-            a->attachCount--;
-            maybeFreeShader(ctx, a.get());
-        }
-        p->attached.clear();
+    // A program in use is only flagged (its name stays valid, GL 4.6 7.3); it is freed
+    // when it stops being the current program.
+    if (ctx->program.get() == p) {
+        p->deleted = true;
+        return;
     }
+    for (auto& a : p->attached) {
+        a->attachCount--;
+        maybeFreeShader(ctx, a.get());
+    }
+    p->attached.clear();
     ctx->share->shaderPrograms.remove(program);
+}
+
+// Frees the current program's name if it was flagged for deletion while in use.
+static void releaseCurrentProgram(Context* ctx) {
+    ProgramObj* old = ctx->program.get();
+    if (!old || !old->deleted) return;
+    std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
+    if (ctx->share->shaderPrograms.get(old->name) != old) return;
+    for (auto& a : old->attached) {
+        a->attachCount--;
+        maybeFreeShader(ctx, a.get());
+    }
+    old->attached.clear();
+    ctx->share->shaderPrograms.remove(old->name);
 }
 
 API GLboolean APIENTRY glIsProgram(GLuint program) {
@@ -396,6 +413,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
     if (!allCompiled || in.shaders.empty()) {
         p->linked = false;
         p->infoLog = in.shaders.empty() ? "error: no shaders attached\n" : "error: attached shader not successfully compiled\n";
+        MGL_DBG("program %u link failed: %s", program, p->infoLog.c_str());
         return;
     }
     glsl::LinkResult r = glsl::link(in);
@@ -442,12 +460,14 @@ API void APIENTRY glUseProgram(GLuint program) {
     MGL_CTX();
     if (ctx->xfb->active && !ctx->xfb->paused) return ctx->setError(GL_INVALID_OPERATION);
     if (!program) {
+        releaseCurrentProgram(ctx);
         ctx->program = nullptr;
         return;
     }
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
     if (!p->linked) return ctx->setError(GL_INVALID_OPERATION, "program not linked");
+    if (ctx->program.get() != p) releaseCurrentProgram(ctx);
     ctx->program = p;
     // Subroutine selections are reset when the current program changes (GL 4.6 §7.10).
     for (int st = 0; st < (int)glsl::Stage::Count; st++) {
