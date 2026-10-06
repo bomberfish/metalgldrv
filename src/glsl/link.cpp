@@ -19,7 +19,12 @@ uint32_t scalarSize(BT b) { return b == BT::Double ? 8 : 4; }
 
 static uint32_t roundUp(uint32_t v, uint32_t a) { return a ? (v + a - 1) / a * a : v; }
 
-TL computeLayout(const Type& t, Packing packing, bool rowMajor) {
+static TL computeLayoutImpl(const Type& t, Packing packing, bool rowMajor, int blockAlign);
+
+TL computeLayout(const Type& t, Packing packing, bool rowMajor) { return computeLayoutImpl(t, packing, rowMajor, -1); }
+
+// blockAlign: layout(align = N) on an interface block applies to each member (GLSL 4.60 §4.4.5)
+static TL computeLayoutImpl(const Type& t, Packing packing, bool rowMajor, int blockAlign) {
     bool s140 = packing != Packing::Std430;
     auto L = std::make_shared<TypeLayout>();
     if (!t.dims.empty()) {
@@ -41,6 +46,7 @@ TL computeLayout(const Type& t, Packing packing, bool rowMajor) {
             TL ml = computeLayout(m.type, packing, rm);
             uint32_t a = ml->align;
             if (m.q.layout.align > 0) a = std::max(a, (uint32_t)m.q.layout.align);
+            else if (blockAlign > 0) a = std::max(a, (uint32_t)blockAlign);
             if (m.q.layout.offset >= 0) off = (uint32_t)m.q.layout.offset;
             off = roundUp(off, a);
             L->offsets.push_back(off);
@@ -77,8 +83,75 @@ TL computeBlockLayout(const StructDef& sd, Packing packing, bool rowMajor) {
     Type t;
     t.base = BT::Struct;
     t.sdef = const_cast<StructDef*>(&sd);
-    TL L = computeLayout(t, packing, rowMajor);
-    return L;
+    return computeLayoutImpl(t, packing, rowMajor, sd.blockQ.layout.align);
+}
+
+XfbCapture xfbCaptureOf(const Type& t, int buffer, uint32_t offset) {
+    XfbCapture c;
+    c.buffer = buffer;
+    c.offset = offset;
+    uint32_t off = offset;
+    bool first = true;
+    // aggregates are flattened to components, each aligned to its own size
+    std::function<void(const Type&)> walk = [&](const Type& ty) {
+        if (ty.isArray()) {
+            Type e = ty.elem();
+            for (int i = 0; i < std::max(ty.dims[0], 1); i++) walk(e);
+            return;
+        }
+        if (ty.base == BT::Struct) {
+            for (auto& m : ty.sdef->members) walk(m.type);
+            return;
+        }
+        uint32_t cs = ty.base == BT::Double ? 8 : 4;
+        if (first) c.align = cs;
+        first = false;
+        if (cs == 8) c.dbl = true;
+        for (int i = 0; i < ty.components(); i++) {
+            off = roundUp(off, cs);
+            off += cs;
+        }
+    };
+    walk(t);
+    if (c.dbl) {
+        c.align = 8;
+        off = roundUp(off, 8);
+    }
+    c.size = off - offset;
+    return c;
+}
+
+std::string checkXfbLayout(const std::vector<XfbCapture>& caps, const int explicitStride[4]) {
+    for (auto& c : caps)
+        if (c.offset % c.align)
+            return "'xfb_offset' : offset of '" + c.name + "' must be a multiple of " + std::to_string(c.align);
+    for (int b = 0; b < 4; b++) {
+        std::vector<const XfbCapture*> list;
+        bool dbl = false;
+        uint32_t end = 0;
+        for (auto& c : caps)
+            if (c.buffer == b) {
+                list.push_back(&c);
+                dbl |= c.dbl;
+                end = std::max(end, c.offset + c.size);
+            }
+        std::sort(list.begin(), list.end(), [](const XfbCapture* x, const XfbCapture* y) { return x->offset < y->offset; });
+        for (size_t i = 1; i < list.size(); i++)
+            if (list[i]->offset < list[i - 1]->offset + list[i - 1]->size)
+                return "transform feedback outputs '" + list[i - 1]->name + "' and '" + list[i]->name + "' overlap in buffer " +
+                       std::to_string(b);
+        uint32_t stride = roundUp(end, dbl ? 8 : 4);
+        if (explicitStride[b] >= 0) {
+            stride = (uint32_t)explicitStride[b];
+            if (stride % (dbl ? 8 : 4))
+                return "'xfb_stride' : stride of buffer " + std::to_string(b) + " must be a multiple of " + (dbl ? "8" : "4");
+            if (end > stride)
+                return "'xfb_stride' : captured outputs overflow the stride of buffer " + std::to_string(b);
+        }
+        if (stride > 4 * kMaxXfbInterleavedComponents)
+            return "transform feedback buffer " + std::to_string(b) + " exceeds gl_MaxTransformFeedbackInterleavedComponents";
+    }
+    return "";
 }
 
 std::string varyingKey(const Variable* v, Stage stage) {
@@ -916,47 +989,57 @@ void Linker::stageMetadata() {
     };
     if (pre != Stage::Count) {
         const StageCode& ps = prog_->stages[(int)pre];
-        // enhanced layouts: xfb_offset qualifiers take precedence over glTransformFeedbackVaryings
+        // enhanced layouts: xfb_offset qualifiers take precedence over glTransformFeedbackVaryings.
+        // The parser resolved each output's xfb_buffer and the block members' xfb_offsets.
         bool qualified = false;
-        int stageBuffer = std::max(0, ps.outLayout.xfbBuffer);
-        uint32_t ends[4] = {0, 0, 0, 0};
-        int explicitStride[4] = {-1, -1, -1, -1};
-        if (ps.outLayout.xfbStride > 0) explicitStride[stageBuffer] = ps.outLayout.xfbStride;
+        int strides[4] = {-1, -1, -1, -1};
+        for (auto& sh : ps.shaders) {
+            if (!sh->xfbMode) continue;
+            qualified = true;
+            for (int b = 0; b < 4; b++) {
+                if (sh->xfbStride[b] < 0) continue;
+                if (strides[b] >= 0 && strides[b] != sh->xfbStride[b])
+                    error("'xfb_stride' : different strides declared for transform feedback buffer " + std::to_string(b));
+                strides[b] = sh->xfbStride[b];
+            }
+        }
+        std::vector<XfbCapture> caps;
         for (auto* v : ps.globals) {
-            if (v->q.storage != Storage::Out) continue;
-            int vb = v->q.layout.xfbBuffer >= 0 ? v->q.layout.xfbBuffer : (v->block && v->block->blockQ.layout.xfbBuffer >= 0 ? v->block->blockQ.layout.xfbBuffer : stageBuffer);
-            if (v->q.layout.xfbStride > 0 && vb < 4) explicitStride[vb] = v->q.layout.xfbStride;
-            auto addQ = [&](const std::string& name, const Type& t, int buffer, int offset) {
-                if (buffer < 0 || buffer > 3) { error("xfb_buffer out of range"); return; }
+            if (!qualified || v->q.storage != Storage::Out) continue;
+            int vb = std::max(0, v->q.layout.xfbBuffer);
+            auto addQ = [&](const std::string& name, const Type& t, int offset) {
                 XfbVarying x;
                 x.name = name;
                 x.type = glTypeEnum(t);
                 x.arraySize = t.isArray() ? t.dims[0] : 1;
-                x.buffer = buffer;
+                x.buffer = vb;
                 x.offset = offset;
                 r.xfbVaryings.push_back(x);
-                ends[buffer] = std::max<uint32_t>(ends[buffer], offset + compSize(t));
-                qualified = true;
+                caps.push_back(xfbCaptureOf(t, vb, (uint32_t)offset));
+                caps.back().name = name;
             };
             if (v->block) {
-                int boff = v->block->blockQ.layout.xfbOffset;
-                int cur = boff;
-                for (auto& m : v->block->members) {
-                    int mo = m.q.layout.xfbOffset >= 0 ? m.q.layout.xfbOffset : (boff >= 0 ? cur : -1);
-                    if (mo >= 0) {
-                        addQ(v->anonBlock ? m.name : v->block->name + "." + m.name, m.type, vb, mo);
-                        cur = mo + compSize(m.type);
-                    }
-                }
+                for (auto& m : v->block->members)
+                    if (m.q.layout.xfbOffset >= 0) addQ(v->anonBlock ? m.name : v->block->name + "." + m.name, m.type, m.q.layout.xfbOffset);
             } else if (v->q.layout.xfbOffset >= 0) {
-                addQ(v->name, v->type, vb, v->q.layout.xfbOffset);
+                addQ(v->name, v->type, v->q.layout.xfbOffset);
             }
         }
         if (qualified) {
+            std::string err = checkXfbLayout(caps, strides);
+            if (!err.empty()) error(err);
             for (int b = 0; b < 4; b++) {
-                if (!ends[b] && explicitStride[b] < 0) continue;
+                uint32_t end = 0;
+                bool dbl = false, any = false;
+                for (auto& c : caps)
+                    if (c.buffer == b) {
+                        any = true;
+                        dbl |= c.dbl;
+                        end = std::max(end, c.offset + c.size);
+                    }
+                if (!any && strides[b] < 0) continue;
                 mp.xfbBufferMask |= 1u << b;
-                mp.xfbStride[b] = explicitStride[b] > 0 ? (uint32_t)explicitStride[b] : roundUp(ends[b], 4);
+                mp.xfbStride[b] = strides[b] >= 0 ? (uint32_t)strides[b] : roundUp(end, dbl ? 8 : 4);
             }
         } else if (!in_.xfbVaryings.empty()) {
             int buffer = 0, offset = 0;

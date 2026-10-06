@@ -29,6 +29,19 @@ TL computeLayout(const Type& t, Packing packing, bool rowMajor);
 TL computeBlockLayout(const StructDef& sd, Packing packing, bool rowMajor);
 uint32_t scalarSize(BT b);
 
+// A transform feedback capture assigned by xfb_offset (GLSL 4.60 §4.4.2.1).
+struct XfbCapture {
+    std::string name;
+    int buffer = 0;
+    uint32_t offset = 0, size = 0;  // size: bytes from offset to the end of the last component (multiple of 8 with doubles)
+    uint32_t align = 4;             // required offset alignment (first component size; 8 with doubles)
+    bool dbl = false;
+};
+XfbCapture xfbCaptureOf(const Type& t, int buffer, uint32_t offset);
+// Validates offsets (alignment, overlap) and strides of one shader stage's captures; returns an error or "".
+std::string checkXfbLayout(const std::vector<XfbCapture>& caps, const int explicitStride[4]);
+constexpr uint32_t kMaxXfbInterleavedComponents = 128;  // GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS (limits.def)
+
 struct StageCode {
     std::vector<std::shared_ptr<const Shader>> shaders;
     const Shader* primary = nullptr;  // shader holding main()

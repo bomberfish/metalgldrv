@@ -12,9 +12,19 @@
 #include "glsl/builtins.h"
 #include "glsl/fold.h"
 #include "glsl/gl_enums.h"
+#include "glsl/program.h"
 #include "glsl/types.h"
 
 namespace glsl {
+
+// Implicitly sized array dimensions (any level, GLSL 4.30 arrays of arrays) take the sizes of a matching
+// sized type (initializer / constructor argument).
+static void sizeUnsizedDims(Type& t, const Type& src) {
+    if (t.dims.size() != src.dims.size()) return;
+    for (size_t i = 0; i < t.dims.size(); i++)
+        if (t.dims[i] == 0) t.dims[i] = src.dims[i];
+}
+
 
 bool exprIsLvalue(const Expr* e) {
     switch (e->kind) {
@@ -91,6 +101,7 @@ private:
     Function* curFn_ = nullptr;
     int loopDepth_ = 0, switchDepth_ = 0;
     int nextId_ = 1;
+    int xfbCurBuffer_ = 0;  // global default xfb_buffer (layout(xfb_buffer = N) out;)
     Qualifiers defaultUbo_, defaultSsbo_;
     std::unordered_map<const Builtin*, Function*> builtinFns_;
     std::unordered_map<Variable*, int> maxIndex_;
@@ -233,6 +244,10 @@ private:
     StructDef* parseStruct();
     void parseArrayDims(Type& t);
     void parseBlock(Qualifiers q, std::vector<Stmt*>* out);
+    void validateBlockLayout(const StructDef& sd);
+    void checkComponent(const Type& type, int comp, bool hasLocation, int ln);
+    void noteXfb(const Layout& L, Storage storage, int buffer, int ln);
+    void finalizeXfb();
     void parseFunction(const Qualifiers& q, const Type& ret, const std::string& name);
     std::vector<Variable*> parseParamList();
     Expr* mkSubroutineCall(Variable* v, Expr* index, std::vector<Expr*> args, int ln);
@@ -295,6 +310,7 @@ bool Parser::run(const PPResult& pp) {
         push();  // user global scope
         parseTokens(pp.tokens);
         finalize();
+        finalizeXfb();
     } catch (ParseError&) {
         return false;
     }
@@ -575,6 +591,12 @@ void Parser::applyStageLayout(const Qualifiers& q) {
     if (L.stream >= 0) T.stream = L.stream;
     if (L.xfbBuffer >= 0) T.xfbBuffer = L.xfbBuffer;
     if (L.xfbStride >= 0) T.xfbStride = L.xfbStride;
+    if (!preamble_ && (L.xfbBuffer >= 0 || L.xfbStride >= 0 || L.xfbOffset >= 0)) {
+        if (q.storage != Storage::Out) fail("transform feedback qualifiers are only allowed on outputs");
+        if (L.xfbOffset >= 0) fail("'xfb_offset' : cannot be applied to the 'out' qualifier alone");
+        noteXfb(L, q.storage, L.xfbBuffer >= 0 ? L.xfbBuffer : xfbCurBuffer_, line());
+        if (L.xfbBuffer >= 0) xfbCurBuffer_ = L.xfbBuffer;
+    }
     if (q.storage == Storage::In && sh_.stage == Stage::Compute && (L.localSize[0] >= 0 || L.localSize[1] >= 0 || L.localSize[2] >= 0)) {
         // update gl_WorkGroupSize constant
         Sym* s = &scopes_[0]["gl_WorkGroupSize"];
@@ -814,6 +836,25 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
         } while (accept(","));
         expect(";");
     }
+    if ((q.storage == Storage::Uniform || q.storage == Storage::Buffer) && !preamble_) validateBlockLayout(*sd);
+    if (!preamble_) {
+        if (q.storage == Storage::Out && q.layout.xfbBuffer < 0) q.layout.xfbBuffer = xfbCurBuffer_;
+        noteXfb(q.layout, q.storage, q.layout.xfbBuffer, line());
+        for (Member& m : sd->members) {
+            noteXfb(m.q.layout, q.storage, q.layout.xfbBuffer, m.line);
+            if (m.q.layout.xfbBuffer >= 0 && m.q.layout.xfbBuffer != q.layout.xfbBuffer)
+                fail("'xfb_buffer' : member '" + m.name + "' does not match the buffer of its block", m.line);
+            if (m.q.layout.xfbOffset >= 0)
+                for (int d : m.type.dims)
+                    if (d == 0) fail("'xfb_offset' : cannot be applied to an unsized array", m.line);
+        }
+        sd->blockQ = q;
+    }
+    if ((q.storage == Storage::In || q.storage == Storage::Out) && !preamble_) {
+        if (q.layout.component >= 0) fail("'component' : cannot be applied to a block");
+        for (const Member& m : sd->members)
+            checkComponent(m.type, m.q.layout.component, m.q.layout.location >= 0 || q.layout.location >= 0, m.line);
+    }
     std::string inst;
     Type t;
     t.base = BT::Struct;
@@ -873,6 +914,109 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
         sh_.globals.push_back(g);
     }
     (void)out;
+}
+
+// Records the use of transform feedback qualifiers in a declaration with the given (resolved) buffer.
+void Parser::noteXfb(const Layout& L, Storage storage, int buffer, int ln) {
+    if (L.xfbBuffer < 0 && L.xfbOffset < 0 && L.xfbStride < 0) return;
+    if (storage != Storage::Out) fail("transform feedback qualifiers are only allowed on outputs", ln);
+    sh_.xfbMode = true;
+    if (buffer < 0 || buffer >= 4) fail("'xfb_buffer' : must be less than gl_MaxTransformFeedbackBuffers", ln);
+    if (L.xfbOffset < -1 || L.xfbStride < -1) fail("transform feedback qualifier values must be non-negative", ln);
+    if (L.xfbStride >= 0) {
+        if (sh_.xfbStride[buffer] >= 0 && sh_.xfbStride[buffer] != L.xfbStride)
+            fail("'xfb_stride' : buffer " + std::to_string(buffer) + " already has a different stride", ln);
+        sh_.xfbStride[buffer] = L.xfbStride;
+    }
+}
+
+// Assigns block member offsets and validates the shader's transform feedback layout (GLSL 4.60 §4.4.2.1).
+void Parser::finalizeXfb() {
+    if (!sh_.xfbMode) return;
+    std::vector<XfbCapture> caps;
+    for (auto& g : sh_.globals) {
+        if (g.kind != GlobalDecl::Var || !g.var || g.var->q.storage != Storage::Out) continue;
+        Variable* v = g.var;
+        int buffer = v->q.layout.xfbBuffer;
+        if (v->block) {
+            int boff = v->block->blockQ.layout.xfbOffset;
+            int cur = boff;
+            for (Member& m : v->block->members) {
+                int mo = m.q.layout.xfbOffset >= 0 ? m.q.layout.xfbOffset : (boff >= 0 ? cur : -1);
+                if (mo < 0) continue;
+                XfbCapture c = xfbCaptureOf(m.type, buffer, mo);
+                c.name = m.name;
+                if (c.dbl && (mo & 7) && m.q.layout.xfbOffset < 0) {  // implicitly assigned: align
+                    mo = (mo + 7) & ~7;
+                    c = xfbCaptureOf(m.type, buffer, mo);
+                    c.name = m.name;
+                }
+                m.q.layout.xfbOffset = mo;
+                caps.push_back(c);
+                cur = mo + (int)c.size;
+            }
+        } else if (v->q.layout.xfbOffset >= 0) {
+            XfbCapture c = xfbCaptureOf(v->type, buffer, v->q.layout.xfbOffset);
+            c.name = v->name;
+            caps.push_back(c);
+        }
+    }
+    std::string err = checkXfbLayout(caps, sh_.xfbStride);
+    if (!err.empty()) fail(err);
+}
+
+// GLSL 4.60 §4.4.2.1 'component' rules for a shader input/output (or block member) of type t.
+void Parser::checkComponent(const Type& type, int comp, bool hasLocation, int ln) {
+    if (comp < 0) return;
+    if (!hasLocation) fail("'component' : requires 'location'", ln);
+    if (comp > 3) fail("'component' : must be in the range 0..3", ln);
+    Type t = type.stripArrays();
+    if (t.base == BT::Struct || t.cols) fail("'component' : cannot be applied to a matrix, structure or block", ln);
+    int size = t.vec;
+    if (t.base == BT::Double) {
+        if (t.vec > 2) fail("'component' : cannot be applied to dvec3 or dvec4", ln);
+        if (comp & 1) fail("'component' : doubles must start at component 0 or 2", ln);
+        size *= 2;
+    }
+    if (comp + size > 4) fail("'component' : the variable does not fit in the location", ln);
+}
+
+// GLSL 4.60 §4.4.5 offset / align rules for uniform and storage block members.
+void Parser::validateBlockLayout(const StructDef& sd) {
+    const Layout& BL = sd.blockQ.layout;
+    bool stdLayout = BL.packing == Packing::Std140 || BL.packing == Packing::Std430;
+    if (BL.offset >= 0) fail("'offset' : only allowed on block members");
+    auto checkAlign = [&](int a) {
+        if (a >= 0 && (a == 0 || (a & (a - 1)) != 0)) fail("'align' : must be a power of 2");
+    };
+    checkAlign(BL.align);
+    if (BL.align >= 0 && !stdLayout) fail("'align' : only allowed on std140 or std430 blocks");
+    uint32_t prevEnd = 0;
+    uint32_t off = 0;
+    bool any = false;
+    for (const Member& m : sd.members) {
+        const Layout& ML = m.q.layout;
+        if (ML.offset >= 0 || ML.align >= 0) {
+            if (!stdLayout) fail("'" + std::string(ML.offset >= 0 ? "offset" : "align") + "' : only allowed on std140 or std430 blocks", m.line);
+            any = true;
+        }
+        checkAlign(ML.align);
+        if (!stdLayout) continue;
+        bool rm = ML.matrix ? ML.matrix == 2 : sd.blockQ.layout.matrix == 2;
+        TL ml = computeLayout(m.type, BL.packing, rm);
+        uint32_t a = ml->align;
+        if (ML.offset >= 0) {
+            if ((uint32_t)ML.offset % a) fail("'offset' : must be a multiple of the base alignment of '" + m.name + "'", m.line);
+            if ((uint32_t)ML.offset < prevEnd) fail("'offset' : member '" + m.name + "' overlaps the previous member", m.line);
+            off = (uint32_t)ML.offset;
+        }
+        if (ML.align > 0) a = std::max(a, (uint32_t)ML.align);
+        else if (BL.align > 0) a = std::max(a, (uint32_t)BL.align);
+        off = (off + a - 1) / a * a;
+        prevEnd = off + ml->size;
+        off = prevEnd;
+    }
+    (void)any;
 }
 
 bool Parser::redeclareBuiltin(const Qualifiers& q, const Type& t, const std::string& name) {
@@ -943,13 +1087,23 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             fail("'" + name + "' : identifiers starting with \"gl_\" are reserved");
         }
         if (t.base == BT::Void) fail("'" + name + "' : illegal use of type 'void'");
-        Variable* v = newVar(name, t, q);
+        if (global && !preamble_ && (q.storage == Storage::In || q.storage == Storage::Out))
+            checkComponent(t, q.layout.component, q.layout.location >= 0, ln);
+        Qualifiers vq = q;
+        if (global && !preamble_) {
+            if (vq.storage == Storage::Out && vq.layout.xfbBuffer < 0) vq.layout.xfbBuffer = xfbCurBuffer_;
+            noteXfb(q.layout, q.storage, vq.layout.xfbBuffer, ln);
+            if (q.layout.xfbOffset >= 0)
+                for (int d : t.dims)
+                    if (d == 0) fail("'xfb_offset' : cannot be applied to an unsized array", ln);
+        }
+        Variable* v = newVar(name, t, vq);
         v->global = global;
         v->line = ln;
         if (preamble_) v->builtin = builtinVarId(name, sh_.stage);
         if (accept("=")) {
             Expr* init = parseInitializer(t);
-            if (v->type.isArray() && v->type.dims[0] == 0 && init->type.isArray()) v->type.dims[0] = init->type.dims[0];
+            if (v->type.isArray() && init->type.isArray()) sizeUnsizedDims(v->type, init->type);
             init = convert(init, v->type, "initializer");
             v->init = init;
             if ((q.storage == Storage::Const || q.storage == Storage::Uniform) && init->cv) v->constVal = init->cv;
@@ -1822,7 +1976,7 @@ Expr* Parser::mkCtor(Type t, std::vector<Expr*> args, int ln) {
         if ((int)args.size() != t.dims[0]) fail("wrong number of arguments for array constructor", ln);
         Type et = t.elem();
         for (auto& a : args) {
-            if (et.isArray() && a->type.isArray() && et.dims[0] == 0) et = a->type;  // unsized inner dims
+            if (et.isArray() && a->type.isArray()) sizeUnsizedDims(et, a->type);  // unsized inner dims
             a = convert(a, et, "array constructor");
         }
         t = et.arrayOf(t.dims[0]);
