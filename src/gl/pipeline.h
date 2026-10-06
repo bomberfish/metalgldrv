@@ -26,7 +26,13 @@ struct ProgramVariant {
             if (e.kind == k) return &e;
         return nullptr;
     }
+    const glsl::EntryPoint* entry(const std::string& name) const {
+        for (auto& e : msl.entryPoints)
+            if (e.name == name) return &e;
+        return nullptr;
+    }
     id<MTLComputePipelineState> compute = nil;
+    std::unordered_map<std::string, id<MTLComputePipelineState>> computeByName;  // multi-kernel variants
 };
 
 #pragma pack(push, 1)
@@ -71,6 +77,7 @@ public:
     ProgramVariant* variant(ProgramObj* prog, const glsl::VariantKey& key);
     id<MTLRenderPipelineState> renderPipeline(const RenderPipelineKey& key);
     id<MTLComputePipelineState> computePipeline(ProgramVariant* v);
+    id<MTLComputePipelineState> computePipeline(ProgramVariant* v, const std::string& name);
     id<MTLDepthStencilState> depthStencil(const DepthStencilKey& key);
 
 private:

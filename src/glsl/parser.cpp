@@ -302,6 +302,14 @@ bool Parser::run(const PPResult& pp) {
 }
 
 void Parser::finalize() {
+    {
+        bool clipV = false, clipD = false;
+        for (auto& v : sh_.vars) {
+            if (v.builtin == BuiltinVar::ClipVertex && v.written) clipV = true;
+            if (v.builtin == BuiltinVar::ClipDistance && v.written && v.q.storage == Storage::Out) clipD = true;
+        }
+        if (clipV && clipD) fail("a shader cannot statically write both gl_ClipVertex and gl_ClipDistance", 0);
+    }
     // Implicitly sized arrays
     for (auto& [v, mx] : maxIndex_) {
         if (!v->type.dims.empty() && v->type.dims[0] == 0 && !(v->q.storage == Storage::Buffer)) v->type.dims[0] = mx + 1;
@@ -329,6 +337,19 @@ void Parser::finalize() {
     for (auto& e : sh_.exprs)
         if (e.kind == EK::Field && !e.type.dims.empty() && e.type.dims[0] == 0 && e.args[0]->type.sdef && e.args[0]->type.sdef->isBlock)
             e.type = e.args[0]->type.sdef->members[e.field].type;
+    // GLSL 4.60 7.1: clip/cull distance array sizes are bounded by gl_MaxClipDistances,
+    // gl_MaxCullDistances and (together) gl_MaxCombinedClipAndCullDistances.
+    {
+        int nclip = 0, ncull = 0;
+        for (auto& v : sh_.vars) {
+            if (!v.global || v.type.dims.empty() || !(v.used || v.written || v.redeclared)) continue;
+            if (v.builtin == BuiltinVar::ClipDistance) nclip = std::max(nclip, v.type.dims[0]);
+            if (v.builtin == BuiltinVar::CullDistance) ncull = std::max(ncull, v.type.dims[0]);
+        }
+        if (nclip > 8) fail("gl_ClipDistance array size exceeds gl_MaxClipDistances", 0);
+        if (ncull > 8) fail("gl_CullDistance array size exceeds gl_MaxCullDistances", 0);
+        if (nclip + ncull > 8) fail("combined gl_ClipDistance and gl_CullDistance sizes exceed gl_MaxCombinedClipAndCullDistances", 0);
+    }
     // Fix up expression types that referenced implicitly sized arrays
     for (auto& e : sh_.exprs) {
         if (e.kind == EK::Var && e.var && e.type.base == e.var->type.base && !e.type.dims.empty() && e.type.dims[0] == 0)
@@ -850,6 +871,8 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     v->block = sd;
     v->anonBlock = inst.empty();
     v->global = true;
+    // GS outputs belong to the vertex stream of their layout(stream) or the current default
+    if (sh_.stage == Stage::Geometry && q.storage == Storage::Out && v->q.layout.stream < 0) v->q.layout.stream = std::max(0, sh_.outLayout.stream);
     if (preamble_) {
         v->builtin = builtinVarId(inst, sh_.stage);
         if ((sh_.stage == Stage::TessControl || sh_.stage == Stage::TessEval) && inst == "gl_in") v->type.dims[0] = 32;
@@ -889,6 +912,7 @@ bool Parser::redeclareBuiltin(const Qualifiers& q, const Type& t, const std::str
     }
     if (q.interpExplicit) { v->q.interp = q.interp; v->q.interpExplicit = true; }
     if (!t.dims.empty() && t.dims[0] > 0 && !v->type.dims.empty()) v->type.dims[0] = t.dims[0];
+    v->redeclared = true;
     return true;
 }
 
@@ -946,6 +970,8 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
         Variable* v = newVar(name, t, q);
         v->global = global;
         v->line = ln;
+        if (global && sh_.stage == Stage::Geometry && q.storage == Storage::Out && v->q.layout.stream < 0)
+            v->q.layout.stream = std::max(0, sh_.outLayout.stream);
         if (preamble_) v->builtin = builtinVarId(name, sh_.stage);
         if (accept("=")) {
             Expr* init = parseInitializer(t);
@@ -1593,6 +1619,10 @@ Expr* Parser::mkIndex(Expr* b, Expr* i, int ln) {
         }
         if (b->cv) e->cv = foldIndex(b, (int)idx, rt);
     } else if (limit == 0 && b->kind == EK::Var && b->var->q.storage != Storage::Buffer) {
+        // GLSL 4.60 7.1: gl_ClipDistance / gl_CullDistance must be sized by redeclaration or by
+        // constant indexing only (other unsized arrays stay lenient for old shaders).
+        if (!preamble_ && (b->var->builtin == BuiltinVar::ClipDistance || b->var->builtin == BuiltinVar::CullDistance))
+            fail("'" + b->var->name + "' must be redeclared with an explicit size to be indexed with a non-constant expression", ln);
         b->var->used = true;  // dynamic indexing of implicitly-sized array: size to the maximum at finalize
     }
     return e;

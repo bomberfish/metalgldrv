@@ -151,6 +151,8 @@ struct MultiPassInfo {
     uint32_t tcsOutputVertices = 0;   // control points per output patch (patch input size when there is no TCS: 0 = use patchVertices)
     uint32_t xfbStride[4] = {0, 0, 0, 0};
     uint32_t xfbBufferMask = 0;       // buffers written by transform feedback
+    uint32_t xfbBufferStream[4] = {0, 0, 0, 0};  // vertex stream captured into each buffer
+    uint32_t tesVertexOutBytes = 0;   // bytes per TES output record (tessellation feeding a GS or transform feedback)
 };
 
 // ARB_shader_subroutine (per stage)
@@ -259,6 +261,11 @@ struct MSLOutput {
 };
 
 MSLOutput generateMSL(const LinkedProgram& program, const VariantKey& key);
+// Program pipelines: pre-rasterization and fragment stages from different separable programs
+// (stages[s] = program providing stage s, or null). Each stage reads its own program's argument
+// buffer; MGLArgs at buffer 0 is then a table of 6 GPU addresses indexed by Stage.
+MSLOutput generateMSL(const LinkedProgram* const stages[(int)Stage::Count], const VariantKey& key);
+MultiPassInfo multipassInfo(const LinkedProgram* const stages[(int)Stage::Count]);
 
 // ---------------------------------------------------------------------------
 // Runtime <-> shader ABI. Mirrored verbatim in the MSL prelude.
@@ -322,6 +329,19 @@ struct alignas(16) MGLDrawInfo {
     uint64_t tcsVertexOut;        // patchCount * tcsOutputVertices * tcsVertexOutBytes
     uint64_t tcsPatchOut;         // patchCount * tcsPatchOutBytes (includes tess levels first: outer[4], inner[2] floats)
     uint64_t counters;            // device atomic counters (primitives generated/written)
+    // Counted multi-pass work (GS / tessellation output whose size only the GPU knows):
+    // a count kernel fills itemCounts, the runtime reads them back, computes prefix sums
+    // into itemOffsets and runs the write kernels (see docs/glsl-compiler.md).
+    uint64_t itemCounts;          // uint4 per work item (written by mgl_tes_count / mgl_gs_count)
+    uint64_t itemOffsets;         // uint4 per work item (first output primitive per stream / TES vertex+primitive)
+    uint64_t tesVertexOut;        // TES output records (multipass.tesVertexOutBytes each)
+    uint64_t tesPrimOut;          // TES primitive list: vertex indices into tesVertexOut, tesVerticesPerPrimitive each
+    uint32_t itemCount;           // work items of the counted pass
+    uint32_t tesPrimCount;        // primitives in tesPrimOut
+    uint32_t xfbPrimLimit[4];     // per stream: output primitives that fit in the bound buffers (capture stops there)
+    uint32_t xfbStreamBase[4];    // per stream: vertices already captured in this session
+    uint32_t xfbBufferStream[4];  // stream feeding each buffer
+    uint32_t pad1[2];
 };
 
 

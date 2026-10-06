@@ -271,15 +271,32 @@ API void APIENTRY glDeleteProgram(GLuint program) {
     std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
-    // A program in use stays alive via ctx->program until unbound.
-    if (ctx->program.get() != p) {
-        for (auto& a : p->attached) {
-            a->attachCount--;
-            maybeFreeShader(ctx, a.get());
-        }
-        p->attached.clear();
+    // A program in use is only flagged (its name stays valid, GL 4.6 7.3); it is freed
+    // when it stops being the current program.
+    if (ctx->program.get() == p) {
+        p->deleted = true;
+        return;
     }
+    for (auto& a : p->attached) {
+        a->attachCount--;
+        maybeFreeShader(ctx, a.get());
+    }
+    p->attached.clear();
     ctx->share->shaderPrograms.remove(program);
+}
+
+// Frees the current program's name if it was flagged for deletion while in use.
+static void releaseCurrentProgram(Context* ctx) {
+    ProgramObj* old = ctx->program.get();
+    if (!old || !old->deleted) return;
+    std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
+    if (ctx->share->shaderPrograms.get(old->name) != old) return;
+    for (auto& a : old->attached) {
+        a->attachCount--;
+        maybeFreeShader(ctx, a.get());
+    }
+    old->attached.clear();
+    ctx->share->shaderPrograms.remove(old->name);
 }
 
 API GLboolean APIENTRY glIsProgram(GLuint program) {
@@ -359,6 +376,15 @@ API void APIENTRY glTransformFeedbackVaryings(GLuint program, GLsizei count, con
     if (bufferMode == GL_SEPARATE_ATTRIBS && count > kMaxXfbBuffers) return ctx->setError(GL_INVALID_VALUE);
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
+    // gl_NextBuffer / gl_SkipComponents* are only valid with interleaved capture
+    if (bufferMode == GL_SEPARATE_ATTRIBS)
+        for (int i = 0; i < count; i++)
+            if (varyings[i] && (!strcmp(varyings[i], "gl_NextBuffer") || !strncmp(varyings[i], "gl_SkipComponents", 17)))
+                return ctx->setError(GL_INVALID_OPERATION);
+    int nextBuffers = 0;
+    for (int i = 0; i < count; i++)
+        if (varyings[i] && !strcmp(varyings[i], "gl_NextBuffer")) nextBuffers++;
+    if (nextBuffers >= kMaxXfbBuffers) return ctx->setError(GL_INVALID_OPERATION);
     p->xfbVaryings.clear();
     for (int i = 0; i < count; i++) p->xfbVaryings.push_back(varyings[i]);
     p->xfbBufferMode = bufferMode;
@@ -397,6 +423,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
     if (!allCompiled || in.shaders.empty()) {
         p->linked = false;
         p->infoLog = in.shaders.empty() ? "error: no shaders attached\n" : "error: attached shader not successfully compiled\n";
+        MGL_DBG("program %u link failed: %s", program, p->infoLog.c_str());
         return;
     }
     glsl::LinkResult r = glsl::link(in);
@@ -434,6 +461,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
             // Report backend failures through the link status so apps see them.
             p->linked = false;
             p->infoLog += "error: internal Metal shader compilation failed: " + v->error + "\n";
+            MGL_DBG("program %u: %s", program, p->infoLog.c_str());
         }
     }
 }
@@ -442,12 +470,14 @@ API void APIENTRY glUseProgram(GLuint program) {
     MGL_CTX();
     if (ctx->xfb->active && !ctx->xfb->paused) return ctx->setError(GL_INVALID_OPERATION);
     if (!program) {
+        releaseCurrentProgram(ctx);
         ctx->program = nullptr;
         return;
     }
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
     if (!p->linked) return ctx->setError(GL_INVALID_OPERATION, "program not linked");
+    if (ctx->program.get() != p) releaseCurrentProgram(ctx);
     ctx->program = p;
     // Subroutine selections are reset when the current program changes (GL 4.6 §7.10).
     for (int st = 0; st < (int)glsl::Stage::Count; st++) {
@@ -549,8 +579,20 @@ API GLint APIENTRY glGetAttribLocation(GLuint program, const GLchar* name) {
         ctx->setError(GL_INVALID_OPERATION);
         return -1;
     }
-    for (auto& a : p->refl.attributes)
-        if (a.name == name) return a.location;
+    // "attr", "attr[0]" or an array element "attr[N]" (N < array size; each element
+    // uses locationsUsed / arraySize consecutive locations).
+    std::string n = name;
+    for (auto& a : p->refl.attributes) {
+        if (a.name == n) return a.location;
+        if (n.size() > a.name.size() + 2 && n.compare(0, a.name.size(), a.name) == 0 && n[a.name.size()] == '[' && n.back() == ']') {
+            const char* digits = n.c_str() + a.name.size() + 1;
+            char* end = nullptr;
+            long idx = strtol(digits, &end, 10);
+            if (end == digits || *end != ']' || end + 1 != n.c_str() + n.size() || idx < 0 || idx >= a.arraySize) return -1;
+            if (idx > 0 && digits[0] == '0') return -1;  // no leading zeros
+            return a.location + (int)idx * (a.locationsUsed / std::max(1, a.arraySize));
+        }
+    }
     return -1;
 }
 

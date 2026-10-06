@@ -18,6 +18,9 @@ bool mglCheckDrawConditional(Context* ctx);
 ProgramObj* mglCompatPrepareDraw(Context* ctx, ProgramObj* prog);  // compat.mm (fixed-function emulation + gl_* uniforms)
 bool mglXfbPrepareDraw(Context* ctx, GLenum mode, uint64_t vertices);  // api_xfb.mm
 void mglQueryNotifyDraw(Context* ctx, GLenum mode, uint64_t vertices, uint64_t instances);  // api_query.mm
+void mglQueryAddPrimitives(Context* ctx, int stream, uint64_t generated, uint64_t written, bool xfbActive, bool overflow);  // api_query.mm
+bool mglQueryPrimitivesActive(Context* ctx);  // api_query.mm
+uint64_t mglPrimitivesFor(GLenum mode, uint64_t vertices);  // api_query.mm
 
 namespace {
 
@@ -77,32 +80,42 @@ inline uint32_t readIndex(const uint8_t* p, GLenum type, size_t i) {
 // ---------------------------------------------------------------------------
 // state application
 // ---------------------------------------------------------------------------
-static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLenum mode) {
+static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLenum mode, bool viewportArray = false) {
     auto& es = ctx->enc;
     const PassDesc& p = ctx->curPass;
-    // Viewport 0 (y is not flipped: GL row 0 == Metal row 0, see glsl.h)
-    MTLViewport vp;
-    vp.originX = ctx->viewport[0][0];
-    vp.originY = ctx->viewport[0][1];
-    vp.width = std::max(0.0f, ctx->viewport[0][2]);
-    vp.height = std::max(0.0f, ctx->viewport[0][3]);
-    vp.znear = ctx->depthRange[0][0];
-    vp.zfar = ctx->depthRange[0][1];
-    if (es.numViewports != 1 || memcmp(&es.vp[0], &vp, sizeof vp) != 0) {
-        [e setViewport:vp];
-        es.vp[0] = vp;
-        es.numViewports = 1;
+    // Viewport 0, or all of them when the last pre-rasterization stage writes gl_ViewportIndex
+    // (y is not flipped: GL row 0 == Metal row 0, see glsl.h)
+    int n = viewportArray ? kMaxViewports : 1;
+    MTLViewport vps[kMaxViewports];
+    MTLScissorRect scs[kMaxViewports];
+    for (int i = 0; i < n; i++) {
+        MTLViewport& vp = vps[i];
+        vp.originX = ctx->viewport[i][0];
+        vp.originY = ctx->viewport[i][1];
+        vp.width = std::max(0.0f, ctx->viewport[i][2]);
+        vp.height = std::max(0.0f, ctx->viewport[i][3]);
+        vp.znear = ctx->depthRange[i][0];
+        vp.zfar = ctx->depthRange[i][1];
+        MTLScissorRect sc = {0, 0, (NSUInteger)p.width, (NSUInteger)p.height};
+        if (ctx->scissorEnabled & (1u << i)) {
+            int x0 = std::clamp(ctx->scissor[i][0], 0, p.width), y0 = std::clamp(ctx->scissor[i][1], 0, p.height);
+            int x1 = std::clamp(ctx->scissor[i][0] + ctx->scissor[i][2], 0, p.width);
+            int y1 = std::clamp(ctx->scissor[i][1] + ctx->scissor[i][3], 0, p.height);
+            sc = {(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)std::max(0, x1 - x0), (NSUInteger)std::max(0, y1 - y0)};
+        }
+        scs[i] = sc;
     }
-    MTLScissorRect sc = {0, 0, (NSUInteger)p.width, (NSUInteger)p.height};
-    if (ctx->scissorEnabled & 1) {
-        int x0 = std::clamp(ctx->scissor[0][0], 0, p.width), y0 = std::clamp(ctx->scissor[0][1], 0, p.height);
-        int x1 = std::clamp(ctx->scissor[0][0] + ctx->scissor[0][2], 0, p.width);
-        int y1 = std::clamp(ctx->scissor[0][1] + ctx->scissor[0][3], 0, p.height);
-        sc = {(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)std::max(0, x1 - x0), (NSUInteger)std::max(0, y1 - y0)};
+    if (es.numViewports != n || memcmp(es.vp, vps, sizeof(MTLViewport) * n) != 0) {
+        if (n == 1) [e setViewport:vps[0]];
+        else [e setViewports:vps count:n];
+        memcpy(es.vp, vps, sizeof(MTLViewport) * n);
+        es.numViewports = n;
     }
-    if (memcmp(&es.sc[0], &sc, sizeof sc) != 0) {
-        [e setScissorRect:sc];
-        es.sc[0] = sc;
+    if (es.numScissors != n || memcmp(es.sc, scs, sizeof(MTLScissorRect) * n) != 0) {
+        if (n == 1) [e setScissorRect:scs[0]];
+        else [e setScissorRects:scs count:n];
+        memcpy(es.sc, scs, sizeof(MTLScissorRect) * n);
+        es.numScissors = n;
     }
     int cull = MTLCullModeNone;
     static const bool noCull = envFlag("METALGLDRV_DEBUG_NOCULL");  // bisect switch
@@ -958,41 +971,131 @@ void fillVertexFetch(Context* ctx, ProgramObj* prog, glsl::VariantKey& vk) {
 
 }  // namespace
 
-// Runs a draw through a multi-pass pipeline. Returns false if unsupported.
-static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d, glsl::VariantKey vk, bool xfbCapture) {
-    const glsl::Reflection& refl = prog->refl;
-    if (d.indirect) {
-        static bool warned = false;
-        if (!warned) MGL_WARN("indirect draws with geometry/tessellation/transform feedback not supported yet");
-        warned = true;
-        return false;
+
+// Program pipelines whose geometry/tessellation stages (and the stages around them) come from
+// different separable programs: draws go through a composite program generated from all stage
+// programs (pipelineComposite), each stage reading its own program's argument buffer. Pipelines
+// without geometry/tessellation stages use the classic path (fragment stage mixed separately).
+ProgramObj* mglPipelineDrawProgram(Context* ctx) {
+    if (ctx->program || !ctx->pipeline) return ctx->activeProgramForStage(glsl::Stage::Vertex);
+    ProgramPipelineObj* pp = ctx->pipeline.get();
+    ProgramObj* vs = pp->stages[(int)glsl::Stage::Vertex].get();
+    if (!vs) return nullptr;
+    ProgramObj* st[(int)glsl::Stage::Count] = {};
+    bool multipass = false, mixed = false;
+    for (int s = 0; s < (int)glsl::Stage::Compute; s++) {
+        st[s] = pp->stages[s].get();
+        if (st[s] && !st[s]->program) st[s] = nullptr;
+        if (!st[s]) continue;
+        if (s == (int)glsl::Stage::Geometry || s == (int)glsl::Stage::TessEval || s == (int)glsl::Stage::TessControl) multipass = true;
+        if (st[s] != vs) mixed = true;
     }
-    // --- primitive list ---
-    Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
-    const uint8_t* src = nullptr;
-    if (d.indexed) {
-        if (ib) {
-            if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
-            src = ib->cpu + (size_t)d.indices;
-        } else {
-            src = (const uint8_t*)d.indices;
-        }
+    if (!multipass || !mixed) return vs;
+    std::vector<uint64_t> key;
+    for (int s = 0; s < (int)glsl::Stage::Compute; s++) {
+        key.push_back((uint64_t)(uintptr_t)st[s]);
+        key.push_back(st[s] ? (uint64_t)(uintptr_t)st[s]->program.get() : 0);
     }
-    GLenum listMode = listModeFor(d.mode);
-    int vpp = listVerts(listMode, ctx->patchVertices);
+    if (pp->composite && pp->compositeKey == key) return pp->composite.get();
+    Ref<ProgramObj> c = new ProgramObj();
+    c->composite = true;
+    c->name = vs->name;
+    c->linked = c->separable = true;
+    c->program = vs->program;
+    glsl::Reflection r = vs->refl;
+    const glsl::LinkedProgram* lp[(int)glsl::Stage::Count] = {};
+    r.stageMask = 0;
+    for (int s = 0; s < (int)glsl::Stage::Compute; s++) {
+        c->stagePrograms[s] = st[s];
+        if (!st[s]) continue;
+        c->stageLinked[s] = st[s]->program;
+        lp[s] = st[s]->program.get();
+        r.stageMask |= 1u << s;
+    }
+    if (ProgramObj* g = st[(int)glsl::Stage::Geometry]) {
+        r.gsInputPrimitive = g->refl.gsInputPrimitive;
+        r.gsOutputPrimitive = g->refl.gsOutputPrimitive;
+        r.gsMaxVertices = g->refl.gsMaxVertices;
+        r.gsInvocations = g->refl.gsInvocations;
+    }
+    if (ProgramObj* t = st[(int)glsl::Stage::TessControl]) r.tcsOutputVertices = t->refl.tcsOutputVertices;
+    if (ProgramObj* t = st[(int)glsl::Stage::TessEval]) {
+        r.tesPrimitiveMode = t->refl.tesPrimitiveMode;
+        r.tesSpacing = t->refl.tesSpacing;
+        r.tesOrder = t->refl.tesOrder;
+        r.tesPointMode = t->refl.tesPointMode;
+    }
+    ProgramObj* last = st[(int)glsl::Stage::Geometry] ? st[(int)glsl::Stage::Geometry] : st[(int)glsl::Stage::TessEval] ? st[(int)glsl::Stage::TessEval] : vs;
+    r.xfbVaryings = last->refl.xfbVaryings;
+    r.writesLayer = last->refl.writesLayer;
+    r.writesViewportIndex = last->refl.writesViewportIndex;
+    ProgramObj* fs = st[(int)glsl::Stage::Fragment];
+    r.fragOutputs = fs ? fs->refl.fragOutputs : std::vector<glsl::FragOutput>();
+    r.usesFragDepth = fs && fs->refl.usesFragDepth;
+    r.earlyFragmentTests = fs && fs->refl.earlyFragmentTests;
+    r.usesDiscard = fs && fs->refl.usesDiscard;
+    r.usesFlatShading = fs && fs->refl.usesFlatShading;
+    r.multipass = glsl::multipassInfo(lp);
+    c->refl = std::move(r);
+    pp->composite = c;
+    pp->compositeKey = key;
+    return c.get();
+}
+
+// Argument buffer address for a draw: a composite program gets a table of per-stage buffers.
+static uint64_t drawArguments(Context* ctx, ProgramObj* prog) {
+    if (!prog->composite) return buildArguments(ctx, prog, false);
+    uint64_t addr[(int)glsl::Stage::Count] = {};
+    for (int s = 0; s < (int)glsl::Stage::Count; s++) {
+        ProgramObj* p = prog->stagePrograms[s].get();
+        if (!p) continue;
+        for (int o = 0; o < s; o++)
+            if (prog->stagePrograms[o].get() == p) addr[s] = addr[o];
+        if (!addr[s]) addr[s] = buildArguments(ctx, p, false);
+        if (!addr[s]) addr[s] = ctx->upload(16).gpu;
+    }
+    UploadAlloc t = ctx->upload(sizeof addr, 16);
+    memcpy(t.cpu, addr, sizeof addr);
+    return t.gpu;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-pass pipelines. Work whose output size only the GPU knows (geometry shader
+// amplification, tessellation) runs as count kernel -> CPU readback + prefix sums ->
+// write kernels, so the runtime knows exact primitive counts (transform feedback offsets,
+// primitive queries, DrawTransformFeedback). Only transform feedback / primitive queries and
+// tessellation feeding a geometry shader take the counted path; plain GS / tessellation
+// rendering stays on the single-pass mesh pipelines.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct MPState {
+    Context* ctx;
+    ProgramObj* prog;
+    const DrawParams* d;
+    ProgramVariant* var;
     std::vector<uint32_t> ids;
-    decomposeToList(ctx, d, src, ids);
-    uint32_t prims = (uint32_t)(ids.size() / vpp);
-    if (!prims) return true;
-    UploadAlloc idxUp = ctx->upload(ids.size() * 4, 16);
-    memcpy(idxUp.cpu, ids.data(), ids.size() * 4);
+    GLenum listMode;
+    int vpp;
+    uint32_t prims;
+    // persistent scratch (survives the CPU waits between passes)
+    id<MTLBuffer> tcsV = nil, tcsP = nil, counts = nil, tesV = nil, tesP = nil;
+    uint32_t itemCount = 0, tesPrimCount = 0;
+    std::vector<uint32_t> offsets;  // uint4 per item, uploaded with the draw info
+    uint32_t xfbPrimLimit[4] = {0, 0, 0, 0};
+    uint32_t xfbStreamBase[4] = {0, 0, 0, 0};
+    bool xfb = false;
+    // per phase (upload memory is retired by every CPU wait)
+    uint64_t infoAddr = 0, argAddr = 0, sysAddr = 0;
+};
 
-    fillVertexFetch(ctx, prog, vk);
-    vk.primitive = (uint8_t)listMode;
-    ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
-    if (!var || !var->ok) return true;
-
-    // --- draw info ---
+// Uploads the per-phase draw description (vertex ids, MGLDrawInfo, arguments, system values).
+void mpUpload(MPState& s) {
+    Context* ctx = s.ctx;
+    const DrawParams& d = *s.d;
+    const glsl::Reflection& refl = s.prog->refl;
+    UploadAlloc idxUp = ctx->upload(std::max<size_t>(4, s.ids.size() * 4), 16);
+    memcpy(idxUp.cpu, s.ids.data(), s.ids.size() * 4);
     UploadAlloc di = ctx->upload(sizeof(glsl::MGLDrawInfo), 16);
     glsl::MGLDrawInfo* info = (glsl::MGLDrawInfo*)di.cpu;
     memset(info, 0, sizeof *info);
@@ -1009,123 +1112,315 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     }
     info->indexBuffer = idxUp.gpu;  // always a 32-bit list of vertex ids (base vertex not yet applied)
     info->indexType = 4;
-    info->count = (uint32_t)ids.size();
+    info->count = (uint32_t)s.ids.size();
     info->baseVertex = d.indexed ? d.baseVertex : 0;
     info->baseInstance = d.baseInstance;
     info->firstVertex = 0;
     info->instanceCount = d.instances;
-    info->primitiveCount = prims;
-    info->primitiveMode = listMode;
-    info->verticesPerPrimitive = vpp;
+    info->primitiveCount = s.prims;
+    info->primitiveMode = s.listMode;
+    info->verticesPerPrimitive = s.vpp;
     info->patchVertices = ctx->patchVertices;
-    TransformFeedbackObj* x = ctx->xfb.get();
-    if (xfbCapture) {
+    if (s.xfb) {
+        TransformFeedbackObj* x = ctx->xfb.get();
         for (int i = 0; i < kMaxXfbBuffers; i++) {
             auto& bb = x->buffers[i];
+            info->xfbBufferStream[i] = refl.multipass.xfbBufferStream[i];
             if (!bb.buffer || !bb.buffer->mtl) continue;
             info->xfbStride[i] = refl.multipass.xfbStride[i];
             info->xfbBuffer[i] = bb.buffer->gpuAddress() + bb.offset;
             GLsizeiptr range = bb.size ? bb.size : bb.buffer->size - bb.offset;
-            info->xfbCapacity[i] = (uint32_t)std::max<GLsizeiptr>(0, range);  // bytes; shader divides by its stride
+            info->xfbCapacity[i] = (uint32_t)std::max<GLsizeiptr>(0, range);
             bb.buffer->lastUse = bb.buffer->lastGpuWrite = serial;
         }
-        info->xfbVertexBase = (uint32_t)x->verticesWritten;
+        info->xfbVertexBase = s.xfbStreamBase[0];
+    }
+    for (int k = 0; k < 4; k++) {
+        info->xfbPrimLimit[k] = s.xfbPrimLimit[k];
+        info->xfbStreamBase[k] = s.xfbStreamBase[k];
     }
     UploadAlloc counters = ctx->upload(64, 16);
     memset(counters.cpu, 0, 64);
     info->counters = counters.gpu;
+    info->tcsVertexOut = s.tcsV ? s.tcsV.gpuAddress : 0;
+    info->tcsPatchOut = s.tcsP ? s.tcsP.gpuAddress : 0;
+    info->itemCounts = s.counts ? s.counts.gpuAddress : 0;
+    info->tesVertexOut = s.tesV ? s.tesV.gpuAddress : 0;
+    info->tesPrimOut = s.tesP ? s.tesP.gpuAddress : 0;
+    info->itemCount = s.itemCount;
+    info->tesPrimCount = s.tesPrimCount;
+    if (!s.offsets.empty()) {
+        UploadAlloc off = ctx->upload(s.offsets.size() * 4, 16);
+        memcpy(off.cpu, s.offsets.data(), s.offsets.size() * 4);
+        info->itemOffsets = off.gpu;
+    }
+    s.infoAddr = di.gpu;
+    s.argAddr = drawArguments(ctx, s.prog);
+    if (!s.argAddr) s.argAddr = ctx->upload(16).gpu;
+    s.sysAddr = buildSys(ctx, s.prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
+}
 
-    uint64_t argAddr = buildArguments(ctx, prog, false);
-    uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
+// Encodes one compute dispatch of kernel `name` in its own encoder (ordered after all prior work).
+bool mpDispatch(MPState& s, const char* name, MTLSize grid, bool threadgroups) {
+    Context* ctx = s.ctx;
+    const glsl::EntryPoint* k = s.var->entry(name);
+    id<MTLComputePipelineState> cps = k ? ctx->pipelines_->computePipeline(s.var, name) : nil;
+    if (!cps) return false;
+    if (grid.width == 0 || grid.height == 0 || grid.depth == 0) return true;
+    id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
+    [ce setComputePipelineState:cps];
+    [ctx->computeArgTable setAddress:s.argAddr atIndex:glsl::kBufArgs];
+    [ctx->computeArgTable setAddress:s.sysAddr atIndex:glsl::kBufSys];
+    [ctx->computeArgTable setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
+    MTLSize tg = MTLSizeMake(std::max(1, k->threadsPerThreadgroup[0]), std::max(1, k->threadsPerThreadgroup[1]), std::max(1, k->threadsPerThreadgroup[2]));
+    if (threadgroups) [ce dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+    else [ce dispatchThreads:grid threadsPerThreadgroup:tg];
+    ctx->endEncoder();
+    return true;
+}
+
+// Submits everything recorded so far and waits for it (count readback).
+void mpWait(MPState& s) {
+    Context* ctx = s.ctx;
+    uint64_t serial = ctx->serial();
+    ctx->waitForResource(serial);
+}
+
+id<MTLBuffer> mpScratch(MPState& s, size_t bytes) {
+    id<MTLBuffer> b = s.ctx->dev->newBuffer(std::max<size_t>(16, bytes));
+    return b;
+}
+
+// Pass 1 of tessellation: VS + TCS for every patch.
+bool mpTessControl(MPState& s) {
+    const glsl::Reflection& refl = s.prog->refl;
+    const DrawParams& d = *s.d;
+    int cpts = refl.multipass.tcsOutputVertices ? (int)refl.multipass.tcsOutputVertices : s.ctx->patchVertices;
+    size_t patches = (size_t)s.prims * d.instances;
+    s.tcsV = mpScratch(s, patches * std::max(1, cpts) * std::max<uint32_t>(16, refl.multipass.tcsVertexOutBytes) + 16);
+    s.tcsP = mpScratch(s, patches * std::max<uint32_t>(32, refl.multipass.tcsPatchOutBytes) + 16);
+    mpUpload(s);
+    return mpDispatch(s, "mgl_tcs", MTLSizeMake(s.prims, d.instances, 1), true);
+}
+
+// TES output records: count (+wait) and generate. Leaves tesPrimCount set.
+bool mpTessRecords(MPState& s) {
+    const glsl::Reflection& refl = s.prog->refl;
+    const DrawParams& d = *s.d;
+    s.itemCount = s.prims * d.instances;
+    s.counts = mpScratch(s, (size_t)s.itemCount * 16);
+    mpUpload(s);
+    if (!mpDispatch(s, "mgl_tes_count", MTLSizeMake(s.itemCount, 1, 1), false)) return false;
+    mpWait(s);
+    const uint32_t* c = (const uint32_t*)s.counts.contents;
+    s.offsets.assign((size_t)s.itemCount * 4, 0);
+    uint64_t prims = 0, verts = 0;
+    uint32_t maxUnits = 0;
+    for (uint32_t i = 0; i < s.itemCount; i++) {
+        s.offsets[i * 4 + 0] = (uint32_t)prims;
+        s.offsets[i * 4 + 1] = (uint32_t)verts;
+        prims += c[i * 4 + 0];
+        verts += c[i * 4 + 1];
+        maxUnits = std::max(maxUnits, c[i * 4 + 2]);
+    }
+    int ipp = refl.tesPointMode ? 1 : (refl.tesPrimitiveMode == GL_ISOLINES ? 2 : 3);
+    s.tesPrimCount = (uint32_t)prims;
+    s.tesV = mpScratch(s, verts * std::max<uint32_t>(16, refl.multipass.tesVertexOutBytes));
+    s.tesP = mpScratch(s, prims * ipp * 4);
+    mpUpload(s);
+    return mpDispatch(s, "mgl_tes_gen", MTLSizeMake(s.itemCount, maxUnits, 1), true);
+}
+
+// Primitives of each stream that still fit in the bound transform feedback buffers.
+void mpXfbLimits(MPState& s, int outVpp) {
+    Context* ctx = s.ctx;
+    TransformFeedbackObj* x = ctx->xfb.get();
+    const glsl::MultiPassInfo& mp = s.prog->refl.multipass;
+    for (int st = 0; st < 4; st++) {
+        s.xfbStreamBase[st] = x->written[st];
+        uint64_t limit = s.xfb ? UINT32_MAX : 0;
+        bool any = false;
+        for (int b = 0; b < kMaxXfbBuffers; b++) {
+            if (!(mp.xfbBufferMask & (1u << b)) || mp.xfbBufferStream[b] != (uint32_t)st || !mp.xfbStride[b]) continue;
+            any = true;
+            auto& bb = x->buffers[b];
+            uint64_t cap = 0;
+            if (bb.buffer && bb.buffer->mtl) {
+                GLsizeiptr range = bb.size ? bb.size : bb.buffer->size - bb.offset;
+                cap = (uint64_t)std::max<GLsizeiptr>(0, range) / mp.xfbStride[b];
+            }
+            uint64_t fit = cap > x->written[st] ? (cap - x->written[st]) / std::max(1, outVpp) : 0;
+            limit = std::min(limit, fit);
+        }
+        if (!any) limit = s.xfb ? UINT32_MAX : 0;  // nothing captured from this stream: never overflows
+        s.xfbPrimLimit[st] = (uint32_t)std::min<uint64_t>(limit, UINT32_MAX);
+    }
+}
+
+// Records the outcome of a counted pass: transform feedback progress and primitive queries.
+void mpFinishCounts(MPState& s, const uint64_t generated[4], int outVpp, bool countGenerated = true) {
+    Context* ctx = s.ctx;
+    TransformFeedbackObj* x = ctx->xfb.get();
+    const glsl::MultiPassInfo& mp = s.prog->refl.multipass;
+    for (int st = 0; st < 4; st++) {
+        bool captured = false;
+        for (int b = 0; b < kMaxXfbBuffers; b++)
+            if ((mp.xfbBufferMask & (1u << b)) && mp.xfbBufferStream[b] == (uint32_t)st) captured = true;
+        uint64_t written = s.xfb ? std::min<uint64_t>(generated[st], s.xfbPrimLimit[st]) : 0;
+        if (s.xfb && !captured) written = generated[st];  // GL counts primitives of streams without buffers as written
+        if (s.xfb && captured) x->written[st] += (uint32_t)(written * outVpp);
+        mglQueryAddPrimitives(ctx, st, countGenerated ? generated[st] : 0, written, s.xfb, written < generated[st]);
+    }
+}
+
+}  // namespace
+
+// Runs a draw through a multi-pass pipeline. Returns false if unsupported.
+//   Classic + capture   : VS transform feedback kernel (rasterization is done by the caller)
+//   MeshGeometry        : VS + GS on a mesh pipeline
+//   Tessellation        : VS+TCS kernel, then TES on object+mesh (or TES records + GS on mesh)
+//   XfbCapture          : counted capture/count passes for transform feedback and primitive queries
+static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d, glsl::VariantKey vk, bool xfbCapture) {
+    const glsl::Reflection& refl = prog->refl;
+    if (d.indirect) {
+        static bool warned = false;
+        if (!warned) MGL_WARN("indirect draws with geometry/tessellation/transform feedback not supported yet");
+        warned = true;
+        return false;
+    }
+    MPState s;
+    s.ctx = ctx;
+    s.prog = prog;
+    s.d = &d;
+    s.xfb = xfbCapture;
+    // --- primitive list ---
+    Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
+    const uint8_t* src = nullptr;
+    if (d.indexed) {
+        if (ib) {
+            if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+            src = ib->cpu + (size_t)d.indices;
+        } else {
+            src = (const uint8_t*)d.indices;
+        }
+    }
+    s.listMode = listModeFor(d.mode);
+    s.vpp = listVerts(s.listMode, ctx->patchVertices);
+    decomposeToList(ctx, d, src, s.ids);
+    s.prims = (uint32_t)(s.ids.size() / std::max(1, s.vpp));
+    if (!s.prims) return true;
+
+    fillVertexFetch(ctx, prog, vk);
+    vk.primitive = (uint8_t)s.listMode;
+    s.var = ctx->pipelines_->variant(prog, vk);
+    if (!s.var || !s.var->ok) return true;
+    ProgramVariant* var = s.var;
+    bool hasGS = refl.stageMask & (1u << (int)glsl::Stage::Geometry);
+    bool hasTess = refl.stageMask & (1u << (int)glsl::Stage::TessEval);
+    uint64_t serialStart = ctx->serial();
+    auto retire = [&]() {
+        uint64_t sr = ctx->serial();
+        for (id<MTLBuffer> b : {s.tcsV, s.tcsP, s.counts, s.tesV, s.tesP})
+            if (b) ctx->dev->releaseAfter(b, sr);
+        (void)serialStart;
+    };
+
+    // --- counted capture (transform feedback / primitive queries) ---
+    if (vk.kind == glsl::PipelineKind::XfbCapture) {
+        uint64_t generated[4] = {0, 0, 0, 0};
+        if (!hasGS && !hasTess) {
+            // VS only: one thread per vertex; counts are known on the CPU
+            uint64_t prims = (uint64_t)s.prims * d.instances;
+            mpXfbLimits(s, s.vpp);
+            mpUpload(s);
+            mpDispatch(s, "mgl_xfb", MTLSizeMake(s.ids.size() * d.instances, 1, 1), false);
+            generated[0] = prims;
+            mpFinishCounts(s, generated, s.vpp, false);
+            return true;
+        }
+        int outVpp;
+        if (hasGS) {
+            uint32_t op = refl.gsOutputPrimitive;
+            outVpp = op == GL_POINTS ? 1 : op == GL_LINE_STRIP ? 2 : 3;
+        } else {
+            outVpp = refl.tesPointMode ? 1 : (refl.tesPrimitiveMode == GL_ISOLINES ? 2 : 3);
+        }
+        mpXfbLimits(s, outVpp);
+        if (hasTess) {
+            if (!mpTessControl(s) || !mpTessRecords(s)) { retire(); return false; }
+            if (!hasGS) {
+                generated[0] = s.tesPrimCount;
+                mpUpload(s);
+                mpDispatch(s, "mgl_tes_xfb", MTLSizeMake(s.tesPrimCount, 1, 1), false);
+                mpFinishCounts(s, generated, outVpp);
+                retire();
+                return true;
+            }
+        }
+        // geometry shader: count, prefix sums, write
+        uint32_t inv = (uint32_t)std::max(1, refl.gsInvocations);
+        s.itemCount = (hasTess ? s.tesPrimCount : s.prims * d.instances) * inv;
+        s.offsets.clear();
+        s.counts = mpScratch(s, (size_t)s.itemCount * 16);
+        mpUpload(s);
+        if (!mpDispatch(s, "mgl_gs_count", MTLSizeMake(s.itemCount, 1, 1), false)) { retire(); return false; }
+        mpWait(s);
+        const uint32_t* c = (const uint32_t*)s.counts.contents;
+        s.offsets.assign((size_t)s.itemCount * 4, 0);
+        for (uint32_t i = 0; i < s.itemCount; i++)
+            for (int st = 0; st < 4; st++) {
+                s.offsets[i * 4 + st] = (uint32_t)generated[st];
+                generated[st] += c[i * 4 + st];
+            }
+        if (s.xfb) {
+            mpUpload(s);
+            mpDispatch(s, "mgl_gs_write", MTLSizeMake(s.itemCount, 1, 1), false);
+        }
+        mpFinishCounts(s, generated, outVpp);
+        retire();
+        return true;
+    }
 
     // --- tessellation pass 1: VS+TCS compute ---
     if (vk.kind == glsl::PipelineKind::Tessellation) {
-        const glsl::EntryPoint* k = var->entry(glsl::EntryPoint::Kernel);
-        if (!k) return false;
-        int cpts = refl.multipass.tcsOutputVertices ? (int)refl.multipass.tcsOutputVertices : ctx->patchVertices;
-        size_t vbytes = (size_t)prims * d.instances * std::max(1, cpts) * std::max<uint32_t>(16, refl.multipass.tcsVertexOutBytes) + 16;
-        size_t pbytes = (size_t)prims * d.instances * std::max<uint32_t>(32, refl.multipass.tcsPatchOutBytes) + 16;
-        id<MTLBuffer> vout = ctx->dev->newBuffer(vbytes);
-        id<MTLBuffer> pout = ctx->dev->newBuffer(pbytes);
-        ctx->dev->releaseAfter(vout, serial);
-        ctx->dev->releaseAfter(pout, serial);
-        info->tcsVertexOut = vout.gpuAddress;
-        info->tcsPatchOut = pout.gpuAddress;
-        id<MTLComputePipelineState> cps = ctx->pipelines_->computePipeline(var);
-        if (!cps) return true;
-        id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
-        [ce setComputePipelineState:cps];
-        [ctx->computeArgTable setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
-        [ctx->computeArgTable setAddress:sysAddr atIndex:glsl::kBufSys];
-        [ctx->computeArgTable setAddress:di.gpu atIndex:glsl::kBufStageIO];
-        [ce dispatchThreadgroups:MTLSizeMake(prims, d.instances, 1)
-            threadsPerThreadgroup:MTLSizeMake(k->threadsPerThreadgroup[0], k->threadsPerThreadgroup[1], k->threadsPerThreadgroup[2])];
-        ctx->endEncoder();
-    }
-    // --- transform feedback only (no GS/tess): VS as compute writing captured vertices ---
-    if (vk.kind == glsl::PipelineKind::XfbCapture) {
-        const glsl::EntryPoint* k = var->entry(glsl::EntryPoint::Kernel);
-        id<MTLComputePipelineState> cps = k ? ctx->pipelines_->computePipeline(var) : nil;
-        if (!cps) return true;
-        id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
-        [ce setComputePipelineState:cps];
-        [ctx->computeArgTable setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
-        [ctx->computeArgTable setAddress:sysAddr atIndex:glsl::kBufSys];
-        [ctx->computeArgTable setAddress:di.gpu atIndex:glsl::kBufStageIO];
-        uint32_t total = (uint32_t)ids.size() * d.instances;
-        uint32_t tg = std::max(1, k->threadsPerThreadgroup[0]);
-        [ce dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        x->verticesWritten += total;
-        return true;  // rasterization (if enabled) is handled by the caller's classic draw
-    }
-    // --- GS + transform feedback: a single-thread kernel walks primitives in GL order ---
-    if (xfbCapture && vk.kind == glsl::PipelineKind::MeshGeometry) {
-        if (var->entry(glsl::EntryPoint::Kernel)) {
-            id<MTLComputePipelineState> cps = ctx->pipelines_->computePipeline(var);
-            if (cps) {
-                id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
-                [ce setComputePipelineState:cps];
-                [ctx->computeArgTable setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
-                [ctx->computeArgTable setAddress:sysAddr atIndex:glsl::kBufSys];
-                [ctx->computeArgTable setAddress:di.gpu atIndex:glsl::kBufStageIO];
-                [ce dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-                ctx->endEncoder();
-            }
-        }
+        if (!mpTessControl(s)) { retire(); return false; }
+        if (hasGS && !mpTessRecords(s)) { retire(); return false; }
+    } else {
+        mpUpload(s);
     }
     // --- mesh pass (GS or TES[+GS]) ---
     const glsl::EntryPoint* ms = var->entry(glsl::EntryPoint::Mesh);
     const glsl::EntryPoint* os = var->entry(glsl::EntryPoint::Object);
-    if (!ms) return false;
+    if (!ms) { retire(); return false; }
+    if (hasTess && hasGS && s.tesPrimCount == 0) { retire(); return true; }
     id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
-    if (!e) return true;
+    if (!e) { retire(); return true; }
     RenderPipelineKey key;
     key.variant = var;
     fillColorKey(ctx, key, refl);
     key.rasterEnabled = !ctx->rasterizerDiscard;
     id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
-    if (!pso) return true;
+    if (!pso) { retire(); return true; }
     if (ctx->enc.pipeline != pso) {
         [e setRenderPipelineState:pso];
         ctx->enc.pipeline = pso;
     }
-    applyDynamicState(ctx, e, refl.gsOutputPrimitive ? refl.gsOutputPrimitive : GL_TRIANGLES);
+    applyDynamicState(ctx, e, refl.gsOutputPrimitive ? refl.gsOutputPrimitive : GL_TRIANGLES, refl.writesViewportIndex);
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
-    [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
-    [table setAddress:sysAddr atIndex:glsl::kBufSys];
-    [table setAddress:di.gpu atIndex:glsl::kBufStageIO];
-    mglQueryNotifyDraw(ctx, d.mode, ids.size(), d.instances);
+    [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
+    [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
+    [table setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
+    mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts come from counted passes
     MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
     if (os) {
         MTLSize objTG = MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2]);
-        [e drawMeshThreadgroups:MTLSizeMake(prims, d.instances, 1) threadsPerObjectThreadgroup:objTG threadsPerMeshThreadgroup:meshTG];
+        [e drawMeshThreadgroups:MTLSizeMake(s.prims, d.instances, 1) threadsPerObjectThreadgroup:objTG threadsPerMeshThreadgroup:meshTG];
     } else {
         int invocations = std::max(1, refl.gsInvocations);
-        [e drawMeshThreadgroups:MTLSizeMake(prims, d.instances, invocations) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
-            threadsPerMeshThreadgroup:meshTG];
+        MTLSize grid = hasTess ? MTLSizeMake(s.tesPrimCount, 1, invocations) : MTLSizeMake(s.prims, d.instances, invocations);
+        [e drawMeshThreadgroups:grid threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:meshTG];
     }
-    // GS output counts are only known on the GPU (MGLDrawInfo::counters); DrawTransformFeedback
-    // with GS-generated vertices is not tracked yet.
+    retire();
     return true;
 }
 
@@ -1298,7 +1593,7 @@ static bool validateDraw(Context* ctx, GLenum mode) {
         }
         if (!pp->stages[(int)glsl::Stage::Vertex]) return false;  // missing stages: undefined rendering, no error
     }
-    ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
+    ProgramObj* prog = mglPipelineDrawProgram(ctx);
     if (!prog && ctx->coreProfile) return false;  // no program/pipeline: undefined rendering, not an error
     bool hasTess = prog && (prog->refl.stageMask & (1u << (int)glsl::Stage::TessEval));
     if (mode == GL_PATCHES && !hasTess) {
@@ -1308,6 +1603,46 @@ static bool validateDraw(Context* ctx, GLenum mode) {
     if (hasTess && mode != GL_PATCHES) {
         ctx->setError(GL_INVALID_OPERATION);
         return false;
+    }
+    if (prog) {
+        // GL 4.6 11.3.1: the primitives reaching the geometry shader must match its input type.
+        const glsl::Reflection& r = prog->refl;
+        bool hasGS = r.stageMask & (1u << (int)glsl::Stage::Geometry);
+        auto cls = [](GLenum m) -> int {  // 0 points, 1 lines, 2 lines adj, 3 triangles, 4 triangles adj, -1 other
+            switch (m) {
+            case GL_POINTS: return 0;
+            case GL_LINES: case GL_LINE_STRIP: case GL_LINE_LOOP: return 1;
+            case GL_LINES_ADJACENCY: case GL_LINE_STRIP_ADJACENCY: return 2;
+            case GL_TRIANGLES: case GL_TRIANGLE_STRIP: case GL_TRIANGLE_FAN: return 3;
+            case GL_TRIANGLES_ADJACENCY: case GL_TRIANGLE_STRIP_ADJACENCY: return 4;
+            default: return -1;
+            }
+        };
+        int tesOut = -1;
+        if (hasTess) tesOut = r.tesPointMode ? 0 : r.tesPrimitiveMode == GL_ISOLINES ? 1 : 3;
+        if (hasGS) {
+            int in = cls(r.gsInputPrimitive);
+            int got = hasTess ? tesOut : cls(mode);
+            if (in >= 0 && got != in) {
+                ctx->setError(GL_INVALID_OPERATION, "draw primitives do not match the geometry shader input");
+                return false;
+            }
+        }
+        // GL 4.6 13.3.1: with transform feedback active, the captured primitive type must match.
+        TransformFeedbackObj* x = ctx->xfb.get();
+        if (x && x->active && !x->paused) {
+            int out;
+            if (hasGS) out = r.gsOutputPrimitive == GL_POINTS ? 0 : r.gsOutputPrimitive == GL_LINE_STRIP ? 1 : 3;
+            else if (hasTess) out = tesOut;
+            else out = cls(mode);
+            if (out == 2) out = 1;
+            if (out == 4) out = 3;
+            int want = x->primitiveMode == GL_POINTS ? 0 : x->primitiveMode == GL_LINES ? 1 : 3;
+            if (out != want) {
+                ctx->setError(GL_INVALID_OPERATION, "primitive type does not match the transform feedback mode");
+                return false;
+            }
+        }
     }
     // mapped non-persistent buffers in use
     for (int b = 0; b < kMaxVertexBindings; b++) {
@@ -1333,9 +1668,9 @@ static bool programHasSideEffects(const glsl::Reflection& r) {
 
 static void executeDraw(Context* ctx, const DrawParams& d) {
     MGL_STAT("draw");
-    ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
+    ProgramObj* prog = mglPipelineDrawProgram(ctx);
     // Compatibility profile: fixed-function emulation (prog == null) and gl_* state uniforms.
-    if (!ctx->coreProfile) prog = mglCompatPrepareDraw(ctx, prog);
+    if (!ctx->coreProfile && !(prog && prog->composite)) prog = mglCompatPrepareDraw(ctx, prog);
     if (!prog) return;
     if (!prog->program) return;  // last successfully linked executable
     if (!mglCheckDrawConditional(ctx)) return;
@@ -1351,15 +1686,26 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
     vk.rasterDiscard = ctx->rasterizerDiscard;
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
+    bool primQueries = mglQueryPrimitivesActive(ctx);
     if (vk.kind != glsl::PipelineKind::Classic) {
-        executeMultiPass(ctx, prog, d, vk, xfbActive);
+        // GS / tessellation: counted capture pass for transform feedback and primitive queries,
+        // then the rasterizing mesh pipeline.
+        if ((xfbActive || primQueries) && !d.indirect) {
+            glsl::VariantKey xk = vk;
+            xk.kind = glsl::PipelineKind::XfbCapture;
+            executeMultiPass(ctx, prog, d, xk, xfbActive);
+        }
+        if (!ctx->rasterizerDiscard) executeMultiPass(ctx, prog, d, vk, false);
         return;
+    }
+    if (primQueries && !d.indirect) {
+        uint64_t n = d.count;
+        mglQueryAddPrimitives(ctx, 0, mglPrimitivesFor(d.mode, n) * (uint64_t)std::max(0, d.instances), 0, false, false);
     }
     if (xfbActive) {
         glsl::VariantKey xk = vk;
         xk.kind = glsl::PipelineKind::XfbCapture;
         executeMultiPass(ctx, prog, d, xk, true);
-        if (ctx->rasterizerDiscard) return;
     }
     // With rasterization discarded the draw only matters for vertex-stage side effects
     // (storage buffer / image / atomic counter writes); run it without a fragment stage then.
@@ -1514,7 +1860,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         [e setRenderPipelineState:pso];
         ctx->enc.pipeline = pso;
     }
-    applyDynamicState(ctx, e, d.mode);
+    applyDynamicState(ctx, e, d.mode, refl.writesViewportIndex);
     [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
     uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
     [table setAddress:sysAddr atIndex:glsl::kBufSys];
@@ -1585,6 +1931,32 @@ API void APIENTRY glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GL
     draw(ctx, d);
 }
 
+// glDrawTransformFeedback*: vertex count = vertices captured into `stream` by the last completed
+// transform feedback session of `id` (known on the CPU, see the counted capture passes).
+static void drawTransformFeedback(Context* ctx, GLenum mode, GLuint id, GLuint stream, GLsizei instances) {
+    if (stream >= 4) return ctx->setError(GL_INVALID_VALUE);
+    if (instances < 0) return ctx->setError(GL_INVALID_VALUE);
+    TransformFeedbackObj* x = id ? ctx->xfbs.get(id) : ctx->defaultXfb.get();
+    if (!x) return ctx->setError(GL_INVALID_VALUE, "not a transform feedback object");
+    if (!x->ended) return ctx->setError(GL_INVALID_OPERATION, "EndTransformFeedback was never called");
+    DrawParams d;
+    d.mode = mode;
+    d.first = 0;
+    d.count = (GLsizei)x->drawCount[stream];
+    d.instances = instances;
+    draw(ctx, d);
+}
+API void APIENTRY glDrawTransformFeedback(GLenum mode, GLuint id) { MGL_CTX(); drawTransformFeedback(ctx, mode, id, 0, 1); }
+API void APIENTRY glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei instancecount) {
+    MGL_CTX();
+    drawTransformFeedback(ctx, mode, id, 0, instancecount);
+}
+API void APIENTRY glDrawTransformFeedbackStream(GLenum mode, GLuint id, GLuint stream) { MGL_CTX(); drawTransformFeedback(ctx, mode, id, stream, 1); }
+API void APIENTRY glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream, GLsizei instancecount) {
+    MGL_CTX();
+    drawTransformFeedback(ctx, mode, id, stream, instancecount);
+}
+
 void mglDrawArraysInternal(Context* ctx, GLenum mode, GLint first, GLsizei count) {
     DrawParams d;
     d.mode = mode;
@@ -1603,7 +1975,6 @@ API void APIENTRY glDrawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLs
     MGL_CTX();
     if (count < 0 || instancecount < 0) return ctx->setError(GL_INVALID_VALUE);
     if (!validIndexType(type)) return ctx->setError(GL_INVALID_ENUM);
-    if (ctx->coreProfile && ctx->vao && !ctx->vao->elementBuffer) return ctx->setError(GL_INVALID_OPERATION, "no element buffer");
     DrawParams d;
     d.mode = mode;
     d.count = count;
@@ -1858,3 +2229,4 @@ API void APIENTRY glTextureBarrier(void) {
     ctx->endEncoder();
 }
 API void APIENTRY glTextureBarrierNV(void) { glTextureBarrier(); }
+

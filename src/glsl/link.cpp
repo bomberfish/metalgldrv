@@ -928,6 +928,7 @@ void Linker::stageMetadata() {
             if (v->q.layout.xfbStride > 0 && vb < 4) explicitStride[vb] = v->q.layout.xfbStride;
             auto addQ = [&](const std::string& name, const Type& t, int buffer, int offset) {
                 if (buffer < 0 || buffer > 3) { error("xfb_buffer out of range"); return; }
+                if (pre == Stage::Geometry) mp.xfbBufferStream[buffer] = (uint32_t)std::max(0, v->q.layout.stream);
                 XfbVarying x;
                 x.name = name;
                 x.type = glTypeEnum(t);
@@ -966,7 +967,12 @@ void Linker::stageMetadata() {
                     mp.xfbStride[buffer] = std::max<uint32_t>(mp.xfbStride[buffer], (uint32_t)offset);
                 }
             };
+            std::set<std::string> seenXfb;
             for (auto& name : in_.xfbVaryings) {
+                if (name != "gl_NextBuffer" && name.compare(0, 17, "gl_SkipComponents") != 0 && !seenXfb.insert(name).second) {
+                    error("transform feedback varying '" + name + "' specified more than once");
+                    continue;
+                }
                 if (name == "gl_NextBuffer") {
                     closeBuffer();
                     buffer++;
@@ -988,9 +994,11 @@ void Linker::stageMetadata() {
                 }
                 Type t;
                 bool found = false;
+                int foundStream = 0;
                 for (auto& sh : ps.shaders)
                     for (auto& v : sh->vars) {
                         if (found || !v.global || v.q.storage != Storage::Out) continue;
+                        foundStream = v.q.layout.stream;
                         if (member.empty() && v.name == base && !v.anonBlock) { t = v.type; found = true; }
                         else if (member.empty() && v.anonBlock && v.block->findMember(base) >= 0) {
                             t = v.block->members[v.block->findMember(base)].type;
@@ -1001,6 +1009,7 @@ void Linker::stageMetadata() {
                         }
                     }
                 if (!found) { error("transform feedback varying '" + name + "' is not an output of the last vertex stage"); continue; }
+                if (pre == Stage::Geometry) mp.xfbBufferStream[buffer] = (uint32_t)std::max(0, foundStream);
                 if (elem >= 0) {
                     if (!t.isArray() || elem >= t.dims[0]) { error("transform feedback varying '" + name + "' index out of range"); continue; }
                     t = t.elem();
@@ -1014,6 +1023,9 @@ void Linker::stageMetadata() {
                 x.offset = offset;
                 r.xfbVaryings.push_back(x);
                 offset += compSize(t);
+                // GL 4.6 11.1.2.1 limits (MAX_TRANSFORM_FEEDBACK_INTERLEAVED/SEPARATE_COMPONENTS)
+                if (in_.xfbInterleaved && offset / 4 > 128) error("too many transform feedback components in buffer " + std::to_string(buffer));
+                if (!in_.xfbInterleaved && compSize(t) / 4 > 64) error("transform feedback varying '" + name + "' has too many components");
                 if (!in_.xfbInterleaved) {
                     closeBuffer();
                     buffer++;
@@ -1058,7 +1070,8 @@ LinkResult Linker::run() {
     if (!prog_->stageMask) error("no shaders attached");
     if ((prog_->stageMask & (1u << (int)Stage::Compute)) && (prog_->stageMask & ~(1u << (int)Stage::Compute)))
         error("a compute shader cannot be linked with other shader stages");
-    if ((prog_->stageMask & (1u << (int)Stage::TessEval)) == 0 && (prog_->stageMask & (1u << (int)Stage::TessControl)))
+    // GL 4.6 7.3: only non-separable programs need a TES alongside a TCS.
+    if (!in_.separable && (prog_->stageMask & (1u << (int)Stage::TessEval)) == 0 && (prog_->stageMask & (1u << (int)Stage::TessControl)))
         error("tessellation control shader requires a tessellation evaluation shader");
     if (!in_.separable && (prog_->stageMask & ~(1u << (int)Stage::Compute)) && !(prog_->stageMask & (1u << (int)Stage::Vertex)))
         error("program has no vertex shader");
