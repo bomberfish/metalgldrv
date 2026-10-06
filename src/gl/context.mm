@@ -149,7 +149,8 @@ Texture* Context::texForUnit(int unit, int targetIdx) { return textures[unit][ta
 Ref<Buffer>* Context::bufferBindingRef(GLenum target) {
     switch (target) {
     case GL_ARRAY_BUFFER: return &arrayBuffer;
-    case GL_ELEMENT_ARRAY_BUFFER: return vao ? &vao->elementBuffer : nullptr;
+    // core profile without a VAO: the binding lives in the (otherwise unusable) default VAO, as in Mesa
+    case GL_ELEMENT_ARRAY_BUFFER: return vao ? &vao->elementBuffer : &defaultVao->elementBuffer;
     case GL_COPY_READ_BUFFER: return &copyReadBuffer;
     case GL_COPY_WRITE_BUFFER: return &copyWriteBuffer;
     case GL_PIXEL_PACK_BUFFER: return &pixelPackBuffer;
@@ -200,6 +201,7 @@ void Context::unbindDeletedBuffer(Buffer* b) {
         if (u.buffer.get() == b) u = IndexedBufferBinding();
     for (auto& u : atomicCounterBuffers)
         if (u.buffer.get() == b) u = IndexedBufferBinding();
+    if (defaultVao && defaultVao->elementBuffer.get() == b) defaultVao->elementBuffer = nullptr;
     if (vao) {
         if (vao->elementBuffer.get() == b) vao->elementBuffer = nullptr;
         for (auto& bd : vao->bindings)
