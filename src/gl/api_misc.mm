@@ -315,6 +315,9 @@ API void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
     for (glsl::Stage st : {glsl::Stage::Geometry, glsl::Stage::TessEval, glsl::Stage::Vertex})
         if (!p) p = ctx->activeProgramForStage(st);
     if (!p || p->refl.xfbVaryings.empty()) return ctx->setError(GL_INVALID_OPERATION, "no transform feedback varyings");
+    for (int b = 0; b < kMaxXfbBuffers; b++)
+        if ((p->refl.multipass.xfbBufferMask & (1u << b)) && !x->buffers[b].buffer)
+            return ctx->setError(GL_INVALID_OPERATION, "transform feedback buffer %d not bound", b);
     x->active = true;
     x->paused = false;
     x->primitiveMode = primitiveMode;

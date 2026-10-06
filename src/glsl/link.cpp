@@ -967,7 +967,12 @@ void Linker::stageMetadata() {
                     mp.xfbStride[buffer] = std::max<uint32_t>(mp.xfbStride[buffer], (uint32_t)offset);
                 }
             };
+            std::set<std::string> seenXfb;
             for (auto& name : in_.xfbVaryings) {
+                if (name != "gl_NextBuffer" && name.compare(0, 17, "gl_SkipComponents") != 0 && !seenXfb.insert(name).second) {
+                    error("transform feedback varying '" + name + "' specified more than once");
+                    continue;
+                }
                 if (name == "gl_NextBuffer") {
                     closeBuffer();
                     buffer++;
@@ -1018,6 +1023,9 @@ void Linker::stageMetadata() {
                 x.offset = offset;
                 r.xfbVaryings.push_back(x);
                 offset += compSize(t);
+                // GL 4.6 11.1.2.1 limits (MAX_TRANSFORM_FEEDBACK_INTERLEAVED/SEPARATE_COMPONENTS)
+                if (in_.xfbInterleaved && offset / 4 > 128) error("too many transform feedback components in buffer " + std::to_string(buffer));
+                if (!in_.xfbInterleaved && compSize(t) / 4 > 64) error("transform feedback varying '" + name + "' has too many components");
                 if (!in_.xfbInterleaved) {
                     closeBuffer();
                     buffer++;

@@ -375,6 +375,15 @@ API void APIENTRY glTransformFeedbackVaryings(GLuint program, GLsizei count, con
     if (bufferMode == GL_SEPARATE_ATTRIBS && count > kMaxXfbBuffers) return ctx->setError(GL_INVALID_VALUE);
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
+    // gl_NextBuffer / gl_SkipComponents* are only valid with interleaved capture
+    if (bufferMode == GL_SEPARATE_ATTRIBS)
+        for (int i = 0; i < count; i++)
+            if (varyings[i] && (!strcmp(varyings[i], "gl_NextBuffer") || !strncmp(varyings[i], "gl_SkipComponents", 17)))
+                return ctx->setError(GL_INVALID_OPERATION);
+    int nextBuffers = 0;
+    for (int i = 0; i < count; i++)
+        if (varyings[i] && !strcmp(varyings[i], "gl_NextBuffer")) nextBuffers++;
+    if (nextBuffers >= kMaxXfbBuffers) return ctx->setError(GL_INVALID_OPERATION);
     p->xfbVaryings.clear();
     for (int i = 0; i < count; i++) p->xfbVaryings.push_back(varyings[i]);
     p->xfbBufferMode = bufferMode;

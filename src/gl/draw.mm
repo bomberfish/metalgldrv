@@ -1558,6 +1558,46 @@ static bool validateDraw(Context* ctx, GLenum mode) {
         ctx->setError(GL_INVALID_OPERATION);
         return false;
     }
+    if (prog) {
+        // GL 4.6 11.3.1: the primitives reaching the geometry shader must match its input type.
+        const glsl::Reflection& r = prog->refl;
+        bool hasGS = r.stageMask & (1u << (int)glsl::Stage::Geometry);
+        auto cls = [](GLenum m) -> int {  // 0 points, 1 lines, 2 lines adj, 3 triangles, 4 triangles adj, -1 other
+            switch (m) {
+            case GL_POINTS: return 0;
+            case GL_LINES: case GL_LINE_STRIP: case GL_LINE_LOOP: return 1;
+            case GL_LINES_ADJACENCY: case GL_LINE_STRIP_ADJACENCY: return 2;
+            case GL_TRIANGLES: case GL_TRIANGLE_STRIP: case GL_TRIANGLE_FAN: return 3;
+            case GL_TRIANGLES_ADJACENCY: case GL_TRIANGLE_STRIP_ADJACENCY: return 4;
+            default: return -1;
+            }
+        };
+        int tesOut = -1;
+        if (hasTess) tesOut = r.tesPointMode ? 0 : r.tesPrimitiveMode == GL_ISOLINES ? 1 : 3;
+        if (hasGS) {
+            int in = cls(r.gsInputPrimitive);
+            int got = hasTess ? tesOut : cls(mode);
+            if (in >= 0 && got != in) {
+                ctx->setError(GL_INVALID_OPERATION, "draw primitives do not match the geometry shader input");
+                return false;
+            }
+        }
+        // GL 4.6 13.3.1: with transform feedback active, the captured primitive type must match.
+        TransformFeedbackObj* x = ctx->xfb.get();
+        if (x && x->active && !x->paused) {
+            int out;
+            if (hasGS) out = r.gsOutputPrimitive == GL_POINTS ? 0 : r.gsOutputPrimitive == GL_LINE_STRIP ? 1 : 3;
+            else if (hasTess) out = tesOut;
+            else out = cls(mode);
+            if (out == 2) out = 1;
+            if (out == 4) out = 3;
+            int want = x->primitiveMode == GL_POINTS ? 0 : x->primitiveMode == GL_LINES ? 1 : 3;
+            if (out != want) {
+                ctx->setError(GL_INVALID_OPERATION, "primitive type does not match the transform feedback mode");
+                return false;
+            }
+        }
+    }
     // mapped non-persistent buffers in use
     for (int b = 0; b < kMaxVertexBindings; b++) {
         Buffer* buf = ctx->vao->bindings[b].buffer.get();

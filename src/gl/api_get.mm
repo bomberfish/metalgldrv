@@ -531,7 +531,12 @@ template <typename T>
 static void getv(GLenum pname, int index, T* data) {
     MGL_CTX();
     Value v;
-    if (!getState(ctx, pname, index, v)) return ctx->setError(index >= 0 ? GL_INVALID_ENUM : GL_INVALID_ENUM, "glGet(0x%x)", pname);
+    if (!getState(ctx, pname, index, v)) {
+        // an indexed state whose index is out of range is INVALID_VALUE, an unknown name INVALID_ENUM
+        Value probe;
+        bool indexedName = index > 0 && getState(ctx, pname, 0, probe);
+        return ctx->setError(indexedName ? GL_INVALID_VALUE : GL_INVALID_ENUM, "glGet(0x%x, %d)", pname, index);
+    }
     if constexpr (std::is_integral_v<T> && !std::is_same_v<T, GLboolean>) {
         if (isNormalizedFloatState(pname) && (v.type == VT::Float || v.type == VT::Double)) {
             // GL 4.6 table 2.x: normalized fixed-point conversion

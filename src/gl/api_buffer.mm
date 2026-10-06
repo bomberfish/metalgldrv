@@ -667,3 +667,20 @@ API void APIENTRY glGetNamedBufferPointerv(GLuint buffer, GLenum pname, void** p
     if (!b) return ctx->setError(GL_INVALID_OPERATION);
     *params = b->mapPointer;
 }
+
+// EXT_transform_feedback: binds from `offset` to the end of the buffer.
+API void APIENTRY glBindBufferOffsetEXT(GLenum target, GLuint index, GLuint buffer, GLintptr offset) {
+    MGL_CTX();
+    if (target != GL_TRANSFORM_FEEDBACK_BUFFER) return ctx->setError(GL_INVALID_ENUM);
+    IndexedBufferBinding* ib;
+    Ref<Buffer>* generic;
+    if (!indexedTargetInfo(ctx, target, index, &ib, &generic)) return;
+    if (offset < 0 || (offset % 4)) return ctx->setError(GL_INVALID_VALUE);
+    Buffer* b = bufferForBind(ctx, buffer);
+    if (b == (Buffer*)-1) return;
+    *generic = b;
+    auto& bb = ctx->xfb->buffers[index];
+    bb.buffer = b;
+    bb.offset = b ? offset : 0;
+    bb.size = 0;
+}
