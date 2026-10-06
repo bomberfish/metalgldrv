@@ -838,8 +838,9 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     }
     if ((q.storage == Storage::Uniform || q.storage == Storage::Buffer) && !preamble_) validateBlockLayout(*sd);
     if (!preamble_) {
+        Layout declared = q.layout;
         if (q.storage == Storage::Out && q.layout.xfbBuffer < 0) q.layout.xfbBuffer = xfbCurBuffer_;
-        noteXfb(q.layout, q.storage, q.layout.xfbBuffer, line());
+        noteXfb(declared, q.storage, q.layout.xfbBuffer, line());
         for (Member& m : sd->members) {
             noteXfb(m.q.layout, q.storage, q.layout.xfbBuffer, m.line);
             if (m.q.layout.xfbBuffer >= 0 && m.q.layout.xfbBuffer != q.layout.xfbBuffer)

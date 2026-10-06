@@ -1053,6 +1053,7 @@ struct Resource {
     GLenum type = 0;
     int arraySize = 1, location = -1, locationIndex = -1, blockIndex = -1, offset = -1, arrayStride = -1, matrixStride = -1;
     int isRowMajor = 0, bufferBinding = -1, bufferDataSize = 0, atomicIndex = -1, topLevelArraySize = 1, topLevelArrayStride = 0;
+    int xfbBufferIndex = -1, xfbBufferStride = 0;
     uint32_t stageMask = 0;
     std::vector<int> activeVariables;
     bool isBlock = false, isPerPatch = false;
@@ -1139,15 +1140,34 @@ static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface, bool* ok)
         }
         break;
     case GL_TRANSFORM_FEEDBACK_VARYING:
-        for (auto& v : r.xfbVaryings) {
-            Resource x;
-            x.name = v.name;
-            x.type = v.type;
-            x.arraySize = v.arraySize;
-            x.offset = v.offset;
-            out.push_back(x);
+    case GL_TRANSFORM_FEEDBACK_BUFFER: {
+        // buffer resources: the binding points used by the captured varyings, in ascending order
+        uint32_t used = r.multipass.xfbBufferMask;
+        for (auto& v : r.xfbVaryings) used |= 1u << v.buffer;
+        auto bufferIndex = [&](int b) { return __builtin_popcount(used & ((1u << b) - 1)); };
+        if (iface == GL_TRANSFORM_FEEDBACK_VARYING) {
+            for (auto& v : r.xfbVaryings) {
+                Resource x;
+                x.name = v.name;
+                x.type = v.type;
+                x.arraySize = v.arraySize;
+                x.offset = v.offset;
+                x.xfbBufferIndex = bufferIndex(v.buffer);
+                out.push_back(x);
+            }
+        } else {
+            for (int b = 0; b < 4; b++) {
+                if (!(used & (1u << b))) continue;
+                Resource x;
+                x.bufferBinding = b;
+                x.xfbBufferStride = (int)r.multipass.xfbStride[b];
+                for (size_t i = 0; i < r.xfbVaryings.size(); i++)
+                    if (r.xfbVaryings[i].buffer == b) x.activeVariables.push_back((int)i);
+                out.push_back(x);
+            }
         }
         break;
+    }
     case GL_ATOMIC_COUNTER_BUFFER:
         for (auto& a : r.atomicCounterBuffers) {
             Resource x;
@@ -1158,7 +1178,6 @@ static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface, bool* ok)
             out.push_back(x);
         }
         break;
-    case GL_TRANSFORM_FEEDBACK_BUFFER:
     case GL_VERTEX_SUBROUTINE: case GL_TESS_CONTROL_SUBROUTINE: case GL_TESS_EVALUATION_SUBROUTINE: case GL_GEOMETRY_SUBROUTINE:
     case GL_FRAGMENT_SUBROUTINE: case GL_COMPUTE_SUBROUTINE: case GL_VERTEX_SUBROUTINE_UNIFORM: case GL_TESS_CONTROL_SUBROUTINE_UNIFORM:
     case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM: case GL_GEOMETRY_SUBROUTINE_UNIFORM: case GL_FRAGMENT_SUBROUTINE_UNIFORM:
@@ -1225,7 +1244,7 @@ API void APIENTRY glGetProgramResourceName(GLuint program, GLenum iface, GLuint 
     bool ok;
     auto res = resourcesFor(p, iface, &ok);
     if (!ok) return ctx->setError(GL_INVALID_ENUM);
-    if (index >= res.size()) return ctx->setError(GL_INVALID_VALUE);
+    if (index >= res.size()) return ctx->setError(GL_INVALID_VALUE, "resource index %u out of range (interface 0x%x has %zu)", index, iface, res.size());
     copyLog(res[index].name, bufSize, length, name);
 }
 
@@ -1237,7 +1256,7 @@ API void APIENTRY glGetProgramResourceiv(GLuint program, GLenum iface, GLuint in
     bool ok;
     auto res = resourcesFor(p, iface, &ok);
     if (!ok) return ctx->setError(GL_INVALID_ENUM);
-    if (index >= res.size()) return ctx->setError(GL_INVALID_VALUE);
+    if (index >= res.size()) return ctx->setError(GL_INVALID_VALUE, "resource index %u out of range (interface 0x%x has %zu)", index, iface, res.size());
     const Resource& x = res[index];
     std::vector<GLint> vals;
     using S = glsl::Stage;
@@ -1268,8 +1287,8 @@ API void APIENTRY glGetProgramResourceiv(GLuint program, GLenum iface, GLuint in
         case GL_LOCATION_INDEX: vals.push_back(x.locationIndex); break;
         case GL_IS_PER_PATCH: vals.push_back(x.isPerPatch); break;
         case GL_LOCATION_COMPONENT: vals.push_back(0); break;
-        case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX: vals.push_back(0); break;
-        case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE: vals.push_back(0); break;
+        case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX: vals.push_back(x.xfbBufferIndex); break;
+        case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE: vals.push_back(x.xfbBufferStride); break;
         default: return ctx->setError(GL_INVALID_ENUM);
         }
     }
