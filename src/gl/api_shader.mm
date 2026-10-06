@@ -469,6 +469,19 @@ API void APIENTRY glLinkProgram(GLuint program) {
     }
 }
 
+// Subroutine selections are reset to defaults when the program used for a stage changes (GL 4.6 7.10).
+static void resetSubroutineSelection(Context* ctx, int st, ProgramObj* p) {
+    ctx->subroutineSelection[st].clear();
+    if (!p) return;
+    const auto& ss = p->refl.subroutines[st];
+    for (int l = 0; l < ss.numLocations; l++) {
+        uint32_t def = 0;
+        for (auto& u : ss.uniforms)
+            if (l >= u.location && l < u.location + u.arraySize && !u.compatible.empty()) def = u.compatible[0];
+        ctx->subroutineSelection[st].push_back(def);
+    }
+}
+
 API void APIENTRY glUseProgram(GLuint program) {
     MGL_CTX();
     if (ctx->xfb->active && !ctx->xfb->paused) return ctx->setError(GL_INVALID_OPERATION);
@@ -482,17 +495,7 @@ API void APIENTRY glUseProgram(GLuint program) {
     if (!p->linked) return ctx->setError(GL_INVALID_OPERATION, "program not linked");
     if (ctx->program.get() != p) releaseCurrentProgram(ctx);
     ctx->program = p;
-    // Subroutine selections are reset when the current program changes (GL 4.6 §7.10).
-    for (int st = 0; st < (int)glsl::Stage::Count; st++) {
-        const auto& ss = p->refl.subroutines[st];
-        ctx->subroutineSelection[st].clear();
-        for (int l = 0; l < ss.numLocations; l++) {
-            uint32_t def = 0;
-            for (auto& u : ss.uniforms)
-                if (l >= u.location && l < u.location + u.arraySize && !u.compatible.empty()) def = u.compatible[0];
-            ctx->subroutineSelection[st].push_back(def);
-        }
-    }
+    for (int st = 0; st < (int)glsl::Stage::Count; st++) resetSubroutineSelection(ctx, st, p);
 }
 
 API void APIENTRY glValidateProgram(GLuint program) {
@@ -1507,7 +1510,11 @@ API void APIENTRY glBindProgramPipeline(GLuint pipeline) {
         return;
     }
     ProgramPipelineObj* pp = pipelineObj(ctx, pipeline, true);
-    if (pp) ctx->pipeline = pp;
+    if (pp) {
+        ctx->pipeline = pp;
+        if (!ctx->program)
+            for (int st = 0; st < (int)glsl::Stage::Count; st++) resetSubroutineSelection(ctx, st, pp->stages[st].get());
+    }
 }
 
 API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program) {
@@ -1530,6 +1537,7 @@ API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint 
     for (auto& [bit, st] : map) {
         if (!(stages & bit)) continue;
         pp->stages[(int)st] = (p && (p->refl.stageMask & (1u << (int)st))) ? p : nullptr;
+        if (ctx->pipeline == pp && !ctx->program) resetSubroutineSelection(ctx, (int)st, pp->stages[(int)st].get());
     }
     pp->validated = false;
 }
@@ -1683,11 +1691,17 @@ API void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, cons
     int st = stageIndexForShaderType(shadertype);
     if (st < 0) return ctx->setError(GL_INVALID_ENUM);
     ProgramObj* p = ctx->activeProgramForStage((glsl::Stage)st);
-    if (!p) return ctx->setError(GL_INVALID_OPERATION);
+    if (!p || !(p->refl.stageMask & (1u << st))) return ctx->setError(GL_INVALID_OPERATION);
     const glsl::StageSubroutines& ss = p->refl.subroutines[st];
     if (count != ss.numLocations) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < count; i++)
         if (indices[i] >= ss.functions.size()) return ctx->setError(GL_INVALID_VALUE);
+    for (auto& u : ss.uniforms)
+        for (int i = 0; i < u.arraySize; i++) {
+            int loc = u.location + i;
+            if (loc < count && std::find(u.compatible.begin(), u.compatible.end(), (int)indices[loc]) == u.compatible.end())
+                return ctx->setError(GL_INVALID_OPERATION);
+        }
     ctx->subroutineSelection[st].assign(indices, indices + count);
 }
 
@@ -1696,7 +1710,7 @@ API void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, G
     int st = stageIndexForShaderType(shadertype);
     if (st < 0) return ctx->setError(GL_INVALID_ENUM);
     ProgramObj* p = ctx->activeProgramForStage((glsl::Stage)st);
-    if (!p) return ctx->setError(GL_INVALID_OPERATION);
+    if (!p || !(p->refl.stageMask & (1u << st))) return ctx->setError(GL_INVALID_OPERATION);
     if (location < 0 || location >= p->refl.subroutines[st].numLocations) return ctx->setError(GL_INVALID_VALUE);
     const auto& sel = ctx->subroutineSelection[st];
     *params = location < (int)sel.size() ? sel[location] : 0;

@@ -222,9 +222,11 @@ void Linker::collectStage(Stage s) {
         merge(sc.inLayout, sh->inLayout);
         merge(sc.outLayout, sh->outLayout);
     }
-    // reachability
+    // reachability (and the static call graph, which must not be recursive)
     std::vector<const Function*> work{sc.main};
     sc.reachable.insert(sc.main);
+    const Function* curFn = nullptr;
+    std::map<const Function*, std::set<const Function*>> calls;
     Walker w;
     w.onStmt = [&](const Stmt* st) {
         if (st->kind == SK::Discard) sc.usesDiscard = true;
@@ -235,6 +237,7 @@ void Linker::collectStage(Stage s) {
             sc.used.insert(e->var);
             for (auto& [mangled, f] : sc.defs) {
                 if (std::find(f->subroutineTypes.begin(), f->subroutineTypes.end(), e->fn->name) == f->subroutineTypes.end()) continue;
+                if (curFn) calls[curFn].insert(f);
                 if (!sc.reachable.count(f)) {
                     sc.reachable.insert(f);
                     work.push_back(f);
@@ -247,6 +250,7 @@ void Linker::collectStage(Stage s) {
                 error("function '" + e->fn->name + "' is used but not defined");
                 return;
             }
+            if (curFn) calls[curFn].insert(it->second);
             if (!sc.reachable.count(it->second)) {
                 sc.reachable.insert(it->second);
                 work.push_back(it->second);
@@ -275,7 +279,38 @@ void Linker::collectStage(Stage s) {
     while (!work.empty()) {
         const Function* f = work.back();
         work.pop_back();
+        curFn = f;
         w.stmt(f->body);
+    }
+    curFn = nullptr;
+    {
+        // GLSL forbids recursion, including through subroutine uniforms
+        std::map<const Function*, int> state;  // 1 = on stack, 2 = done
+        std::function<bool(const Function*)> dfs = [&](const Function* f) {
+            state[f] = 1;
+            for (auto* g : calls[f]) {
+                int st = state[g];
+                if (st == 1) { error("recursive call to function '" + g->name + "'"); return true; }
+                if (st == 0 && dfs(g)) return true;
+            }
+            state[f] = 2;
+            return false;
+        };
+        dfs(sc.main);
+    }
+    // subroutine functions must be defined, and subroutine uniforms need a compatible subroutine
+    for (auto& sh : sc.shaders) {
+        for (auto* f : sh->functions)
+            if (!f->subroutineTypes.empty() && !sc.defs.count(f->mangled))
+                error("subroutine function '" + f->name + "' is declared but not defined");
+        for (auto& g : sh->globals) {
+            if (g.kind != GlobalDecl::Var || g.var->type.base != BT::Subroutine || g.var->q.storage != Storage::Uniform) continue;
+            bool any = false;
+            for (auto& [mangled, f] : sc.defs)
+                if (std::find(f->subroutineTypes.begin(), f->subroutineTypes.end(), g.var->type.subr->name) != f->subroutineTypes.end())
+                    any = true;
+            if (!any) error("subroutine uniform '" + g.var->name + "' has no compatible subroutine function");
+        }
     }
     for (auto* v : sc.used) {
         sc.usedNames.insert(v->name);

@@ -1151,6 +1151,13 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
         return "((device atomic_uint*)(A->s" + std::to_string(ob.slot) + " + " + off + "))";
     }
     std::string T = a->type.base == BT::Int ? "atomic_int" : "atomic_uint";
+    if (a->kind == EK::Swizzle && a->nswz == 1) {
+        // one component of a shared-memory vector (MSL cannot take the address of a swizzle)
+        const Expr* r = a->args[0];
+        while (r->kind == EK::Index || r->kind == EK::Field) r = r->args[0];
+        if (r->kind == EK::Var && inThreadgroup(r->var))
+            return "((threadgroup " + T + "*)&(" + ex(a->args[0]) + ") + " + std::to_string(a->swz[0]) + ")";
+    }
     Acc acc;
     if (a->kind == EK::Swizzle && a->nswz == 1 && bufAccess(a->args[0], acc) && acc.type.isVector()) {
         // single component of a buffer vector, e.g. atomicAdd(buf.v.y, 1)
