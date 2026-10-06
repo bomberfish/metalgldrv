@@ -340,6 +340,8 @@ public:
     id<MTLBuffer> resultBuffer = nil;  // occlusion: visibility result buffer
     uint32_t resultOffset = 0;
     uint64_t cpuCount = 0;     // primitive queries counted on the CPU
+    // pipeline statistics counted on the GPU: uint counters (buffer, byte offset) summed at resolve
+    std::vector<std::pair<id<MTLBuffer>, uint32_t>> gpuCounts;
 };
 
 class SyncObj : public RefCounted {

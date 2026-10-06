@@ -23,7 +23,7 @@ const char* kExtensions[] = {
     "GL_ARB_half_float_pixel", "GL_ARB_half_float_vertex", "GL_ARB_indirect_parameters", "GL_ARB_instanced_arrays",
     "GL_ARB_internalformat_query", "GL_ARB_internalformat_query2", "GL_ARB_invalidate_subdata", "GL_ARB_map_buffer_alignment",
     "GL_ARB_map_buffer_range", "GL_ARB_multi_bind", "GL_ARB_multi_draw_indirect", "GL_ARB_multisample",
-    "GL_ARB_multitexture", "GL_ARB_occlusion_query", "GL_ARB_occlusion_query2", "GL_ARB_pixel_buffer_object",
+    "GL_ARB_multitexture", "GL_ARB_occlusion_query", "GL_ARB_occlusion_query2", "GL_ARB_pipeline_statistics_query", "GL_ARB_pixel_buffer_object",
     "GL_ARB_point_parameters", "GL_ARB_point_sprite", "GL_ARB_polygon_offset_clamp", "GL_ARB_program_interface_query",
     "GL_ARB_provoking_vertex", "GL_ARB_query_buffer_object", "GL_ARB_robust_buffer_access_behavior", "GL_ARB_robustness",
     "GL_ARB_sample_shading", "GL_ARB_sampler_objects", "GL_ARB_seamless_cube_map", "GL_ARB_seamless_cubemap_per_texture",

@@ -27,6 +27,7 @@ struct MGLDrawInfo {
     device uchar* tcsVertexOut;
     device uchar* tcsPatchOut;
     device atomic_uint* counters;
+    device atomic_uint* stats;
 };
 inline device const uchar* mgl_vptr(constant MGLDrawInfo& D, uint b, uint off, uint vid, uint inst) {
     device const uchar* p = D.vertexBuffer[b];

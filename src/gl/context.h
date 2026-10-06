@@ -232,7 +232,10 @@ public:
     GLenum hints[8] = {GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE};
     float currentAttrib[kMaxVertexAttribs][4];
     uint32_t currentAttribType[kMaxVertexAttribs];  // GL_FLOAT / GL_INT / GL_UNSIGNED_INT
-    Ref<Query> activeQueries[8][4];  // [query target index][index]
+    Ref<Query> activeQueries[19][4];  // [query target index][index] (api_query.mm queryTargetIndex)
+    int statsQueriesActive = 0;       // active ARB_pipeline_statistics_query queries (draw-time counting)
+    id<MTLBuffer> statsSlots = nil;   // GPU-side statistics counters (2 x uint per draw slot)
+    uint32_t statsNext = 0;
     GLenum conditionalRenderMode = 0;
     Ref<Query> conditionalQuery;
 
@@ -338,6 +341,16 @@ id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarge
 id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger);
 id<MTLTexture> attachmentTexture(Context* ctx, const Attachment& a, const FormatInfo** fmt, int* w, int* h);
 void markTextureWrite(Context* ctx, Texture* t);
+
+// ARB_pipeline_statistics_query (api_query.mm): counts of one draw/dispatch, added to the
+// active statistics queries. GPU-only counts go through mglStatsGpuSlot (returns the GPU
+// address of uint[3] {GS primitives emitted, TES invocations, tessellated primitives}, or 0).
+struct DrawStats {
+    uint64_t vertices = 0, primitives = 0, vsInvocations = 0, patches = 0, tesInvocations = 0, gsInvocations = 0, gsPrimitives = 0,
+             csInvocations = 0, clipPrimitives = 0, fsEstimate = 0;
+};
+void mglStatsCountDraw(Context* ctx, const DrawStats& st);
+uint64_t mglStatsGpuSlot(Context* ctx, bool gs, bool tess);
 
 // Common entry-point prologue.
 #define MGL_CTX_RET(r)                     \

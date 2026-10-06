@@ -20,9 +20,23 @@ static int queryTargetIndex(GLenum target) {
     case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN: return 5;
     case GL_TRANSFORM_FEEDBACK_OVERFLOW: return 6;
     case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW: return 7;
+    // ARB_pipeline_statistics_query
+    case GL_VERTICES_SUBMITTED: return 8;
+    case GL_PRIMITIVES_SUBMITTED: return 9;
+    case GL_VERTEX_SHADER_INVOCATIONS: return 10;
+    case GL_TESS_CONTROL_SHADER_PATCHES: return 11;
+    case GL_TESS_EVALUATION_SHADER_INVOCATIONS: return 12;
+    case GL_GEOMETRY_SHADER_INVOCATIONS: return 13;
+    case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED: return 14;
+    case GL_FRAGMENT_SHADER_INVOCATIONS: return 15;
+    case GL_COMPUTE_SHADER_INVOCATIONS: return 16;
+    case GL_CLIPPING_INPUT_PRIMITIVES: return 17;
+    case GL_CLIPPING_OUTPUT_PRIMITIVES: return 18;
     default: return -1;
     }
 }
+
+static bool isStatistics(GLenum t) { int i = queryTargetIndex(t); return i >= 8 && i <= 18; }
 
 static bool isOcclusion(GLenum t) { return t == GL_SAMPLES_PASSED || t == GL_ANY_SAMPLES_PASSED || t == GL_ANY_SAMPLES_PASSED_CONSERVATIVE; }
 
@@ -32,9 +46,17 @@ static Query* activeOcclusion(Context* ctx) {
     return nullptr;
 }
 
+// The query fed by the visibility counter of the current render pass: an occlusion query,
+// else an active FRAGMENT_SHADER_INVOCATIONS query (samples reaching the fragment stage).
+static Query* activeVisibilityQuery(Context* ctx) {
+    if (Query* q = activeOcclusion(ctx)) return q;
+    Query* f = ctx->activeQueries[15][0].get();
+    return f && f->resultBuffer ? f : nullptr;
+}
+
 // Called before each draw: routes visibility counting to the active occlusion query.
 void mglQueryNotifyDraw(Context* ctx, GLenum mode, uint64_t vertices, uint64_t instances) {
-    Query* oq = activeOcclusion(ctx);
+    Query* oq = activeVisibilityQuery(ctx);
     id<MTL4RenderCommandEncoder> e = ctx->renderEnc;
     if (e) {
         int64_t want = oq ? (int64_t)oq->resultOffset : -1;
@@ -63,6 +85,51 @@ void mglQueryNotifyDraw(Context* ctx, GLenum mode, uint64_t vertices, uint64_t i
         }
     };
     if (Query* pq = ctx->activeQueries[4][0].get()) pq->cpuCount += prims(mode, vertices) * instances;
+}
+
+// ARB_pipeline_statistics_query: per-draw counts computed by the draw code.
+// `gsPrims`/`tesInv`/`tessPrims` are only known on the GPU; mglStatsGpuSlot hands out the
+// counters the multi-pass shaders accumulate them into.
+void mgl::mglStatsCountDraw(Context* ctx, const DrawStats& st) {
+    auto add = [&](int ti, uint64_t v) {
+        if (Query* q = ctx->activeQueries[ti][0].get()) q->cpuCount += v;
+    };
+    add(8, st.vertices);
+    add(9, st.primitives);
+    add(10, st.vsInvocations);
+    add(11, st.patches);
+    add(12, st.tesInvocations);
+    add(13, st.gsInvocations);
+    add(14, st.gsPrimitives);
+    add(16, st.csInvocations);
+    add(17, st.clipPrimitives);
+    add(18, st.clipPrimitives);
+    // fragment invocations without the visibility counter: at least one per rasterized primitive
+    if (Query* f = ctx->activeQueries[15][0].get())
+        if (activeVisibilityQuery(ctx) != f) f->cpuCount += st.fsEstimate;
+}
+
+uint64_t mgl::mglStatsGpuSlot(Context* ctx, bool gs, bool tess) {
+    Query* gsq = ctx->activeQueries[14][0].get();
+    Query* tesq = ctx->activeQueries[12][0].get();
+    Query* c1 = ctx->activeQueries[17][0].get();
+    Query* c2 = ctx->activeQueries[18][0].get();
+    if (!(gs && (gsq || c1 || c2)) && !(tess && (tesq || ((c1 || c2) && !gs)))) return 0;
+    const uint32_t kSlots = 4096, kSlotBytes = 16;
+    if (!ctx->statsSlots || ctx->statsNext >= kSlots) {
+        ctx->statsSlots = ctx->dev->newBuffer(kSlots * kSlotBytes);
+        memset(ctx->statsSlots.contents, 0, kSlots * kSlotBytes);
+        ctx->statsNext = 0;
+    }
+    uint32_t off = ctx->statsNext++ * kSlotBytes;
+    id<MTLBuffer> b = ctx->statsSlots;
+    memset((uint8_t*)b.contents + off, 0, kSlotBytes);
+    // [0] GS primitives emitted, [1] TES invocations, [2] tessellated primitives
+    if (gs && gsq) gsq->gpuCounts.push_back({b, off});
+    if (tess && tesq) tesq->gpuCounts.push_back({b, off + 4});
+    for (Query* c : {c1, c2})
+        if (c) c->gpuCounts.push_back({b, gs ? off : off + 8});
+    return b.gpuAddress + off;
 }
 
 // Ensures render passes started from now on carry the visibility buffer of `q`.
@@ -109,6 +176,7 @@ API void APIENTRY glDeleteQueries(GLsizei n, const GLuint* ids) {
         if (q && q->active) {
             int ti = queryTargetIndex(q->target);
             if (ti >= 0) ctx->activeQueries[ti][q->index] = nullptr;
+            if (isStatistics(q->target)) ctx->statsQueriesActive--;
         }
         ctx->queries.remove(ids[i]);
     }
@@ -147,7 +215,15 @@ static void beginQuery(Context* ctx, GLenum target, GLuint index, GLuint id) {
     q->cpuCount = 0;
     q->serial = 0;
     ctx->activeQueries[ti][index] = q;
+    q->gpuCounts.clear();
+    q->resultBuffer = nil;
     if (isOcclusion(target)) attachVisibility(ctx, q);
+    if (isStatistics(target)) {
+        ctx->statsQueriesActive++;
+        // Fragment invocations are sampled with the visibility counter unless an occlusion
+        // query owns it (draws then fall back to a CPU estimate, see mglStatsCountDraw).
+        if (target == GL_FRAGMENT_SHADER_INVOCATIONS && !activeOcclusion(ctx)) attachVisibility(ctx, q);
+    }
     if (target == GL_TIME_ELAPSED) {
         ctx->flush();
         q->beginSerial = ctx->serial();
@@ -160,11 +236,19 @@ static void endQuery(Context* ctx, GLenum target, GLuint index) {
     if (index >= 4) return ctx->setError(GL_INVALID_VALUE);
     Ref<Query> q = ctx->activeQueries[ti][index];
     if (!q) return ctx->setError(GL_INVALID_OPERATION, "query not active");
+    bool routed = activeVisibilityQuery(ctx) == q.get();
     ctx->activeQueries[ti][index] = nullptr;
     q->active = false;
     q->serial = ctx->serial();
     if (target == GL_TIME_ELAPSED) ctx->flush();
-    if (isOcclusion(target) && ctx->renderEnc && ctx->encVisibilityOffset >= 0) {
+    if (isStatistics(target)) {
+        ctx->statsQueriesActive--;
+        if (!q->resultBuffer && q->gpuCounts.empty()) {
+            q->result = q->cpuCount;
+            q->resultAvailable = true;
+        }
+    }
+    if (routed && ctx->renderEnc && ctx->encVisibilityOffset >= 0) {
         [ctx->renderEnc setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
         ctx->encVisibilityOffset = -1;
     }
@@ -234,6 +318,25 @@ static bool resolveQuery(Context* ctx, Query* q, bool wait) {
         if (a && b && e1 > s0) q->result = (uint64_t)((e1 - s0) * 1e9);
         else if (b) q->result = (uint64_t)((e1 - s1) * 1e9);
         else q->result = 0;
+        break;
+    }
+    case GL_VERTICES_SUBMITTED: case GL_PRIMITIVES_SUBMITTED: case GL_VERTEX_SHADER_INVOCATIONS:
+    case GL_TESS_CONTROL_SHADER_PATCHES: case GL_TESS_EVALUATION_SHADER_INVOCATIONS: case GL_GEOMETRY_SHADER_INVOCATIONS:
+    case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED: case GL_FRAGMENT_SHADER_INVOCATIONS: case GL_COMPUTE_SHADER_INVOCATIONS:
+    case GL_CLIPPING_INPUT_PRIMITIVES: case GL_CLIPPING_OUTPUT_PRIMITIVES: {
+        uint64_t v = q->cpuCount;
+        if (q->resultBuffer) {
+            uint64_t samples = 0;
+            memcpy(&samples, (uint8_t*)q->resultBuffer.contents + q->resultOffset, 8);
+            v += samples;
+        }
+        for (auto& [buf, off] : q->gpuCounts) {
+            uint32_t c = 0;
+            memcpy(&c, (uint8_t*)buf.contents + off, 4);
+            v += c;
+        }
+        q->gpuCounts.clear();
+        q->result = v;
         break;
     }
     case GL_TIMESTAMP: {

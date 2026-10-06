@@ -335,6 +335,7 @@ struct alignas(16) MGLDrawInfo {
     uint64_t tcsVertexOut;        // patchCount * tcsOutputVertices * tcsVertexOutBytes
     uint64_t tcsPatchOut;         // patchCount * tcsPatchOutBytes (includes tess levels first: outer[4], inner[2] floats)
     uint64_t counters;            // device atomic counters (primitives generated/written)
+    uint64_t stats;               // pipeline statistics: uint[3] {GS primitives, TES invocations, tess primitives}, or 0
 };
 
 

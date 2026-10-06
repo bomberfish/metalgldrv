@@ -2763,7 +2763,9 @@ void Emitter::emitGeometry(std::string& o) {
         if (v->builtin == BuiltinVar::InvocationID) e += "        g.bi_" + v->name + " = int(mgl_tg.z);\n";
         if (v->builtin == BuiltinVar::PrimitiveID && v->q.storage == Storage::Out) e += "        g.bi_" + v->name + " = int(mgl_prim);\n";
     }
-    e += "        g.mgl_init();\n        g." + gsi.mainName + "();\n        mgl_mo.set_primitive_count(g.mgl_np);\n    }\n}\n\n";
+    e += "        g.mgl_init();\n        g." + gsi.mainName + "();\n        mgl_mo.set_primitive_count(g.mgl_np);\n";
+    e += "        if (D.stats != nullptr) atomic_fetch_add_explicit(D.stats, g.mgl_np, memory_order_relaxed);  // pipeline statistics\n";
+    e += "    }\n}\n\n";
     entries_ += e;
     EntryPoint ep{"mgl_gs", Stage::Geometry, EntryPoint::Mesh};
     ep.threadsPerThreadgroup[0] = NV;
@@ -2935,7 +2937,10 @@ void Emitter::emitTessellation(std::string& o) {
     e += "    for (uint k = mgl_tid; k < np * " + std::to_string(ipp) + "u; k += " + std::to_string(NT) + "u) mgl_mo.set_index(k, mgl_idx[k]);\n";
     e += "    for (uint k = mgl_tid; k < np; k += " + std::to_string(NT) + "u) {\n        tes::MP p;\n" + indentBy(ro.primCopy, 8) +
          "        mgl_mo.set_primitive(k, p);\n    }\n";
-    e += "    if (mgl_tid == 0u) mgl_mo.set_primitive_count(np);\n}\n\n";
+    e += "    if (mgl_tid == 0u) {\n        mgl_mo.set_primitive_count(np);\n"
+         "        if (D.stats != nullptr) {  // pipeline statistics: TES invocations, tessellated primitives\n"
+         "            atomic_fetch_add_explicit(D.stats + 1, nv, memory_order_relaxed);\n"
+         "            atomic_fetch_add_explicit(D.stats + 2, np, memory_order_relaxed);\n        }\n    }\n}\n\n";
     entries_ += e;
     EntryPoint obj{"mgl_tes_obj", Stage::TessEval, EntryPoint::Object};
     obj.payloadBytes = 128;
