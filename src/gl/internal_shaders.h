@@ -43,4 +43,8 @@ void blitToTexture(Context* ctx, const BlitParams& p, id<MTLTexture> dst, int ds
 
 id<MTLLibrary> internalLibrary();
 
+// Expands `texels` tightly packed 12-byte texels at srcAddr into 16-byte texels at dstAddr
+// (4th word = alphaBits), on the GPU in command order.
+void expandRgb32(Context* ctx, uint64_t srcAddr, uint64_t dstAddr, uint32_t texels, uint32_t alphaBits);
+
 }  // namespace mgl

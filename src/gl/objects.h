@@ -161,6 +161,10 @@ public:
     GLintptr bufferOffset = 0;
     GLsizeiptr bufferSize = -1;
     uint32_t bufferGeneration = 0;
+    // GL_RGB32* buffer textures read an RGBA32 copy (Metal has no 96-bit format),
+    // refreshed when the source buffer's contents may have changed.
+    id<MTLBuffer> bufferExpanded = nil;
+    uint64_t expandedVersion = ~0ull, expandedGpuWrite = ~0ull;
 
     // Metal storage. Allocated lazily when the texture is first used
     // (images may be specified level by level).

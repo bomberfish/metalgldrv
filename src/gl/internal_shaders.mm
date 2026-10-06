@@ -78,6 +78,12 @@ fragment StencilOut blit_fs_stencil(QuadOut in [[stage_in]], constant BlitStenci
     o.s = a.src.read(uint2(in.uv), q.slice, uint(q.lod)).r;
     return o;
 }
+// GL_RGB32{F,I,UI} buffer textures: tightly packed 12-byte texels -> RGBA32 (alpha = 1).
+kernel void expand_rgb32(device const uint* src [[buffer(0)]], device uint4* dst [[buffer(1)]], constant uint2& p [[buffer(2)]],
+                         uint i [[thread_position_in_grid]]) {
+    if (i >= p.x) return;
+    dst[i] = uint4(src[3 * i], src[3 * i + 1], src[3 * i + 2], p.y);
+}
 )MSL";
 
 id<MTLLibrary> internalLibrary() {
@@ -339,6 +345,28 @@ void clearWithQuad(Context* ctx, const QuadClear& q) {
     [ctx->renderArgTable setAddress:qa.gpu atIndex:0];
     [ctx->renderArgTable setAddress:va.gpu atIndex:1];
     [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+}
+
+void expandRgb32(Context* ctx, uint64_t srcAddr, uint64_t dstAddr, uint32_t texels, uint32_t alphaBits) {
+    static id<MTLComputePipelineState> pso = [] {
+        MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
+        d.computeFunctionDescriptor = fnDesc(internalLibrary(), @"expand_rgb32");
+        NSError* err = nil;
+        id<MTLComputePipelineState> p = [Device::get()->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
+        if (!p) MGL_ERR("expand_rgb32 pipeline failed: %s", err.localizedDescription.UTF8String);
+        return p;
+    }();
+    if (!pso || !texels) return;
+    UploadAlloc pa = ctx->upload(8);
+    uint32_t p[2] = {texels, alphaBits};
+    memcpy(pa.cpu, p, 8);
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    [e setComputePipelineState:pso];
+    [ctx->computeArgTable setAddress:srcAddr atIndex:0];
+    [ctx->computeArgTable setAddress:dstAddr atIndex:1];
+    [ctx->computeArgTable setAddress:pa.gpu atIndex:2];
+    [e dispatchThreads:MTLSizeMake(texels, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
 }
 
 void blitToTexture(Context* ctx, const BlitParams& bpIn, id<MTLTexture> dst, int dstLevel, int dstSlice) {

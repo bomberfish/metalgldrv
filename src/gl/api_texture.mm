@@ -818,7 +818,8 @@ static bool getLevelParam(Context* ctx, Texture* t, int face, GLint level, GLenu
     case GL_TEXTURE_WIDTH:
         if (t->target == GL_TEXTURE_BUFFER) {
             GLsizeiptr sz = t->buffer ? (t->bufferSize < 0 ? t->buffer->size - t->bufferOffset : t->bufferSize) : 0;
-            *out = f ? sz / f->bytesPerPixel : 0;
+            // Clamped to MAX_TEXTURE_BUFFER_SIZE (GL 4.6 8.9).
+            *out = f ? std::min<GLsizeiptr>(sz / bufferTexelBytes(f), (GLsizeiptr)1 << 27) : 0;
         } else *out = L.width;
         return true;
     case GL_TEXTURE_HEIGHT: *out = t->target == GL_TEXTURE_BUFFER ? 1 : L.height; return true;
