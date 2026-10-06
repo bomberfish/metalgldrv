@@ -2380,7 +2380,8 @@ void Emitter::emitClassicVS(std::string& o) {
     }
     RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, true);
     o += "struct In {\n" + inS + "};\nstruct Out {\n" + ro.vertexStruct + "};\n}  // namespace vs\n\n";
-    std::string e = "vertex vs::Out mgl_vs(";
+    // Rasterizer discard: Metal needs a void vertex function when rasterization is disabled.
+    std::string e = K.rasterDiscard ? "vertex void mgl_vs(" : "vertex vs::Out mgl_vs(";
     if (anyIn) e += "vs::In in [[stage_in]], ";
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint mgl_vid [[vertex_id]], uint mgl_iid [[instance_id]]";
     e += ", uint mgl_bi [[base_instance]]";
@@ -2396,7 +2397,8 @@ void Emitter::emitClassicVS(std::string& o) {
         if (v->builtin == BuiltinVar::DrawID) e += "    g.bi_" + v->name + " = sys.drawID;\n";
         if (v->builtin == BuiltinVar::PointSize) e += "    g.bi_" + v->name + " = sys.pointSize;\n";
     }
-    e += "    g.mgl_init();\n    g." + si.mainName + "();\n    vs::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
+    if (K.rasterDiscard) e += "    g.mgl_init();\n    g." + si.mainName + "();\n}\n\n";
+    else e += "    g.mgl_init();\n    g." + si.mainName + "();\n    vs::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
     entries_ += e;
     fragInputsAvailable_ = ro.names;
     haveVsOutputs_ = true;

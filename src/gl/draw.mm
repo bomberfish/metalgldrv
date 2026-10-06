@@ -1282,6 +1282,13 @@ static bool validateDraw(Context* ctx, GLenum mode) {
     return true;
 }
 
+static bool programHasSideEffects(const glsl::Reflection& r) {
+    if (!r.storageBlocks.empty() || !r.atomicCounterBuffers.empty()) return true;
+    for (auto& sl : r.slots)
+        if (sl.kind == glsl::SlotKind::Image) return true;
+    return false;
+}
+
 static void executeDraw(Context* ctx, const DrawParams& d) {
     MGL_STAT("draw");
     ProgramObj* prog = ctx->activeProgramForStage(glsl::Stage::Vertex);
@@ -1312,7 +1319,9 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
         executeMultiPass(ctx, prog, d, xk, true);
         if (ctx->rasterizerDiscard) return;
     }
-    if (ctx->rasterizerDiscard) return;
+    // With rasterization discarded the draw only matters for vertex-stage side effects
+    // (storage buffer / image / atomic counter writes); run it without a fragment stage then.
+    if (ctx->rasterizerDiscard && !programHasSideEffects(refl)) return;
     if (envFlag("METALGLDRV_DUMP_LAYOUT")) {
         // One line per (program, layout) for diagnosing vertex input issues in the field.
         static std::set<std::string> seen;
