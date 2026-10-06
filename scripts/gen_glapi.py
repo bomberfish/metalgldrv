@@ -30,6 +30,7 @@ def main():
 
     # --- collect commands ---------------------------------------------------
     commands = {}
+    aliases = {}  # extension name -> core command it is identical to (gl.xml <alias>)
     for cmd in root.find("commands"):
         proto = cmd.find("proto")
         name = proto.find("name").text
@@ -42,6 +43,9 @@ def main():
             # array suffix after name (rare in gl.xml) is kept in the decl text
             params.append((ptype, pname, text_of(p).strip()))
         commands[name] = (ret, params)
+        al = cmd.find("alias")
+        if al is not None:
+            aliases[name] = al.get("name")
 
     wanted_cmds = []
     wanted_enums = set()
@@ -130,9 +134,17 @@ def main():
     for n in wanted_cmds:
         ret, params = commands[n]
         plist = ", ".join(p[2] for p in params) or "void"
-        body = "mgl_report_unimplemented(\"%s\");" % n
-        if ret != "void":
-            body += " return (%s)0;" % ret
+        target = aliases.get(n)
+        same_sig = target in commands and commands[target][0] == ret and \
+            [pp[0] for pp in commands[target][1]] == [pp[0] for pp in params]
+        if target in seen and target != n and same_sig:
+            # Same entry point under an extension name: forward to the core command.
+            call = "%s(%s);" % (target, ", ".join(pp[1] for pp in params))
+            body = ("return " + call) if ret != "void" else call
+        else:
+            body = "mgl_report_unimplemented(\"%s\");" % n
+            if ret != "void":
+                body += " return (%s)0;" % ret
         s.append("__attribute__((weak, visibility(\"default\"))) %s APIENTRY %s(%s) { %s }" % (ret, n, plist, body))
     s.append("}")
     with open(os.path.join(outdir, "gl_stubs.cpp"), "w") as f:

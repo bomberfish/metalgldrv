@@ -1082,12 +1082,19 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
     }
     std::string T = a->type.base == BT::Int ? "atomic_int" : "atomic_uint";
     Acc acc;
+    if (a->kind == EK::Swizzle && a->nswz == 1 && bufAccess(a->args[0], acc) && acc.type.isVector()) {
+        // single component of a buffer vector, e.g. atomicAdd(buf.v.y, 1)
+        uint32_t step = acc.compStride ? acc.compStride : scalarSize(acc.type.base);
+        if (!acc.device) fail("atomic operation on a uniform");
+        return "((device " + T + "*)(" + acc.ptr + " + (" + acc.off + " + " + std::to_string(a->swz[0] * step) + "u)))";
+    }
+    acc = Acc();
     if (bufAccess(a, acc)) {
         if (!acc.device) fail("atomic operation on a uniform");
         return "((device " + T + "*)(" + acc.ptr + " + " + acc.off + "))";
     }
     const Expr* r = a;
-    while (r->kind == EK::Index || r->kind == EK::Field) r = r->args[0];
+    while (r->kind == EK::Index || r->kind == EK::Field || r->kind == EK::Swizzle) r = r->args[0];
     if (r->kind == EK::Var && inThreadgroup(r->var)) return "((threadgroup " + T + "*)&(" + ex(a) + "))";
     fail("atomic operation requires a buffer or shared variable");
 }
