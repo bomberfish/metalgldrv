@@ -125,7 +125,11 @@ private:
         if (n == 1) return scalarName(b);
         return scalarName(b) + std::to_string(n);
     }
-    std::string structName(const StructDef* sd) { return (sd->isBlock ? "B_" : "S_") + sd->name; }
+    // in and out blocks of one stage may share a block name (separate interfaces)
+    std::string structName(const StructDef* sd) {
+        if (!sd->isBlock) return "S_" + sd->name;
+        return std::string(sd->blockQ.storage == Storage::In ? "Bi_" : sd->blockQ.storage == Storage::Out ? "Bo_" : "B_") + sd->name;
+    }
     std::string texType(const Type& t, uint8_t memory) {
         std::string T = scalarName(t.sampled == BT::Float ? BT::Float : t.sampled);
         bool image = t.base == BT::Image;

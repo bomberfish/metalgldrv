@@ -600,6 +600,7 @@ void Linker::assignUniforms() {
     std::map<std::string, Entry> blockVars;  // key -> first variable
     std::vector<std::string> blockOrder;
     std::map<std::string, size_t> defIdx, opIdx;
+    std::map<std::string, int> declBinding;  // uniform name -> layout(binding) from any stage that declares one
     for (int s = 0; s < (int)Stage::Count; s++) {
         StageCode& sc = prog_->stages[s];
         if (!sc.main) continue;
@@ -625,6 +626,7 @@ void Linker::assignUniforms() {
                                m0[i].type.dims == m1[i].type.dims;
                     if (!same) error("block '" + v->block->name + "' is declared with different members in different stages");
                 }
+                if (v->block->blockQ.layout.binding >= 0) declBinding[key] = v->block->blockQ.layout.binding;
                 blockVars[key].mask |= 1u << s;
                 continue;
             }
@@ -633,6 +635,7 @@ void Linker::assignUniforms() {
             if (v->type.base == BT::Subroutine) continue;         // subroutine uniforms have their own interface
             bool opq = v->type.containsOpaque();
             bool aggregate = v->type.stripArrays().base == BT::Struct;
+            if (v->q.layout.binding >= 0) declBinding[v->name] = v->q.layout.binding;
             auto addTo = [&](std::map<std::string, size_t>& idx, std::vector<Entry>& vec) {
                 auto it = idx.find(v->name);
                 if (it == idx.end()) {
@@ -757,7 +760,7 @@ void Linker::assignUniforms() {
             for (int i = 0; i < n; i++) {
                 Block b;
                 b.name = v->type.isArray() ? sd.name + "[" + std::to_string(i) + "]" : sd.name;
-                b.binding = std::max(0, sd.blockQ.layout.binding) + i;
+                b.binding = (declBinding.count(key) ? declBinding[key] : 0) + i;
                 b.dataSize = bb.layout->size;
                 b.slot = bb.slot + i;
                 b.stageMask = mask;
@@ -839,7 +842,7 @@ void Linker::assignUniforms() {
         u.type = glTypeEnum(bt);
         u.arraySize = lf.type.isArray() ? lf.type.dims[0] : 1;
         u.stageMask = lf.mask;
-        u.binding = lf.explicitLoc ? std::max(0, v->q.layout.binding) : 0;
+        u.binding = lf.explicitLoc && declBinding.count(v->name) ? declBinding[v->name] : 0;
         // Atomic counters have no uniform location (GL 4.6 §7.6.1).
         if (bt.base == BT::AtomicUint) u.location = -1;
         else if (explicitLoc_.count(lf.path)) u.location = explicitLoc_[lf.path];
