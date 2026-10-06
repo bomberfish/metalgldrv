@@ -349,6 +349,12 @@ private:
     RasterOut rasterOutput(Stage producer, const std::string& g, bool mesh, bool points);
     void emitClassicVS(std::string& o);
     void emitFS(std::string& o, bool meshInput);
+    // Mesh render pipelines need a fragment function; programs without a fragment shader
+    // (GL leaves color undefined, depth/stencil still update) get an empty one.
+    void emitNullFS() {
+        entries_ += "fragment void mgl_fs() {}\n\n";
+        out_.entryPoints.push_back({"mgl_fs", Stage::Fragment, EntryPoint::Fragment});
+    }
     void emitCS(std::string& o);
     void emitGeometry(std::string& o);
     void emitTessellation(std::string& o);
@@ -3159,11 +3165,13 @@ MSLOutput Emitter::run() {
                 if (!gs) fail("program has no geometry shader");
                 emitGeometry(o);
                 if (P.stages[(int)Stage::Fragment].main) emitFS(o, true);
+                else emitNullFS();
                 break;
             case PipelineKind::Tessellation:
                 if (!tess) fail("program has no tessellation evaluation shader");
                 emitTessellation(o);
                 if (P.stages[(int)Stage::Fragment].main) emitFS(o, true);
+                else emitNullFS();
                 break;
             case PipelineKind::XfbCapture:
                 emitXfb(o);
