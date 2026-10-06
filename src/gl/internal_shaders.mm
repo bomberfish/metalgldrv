@@ -341,8 +341,28 @@ void clearWithQuad(Context* ctx, const QuadClear& q) {
     [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 }
 
-void blitToTexture(Context* ctx, const BlitParams& bp, id<MTLTexture> dst, int dstLevel, int dstSlice) {
+void blitToTexture(Context* ctx, const BlitParams& bpIn, id<MTLTexture> dst, int dstLevel, int dstSlice) {
     ctx->endEncoder();
+    BlitParams bp = bpIn;
+    if (bp.src.textureType == MTLTextureType3D) {
+        // A 3D texture can't be viewed as a 2D array; copy the source depth slice
+        // into a temporary single-level 2D texture and sample that instead.
+        id<MTLTexture> s = bp.src;
+        int lw = std::max(1, (int)(s.width >> bp.srcLevel)), lh = std::max(1, (int)(s.height >> bp.srcLevel));
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:s.pixelFormat width:lw height:lh mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> tmp = [ctx->dev->mtl newTextureWithDescriptor:td];
+        if (!tmp) return;
+        Device::get()->retainUntil(tmp, ctx->serial());
+        id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
+        [ce copyFromTexture:s sourceSlice:0 sourceLevel:bp.srcLevel sourceOrigin:MTLOriginMake(0, 0, bp.srcSlice) sourceSize:MTLSizeMake(lw, lh, 1)
+                  toTexture:tmp destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        ctx->endEncoder();
+        bp.src = tmp;
+        bp.srcLevel = 0;
+        bp.srcSlice = 0;
+    }
     MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
     MTLPixelFormat colors[kMaxDrawBuffers];
     for (int i = 0; i < kMaxDrawBuffers; i++) colors[i] = MTLPixelFormatInvalid;

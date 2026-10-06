@@ -1241,48 +1241,92 @@ API void APIENTRY glCopyTexImage1D(GLenum target, GLint level, GLenum internalfo
     if (t && ctx->error == GL_NO_ERROR) copyTexSubImage(ctx, t, target, level, 0, 0, 0, x, y, width, 1);
 }
 
+bool mglFramebufferComplete(Context* ctx, Framebuffer* fb, GLenum* status);  // api_fbo.mm
+
+static bool readFbMultisampled(Framebuffer* fb) {
+    if (fb->isDefault) return fb->surface && fb->surface->samples > 1;
+    for (auto& a : fb->att)
+        if ((a.type == GL_RENDERBUFFER && a.rb && a.rb->samples > 1) || (a.type == GL_TEXTURE && a.tex && a.tex->samples > 1)) return true;
+    return false;
+}
+
+// Shared validation for Copy{Tex,Texture}SubImage{1,2,3}D. `t` is the texture
+// (already resolved); `target` is the GL target (cube face for TexSubImage2D);
+// `dsa` selects DSA error semantics (wrong texture target -> INVALID_OPERATION).
+static void copySubImageChecked(Context* ctx, Texture* t, GLenum target, int dims, bool dsa, GLint level, int xo, int yo, int zo, int x,
+                                int y, int w, int h) {
+    GLenum tt = t->target;
+    bool ok;
+    switch (dims) {
+    case 1: ok = tt == GL_TEXTURE_1D; break;
+    case 2: ok = tt == GL_TEXTURE_2D || tt == GL_TEXTURE_1D_ARRAY || tt == GL_TEXTURE_RECTANGLE || (!dsa && tt == GL_TEXTURE_CUBE_MAP); break;
+    default: ok = tt == GL_TEXTURE_3D || tt == GL_TEXTURE_2D_ARRAY || tt == GL_TEXTURE_CUBE_MAP_ARRAY || (dsa && tt == GL_TEXTURE_CUBE_MAP); break;
+    }
+    if (!ok) return ctx->setError(dsa ? GL_INVALID_OPERATION : GL_INVALID_ENUM, "copy: bad texture target");
+    if (level < 0 || level >= Texture::kMaxLevels || (tt == GL_TEXTURE_RECTANGLE && level != 0)) return ctx->setError(GL_INVALID_VALUE);
+    if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
+    Framebuffer* fb = ctx->readFb.get();
+    GLenum status;
+    if (!fb || !mglFramebufferComplete(ctx, fb, &status)) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+    if (readFbMultisampled(fb)) return ctx->setError(GL_INVALID_OPERATION, "copy: multisampled read framebuffer");
+    if (dsa && tt == GL_TEXTURE_CUBE_MAP) {
+        if (zo < 0 || zo > 5) return ctx->setError(GL_INVALID_VALUE);
+        target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + zo;
+        zo = 0;
+    }
+    if (!dsa && tt == GL_TEXTURE_CUBE_MAP && !isCubeFace(target)) return ctx->setError(GL_INVALID_ENUM);
+    const TexImageLevel& L = t->levels[faceIndex(target)][level];
+    if (!L.defined()) return ctx->setError(GL_INVALID_OPERATION, "copy: level not defined");
+    int lw = L.width, lh = L.height, ld = L.depth;
+    if (xo < 0 || xo + w > lw) return ctx->setError(GL_INVALID_VALUE);
+    if (dims >= 2 && (yo < 0 || yo + h > lh)) return ctx->setError(GL_INVALID_VALUE);
+    if (dims == 3 && (zo < 0 || zo >= ld)) return ctx->setError(GL_INVALID_VALUE);
+    if (fb->readBuffer == GL_NONE) return ctx->setError(GL_INVALID_OPERATION, "copy: read buffer is NONE");
+    copyTexSubImage(ctx, t, target, level, xo, yo, zo, x, y, w, h);
+}
+
 API void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
     MGL_CTX();
+    if (target != GL_TEXTURE_1D) return ctx->setError(GL_INVALID_ENUM);
     Texture* t = texForTarget(ctx, target);
-    if (t) copyTexSubImage(ctx, t, target, level, xoffset, 0, 0, x, y, width, 1);
+    if (t) copySubImageChecked(ctx, t, target, 1, false, level, xoffset, 0, 0, x, y, width, 1);
 }
 
 API void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width,
                                       GLsizei height) {
     MGL_CTX();
+    if (!(target == GL_TEXTURE_2D || target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_RECTANGLE || isCubeFace(target)))
+        return ctx->setError(GL_INVALID_ENUM);
     Texture* t = texForTarget(ctx, target);
-    if (!t) return;
-    const TexImageLevel& L = t->levels[faceIndex(target)][level];
-    if (!L.defined()) return ctx->setError(GL_INVALID_OPERATION);
-    if (xoffset < 0 || yoffset < 0 || xoffset + width > L.width || yoffset + height > L.height) return ctx->setError(GL_INVALID_VALUE);
-    copyTexSubImage(ctx, t, target, level, xoffset, yoffset, 0, x, y, width, height);
+    if (t) copySubImageChecked(ctx, t, target, 2, false, level, xoffset, yoffset, 0, x, y, width, height);
 }
 
 API void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y,
                                       GLsizei width, GLsizei height) {
     MGL_CTX();
+    if (!(target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_CUBE_MAP_ARRAY)) return ctx->setError(GL_INVALID_ENUM);
     Texture* t = texForTarget(ctx, target);
-    if (t) copyTexSubImage(ctx, t, target, level, xoffset, yoffset, zoffset, x, y, width, height);
+    if (t) copySubImageChecked(ctx, t, target, 3, false, level, xoffset, yoffset, zoffset, x, y, width, height);
+}
+
+API void APIENTRY glCopyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
+    MGL_CTX();
+    Texture* t = namedTex(ctx, texture);
+    if (t) copySubImageChecked(ctx, t, t->target, 1, true, level, xoffset, 0, 0, x, y, width, 1);
 }
 
 API void APIENTRY glCopyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width,
                                           GLsizei height) {
     MGL_CTX();
     Texture* t = namedTex(ctx, texture);
-    if (t) copyTexSubImage(ctx, t, t->target, level, xoffset, yoffset, 0, x, y, width, height);
+    if (t) copySubImageChecked(ctx, t, t->target, 2, true, level, xoffset, yoffset, 0, x, y, width, height);
 }
 
 API void APIENTRY glCopyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y,
                                           GLsizei width, GLsizei height) {
     MGL_CTX();
     Texture* t = namedTex(ctx, texture);
-    if (t) copyTexSubImage(ctx, t, t->target, level, xoffset, yoffset, zoffset, x, y, width, height);
-}
-
-API void APIENTRY glCopyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
-    MGL_CTX();
-    Texture* t = namedTex(ctx, texture);
-    if (t) copyTexSubImage(ctx, t, t->target, level, xoffset, 0, 0, x, y, width, 1);
+    if (t) copySubImageChecked(ctx, t, t->target, 3, true, level, xoffset, yoffset, zoffset, x, y, width, height);
 }
 
 // --- copy image ---
