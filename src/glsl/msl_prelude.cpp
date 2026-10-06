@@ -46,6 +46,9 @@ template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_muls(mgl_dmat<C, R> a, ul
 template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_muls(ulong s, mgl_dmat<C, R> a) { return mgl_dmat_muls(a, s); }
 template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_divs(mgl_dmat<C, R> a, ulong s) { for (int i = 0; i < C; i++) a[i] = mgl_f64_div(a[i], vec<ulong, R>(s)); return a; }
 template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_divs(ulong s, mgl_dmat<C, R> a) { for (int i = 0; i < C; i++) a[i] = mgl_f64_div(vec<ulong, R>(s), a[i]); return a; }
+// ++/-- on double matrices are emitted as mgl_f64_add/sub(x, 1.0)
+template <int C, int R> inline mgl_dmat<C, R> mgl_f64_add(mgl_dmat<C, R> a, ulong s) { return mgl_dmat_adds(a, s); }
+template <int C, int R> inline mgl_dmat<C, R> mgl_f64_sub(mgl_dmat<C, R> a, ulong s) { return mgl_dmat_subs(a, s); }
 template <int C, int R> inline mgl_dmat<C, R> mgl_dmat_neg(mgl_dmat<C, R> a) { for (int i = 0; i < C; i++) a[i] = mgl_f64_neg(a[i]); return a; }
 template <int C, int R> inline vec<ulong, R> mgl_dmat_mv(mgl_dmat<C, R> m, vec<ulong, C> v) {
     vec<ulong, R> r = mgl_f64_mul(m[0], vec<ulong, R>(v[0]));

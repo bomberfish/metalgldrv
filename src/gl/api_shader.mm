@@ -1,3 +1,6 @@
+#include <limits>
+#include <type_traits>
+#include <cmath>
 // Shader & program objects, uniforms, program interface queries, pipelines.
 #import "gl/context.h"
 #include <cmath>
@@ -1081,8 +1084,25 @@ static void getUniform(Context* ctx, GLuint program, GLint location, GLsizei buf
             const uint8_t* e = src + c * matStride + r * elemSize;
             T v;
             switch (ts.base) {
-            case BaseType::Float: { float f; memcpy(&f, e, 4); v = (T)f; break; }
-            case BaseType::Double: { double d; memcpy(&d, e, 8); v = (T)d; break; }
+            // floating point to integer queries round to nearest (GL 4.6 §2.2.2)
+            case BaseType::Float:
+            case BaseType::Double: {
+                double d;
+                if (ts.base == BaseType::Float) {
+                    float f;
+                    memcpy(&f, e, 4);
+                    d = f;
+                } else {
+                    memcpy(&d, e, 8);
+                }
+                if (std::is_integral<T>::value) {
+                    d = std::nearbyint(d);
+                    if (std::is_unsigned<T>::value) d = std::max(d, 0.0);  // negative -> 0 for unsigned queries
+                    d = std::clamp(d, (double)std::numeric_limits<T>::lowest(), (double)std::numeric_limits<T>::max());
+                }
+                v = (T)d;
+                break;
+            }
             case BaseType::Int: { int32_t i; memcpy(&i, e, 4); v = (T)i; break; }
             case BaseType::UInt: case BaseType::Bool: { uint32_t i; memcpy(&i, e, 4); v = (T)i; break; }
             default: v = 0;
