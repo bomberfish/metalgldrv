@@ -291,6 +291,10 @@ private:
         if (stage_ == Stage::TessEval) return v->q.storage == Storage::In;
         return false;
     }
+    bool rootInThreadgroup(const Expr* e) const {
+        while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
+        return e->kind == EK::Var && inThreadgroup(e->var);
+    }
     std::string varName(const Variable* v) {
         if (v->builtin != BuiltinVar::None) return (inThreadgroup(v) ? "S->bi_" : "bi_") + v->name;
         if (v->global) {
@@ -847,6 +851,11 @@ std::string Emitter::ex(const Expr* e) {
             const Expr* b = e->args[0];
             std::string idx = ex(e->args[1]);
             if (b->type.isOpaque() || b->type.stripArrays().isOpaque()) fail("opaque array used as a value");
+            if (b->type.isVector() && !b->type.isArray() && rootInThreadgroup(b)) {
+                // Address the component as a scalar so concurrent invocations writing different
+                // components of one shared vector don't race through a whole-vector store.
+                return "((threadgroup " + scalarName(b->type.base) + "*)&(" + ex(b) + "))[" + idx + "]";
+            }
             return ex(b) + "[" + idx + "]";
         }
         case EK::Swizzle: {
