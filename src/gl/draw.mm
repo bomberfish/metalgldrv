@@ -189,6 +189,56 @@ static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLen
 }
 
 // Fills the program's argument slots. Returns GPU address of the slot buffer.
+// GL 4.6 §8.26: an image unit is invalid when its level lies outside [base, max], when
+// it is the base level of a texture that is not base-complete, or another level of a
+// texture that is not mipmap-complete (Mesa's rule, which the CTS follows).
+static bool imageUnitValid(const ImageUnit& iu) {
+    const Texture* t = iu.tex.get();
+    if (t->target == GL_TEXTURE_BUFFER) return t->buffer && t->buffer->mtl;
+    if (t->viewParent) return true;
+    int maxLevel = t->immutable ? std::min(t->maxLevel, t->immutableLevels - 1) : t->maxLevel;
+    if (iu.level < t->baseLevel || iu.level > maxLevel) return false;
+    SamplerState ss = t->sampler;
+    ss.minFilter = iu.level == t->baseLevel ? GL_NEAREST : GL_NEAREST_MIPMAP_NEAREST;
+    int first = 0, last = 0;
+    if (!textureComplete(t, ss, &first, &last)) return false;
+    return iu.level <= last || t->samples > 0;
+}
+
+// One depth slice of a 3D texture as a standalone 2D texture (non-layered image binding).
+static id<MTLTexture> imageSliceCopy(Context* ctx, id<MTLTexture> src, MTLPixelFormat pf, NSUInteger level, int layer, bool writable) {
+    NSUInteger w = std::max<NSUInteger>(1, src.width >> level), h = std::max<NSUInteger>(1, src.height >> level);
+    NSUInteger depth = std::max<NSUInteger>(1, src.depth >> level);
+    if (layer < 0 || (NSUInteger)layer >= depth) return nil;
+    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:w height:h mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = src.usage | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> tmp = [ctx->dev->mtl newTextureWithDescriptor:td];
+    if (!tmp) return nil;
+    ctx->dev->makeResident(tmp);
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    [e copyFromTexture:src sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, layer) sourceSize:MTLSizeMake(w, h, 1)
+             toTexture:tmp destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    uint64_t serial = ctx->serial();
+    if (writable) ctx->imageWritebacks.push_back({tmp, src, level, (NSUInteger)layer});
+    ctx->dev->releaseAfter(tmp, serial);
+    return pf == tmp.pixelFormat ? tmp : [tmp newTextureViewWithPixelFormat:pf];
+}
+
+// Copies image slices written through imageSliceCopy() back into their 3D textures.
+static void flushImageWritebacks(Context* ctx) {
+    if (ctx->imageWritebacks.empty()) return;
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    [e barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    for (auto& wb : ctx->imageWritebacks)
+        [e copyFromTexture:wb.tmp sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                sourceSize:MTLSizeMake(wb.tmp.width, wb.tmp.height, 1) toTexture:wb.dst destinationSlice:0 destinationLevel:wb.level
+         destinationOrigin:MTLOriginMake(0, 0, wb.z)];
+    [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    ctx->imageWritebacks.clear();
+}
+
 static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) {
     const glsl::Reflection& r = prog->refl;
     size_t nslots = r.slots.size();
@@ -326,7 +376,7 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             int unit = std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1);
             ImageUnit& iu = ctx->imageUnits[unit];
             id<MTLTexture> view = nil;
-            if (iu.tex && ensureTextureStorage(ctx, iu.tex.get())) {
+            if (iu.tex && imageUnitValid(iu) && ensureTextureStorage(ctx, iu.tex.get())) {
                 Texture* t = iu.tex.get();
                 const FormatInfo* f = formatInfo(iu.format);
                 MTLPixelFormat pf = f ? f->mtl : t->mtl.pixelFormat;
@@ -346,14 +396,24 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                         vt = MTLTextureType2D;
                     }
                     if (pf != t->mtl.pixelFormat && !(t->mtl.usage & MTLTextureUsagePixelFormatView)) pf = t->mtl.pixelFormat;
-                    view = [t->mtl newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(std::min(iu.level, t->storageLevels - 1), 1) slices:sr];
+                    NSUInteger lvl = std::min(iu.level, t->storageLevels - 1);
+                    if (t->mtl.textureType == MTLTextureType3D && !iu.layered && vt == MTLTextureType2D) {
+                        view = imageSliceCopy(ctx, t->mtl, pf, lvl, iu.layer, iu.access != GL_READ_ONLY);
+                    } else {
+                        view = [t->mtl newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(lvl, 1) slices:sr];
+                    }
                     ctx->dev->retainUntil(view, serial);
                 }
                 t->lastUse = t->lastGpuWrite = serial;
             }
-            if (!view) view = dummyTexture(ctx, mtlTextureType(s.textureTarget, 0), FmtKind::Unorm);
-            MTLResourceID rid = view.gpuResourceID;
-            memcpy(&v, &rid, 8);
+            // Invalid image units (GL 4.6 §8.26) get a null texture: loads return zero and
+            // stores are dropped.
+            if (view) {
+                MTLResourceID rid = view.gpuResourceID;
+                memcpy(&v, &rid, 8);
+            } else {
+                v = 0;
+            }
             break;
         }
         case glsl::SlotKind::SubroutineIndices: {
@@ -1668,7 +1728,13 @@ static bool programHasSideEffects(const glsl::Reflection& r) {
     return false;
 }
 
+static void executeDrawImpl(Context* ctx, const DrawParams& d);
 static void executeDraw(Context* ctx, const DrawParams& d) {
+    executeDrawImpl(ctx, d);
+    flushImageWritebacks(ctx);
+}
+
+static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     MGL_STAT("draw");
     ProgramObj* prog = mglPipelineDrawProgram(ctx);
     // Compatibility profile: fixed-function emulation (prog == null) and gl_* state uniforms.
@@ -2188,6 +2254,7 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
     // GL requires explicit glMemoryBarrier for incoherent accesses, but keep dispatches ordered
     // against each other (cheap within one encoder).
     [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    flushImageWritebacks(ctx);
 }
 
 API void APIENTRY glDispatchCompute(GLuint x, GLuint y, GLuint z) {
