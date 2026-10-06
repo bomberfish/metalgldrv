@@ -2399,7 +2399,7 @@ void Emitter::emitClassicVS(std::string& o) {
     for (auto* v : si.builtins) {
         if (v->builtin == BuiltinVar::VertexID) e += "    g.bi_" + v->name + " = int(mgl_vid);\n";
         if (v->builtin == BuiltinVar::InstanceID) e += "    g.bi_" + v->name + " = int(mgl_iid - mgl_bi);\n";
-        if (v->builtin == BuiltinVar::BaseVertex) e += "    g.bi_" + v->name + " = int(mgl_bv);\n";
+        if (v->builtin == BuiltinVar::BaseVertex) e += "    g.bi_" + v->name + " = (sys.flags & 8u) ? 0 : int(mgl_bv);\n";
         if (v->builtin == BuiltinVar::BaseInstance) e += "    g.bi_" + v->name + " = int(mgl_bi);\n";
         if (v->builtin == BuiltinVar::DrawID) e += "    g.bi_" + v->name + " = sys.drawID;\n";
         if (v->builtin == BuiltinVar::PointSize) e += "    g.bi_" + v->name + " = sys.pointSize;\n";

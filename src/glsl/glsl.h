@@ -291,7 +291,8 @@ struct alignas(16) MGLSys {
     uint32_t clipDistanceMask;             // glEnable(GL_CLIP_DISTANCEi)
     float viewport[4];                     // x, y, w, h of viewport 0
     float pointSize;                       // glPointSize (when program doesn't write gl_PointSize)
-    uint32_t flags;                        // bit0: program point size, bit1: point sprite origin lower-left
+    uint32_t flags;                        // bit0: program point size, bit1: point sprite origin lower-left,
+                                           // bit2: clip origin upper-left, bit3: non-indexed draw (gl_BaseVertex = 0)
     int32_t baseVertex, baseInstance;      // gl_BaseVertex / gl_BaseInstance / gl_DrawID support
     int32_t drawID, firstVertex;
     uint32_t sampleMask;

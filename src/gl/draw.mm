@@ -359,7 +359,8 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
     return args.gpu;
 }
 
-static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseVertex, GLuint baseInstance, GLint first) {
+static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseVertex, GLuint baseInstance, GLint first,
+                         bool indexed = true) {
     UploadAlloc sa = ctx->upload(sizeof(glsl::MGLSys), 16);
     glsl::MGLSys* s = (glsl::MGLSys*)sa.cpu;
     s->depthRangeNear = ctx->depthRange[0][0];
@@ -368,7 +369,8 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     s->clipDistanceMask = ctx->clipDistanceMask;
     for (int k = 0; k < 4; k++) s->viewport[k] = ctx->viewport[0][k];
     s->pointSize = ctx->pointSize;
-    s->flags = (ctx->programPointSize ? 1u : 0u) | (ctx->pointSpriteOrigin == GL_LOWER_LEFT ? 2u : 0u) | (ctx->clipOrigin == GL_UPPER_LEFT ? 4u : 0u);
+    s->flags = (ctx->programPointSize ? 1u : 0u) | (ctx->pointSpriteOrigin == GL_LOWER_LEFT ? 2u : 0u) | (ctx->clipOrigin == GL_UPPER_LEFT ? 4u : 0u) |
+               (indexed ? 0u : 8u);  // gl_BaseVertex is 0 for commands without a baseVertex parameter
     s->baseVertex = baseVertex;
     s->baseInstance = baseInstance;
     s->drawID = drawID;
@@ -1480,7 +1482,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
     }
     applyDynamicState(ctx, e, d.mode);
     [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
-    uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
+    uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first, d.indexed);
     [table setAddress:sysAddr atIndex:glsl::kBufSys];
     if (mixedFs) {
         // The fragment stage reads its own program's arguments.
@@ -1489,7 +1491,7 @@ static void executeDraw(Context* ctx, const DrawParams& d) {
             ctx->enc.fsTableSplit = true;
         }
         [ctx->renderArgTableFS setAddress:fsArgAddr ? fsArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
-        [ctx->renderArgTableFS setAddress:fsProg ? buildSys(ctx, fsProg, d.drawID, d.baseVertex, d.baseInstance, d.first) : sysAddr
+        [ctx->renderArgTableFS setAddress:fsProg ? buildSys(ctx, fsProg, d.drawID, d.baseVertex, d.baseInstance, d.first, d.indexed) : sysAddr
                                   atIndex:glsl::kBufSys];
     } else if (ctx->enc.fsTableSplit) {
         [e setArgumentTable:table atStages:MTLRenderStageFragment];
