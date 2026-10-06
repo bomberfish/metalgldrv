@@ -181,16 +181,19 @@ static void texImage(Context* ctx, GLenum target, GLint level, GLint internalfor
     if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE);
     if (w < 0 || h < 0 || d < 0 || border != 0) return ctx->setError(GL_INVALID_VALUE);
     if (w > 16384 || h > 16384 || d > 2048) return ctx->setError(GL_INVALID_VALUE);
-    if (!isValidFormatType(format, type)) return ctx->setError(GL_INVALID_ENUM, "bad format/type 0x%x/0x%x", format, type);
+    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e, "bad format/type 0x%x/0x%x", format, type);
     const FormatInfo* f = resolveInternalFormat(internalformat, format, type);
     if (!f) return ctx->setError(GL_INVALID_VALUE, "unsupported internal format 0x%x", internalformat);
+    if (GLenum e = texImageFormatError(f, format, type, target))
+        return ctx->setError(e, "format 0x%x/type 0x%x incompatible with internal format 0x%x", format, type, internalformat);
+    if (f->comp == Comp::Compressed && (target == GL_TEXTURE_3D || target == GL_PROXY_TEXTURE_3D) &&
+        (f->internalFormat == GL_COMPRESSED_RED_RGTC1 || f->internalFormat == GL_COMPRESSED_SIGNED_RED_RGTC1 ||
+         f->internalFormat == GL_COMPRESSED_RG_RGTC2 || f->internalFormat == GL_COMPRESSED_SIGNED_RG_RGTC2))
+        return ctx->setError(GL_INVALID_OPERATION);
     if (f->comp == Comp::Compressed) {
         // glTexImage with a compressed internal format and uncompressed data: CPU-compress not supported; store RGBA8.
         f = formatInfo(f->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8);
     }
-    bool isDS = isDepthOrStencil(f);
-    bool fmtDS = format == GL_DEPTH_COMPONENT || format == GL_DEPTH_STENCIL || format == GL_STENCIL_INDEX;
-    if (isDS != fmtDS) return ctx->setError(GL_INVALID_OPERATION, "depth/stencil format mismatch");
     if (isProxy(target)) {
         // Proxy: record the level if it would succeed, otherwise clear it (GL 4.6 §8.22).
         Ref<Texture>& pt = ctx->proxyTextures[target];
@@ -253,7 +256,7 @@ static void texSubImage(Context* ctx, Texture* t, GLenum target, GLint level, GL
                         GLenum format, GLenum type, const void* pixels) {
     if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE);
     if (w < 0 || h < 0 || d < 0) return ctx->setError(GL_INVALID_VALUE);
-    if (!isValidFormatType(format, type)) return ctx->setError(GL_INVALID_ENUM);
+    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
     int face = faceIndex(target);
     if (t->target == GL_TEXTURE_CUBE_MAP && !isCubeFace(target)) {
         // DSA path on cube maps: z selects faces
@@ -273,9 +276,7 @@ static void texSubImage(Context* ctx, Texture* t, GLenum target, GLint level, GL
     const TexImageLevel& L = t->levels[face][level];
     if (!L.defined()) return ctx->setError(GL_INVALID_OPERATION, "level %d not defined", level);
     if (x < 0 || y < 0 || z < 0 || x + w > L.width || y + h > L.height || z + d > L.depth) return ctx->setError(GL_INVALID_VALUE);
-    bool isDS = isDepthOrStencil(L.fmt);
-    bool fmtDS = format == GL_DEPTH_COMPONENT || format == GL_DEPTH_STENCIL || format == GL_STENCIL_INDEX;
-    if (isDS != fmtDS) return ctx->setError(GL_INVALID_OPERATION);
+    if (GLenum e = texImageFormatError(L.fmt, format, type, t->target)) return ctx->setError(e);
     if (!w || !h || !d) return;
     if (!pixels && !ctx->pixelUnpackBuffer) return;
     uploadTexSubImage(ctx, t, level, face, x, y, z, w, h, d, format, type, pixels);
@@ -498,7 +499,9 @@ static void texStorageMS(Context* ctx, Texture* t, GLsizei samples, GLenum inter
                          GLboolean fixed, bool immutable) {
     const FormatInfo* f = resolveInternalFormat(internalformat, GL_RGBA, GL_UNSIGNED_BYTE);
     if (!f || !f->renderable) return ctx->setError(GL_INVALID_ENUM);
-    if (samples < 1 || w < 1 || h < 1 || d < 1) return ctx->setError(GL_INVALID_VALUE);
+    // TexStorage*Multisample needs sizes >= 1; TexImage*Multisample only rejects negative ones.
+    int minSize = immutable ? 1 : 0;
+    if (samples < 1 || w < minSize || h < minSize || d < minSize) return ctx->setError(GL_INVALID_VALUE);
     if (samples > 4) return ctx->setError(GL_INVALID_OPERATION);
     if (t->immutable) return ctx->setError(GL_INVALID_OPERATION);
     // Metal multisample textures need >= 2 samples; GL allows rounding the count up.
@@ -514,7 +517,7 @@ static void texStorageMS(Context* ctx, Texture* t, GLsizei samples, GLenum inter
     t->immutable = immutable;
     t->immutableLevels = 1;
     t->storageDirty = true;
-    ensureTextureStorage(ctx, t);
+    if (w && h && d) ensureTextureStorage(ctx, t);
 }
 
 API void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height,
@@ -1031,10 +1034,26 @@ API void APIENTRY glTextureBufferRange(GLuint texture, GLenum internalformat, GL
 static void getTexImage(Context* ctx, Texture* t, GLenum target, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels,
                         int x = 0, int y = 0, int z = 0, int w = -1, int h = -1, int d = -1) {
     if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE);
-    if (!isValidFormatType(format, type)) return ctx->setError(GL_INVALID_ENUM);
+    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
     int face = faceIndex(target);
     const TexImageLevel& L = t->levels[face][level];
     if (!L.defined()) return;
+    {
+        // §8.11.4: integer-ness must match; DEPTH_STENCIL needs a depth/stencil texture,
+        // DEPTH_COMPONENT a depth one, STENCIL_INDEX a stencil one; color formats a color texture.
+        const FormatInfo* f = L.fmt;
+        bool intTex = f->kind == FmtKind::UInt || f->kind == FmtKind::SInt;
+        bool intFmt = format == GL_RED_INTEGER || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER || format == GL_RG_INTEGER ||
+                      format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER ||
+                      format == GL_ALPHA_INTEGER;
+        bool depth = f->baseFormat == GL_DEPTH_COMPONENT, ds = f->baseFormat == GL_DEPTH_STENCIL, st = f->baseFormat == GL_STENCIL_INDEX;
+        bool bad = false;
+        if (format == GL_DEPTH_STENCIL) bad = !ds;
+        else if (format == GL_DEPTH_COMPONENT) bad = !depth && !ds;
+        else if (format == GL_STENCIL_INDEX) bad = !st && !ds;
+        else bad = depth || ds || st || intTex != intFmt;
+        if (bad) return ctx->setError(GL_INVALID_OPERATION);
+    }
     if (w < 0) {
         w = L.width;
         h = L.height;

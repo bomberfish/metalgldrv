@@ -535,7 +535,7 @@ void clearBufferRange(Context* ctx, Buffer* b, GLenum internalformat, GLintptr o
                       const void* data) {
     const FormatInfo* f = formatInfo(internalformat);
     if (!f || f->comp == Comp::Compressed || isDepthOrStencil(f)) return ctx->setError(GL_INVALID_ENUM);
-    if (!isValidFormatType(format, type)) return ctx->setError(GL_INVALID_ENUM);
+    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
     // Buffer clear uses the GL texel size of the internal format (no RGB padding).
     int texel = clientPixelSize(f->baseFormat == GL_RGB ? GL_RGB : f->baseFormat == GL_RGBA ? GL_RGBA : f->baseFormat == GL_RG ? GL_RG : GL_RED,
                                 f->kind == FmtKind::Float ? (f->rBits == 16 ? GL_HALF_FLOAT : GL_FLOAT)

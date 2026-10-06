@@ -237,6 +237,65 @@ static int packedSize(GLenum type, int& comps) {
     }
 }
 
+static bool isIntegerFormat(GLenum format) {
+    switch (format) {
+    case GL_RED_INTEGER: case GL_GREEN_INTEGER: case GL_BLUE_INTEGER: case GL_ALPHA_INTEGER:
+    case GL_RG_INTEGER: case GL_RGB_INTEGER: case GL_BGR_INTEGER: case GL_RGBA_INTEGER: case GL_BGRA_INTEGER:
+        return true;
+    default: return false;
+    }
+}
+
+// GL 4.6 §8.4.4 / Tables 8.7–8.8: INVALID_ENUM for unknown format or type enums,
+// INVALID_OPERATION for a known pair that cannot be combined.
+GLenum pixelFormatTypeError(GLenum format, GLenum type) {
+    int n = formatComponents(format);
+    int pc;
+    bool packed = packedSize(type, pc) != 0;
+    if (!n || (!packed && !typeSize(type))) return GL_INVALID_ENUM;
+    bool integer = isIntegerFormat(format);
+    switch (type) {
+    case GL_UNSIGNED_BYTE_3_3_2: case GL_UNSIGNED_BYTE_2_3_3_REV:
+    case GL_UNSIGNED_SHORT_5_6_5: case GL_UNSIGNED_SHORT_5_6_5_REV:
+        return format == GL_RGB || format == GL_RGB_INTEGER ? 0 : GL_INVALID_OPERATION;
+    case GL_UNSIGNED_SHORT_4_4_4_4: case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+    case GL_UNSIGNED_SHORT_5_5_5_1: case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+    case GL_UNSIGNED_INT_8_8_8_8: case GL_UNSIGNED_INT_8_8_8_8_REV:
+    case GL_UNSIGNED_INT_10_10_10_2: case GL_UNSIGNED_INT_2_10_10_10_REV:
+        return format == GL_RGBA || format == GL_BGRA || format == GL_RGBA_INTEGER || format == GL_BGRA_INTEGER ? 0
+                                                                                                             : GL_INVALID_OPERATION;
+    case GL_UNSIGNED_INT_10F_11F_11F_REV: case GL_UNSIGNED_INT_5_9_9_9_REV:
+        return format == GL_RGB ? 0 : GL_INVALID_OPERATION;
+    case GL_UNSIGNED_INT_24_8: case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+        return format == GL_DEPTH_STENCIL ? 0 : GL_INVALID_OPERATION;
+    default: break;
+    }
+    if (format == GL_DEPTH_STENCIL) return GL_INVALID_OPERATION;  // needs a packed depth/stencil type
+    if (integer && (type == GL_FLOAT || type == GL_HALF_FLOAT)) return GL_INVALID_OPERATION;
+    return 0;
+}
+
+GLenum texImageFormatError(const FormatInfo* f, GLenum format, GLenum type, GLenum target) {
+    if (GLenum e = pixelFormatTypeError(format, type)) return e;
+    bool depth = f->baseFormat == GL_DEPTH_COMPONENT, ds = f->baseFormat == GL_DEPTH_STENCIL,
+         stencil = f->baseFormat == GL_STENCIL_INDEX;
+    switch (format) {
+    case GL_DEPTH_COMPONENT: case GL_DEPTH_STENCIL:
+        if (!depth && !ds) return GL_INVALID_OPERATION;
+        break;
+    case GL_STENCIL_INDEX:
+        if (!stencil) return GL_INVALID_OPERATION;
+        break;
+    default:
+        if (depth || ds || stencil) return GL_INVALID_OPERATION;
+        break;
+    }
+    bool intTex = f->kind == FmtKind::UInt || f->kind == FmtKind::SInt;
+    if (intTex != isIntegerFormat(format)) return GL_INVALID_OPERATION;
+    if ((target == GL_TEXTURE_3D || target == GL_PROXY_TEXTURE_3D) && (depth || ds || stencil)) return GL_INVALID_OPERATION;
+    return 0;
+}
+
 bool isValidFormatType(GLenum format, GLenum type) {
     int n = formatComponents(format);
     if (!n) return false;
@@ -759,19 +818,21 @@ void encodeClient(GLenum format, GLenum type, const Px& px, uint8_t* p, bool swa
     }
     auto comp = [&](int k) { return map[k] >= 0 ? c[map[k]] : 0.0f; };
     auto icomp = [&](int k) { return map[k] >= 0 ? ci[map[k]] : 0; };
+    // Integer values are clamped to the destination type's range (GL 4.6 §8.4.4.2 / §18.2.8).
+    auto ic = [&](int k, int64_t lo, int64_t hi) { return std::clamp<int64_t>(icomp(k), lo, hi); };
     int nc = 0;
     while (nc < 4 && map[nc] >= 0) nc++;
     switch (type) {
-    case GL_UNSIGNED_BYTE: for (int k = 0; k < nc; k++) p[k] = (uint8_t)(isInt ? icomp(k) : toUnorm(comp(k), 8)); break;
-    case GL_BYTE: for (int k = 0; k < nc; k++) p[k] = (uint8_t)(int8_t)(isInt ? icomp(k) : toSnorm(comp(k), 8)); break;
-    case GL_UNSIGNED_SHORT: for (int k = 0; k < nc; k++) wr<uint16_t>(p + 2 * k, (uint16_t)(isInt ? icomp(k) : toUnorm(comp(k), 16)), swap); break;
-    case GL_SHORT: for (int k = 0; k < nc; k++) wr<int16_t>(p + 2 * k, (int16_t)(isInt ? icomp(k) : toSnorm(comp(k), 16)), swap); break;
-    case GL_UNSIGNED_INT: for (int k = 0; k < nc; k++) wr<uint32_t>(p + 4 * k, (uint32_t)(isInt ? icomp(k) : toUnorm(comp(k), 32)), swap); break;
-    case GL_INT: for (int k = 0; k < nc; k++) wr<int32_t>(p + 4 * k, (int32_t)(isInt ? icomp(k) : toSnorm(comp(k), 32)), swap); break;
+    case GL_UNSIGNED_BYTE: for (int k = 0; k < nc; k++) p[k] = (uint8_t)(isInt ? ic(k, 0, 255) : toUnorm(comp(k), 8)); break;
+    case GL_BYTE: for (int k = 0; k < nc; k++) p[k] = (uint8_t)(int8_t)(isInt ? ic(k, -128, 127) : toSnorm(comp(k), 8)); break;
+    case GL_UNSIGNED_SHORT: for (int k = 0; k < nc; k++) wr<uint16_t>(p + 2 * k, (uint16_t)(isInt ? ic(k, 0, 65535) : toUnorm(comp(k), 16)), swap); break;
+    case GL_SHORT: for (int k = 0; k < nc; k++) wr<int16_t>(p + 2 * k, (int16_t)(isInt ? ic(k, -32768, 32767) : toSnorm(comp(k), 16)), swap); break;
+    case GL_UNSIGNED_INT: for (int k = 0; k < nc; k++) wr<uint32_t>(p + 4 * k, (uint32_t)(isInt ? ic(k, 0, 4294967295LL) : toUnorm(comp(k), 32)), swap); break;
+    case GL_INT: for (int k = 0; k < nc; k++) wr<int32_t>(p + 4 * k, (int32_t)(isInt ? ic(k, INT32_MIN, INT32_MAX) : toSnorm(comp(k), 32)), swap); break;
     case GL_HALF_FLOAT: for (int k = 0; k < nc; k++) wr<uint16_t>(p + 2 * k, floatToHalf(comp(k)), swap); break;
     case GL_FLOAT: for (int k = 0; k < nc; k++) wr<float>(p + 4 * k, comp(k), swap); break;
     default: {
-        auto u = [&](int k, int bits) -> uint32_t { return isInt ? (uint32_t)icomp(k) & ((1u << bits) - 1) : (uint32_t)toUnorm(comp(k), bits); };
+        auto u = [&](int k, int bits) -> uint32_t { return isInt ? (uint32_t)ic(k, 0, (1LL << bits) - 1) : (uint32_t)toUnorm(comp(k), bits); };
         uint32_t v = 0;
         int sz = 4;
         switch (type) {

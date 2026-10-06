@@ -781,7 +781,11 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
 }
 
 bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, int h, GLenum format, GLenum type, void* pixels,
-                           const PixelStore& ps, GLsizei bufSize) {
+                           const PixelStore& ps3d, GLsizei bufSize) {
+    // ReadPixels writes a single image: PACK_SKIP_IMAGES / PACK_IMAGE_HEIGHT don't apply.
+    PixelStore ps = ps3d;
+    ps.skipImages = 0;
+    ps.imageHeight = 0;
     bool isDepth = format == GL_DEPTH_COMPONENT, isStencil = format == GL_STENCIL_INDEX, isDS = format == GL_DEPTH_STENCIL;
     const FormatInfo* f;
     int level, slice;
@@ -789,6 +793,10 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
                                                         : readAttachmentTexture(ctx, fb, &f, &level, &slice);
     if (!src) {
         ctx->setError(GL_INVALID_OPERATION, "no readable buffer");
+        return false;
+    }
+    if (isDS && f->baseFormat != GL_DEPTH_STENCIL) {  // needs a packed depth+stencil buffer
+        ctx->setError(GL_INVALID_OPERATION, "DEPTH_STENCIL read without depth+stencil buffer");
         return false;
     }
     if (!isDepth && !isStencil && !isDS) {
@@ -859,7 +867,7 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
 API void APIENTRY glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void* pixels) {
     MGL_CTX();
     if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
-    if (!isValidFormatType(format, type)) return ctx->setError(GL_INVALID_ENUM, "glReadPixels format/type");
+    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e, "glReadPixels format/type");
     Framebuffer* fb = ctx->readFb.get();
     if (!fb) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
     GLenum status;
@@ -878,7 +886,7 @@ API void APIENTRY glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fo
 API void APIENTRY glReadnPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, GLsizei bufSize, void* data) {
     MGL_CTX();
     if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
-    if (!isValidFormatType(format, type)) return ctx->setError(GL_INVALID_ENUM);
+    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
     Framebuffer* fb = ctx->readFb.get();
     if (!fb) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
     GLenum status;
