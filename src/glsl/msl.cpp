@@ -1228,7 +1228,8 @@ std::string Emitter::callBuiltin(const Expr* e) {
     if (n == "allInvocationsEqual" || n == "allInvocationsEqualARB") {
         std::string pre;
         std::string v = bind(a(0), "bool", pre);
-        return "(" + pre + "simd_all(" + v + " == simd_broadcast_first(" + v + ")))";
+        // simd_broadcast_first has no bool overload
+        return "(" + pre + "simd_all(int(" + v + ") == simd_broadcast_first(int(" + v + "))))";
     }
     if (n == "modf" || n == "frexp" || n == "uaddCarry" || n == "usubBorrow" || n == "umulExtended" || n == "imulExtended") {
         std::string callee = n == "modf" ? "modf" : n == "frexp" ? "frexp" : n == "uaddCarry" ? "mgl_uaddCarry"
