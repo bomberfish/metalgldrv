@@ -1845,6 +1845,32 @@ API void APIENTRY glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GL
     draw(ctx, d);
 }
 
+// glDrawTransformFeedback*: vertex count = vertices captured into `stream` by the last completed
+// transform feedback session of `id` (known on the CPU, see the counted capture passes).
+static void drawTransformFeedback(Context* ctx, GLenum mode, GLuint id, GLuint stream, GLsizei instances) {
+    if (stream >= 4) return ctx->setError(GL_INVALID_VALUE);
+    if (instances < 0) return ctx->setError(GL_INVALID_VALUE);
+    TransformFeedbackObj* x = id ? ctx->xfbs.get(id) : ctx->defaultXfb.get();
+    if (!x) return ctx->setError(GL_INVALID_VALUE, "not a transform feedback object");
+    if (!x->ended) return ctx->setError(GL_INVALID_OPERATION, "EndTransformFeedback was never called");
+    DrawParams d;
+    d.mode = mode;
+    d.first = 0;
+    d.count = (GLsizei)x->drawCount[stream];
+    d.instances = instances;
+    draw(ctx, d);
+}
+API void APIENTRY glDrawTransformFeedback(GLenum mode, GLuint id) { MGL_CTX(); drawTransformFeedback(ctx, mode, id, 0, 1); }
+API void APIENTRY glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei instancecount) {
+    MGL_CTX();
+    drawTransformFeedback(ctx, mode, id, 0, instancecount);
+}
+API void APIENTRY glDrawTransformFeedbackStream(GLenum mode, GLuint id, GLuint stream) { MGL_CTX(); drawTransformFeedback(ctx, mode, id, stream, 1); }
+API void APIENTRY glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream, GLsizei instancecount) {
+    MGL_CTX();
+    drawTransformFeedback(ctx, mode, id, stream, instancecount);
+}
+
 void mglDrawArraysInternal(Context* ctx, GLenum mode, GLint first, GLsizei count) {
     DrawParams d;
     d.mode = mode;
@@ -1863,7 +1889,6 @@ API void APIENTRY glDrawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLs
     MGL_CTX();
     if (count < 0 || instancecount < 0) return ctx->setError(GL_INVALID_VALUE);
     if (!validIndexType(type)) return ctx->setError(GL_INVALID_ENUM);
-    if (ctx->coreProfile && ctx->vao && !ctx->vao->elementBuffer) return ctx->setError(GL_INVALID_OPERATION, "no element buffer");
     DrawParams d;
     d.mode = mode;
     d.count = count;

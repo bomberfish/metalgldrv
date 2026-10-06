@@ -329,6 +329,8 @@ API void APIENTRY glEndTransformFeedback(void) {
     TransformFeedbackObj* x = ctx->xfb.get();
     if (!x->active) return ctx->setError(GL_INVALID_OPERATION);
     x->active = false;
+    x->ended = true;
+    for (int s = 0; s < 4; s++) x->drawCount[s] = x->written[s];
     x->paused = false;
     x->program = nullptr;
 }

@@ -368,7 +368,9 @@ public:
     bool active = false, paused = false;
     GLenum primitiveMode = 0;
     Ref<ProgramObj> program;
-    uint32_t written[4] = {};  // vertices captured per stream (for DrawTransformFeedback)
+    uint32_t written[4] = {};  // vertices captured per stream in the current session
+    uint32_t drawCount[4] = {};  // vertices captured per stream by the last completed session (DrawTransformFeedback)
+    bool ended = false;          // EndTransformFeedback was called at least once
     uint64_t verticesWritten = 0;
 };
 
