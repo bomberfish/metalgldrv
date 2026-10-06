@@ -302,6 +302,34 @@ bool Parser::run(const PPResult& pp) {
 }
 
 void Parser::finalize() {
+    // GLSL 4.60 4.3.4 / 4.3.6: arrayed interfaces of the geometry and tessellation stages
+    if (!preamble_) {
+        Stage st = sh_.stage;
+        for (auto& v : sh_.vars) {
+            if (!v.global || v.builtin != BuiltinVar::None || v.param) continue;
+            if (v.q.storage != Storage::In && v.q.storage != Storage::Out) continue;
+            bool in = v.q.storage == Storage::In;
+            const std::string what = "'" + (v.block ? v.block->name : v.name) + "'";
+            if (st == Stage::TessControl && in && v.q.patch) fail("tessellation control shader inputs cannot be per-patch: " + what, v.line);
+            if (st == Stage::TessEval && !in && v.q.patch) fail("tessellation evaluation shader outputs cannot be per-patch: " + what, v.line);
+            bool arrayed = (st == Stage::Geometry && in) || (st == Stage::TessControl && !v.q.patch) ||
+                           (st == Stage::TessEval && in && !v.q.patch);
+            if (!arrayed) continue;
+            if (!v.type.isArray()) fail(what + " must be declared as an array", v.line);
+            int n = v.type.dims[0];
+            if (n == 0) continue;  // unsized: sized from the layout later
+            if (st == Stage::Geometry && sh_.inLayout.primitive != Layout::kNoPrimitive && n != primitiveVertexCount(sh_.inLayout.primitive))
+                fail("array size of geometry shader input " + what + " does not match the input primitive", v.line);
+            if ((st == Stage::TessEval || st == Stage::TessControl) && in && n != 32)
+                fail("array size of input " + what + " must be gl_MaxPatchVertices", v.line);
+            if (st == Stage::TessControl && !in && sh_.outLayout.vertices > 0 && n != sh_.outLayout.vertices)
+                fail("array size of output " + what + " does not match the output patch size", v.line);
+        }
+        if (st == Stage::TessControl && sh_.outLayout.vertices != -1 && (sh_.outLayout.vertices <= 0 || sh_.outLayout.vertices > 32))
+            fail("invalid output patch vertex count", 0);
+        if (st == Stage::Geometry && sh_.outLayout.maxVertices > 256) fail("max_vertices exceeds gl_MaxGeometryOutputVertices", 0);
+        if (st == Stage::Geometry && sh_.inLayout.invocations > 32) fail("invocations exceeds gl_MaxGeometryShaderInvocations", 0);
+    }
     {
         bool clipV = false, clipD = false;
         for (auto& v : sh_.vars) {

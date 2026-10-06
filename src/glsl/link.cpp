@@ -191,7 +191,13 @@ void Linker::collectStage(Stage s) {
     }
     // stage layouts merged across objects
     for (auto& sh : sc.shaders) {
-        auto merge = [](Layout& d, const Layout& l) {
+        auto merge = [&](Layout& d, const Layout& l) {
+            // GLSL 4.60 4.4: all declarations of a layout across a stage's shaders must agree
+            if (l.maxVertices >= 0 && d.maxVertices >= 0 && l.maxVertices != d.maxVertices) error("conflicting max_vertices declarations");
+            if (l.vertices >= 0 && d.vertices >= 0 && l.vertices != d.vertices) error("conflicting output patch vertex counts");
+            if (l.invocations >= 0 && d.invocations >= 0 && l.invocations != d.invocations) error("conflicting invocations declarations");
+            if (l.primitive != Layout::kNoPrimitive && d.primitive != Layout::kNoPrimitive && l.primitive != d.primitive)
+                error("conflicting primitive type declarations");
             for (int i = 0; i < 3; i++) if (l.localSize[i] >= 0) d.localSize[i] = l.localSize[i];
             if (l.maxVertices >= 0) d.maxVertices = l.maxVertices;
             if (l.invocations >= 0) d.invocations = l.invocations;
