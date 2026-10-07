@@ -1,0 +1,9 @@
+case,status,details
+KHR-NoContext.gl45.robustness.no_reset_notification,Pass,"Pass"
+KHR-NoContext.gl45.robustness.lose_context_on_reset,Pass,"Pass"
+KHR-NoContext.gl45.robustness.getnuniform,Pass,"Pass"
+KHR-NoContext.gl45.robustness.readnpixels,Pass,"Pass"
+KHR-NoContext.gl45.context_flags.no_flags_set_case,Pass,"Pass"
+KHR-NoContext.gl45.context_flags.debug_flag_set_case,Pass,"Pass"
+KHR-NoContext.gl45.context_flags.robust_flag_set_case,Pass,"Pass"
+KHR-NoContext.gl45.context_flags.all_flags_set_case,Pass,"Pass"

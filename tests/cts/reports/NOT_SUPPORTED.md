@@ -1,4 +1,22 @@
-# CTS receipts: run matrix and NotSupported audit (commit 926bb9c)
+# CTS receipts: run matrix and NotSupported audit
+
+## Current receipts (commit a9bd463)
+
+| platform | mode | runs | result |
+|---|---|---|---|
+| macOS 27.0 / Apple M4 Pro | default | 14 (full runner matrix) | 0 Fail/Crash/Timeout. KHR-GL46 18061 pass, 1652 NotSupported (18043/1670 on config 2); KHR-Single-GL46 11340 pass, 8 NotSupported; KHR-NoContext 8/8 |
+| macOS 27.0 / Apple M4 Pro | METALGLDRV_STRICT=1 | 14 (`*-strict`) | 0 Fail/Crash/Timeout. KHR-GL46 18100 pass, 1613 NotSupported (18082/1631 on config 2); Single and NoContext as in default mode |
+| iPadOS 27.0.1 / Apple M5 | default | 3 (`*-ipad`) | 0 Fail/Crash/Timeout. KHR-GL46 18066 pass, 1647 NotSupported; Single 11340/8; NoContext 8/8 |
+
+On the Mac, NotSupported is the iPad breakdown below plus the 5 texture_filter_minmax cases: the M4 Pro (Apple9)
+ignores the sampler reduction mode, so ARB_texture_filter_minmax is only exposed on Apple10 GPUs. Strict mode
+exposes multisample images (GL_MAX_IMAGE_SAMPLES 4), which turns those 39 cases into passes. Config 2 adds the 18
+fragdepth cases that need a depth buffer.
+
+The sections below are the earlier audit for commit 926bb9c, from before the optional extensions, followed by the
+iPad breakdown. That iPad breakdown matches the current receipts.
+
+## Earlier receipts (commit 926bb9c)
 
 Khronos OpenGL CTS 4.6.8.1, public case lists, run on macOS / Apple M4 Pro by `tests/cts/run_receipts.sh`.
 Per-run results are in `index.csv`, `LATEST.md` and the per-run folders (`results.csv` lists every case,
