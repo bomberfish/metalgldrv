@@ -106,7 +106,8 @@ Metal quirks worked around:
   right after decommitting it waits (`Device::kSparseSettleTime`). Decommitted texels may read
   old data during that window.
 * Metal shaders can't write multisample textures, so sparse multisample textures are 2D arrays
-  with a slice per sample (`VariantKey::msArraySlots`); they can't be framebuffer attachments.
+  with a slice per sample, the layout of multisample image shadows: images bind them directly and
+  samplers index them (`VariantKey::msArraySlots`). They can't be framebuffer attachments.
 * Sparse buffers have no CPU mapping: CPU reads (index/indirect data, PBOs) copy through the GPU,
   buffer textures sample a copy of the committed range.
 
