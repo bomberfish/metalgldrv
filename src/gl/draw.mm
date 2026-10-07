@@ -590,6 +590,12 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
     }
     bool needCurrent = false;
     uint32_t bindingUsed = 0;
+    uint32_t wideMask = 0;  // locations holding a dvec3/dvec4
+    for (const auto& a : prog->refl.attributes) {
+        TypeShape ts = typeShape(a.type);
+        if (a.location < 0 || ts.base != BaseType::Double || ts.rows <= 2) continue;
+        for (int k = 0; k < std::max(1, a.locationsUsed) && a.location + k < kMaxVertexAttribs; k++) wideMask |= 1u << (a.location + k);
+    }
     for (const auto& a : prog->refl.attributes) {
         if (a.location < 0) continue;
         TypeShape ts = typeShape(a.type);
@@ -598,9 +604,9 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
             int loc = a.location + k;
             if (loc >= kMaxVertexAttribs) break;
             VertexAttribKey& ak = key.attribs[loc];
-            // dvec3/dvec4 (one location each) arrive in two Metal attributes: L and 16 + L
+            // dvec3/dvec4 (one location each) arrive in two Metal attributes: L and secondHalfAttribute(L)
             bool wideDouble = ts.base == BaseType::Double && ts.rows > 2;
-            VertexAttribKey& ak2 = key.attribs[16 + loc];
+            VertexAttribKey& ak2 = key.attribs[glsl::secondHalfAttribute(loc, wideMask)];
             const VertexAttrib* va = vao ? &vao->attribs[loc] : nullptr;
             bool enabled = va && va->enabled;
             if (enabled) {
@@ -617,7 +623,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                 }
                 if (va->type == GL_DOUBLE && va->isLong) {
                     // dvecN arrive as raw bits: double/dvec2 -> uint2/uint4 at L; dvec3/4 -> uint4 at L
-                    // plus uint2/uint4 at 16 + L (same binding, +16 bytes)
+                    // plus uint2/uint4 at the second-half attribute (same binding, +16 bytes)
                     int dwords = va->size * 2;
                     f = std::min(dwords, 4) == 2 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4;
                     if (wideDouble) {

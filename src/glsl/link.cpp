@@ -1326,15 +1326,32 @@ void Linker::stageMetadata() {
         for (auto* v : ps.globals) {
             if (!qualified || v->q.storage != Storage::Out) continue;
             int vb = std::max(0, v->q.layout.xfbBuffer);
-            auto addQ = [&](const std::string& name, const Type& t, int offset) {
-                if (pre == Stage::Geometry) mp.xfbBufferStream[vb] = (uint32_t)std::max(0, v->q.layout.stream);
+            // A struct (or array of structs) is captured member by member ("s[1].m"), each member
+            // aligned like a standalone output and placed right after the previous one.
+            std::function<void(const std::string&, const Type&, uint32_t&)> addLeaves = [&](const std::string& name, const Type& t,
+                                                                                          uint32_t& off) {
+                if (t.stripArrays().base == BT::Struct) {
+                    if (t.isArray()) {
+                        for (int i = 0; i < std::max(t.dims[0], 1); i++) addLeaves(name + "[" + std::to_string(i) + "]", t.elem(), off);
+                    } else {
+                        for (auto& m : t.sdef->members) addLeaves(name + "." + m.name, m.type, off);
+                    }
+                    return;
+                }
+                if (t.stripArrays().base == BT::Double) off = roundUp(off, 8);
                 XfbVarying x;
                 x.name = name;
                 x.type = glTypeEnum(t);
                 x.arraySize = t.isArray() ? t.dims[0] : 1;
                 x.buffer = vb;
-                x.offset = offset;
+                x.offset = (int)off;
                 r.xfbVaryings.push_back(x);
+                off += xfbCaptureOf(t, vb, off).size;
+            };
+            auto addQ = [&](const std::string& name, const Type& t, int offset) {
+                if (pre == Stage::Geometry) mp.xfbBufferStream[vb] = (uint32_t)std::max(0, v->q.layout.stream);
+                uint32_t off = (uint32_t)offset;
+                addLeaves(name, t, off);
                 caps.push_back(xfbCaptureOf(t, vb, (uint32_t)offset));
                 caps.back().name = name;
             };

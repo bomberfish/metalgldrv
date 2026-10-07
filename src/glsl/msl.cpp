@@ -2451,6 +2451,7 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
     };
     // layout(component = c) inputs share a location: the attribute is declared wide enough for all of them
     std::map<int, int> declWidth;
+    uint32_t wideMask = 0;  // locations holding a dvec3/dvec4 (two Metal attributes)
     for (auto* v : attrs) {
         if (!isInput(v)) continue;
         auto it = P->attribLocations.find(v->name);
@@ -2461,7 +2462,8 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
         for (auto& [lt, a] : leaves) {
             if (lt.base == BT::Double) {
                 if (lt.vec <= 2) declWidth[loc] = std::max(declWidth[loc], comp + 2 * lt.vec);
-                loc += lt.vec > 2 ? 2 : 1;
+                else if (loc < 32) wideMask |= 1u << loc;
+                loc++;
                 continue;
             }
             declWidth[loc] = std::max(declWidth[loc], comp + lt.vec);
@@ -2495,7 +2497,7 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                     continue;
                 }
                 if (lt.base == BT::Double) {
-                    std::string L1 = std::to_string(16 + loc);  // second half: Metal attribute 16 + L
+                    std::string L1 = std::to_string(secondHalfAttribute(loc, wideMask));  // second half
                     if (n <= 2) {
                         inS += "    uint" + std::to_string(2 * n) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
                         code += "    " + a + " = as_type<" + vecName(BT::Double, n) + ">(in.a" + L0 + ");\n";

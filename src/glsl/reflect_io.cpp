@@ -172,9 +172,15 @@ void collect(const LinkedProgram& P, Stage s, Storage storage, std::vector<Inter
             continue;
         }
         Type t = v->type;
-        if (arrayed && t.isArray()) t = t.elem();
+        std::string name = v->name;
+        if (arrayed && t.isArray()) {
+            t = t.elem();
+            // Structure members keep the per-vertex index in their names ("v[0].m", "v[0][1].m"),
+            // enumerated for the first vertex only.
+            if (t.stripArrays().base == BT::Struct) name += "[0]";
+        }
         int loc = v->builtin == BuiltinVar::None ? v->q.layout.location : -1;
-        c.add(v->name, t, loc, v->builtin == BuiltinVar::None ? v->q.layout.component : 0, v->q.patch);
+        c.add(name, t, loc, v->builtin == BuiltinVar::None ? v->q.layout.component : 0, v->q.patch);
     }
 }
 
