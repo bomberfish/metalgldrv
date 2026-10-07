@@ -359,7 +359,9 @@ static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment,
     Attachment a;
     if (texture) {
         Texture* t = ctx->share->textures.get(texture);
-        if (!t) return ctx->setError(GL_INVALID_OPERATION, "texture %u does not exist", texture);
+        // GL 4.6 9.2.8: FramebufferTexture (layered) reports a missing texture as INVALID_VALUE, the
+        // other attachment commands as INVALID_OPERATION
+        if (!t || !t->target) return ctx->setError(layered ? GL_INVALID_VALUE : GL_INVALID_OPERATION, "texture %u does not exist", texture);
         if (level < 0) return ctx->setError(GL_INVALID_VALUE);
         if (t->immutable && level >= t->immutableLevels) return ctx->setError(GL_INVALID_VALUE, "level %d beyond the texture's storage", level);
         if (textarget && textarget != t->target &&
