@@ -364,8 +364,8 @@ TEST(texture_view_cube_from_array) {
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     const char* vs = "#version 430 core\nvoid main() { vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4.0 - 1.0; gl_Position = vec4(p, 0, 1); }";
     GLuint prog = compileProgram(vs, "#version 430 core\nuniform samplerCube s; out vec4 c;\n"
-                                     "void main() { int i = int(gl_FragCoord.x); vec3 d[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0),\n"
-                                     "  vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1)); c = textureLod(s, d[i % 6], float(i / 6)); }");
+                                     "void main() { int i = int(gl_FragCoord.x); vec3 d[6] = vec3[6](vec3(1,-0.9,-0.9), vec3(-1,-0.9,-0.9), vec3(-0.9,1,-0.9),\n"
+                                     "  vec3(-0.9,-1,-0.9), vec3(-0.9,-0.9,1), vec3(-0.9,-0.9,-1)); c = textureLod(s, d[i % 6], float(i / 6)); }");
     GLuint vao, fbo, rt;
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
