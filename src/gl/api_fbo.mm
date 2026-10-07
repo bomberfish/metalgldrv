@@ -357,6 +357,7 @@ static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment,
         Texture* t = ctx->share->textures.get(texture);
         if (!t) return ctx->setError(GL_INVALID_OPERATION, "texture %u does not exist", texture);
         if (level < 0) return ctx->setError(GL_INVALID_VALUE);
+        if (t->immutable && level >= t->immutableLevels) return ctx->setError(GL_INVALID_VALUE, "level %d beyond the texture's storage", level);
         if (textarget && textarget != t->target &&
             !(t->target == GL_TEXTURE_CUBE_MAP && textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z))
             return ctx->setError(GL_INVALID_OPERATION);
@@ -600,6 +601,24 @@ API void APIENTRY glGetNamedFramebufferParameteriv(GLuint framebuffer, GLenum pn
     getFbParameter(ctx, framebuffer ? ctx->framebuffers.get(framebuffer) : ctx->defaultFramebuffer(), pname, params);
 }
 
+API void APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat* val) {
+    MGL_CTX();
+    if (pname != GL_SAMPLE_POSITION) return ctx->setError(GL_INVALID_ENUM);
+    PassDesc p;
+    int samples = ctx->resolvePass(p) ? p.samples : 1;
+    if (index >= (GLuint)std::max(1, samples)) return ctx->setError(GL_INVALID_VALUE);
+    if (samples <= 1) {
+        val[0] = val[1] = 0.5f;
+        return;
+    }
+    // Metal's standard sample locations. Rendering keeps GL's row order (window y up =
+    // texture row up), so the within-pixel offsets carry over unchanged.
+    MTLSamplePosition pos[16];
+    [ctx->dev->mtl getDefaultSamplePositions:pos count:(NSUInteger)samples];
+    val[0] = pos[index].x;
+    val[1] = pos[index].y;
+}
+
 // --- draw / read buffers ---
 static bool validDefaultBuffer(GLenum b) {
     return b == GL_NONE || b == GL_BACK || b == GL_FRONT || b == GL_BACK_LEFT || b == GL_FRONT_LEFT || b == GL_LEFT ||
@@ -693,16 +712,54 @@ API void APIENTRY glNamedFramebufferReadBuffer(GLuint framebuffer, GLenum src) {
     readBuffer(ctx, framebuffer ? ctx->framebuffers.get(framebuffer) : ctx->readSurface ? ctx->readSurface->fb.get() : nullptr, src);
 }
 
+// Invalidation is only a hint (we keep contents); validate the arguments (GL 4.6 §17.4.4).
+static void invalidateFramebuffer(Context* ctx, Framebuffer* fb, GLsizei n, const GLenum* attachments, GLsizei w, GLsizei h) {
+    if (n < 0 || w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
+    for (int i = 0; i < n; i++) {
+        GLenum a = attachments[i];
+        if (fb->isDefault) {
+            if (a != GL_COLOR && a != GL_DEPTH && a != GL_STENCIL && a != GL_FRONT_LEFT && a != GL_FRONT_RIGHT && a != GL_BACK_LEFT &&
+                a != GL_BACK_RIGHT)
+                return ctx->setError(GL_INVALID_ENUM);
+        } else if (a >= GL_COLOR_ATTACHMENT0 && a <= GL_COLOR_ATTACHMENT31) {
+            if (a >= GL_COLOR_ATTACHMENT0 + kMaxDrawBuffers) return ctx->setError(GL_INVALID_OPERATION);
+        } else if (a != GL_DEPTH_ATTACHMENT && a != GL_STENCIL_ATTACHMENT && a != GL_DEPTH_STENCIL_ATTACHMENT) {
+            return ctx->setError(GL_INVALID_ENUM);
+        }
+    }
+}
+static Framebuffer* invalidateTarget(Context* ctx, GLenum target) {
+    if (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER) return ctx->drawFb.get();
+    if (target == GL_READ_FRAMEBUFFER) return ctx->readFb.get();
+    ctx->setError(GL_INVALID_ENUM);
+    return nullptr;
+}
+static Framebuffer* invalidateNamed(Context* ctx, GLuint name) {
+    if (!name) {
+        Framebuffer* d = ctx->defaultFramebuffer();
+        if (!d) ctx->setError(GL_INVALID_OPERATION);
+        return d;
+    }
+    Framebuffer* fb = ctx->framebuffers.get(name);
+    if (!fb) ctx->setError(GL_INVALID_OPERATION);
+    return fb;
+}
 API void APIENTRY glInvalidateFramebuffer(GLenum target, GLsizei n, const GLenum* attachments) {
     MGL_CTX();
-    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) return ctx->setError(GL_INVALID_ENUM);
-    if (n < 0) return ctx->setError(GL_INVALID_VALUE);
+    if (Framebuffer* fb = invalidateTarget(ctx, target)) invalidateFramebuffer(ctx, fb, n, attachments, 0, 0);
 }
-API void APIENTRY glInvalidateSubFramebuffer(GLenum target, GLsizei n, const GLenum* attachments, GLint, GLint, GLsizei, GLsizei) {
-    glInvalidateFramebuffer(target, n, attachments);
+API void APIENTRY glInvalidateSubFramebuffer(GLenum target, GLsizei n, const GLenum* attachments, GLint, GLint, GLsizei w, GLsizei h) {
+    MGL_CTX();
+    if (Framebuffer* fb = invalidateTarget(ctx, target)) invalidateFramebuffer(ctx, fb, n, attachments, w, h);
 }
-API void APIENTRY glInvalidateNamedFramebufferData(GLuint fb, GLsizei n, const GLenum* attachments) {}
-API void APIENTRY glInvalidateNamedFramebufferSubData(GLuint fb, GLsizei n, const GLenum* attachments, GLint, GLint, GLsizei, GLsizei) {}
+API void APIENTRY glInvalidateNamedFramebufferData(GLuint fb, GLsizei n, const GLenum* attachments) {
+    MGL_CTX();
+    if (Framebuffer* f = invalidateNamed(ctx, fb)) invalidateFramebuffer(ctx, f, n, attachments, 0, 0);
+}
+API void APIENTRY glInvalidateNamedFramebufferSubData(GLuint fb, GLsizei n, const GLenum* attachments, GLint, GLint, GLsizei w, GLsizei h) {
+    MGL_CTX();
+    if (Framebuffer* f = invalidateNamed(ctx, fb)) invalidateFramebuffer(ctx, f, n, attachments, w, h);
+}
 
 // ---------------------------------------------------------------------------
 // reads

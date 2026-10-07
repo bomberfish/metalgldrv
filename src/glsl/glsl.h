@@ -162,6 +162,8 @@ struct MultiPassInfo {
     uint32_t tcsOutputVertices = 0;   // control points per output patch (patch input size when there is no TCS: 0 = use patchVertices)
     uint32_t xfbStride[4] = {0, 0, 0, 0};
     uint32_t xfbBufferMask = 0;       // buffers written by transform feedback
+    uint32_t xfbBufferStream[4] = {0, 0, 0, 0};  // vertex stream captured into each buffer
+    uint32_t tesVertexOutBytes = 0;   // bytes per TES output record (tessellation feeding a GS or transform feedback)
 };
 
 // ARB_shader_subroutine (per stage)
@@ -253,6 +255,14 @@ struct VariantKey {
     // Classic path: pull vertex attributes from MGLDrawInfo (buffer 22, formats in
     // `attribs`) instead of [[stage_in]]; used for layouts Metal's vertex fetch rejects.
     bool manualFetch = false;
+    // Classic path: the vertex shader also writes transform feedback (MGLDrawInfo at buffer 22,
+    // non-indexed draw over the decomposed primitive list); used when it has side effects.
+    bool xfbInVertex = false;
+    // Fragment: run at sample rate (GL_SAMPLE_SHADING with MIN_SAMPLE_SHADING_VALUE > 0).
+    bool sampleShading = false;
+    // Fragment: AND the coverage with MGLSys::sampleMask (GL_SAMPLE_MASK) and the
+    // GL_SAMPLE_COVERAGE mask derived from MGLSys::sampleCoverage.
+    bool sampleMask = false;
 };
 
 struct EntryPoint {
@@ -262,6 +272,7 @@ struct EntryPoint {
     int threadsPerThreadgroup[3] = {1, 1, 1};
     uint32_t payloadBytes = 0;   // object -> mesh
     uint32_t maxMeshVertices = 0, maxMeshPrimitives = 0;
+    uint32_t scratchWordsPerItem = 0;  // mgl_gs_copy: size of each item's MGLDrawInfo::gsRecord area
 };
 
 struct MSLOutput {
@@ -271,6 +282,11 @@ struct MSLOutput {
 };
 
 MSLOutput generateMSL(const LinkedProgram& program, const VariantKey& key);
+// Program pipelines: pre-rasterization and fragment stages from different separable programs
+// (stages[s] = program providing stage s, or null). Each stage reads its own program's argument
+// buffer; MGLArgs at buffer 0 is then a table of 6 GPU addresses indexed by Stage.
+MSLOutput generateMSL(const LinkedProgram* const stages[(int)Stage::Count], const VariantKey& key);
+MultiPassInfo multipassInfo(const LinkedProgram* const stages[(int)Stage::Count]);
 
 // ---------------------------------------------------------------------------
 // Runtime <-> shader ABI. Mirrored verbatim in the MSL prelude.
@@ -291,8 +307,8 @@ struct alignas(16) MGLSys {
     uint32_t clipDistanceMask;             // glEnable(GL_CLIP_DISTANCEi)
     float viewport[4];                     // x, y, w, h of viewport 0
     float pointSize;                       // glPointSize (when program doesn't write gl_PointSize)
-    uint32_t flags;                        // bit0: program point size, bit1: point sprite origin lower-left,
-                                           // bit2: clip origin upper-left, bit3: non-indexed draw (gl_BaseVertex = 0)
+    uint32_t flags;                        // bit0: program point size, bit1: point sprite origin lower-left, bit2: upper-left clip origin, bit3: invert sample coverage,
+                                           // bit4: non-indexed draw (gl_BaseVertex = 0)
     int32_t baseVertex, baseInstance;      // gl_BaseVertex / gl_BaseInstance / gl_DrawID support
     int32_t drawID, firstVertex;
     uint32_t sampleMask;
@@ -300,7 +316,7 @@ struct alignas(16) MGLSys {
     uint32_t alphaFunc;                    // compat alpha test (GL_ALWAYS -> disabled)
     float minSampleShading;
     float renderTargetHeight;              // height of the bound framebuffer (layout(origin_upper_left) gl_FragCoord)
-    uint32_t pad1;
+    float sampleCoverage;                  // GL_SAMPLE_COVERAGE value (1 when disabled); flags bit3: invert
     float tessDefaultOuter[4];             // GL_PATCH_DEFAULT_OUTER_LEVEL (used when there is no TCS)
     float tessDefaultInner[2];             // GL_PATCH_DEFAULT_INNER_LEVEL
     uint32_t pad2[2];
@@ -335,6 +351,20 @@ struct alignas(16) MGLDrawInfo {
     uint64_t tcsVertexOut;        // patchCount * tcsOutputVertices * tcsVertexOutBytes
     uint64_t tcsPatchOut;         // patchCount * tcsPatchOutBytes (includes tess levels first: outer[4], inner[2] floats)
     uint64_t counters;            // device atomic counters (primitives generated/written)
+    // Counted multi-pass work (GS / tessellation output whose size only the GPU knows):
+    // a count kernel fills itemCounts, the runtime reads them back, computes prefix sums
+    // into itemOffsets and runs the write kernels (see docs/glsl-compiler.md).
+    uint64_t itemCounts;          // uint4 per work item (written by mgl_tes_count / mgl_gs_count)
+    uint64_t itemOffsets;         // uint4 per work item (first output primitive per stream / TES vertex+primitive)
+    uint64_t tesVertexOut;        // TES output records (multipass.tesVertexOutBytes each)
+    uint64_t tesPrimOut;          // TES primitive list: vertex indices into tesVertexOut, tesVerticesPerPrimitive each
+    uint32_t itemCount;           // work items of the counted pass
+    uint32_t tesPrimCount;        // primitives in tesPrimOut
+    uint32_t xfbPrimLimit[4];     // per stream: output primitives that fit in the bound buffers (capture stops there)
+    uint32_t xfbStreamBase[4];    // per stream: vertices already captured in this session
+    uint32_t xfbBufferStream[4];  // stream feeding each buffer
+    uint64_t gsRecord;            // optional: mgl_gs_count stores each item's captured primitives here
+                                  // (EntryPoint::scratchWordsPerItem uint32 per item); mgl_gs_copy places them
     uint64_t stats;               // pipeline statistics: uint[3] {GS primitives, TES invocations, tess primitives}, or 0
 };
 

@@ -599,6 +599,7 @@ in int gl_PrimitiveID;
 in int gl_SampleID;
 in vec2 gl_SamplePosition;
 in int gl_SampleMaskIn[1];
+uniform int gl_NumSamples;
 in int gl_Layer;
 in int gl_ViewportIndex;
 in bool gl_HelperInvocation;
@@ -689,7 +690,7 @@ BuiltinVar builtinVarId(const std::string& n, Stage stage) {
         {"gl_NumWorkGroups", BuiltinVar::NumWorkGroups}, {"gl_WorkGroupID", BuiltinVar::WorkGroupID},
         {"gl_LocalInvocationID", BuiltinVar::LocalInvocationID}, {"gl_GlobalInvocationID", BuiltinVar::GlobalInvocationID},
         {"gl_LocalInvocationIndex", BuiltinVar::LocalInvocationIndex}, {"gl_WorkGroupSize", BuiltinVar::WorkGroupSize},
-        {"gl_DepthRange", BuiltinVar::DepthRange},
+        {"gl_DepthRange", BuiltinVar::DepthRange}, {"gl_NumSamples", BuiltinVar::NumSamples},
     };
     if (n == "gl_Color") return stage == Stage::Fragment ? BuiltinVar::FragColorIn : BuiltinVar::Color;
     if (n == "gl_SecondaryColor") return stage == Stage::Fragment ? BuiltinVar::SecondaryColorIn : BuiltinVar::SecondaryColor;

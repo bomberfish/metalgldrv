@@ -73,13 +73,21 @@ static void specDims(const Texture* t, const TexImageLevel& l, int& w, int& h, i
     }
 }
 
+// First defined image of a level (cube maps: any face; faces may be specified in any order).
+static const TexImageLevel* definedImage(const Texture* t, int level) {
+    int faces = t->target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
+    for (int f = 0; f < faces; f++)
+        if (t->levels[f][level].defined()) return &t->levels[f][level];
+    return nullptr;
+}
+
 int textureStorageLevelFor(const Texture* t) {
     // Level whose spec defines the storage: level 0 if defined, else the base level.
-    if (t->immutable || t->levels[0][0].defined()) return 0;
+    if (t->immutable || definedImage(t, 0)) return 0;
     int b = std::clamp(t->baseLevel, 0, Texture::kMaxLevels - 1);
-    if (t->levels[0][b].defined()) return b;
+    if (definedImage(t, b)) return b;
     for (int l = 0; l < Texture::kMaxLevels; l++)
-        if (t->levels[0][l].defined()) return l;
+        if (definedImage(t, l)) return l;
     return -1;
 }
 
@@ -89,7 +97,7 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
     if (!t->storageDirty && t->mtl) return true;
     int ref = textureStorageLevelFor(t);
     if (ref < 0) return false;
-    const TexImageLevel& L = t->levels[0][ref];
+    const TexImageLevel& L = t->immutable ? t->levels[0][ref] : *definedImage(t, ref);
     int w, h, d;
     specDims(t, L, w, h, d);
     w = std::max(1, w << ref);
@@ -594,8 +602,14 @@ bool readTextureRegion(Context* ctx, id<MTLTexture> tex, int level, int slice, i
     if (tex.sampleCount > 1) {
         MGL_WARN("readback of multisampled texture not resolved");
     }
+    // 3D textures: the GL layer is a depth plane, not a slice
+    int z = 0;
+    if (src.textureType == MTLTextureType3D) {
+        z = slice;
+        slice = 0;
+    }
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
-    [e copyFromTexture:src sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(x, y, 0) sourceSize:MTLSizeMake(w, h, 1)
+    [e copyFromTexture:src sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(x, y, z) sourceSize:MTLSizeMake(w, h, 1)
               toBuffer:buf destinationOffset:0 destinationBytesPerRow:rowBytes destinationBytesPerImage:imgBytes options:opt];
     uint64_t s = ctx->serial();
     ctx->finish();

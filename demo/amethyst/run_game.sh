@@ -32,4 +32,10 @@ echo "== logs in $OUT (latestlog.txt, lldb.log)"
 xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BUNDLE" \
     --source Documents/latestlog.old.txt --destination "$OUT/latestlog.old.txt" >/dev/null 2>&1
 xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BUNDLE" --source Documents/metalgldrv.log --destination "$OUT/metalgldrv.log" >/dev/null 2>&1
+# PNGs written by METALGLDRV_CAPTURE_PROG
+for f in $(xcrun devicectl device info files --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BUNDLE" \
+             --subdirectory Documents 2>/dev/null | grep -o 'capture_p[0-9]*_[A-Za-z0-9_]*\.png' | sort -u); do
+    xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BUNDLE" \
+        --source "Documents/$f" --destination "$OUT/$f" >/dev/null 2>&1
+done
 grep -E "metalgldrv|EGLBridge|RENDERER|Exception|Error|FATAL|crash" "$OUT/latestlog.txt" | head -60

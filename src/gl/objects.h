@@ -314,11 +314,20 @@ public:
 
     // compiled pipeline variants
     std::unordered_map<uint64_t, std::shared_ptr<ProgramVariant>> variants;
+
+    // Program pipeline composite (separable programs per stage feeding a multi-pass pipeline):
+    // a draw-only program whose variants are generated from the stage programs, each stage
+    // reading its own program's argument buffer.
+    bool composite = false;
+    Ref<ProgramObj> stagePrograms[(int)glsl::Stage::Count];
+    std::shared_ptr<const glsl::LinkedProgram> stageLinked[(int)glsl::Stage::Count];
 };
 
 class ProgramPipelineObj : public Object {
 public:
     Ref<ProgramObj> stages[(int)glsl::Stage::Count];
+    Ref<ProgramObj> composite;          // see ProgramObj::composite
+    std::vector<uint64_t> compositeKey;
     Ref<ProgramObj> activeProgram;
     bool validated = false;
     std::string infoLog;
@@ -361,7 +370,9 @@ public:
     bool active = false, paused = false;
     GLenum primitiveMode = 0;
     Ref<ProgramObj> program;
-    uint32_t written[4] = {};  // vertices captured per stream (for DrawTransformFeedback)
+    uint32_t written[4] = {};  // vertices captured per stream in the current session
+    uint32_t drawCount[4] = {};  // vertices captured per stream by the last completed session (DrawTransformFeedback)
+    bool ended = false;          // EndTransformFeedback was called at least once
     uint64_t verticesWritten = 0;
 };
 

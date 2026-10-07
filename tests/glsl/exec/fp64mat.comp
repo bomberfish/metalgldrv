@@ -1,0 +1,20 @@
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+double D(double v) { return v + double(seq[0]); }
+
+void main() {
+    // A singular matrix whose products and sums are exact in double: det must be exactly 0
+    dmat3 m = dmat3(D(-511.5), D(-511.375), D(-511.25), D(-511.125), D(-511.0), D(-510.875), D(-510.75), D(-510.625), D(-510.5));
+    check(determinant(m) == 0.0lf);
+    check(isinf(inverse(m)[0][0]));
+    dmat2 m2 = dmat2(D(-506.5), D(-506.375), D(-506.25), D(-506.125));
+    // det2 = a*d - b*c exactly
+    double d2 = D(-506.5) * D(-506.125) - D(-506.375) * D(-506.25);
+    check(determinant(m2) == d2);
+    dmat2 i2 = inverse(m2);
+    check(i2[0][0] == D(-506.125) / d2 && i2[0][1] == -D(-506.375) / d2);
+}

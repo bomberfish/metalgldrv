@@ -119,7 +119,8 @@ API void APIENTRY glBindTextureUnit(GLuint unit, GLuint texture) {
 
 API void APIENTRY glBindTextures(GLuint first, GLsizei count, const GLuint* textures) {
     MGL_CTX();
-    if (first + count > kMaxTextureUnits) return ctx->setError(GL_INVALID_OPERATION);
+    if (count < 0) return ctx->setError(GL_INVALID_VALUE);
+    if ((uint64_t)first + (uint64_t)count > (uint64_t)kMaxTextureUnits) return ctx->setError(GL_INVALID_OPERATION);
     for (int i = 0; i < count; i++) {
         GLuint name = textures ? textures[i] : 0;
         if (!name) {
@@ -807,7 +808,10 @@ API void APIENTRY glGetTextureParameteriv(GLuint texture, GLenum pname, GLint* p
 }
 
 static bool getLevelParam(Context* ctx, Texture* t, int face, GLint level, GLenum pname, double* out) {
-    if (level < 0 || level >= Texture::kMaxLevels) {
+    // buffer textures (and other single-level targets) only have level 0
+    bool single = t->target == GL_TEXTURE_BUFFER || t->target == GL_TEXTURE_RECTANGLE || t->target == GL_TEXTURE_2D_MULTISAMPLE ||
+                  t->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    if (level < 0 || level >= Texture::kMaxLevels || (single && level != 0)) {
         ctx->setError(GL_INVALID_VALUE);
         return false;
     }
@@ -1486,10 +1490,25 @@ API void APIENTRY glInvalidateTexSubImage(GLuint texture, GLint level, GLint, GL
 }
 
 // --- image units ---
+// GL 4.6 table 8.33: internal formats usable with image units.
+static bool isImageUnitFormat(GLenum f) {
+    switch (f) {
+    case GL_RGBA32F: case GL_RGBA16F: case GL_RG32F: case GL_RG16F: case GL_R11F_G11F_B10F: case GL_R32F: case GL_R16F:
+    case GL_RGBA32UI: case GL_RGBA16UI: case GL_RGB10_A2UI: case GL_RGBA8UI: case GL_RG32UI: case GL_RG16UI: case GL_RG8UI:
+    case GL_R32UI: case GL_R16UI: case GL_R8UI:
+    case GL_RGBA32I: case GL_RGBA16I: case GL_RGBA8I: case GL_RG32I: case GL_RG16I: case GL_RG8I: case GL_R32I: case GL_R16I: case GL_R8I:
+    case GL_RGBA16: case GL_RGB10_A2: case GL_RGBA8: case GL_RG16: case GL_RG8: case GL_R16: case GL_R8:
+    case GL_RGBA16_SNORM: case GL_RGBA8_SNORM: case GL_RG16_SNORM: case GL_RG8_SNORM: case GL_R16_SNORM: case GL_R8_SNORM:
+        return true;
+    default: return false;
+    }
+}
+
 API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format) {
     MGL_CTX();
     if (unit >= kMaxImageUnits || level < 0 || layer < 0) return ctx->setError(GL_INVALID_VALUE);
     if (access != GL_READ_ONLY && access != GL_WRITE_ONLY && access != GL_READ_WRITE) return ctx->setError(GL_INVALID_ENUM);
+    if (!isImageUnitFormat(format) || !formatInfo(format)) return ctx->setError(GL_INVALID_VALUE);
     ImageUnit& iu = ctx->imageUnits[unit];
     if (!texture) {
         iu = ImageUnit();
@@ -1497,11 +1516,17 @@ API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, G
     }
     Texture* t = ctx->share->textures.get(texture);
     if (!t) return ctx->setError(GL_INVALID_VALUE);
-    if (!formatInfo(format)) return ctx->setError(GL_INVALID_VALUE);
-    if (!t->needsShaderWrite) {
+    // Accessing the texture through a different (size-compatible) format needs a format view.
+    const FormatInfo* tf = t->storageFmt ? t->storageFmt : t->levels[0][std::clamp(t->baseLevel, 0, Texture::kMaxLevels - 1)].fmt;
+    bool reinterpret = tf && t->target != GL_TEXTURE_BUFFER && formatInfo(format)->mtl != tf->mtl;
+    bool needView = reinterpret && !t->needsFormatView;
+    if (needView) t->needsFormatView = true;
+    if (!t->needsShaderWrite || needView) {
         t->needsShaderWrite = true;
-        if (t->mtl && !(t->mtl.usage & MTLTextureUsageShaderWrite) && t->target != GL_TEXTURE_BUFFER) {
-            // Reallocate with write usage, copying contents.
+        bool missing = t->mtl && (!(t->mtl.usage & MTLTextureUsageShaderWrite) ||
+                                  (needView && !(t->mtl.usage & MTLTextureUsagePixelFormatView)));
+        if (missing && t->target != GL_TEXTURE_BUFFER) {
+            // Reallocate with write (and format view) usage, copying contents.
             id<MTLTexture> old = t->mtl;
             const FormatInfo* oldFmt = t->storageFmt;
             t->mtl = nil;
@@ -1525,9 +1550,19 @@ API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, G
 
 API void APIENTRY glBindImageTextures(GLuint first, GLsizei count, const GLuint* textures) {
     MGL_CTX();
+    if (count < 0) return ctx->setError(GL_INVALID_VALUE);
+    if ((uint64_t)first + (uint64_t)count > (uint64_t)kMaxImageUnits) return ctx->setError(GL_INVALID_OPERATION);
     for (int i = 0; i < count; i++) {
         GLuint name = textures ? textures[i] : 0;
         Texture* t = name ? ctx->share->textures.get(name) : nullptr;
+        if (name && (!t || !t->target)) {
+            ctx->setError(GL_INVALID_OPERATION, "BindImageTextures: %u is not a texture", name);
+            continue;
+        }
+        if (t && !(t->target == GL_TEXTURE_BUFFER ? t->buffer != nullptr : t->levels[0][0].defined())) {
+            ctx->setError(GL_INVALID_OPERATION, "BindImageTextures: texture %u has no level 0", name);
+            continue;
+        }
         GLenum fmt = t && t->levels[0][0].defined() ? t->levels[0][0].fmt->internalFormat : GL_R8;
         glBindImageTexture(first + i, name, 0, t && (t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_3D || t->isCube()), 0,
                            GL_READ_WRITE, fmt);
@@ -1576,10 +1611,16 @@ API void APIENTRY glBindSampler(GLuint unit, GLuint sampler) {
 
 API void APIENTRY glBindSamplers(GLuint first, GLsizei count, const GLuint* samplers) {
     MGL_CTX();
-    if (first + count > kMaxTextureUnits) return ctx->setError(GL_INVALID_OPERATION);
+    if (count < 0) return ctx->setError(GL_INVALID_VALUE);
+    if ((uint64_t)first + (uint64_t)count > (uint64_t)kMaxTextureUnits) return ctx->setError(GL_INVALID_OPERATION);
     for (int i = 0; i < count; i++) {
         GLuint s = samplers ? samplers[i] : 0;
-        ctx->samplers[first + i] = s ? ctx->share->samplers.get(s) : nullptr;
+        Sampler* so = s ? ctx->share->samplers.get(s) : nullptr;
+        if (s && !so) {
+            ctx->setError(GL_INVALID_OPERATION, "BindSamplers: %u is not a sampler", s);
+            continue;
+        }
+        ctx->samplers[first + i] = so;
     }
 }
 

@@ -310,13 +310,19 @@ API void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
     if (primitiveMode != GL_POINTS && primitiveMode != GL_LINES && primitiveMode != GL_TRIANGLES) return ctx->setError(GL_INVALID_ENUM);
     TransformFeedbackObj* x = ctx->xfb.get();
     if (x->active) return ctx->setError(GL_INVALID_OPERATION);
-    ProgramObj* p = ctx->activeProgramForStage(glsl::Stage::Vertex);
+    // the program of the last vertex-processing stage provides the captured varyings
+    ProgramObj* p = nullptr;
+    for (glsl::Stage st : {glsl::Stage::Geometry, glsl::Stage::TessEval, glsl::Stage::Vertex})
+        if (!p) p = ctx->activeProgramForStage(st);
     if (!p || p->refl.xfbVaryings.empty()) return ctx->setError(GL_INVALID_OPERATION, "no transform feedback varyings");
+    for (int b = 0; b < kMaxXfbBuffers; b++)
+        if ((p->refl.multipass.xfbBufferMask & (1u << b)) && !x->buffers[b].buffer)
+            return ctx->setError(GL_INVALID_OPERATION, "transform feedback buffer %d not bound", b);
     x->active = true;
     x->paused = false;
     x->primitiveMode = primitiveMode;
     x->program = p;
-    x->verticesWritten = 0;
+    for (auto& w : x->written) w = 0;
     static bool warned = false;
     warned = true;
 }
@@ -326,6 +332,8 @@ API void APIENTRY glEndTransformFeedback(void) {
     TransformFeedbackObj* x = ctx->xfb.get();
     if (!x->active) return ctx->setError(GL_INVALID_OPERATION);
     x->active = false;
+    x->ended = true;
+    for (int s = 0; s < 4; s++) x->drawCount[s] = x->written[s];
     x->paused = false;
     x->program = nullptr;
 }

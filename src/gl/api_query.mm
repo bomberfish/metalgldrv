@@ -67,7 +67,10 @@ void mglQueryNotifyDraw(Context* ctx, GLenum mode, uint64_t vertices, uint64_t i
             ctx->encVisibilityOffset = want;
         }
     }
-    // Primitive counting on the CPU (no geometry amplification).
+}
+
+// Primitives a draw of `n` vertices in mode `m` assembles (no geometry amplification).
+uint64_t mglPrimitivesFor(GLenum m, uint64_t n) {
     auto prims = [&](GLenum m, uint64_t n) -> uint64_t {
         switch (m) {
         case GL_POINTS: return n;
@@ -84,7 +87,28 @@ void mglQueryNotifyDraw(Context* ctx, GLenum mode, uint64_t vertices, uint64_t i
         default: return 0;
         }
     };
-    if (Query* pq = ctx->activeQueries[4][0].get()) pq->cpuCount += prims(mode, vertices) * instances;
+    return prims(m, n);
+}
+
+// Primitive query bookkeeping (all counts are known on the CPU, see draw.mm):
+// PRIMITIVES_GENERATED / TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN per vertex stream, and the
+// overflow queries (any stream / one stream) while transform feedback is active.
+void mglQueryAddPrimitives(Context* ctx, int stream, uint64_t generated, uint64_t written, bool xfbActive, bool overflow) {
+    if (stream < 0 || stream > 3) return;
+    if (Query* q = ctx->activeQueries[4][stream].get()) q->cpuCount += generated;
+    if (!xfbActive) return;
+    if (Query* q = ctx->activeQueries[5][stream].get()) q->cpuCount += written;
+    if (overflow) {
+        if (Query* q = ctx->activeQueries[6][0].get()) q->cpuCount = 1;
+        if (Query* q = ctx->activeQueries[7][stream].get()) q->cpuCount = 1;
+    }
+}
+
+bool mglQueryPrimitivesActive(Context* ctx) {
+    for (int ti = 4; ti < 8; ti++)
+        for (int i = 0; i < 4; i++)
+            if (ctx->activeQueries[ti][i]) return true;
+    return false;
 }
 
 // ARB_pipeline_statistics_query: per-draw counts computed by the draw code.
@@ -233,7 +257,8 @@ static void beginQuery(Context* ctx, GLenum target, GLuint index, GLuint id) {
 static void endQuery(Context* ctx, GLenum target, GLuint index) {
     int ti = queryTargetIndex(target);
     if (ti < 0) return ctx->setError(GL_INVALID_ENUM);
-    if (index >= 4) return ctx->setError(GL_INVALID_VALUE);
+    bool indexedT = target == GL_PRIMITIVES_GENERATED || target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW;
+    if (index >= (indexedT ? 4u : 1u)) return ctx->setError(GL_INVALID_VALUE);
     Ref<Query> q = ctx->activeQueries[ti][index];
     if (!q) return ctx->setError(GL_INVALID_OPERATION, "query not active");
     bool routed = activeVisibilityQuery(ctx) == q.get();
@@ -255,7 +280,7 @@ static void endQuery(Context* ctx, GLenum target, GLuint index) {
     if (target == GL_PRIMITIVES_GENERATED || target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_TRANSFORM_FEEDBACK_OVERFLOW ||
         target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW) {
         q->result = q->cpuCount;
-        if (target == GL_TRANSFORM_FEEDBACK_OVERFLOW || target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW) q->result = 0;
+        if (target == GL_TRANSFORM_FEEDBACK_OVERFLOW || target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW) q->result = q->cpuCount != 0;
         q->resultAvailable = true;
     }
 }
@@ -405,7 +430,9 @@ static void getQueryiv(Context* ctx, GLenum target, GLuint index, GLenum pname, 
     }
     int ti = queryTargetIndex(target);
     if (ti < 0) return ctx->setError(GL_INVALID_ENUM);
-    if (index >= 4) return ctx->setError(GL_INVALID_VALUE);
+    bool indexed = target == GL_PRIMITIVES_GENERATED || target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN ||
+                   target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW;
+    if (index >= (indexed ? 4u : 1u)) return ctx->setError(GL_INVALID_VALUE);
     switch (pname) {
     case GL_CURRENT_QUERY: *params = ctx->activeQueries[ti][index] ? ctx->activeQueries[ti][index]->name : 0; break;
     case GL_QUERY_COUNTER_BITS: *params = target == GL_ANY_SAMPLES_PASSED || target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE ? 1 : 64; break;
@@ -429,7 +456,8 @@ API void APIENTRY glBeginConditionalRender(GLuint id, GLenum mode) {
     default: return ctx->setError(GL_INVALID_ENUM);
     }
     Query* q = ctx->queries.get(id);
-    if (!q || q->active || !isOcclusion(q->target)) return ctx->setError(GL_INVALID_OPERATION);
+    bool overflowQ = q && (q->target == GL_TRANSFORM_FEEDBACK_OVERFLOW || q->target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW);
+    if (!q || q->active || !(isOcclusion(q->target) || overflowQ)) return ctx->setError(GL_INVALID_OPERATION);
     bool inverted = mode == GL_QUERY_WAIT_INVERTED || mode == GL_QUERY_NO_WAIT_INVERTED || mode == GL_QUERY_BY_REGION_WAIT_INVERTED ||
                     mode == GL_QUERY_BY_REGION_NO_WAIT_INVERTED;
     bool noWait = mode == GL_QUERY_NO_WAIT || mode == GL_QUERY_BY_REGION_NO_WAIT || mode == GL_QUERY_NO_WAIT_INVERTED ||
