@@ -1900,10 +1900,12 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
 
 // Fast path for indexed triangle/line lists from a buffer: rotate the whole index buffer
 // once (per content version) and draw from the same offset in the rotated copy. This
-// serves every draw into a shared index buffer (Sodium) with one allocation.
+// serves every draw into a shared index buffer (Sodium) with one allocation. Buffers without a
+// CPU copy (sparse) would need a readback and a copy as large as the whole buffer (1 GB of
+// mostly uncommitted virtual range in the sparse buffer CTS): they rotate the drawn range only.
 static bool rotatedWholeBuffer(Context* ctx, const DrawParams& d, IndexInfo& out) {
     Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
-    if (!ib || !ib->mtl || (d.mode != GL_TRIANGLES && d.mode != GL_LINES)) return false;
+    if (!ib || !ib->cpu || (d.mode != GL_TRIANGLES && d.mode != GL_LINES)) return false;
     if (d.indexType != GL_UNSIGNED_SHORT && d.indexType != GL_UNSIGNED_INT) return false;
     if (ctx->primitiveRestart || ctx->primitiveRestartFixed) return false;
     if (ib->mapped && (ib->mapAccess & GL_MAP_PERSISTENT_BIT) && (ib->mapAccess & GL_MAP_WRITE_BIT)) return false;
@@ -1920,8 +1922,7 @@ static bool rotatedWholeBuffer(Context* ctx, const DrawParams& d, IndexInfo& out
         ib->rotated = ctx->dev->newBuffer((size_t)ib->size);
         if (!ib->rotated) return false;
         uint8_t* dst = (uint8_t*)ib->rotated.contents;
-        if (ib->cpu) memcpy(dst, ib->cpu, (size_t)ib->size);
-        else readBuffer(ctx, ib, 0, ib->size, dst);
+        memcpy(dst, ib->cpu, (size_t)ib->size);
         size_t n = (size_t)ib->size / isz;
         auto rot = [&](auto* v) {
             for (size_t i = phase; i + vpp <= n; i += vpp) {
@@ -1967,10 +1968,11 @@ static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& 
     }
     // Cache key: only buffer-backed indices whose content can't change behind our back.
     bool cacheable = ib && !(ib->mapped && (ib->mapAccess & GL_MAP_PERSISTENT_BIT) && (ib->mapAccess & GL_MAP_WRITE_BIT));
-    char key[96];
-    snprintf(key, sizeof key, "%p:%u:%llu:%zu:%d:%x:%x:%d:%u", (void*)ib, ib ? ib->generation : 0,
-             (unsigned long long)(ib ? ib->contentVersion : 0), (size_t)d.indices, d.count, d.indexType, d.mode, d.first,
-             ctx->primitiveRestart || ctx->primitiveRestartFixed ? ctx->primitiveRestartIndex : 0xdead);
+    // GPU writes (shaders, copies into GPU-only buffers) change lastGpuWrite, not contentVersion.
+    char key[160];
+    snprintf(key, sizeof key, "%p:%u:%llu:%llu:%zu:%d:%x:%x:%d:%u", (void*)ib, ib ? ib->generation : 0,
+             (unsigned long long)(ib ? ib->contentVersion : 0), (unsigned long long)(ib ? ib->lastGpuWrite : 0), (size_t)d.indices,
+             d.count, d.indexType, d.mode, d.first, ctx->primitiveRestart || ctx->primitiveRestartFixed ? ctx->primitiveRestartIndex : 0xdead);
     struct RotEntry {
         IndexInfo info;
         uint32_t minIdx, maxIdx;
