@@ -869,9 +869,12 @@ id<MTLTexture> readDepthStencilTexture(Context* ctx, Framebuffer* fb, bool stenc
 }
 
 // Resolves a multisampled texture region into a temporary single-sample texture.
-static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
+// `slice` selects the layer of a multisample array; the result is a single 2D image (slice 0).
+static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src, int* slice) {
     if (src.sampleCount <= 1) return src;
     const FormatInfo* f = formatInfoForMTL(src.pixelFormat);
+    int layer = *slice;
+    *slice = 0;
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
     td.storageMode = MTLStorageModePrivate;
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
@@ -881,7 +884,13 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
     ctx->endEncoder();
     if (f && (f->kind == FmtKind::UInt || f->kind == FmtKind::SInt)) {
         // Integer samples can't be averaged: GL takes a single sample (we use sample 0).
-        resolveSample0(ctx, src, dst, f->kind == FmtKind::SInt);
+        id<MTLTexture> s2 = src;
+        if (src.textureType == MTLTextureType2DMultisampleArray) {
+            s2 = [src newTextureViewWithPixelFormat:src.pixelFormat textureType:MTLTextureType2DMultisample levels:NSMakeRange(0, 1)
+                                             slices:NSMakeRange(layer, 1)];
+            ctx->dev->retainUntil(s2, ctx->serial());
+        }
+        resolveSample0(ctx, s2, dst, f->kind == FmtKind::SInt);
         ctx->dev->releaseAfter(dst, ctx->serial());
         return dst;
     }
@@ -890,6 +899,7 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
     bool hasStencil = f && (f->kind == FmtKind::Stencil || f->kind == FmtKind::DepthStencil);
     if (hasDepth) {
         rp.depthAttachment.texture = src;
+        rp.depthAttachment.slice = layer;
         rp.depthAttachment.loadAction = MTLLoadActionLoad;
         rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
         rp.depthAttachment.resolveTexture = dst;
@@ -897,6 +907,7 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
     }
     if (hasStencil) {
         rp.stencilAttachment.texture = src;
+        rp.stencilAttachment.slice = layer;
         rp.stencilAttachment.loadAction = MTLLoadActionLoad;
         rp.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
         rp.stencilAttachment.resolveTexture = dst;
@@ -904,6 +915,7 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
     }
     if (!hasDepth && !hasStencil) {
         rp.colorAttachments[0].texture = src;
+        rp.colorAttachments[0].slice = layer;
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
         rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
         rp.colorAttachments[0].resolveTexture = dst;
@@ -947,7 +959,7 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
         }
     }
     ctx->applyClearNow();
-    src = resolveForRead(ctx, src);
+    src = resolveForRead(ctx, src, &slice);
     int lw = std::max(1, (int)src.width >> level), lh = std::max(1, (int)src.height >> level);
     ClientLayout cl = clientLayout(format, type, w, h, ps);
     size_t need = clientImageSize(format, type, w, h, 1, ps);
@@ -1072,7 +1084,7 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
     ctx->endEncoder();
     auto blitOne = [&](id<MTLTexture> src, int slevel, int sslice, id<MTLTexture> dst, int dlevel, int dslice, BlitParams::What what, bool linear) {
         if (!src || !dst) return;
-        src = resolveForRead(ctx, src);
+        src = resolveForRead(ctx, src, &sslice);
         if (!ctx->framebufferSRGB && what == BlitParams::Color && (src.usage & MTLTextureUsagePixelFormatView) &&
             (src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB || src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)) {
             // FRAMEBUFFER_SRGB disabled: copy encoded values as they are (no sRGB decode on read).
