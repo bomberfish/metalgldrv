@@ -284,7 +284,9 @@ inline mgl_tess mgl_tess_setup(uint domain, uint spacing, uint points, uint ccw,
     }
     for (uint k = 0; k < nInner; k++)
         if (t.ni[k] == 1u) {  // treated as 1 + epsilon
-            if (spacing == 2u) { t.ni[k] = 3u; t.xi[k] = 1.0001f; }
+            // fractional_odd: three segments whose two short ones have length epsilon/2 -> 0, so the
+            // inner ring sits exactly on the outer edges (CTS looks for triangles spanning u/v 0..1)
+            if (spacing == 2u) { t.ni[k] = 3u; t.xi[k] = 1.0f; }
             else { t.ni[k] = 2u; t.xi[k] = 2.0f; }
         }
     if (domain == 0u) {
