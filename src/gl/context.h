@@ -135,7 +135,8 @@ public:
     Ref<ShareGroup> share;
     int majorVersion, minorVersion;
     bool coreProfile, debugContext, forwardCompatible, robustAccess, noErrorMode;
-    bool loseContextOnReset = false;  // RESET_NOTIFICATION_STRATEGY requested at creation
+    bool loseContextOnReset = false;
+    GLenum clampReadColor = GL_FIXED_ONLY;  // glClampColor(GL_CLAMP_READ_COLOR)  // RESET_NOTIFICATION_STRATEGY requested at creation
     bool everCurrent = false;
 
     // ---- errors / debug ----

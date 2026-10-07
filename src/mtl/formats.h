@@ -82,7 +82,7 @@ void convertToStorage(const FormatInfo* f, GLenum format, GLenum type, const voi
 // Converts Metal storage -> client pixels (glReadPixels / glGetTexImage).
 void convertFromStorage(const FormatInfo* f, GLenum format, GLenum type, const void* src, size_t srcRowStride,
                         void* dst, size_t dstRowStride, int width, int height, bool swapBytes,
-                        bool depthPlane = true);
+                        bool depthPlane = true, bool clampColor = false);  // clampColor: CLAMP_READ_COLOR
 
 // Size in bytes of one tightly packed image in Metal storage.
 size_t storageRowBytes(const FormatInfo* f, int width);

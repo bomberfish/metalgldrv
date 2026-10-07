@@ -991,7 +991,12 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
     // GL row 0 is the bottom row == Metal row 0: no flip.
     const FormatInfo* rf = f;
     if (fb->isDefault && ctx->framebufferSRGB == false) rf = f;
-    convertFromStorage(rf, format, type, data.data(), rowBytes, out, cl.rowStride, rw, rh, ps.swapBytes);
+    // GL_CLAMP_READ_COLOR: TRUE clamps to [0,1]; FIXED_ONLY (default) clamps fixed-point buffers
+    bool isInt = rf->kind == FmtKind::UInt || rf->kind == FmtKind::SInt;
+    bool fixedPoint = rf->kind == FmtKind::Unorm || rf->kind == FmtKind::Snorm;
+    bool clamp = !isInt && rf->comp != Comp::Compressed &&
+                 (ctx->clampReadColor == GL_TRUE || (ctx->clampReadColor == GL_FIXED_ONLY && fixedPoint));
+    convertFromStorage(rf, format, type, data.data(), rowBytes, out, cl.rowStride, rw, rh, ps.swapBytes, true, clamp);
     return true;
 }
 
