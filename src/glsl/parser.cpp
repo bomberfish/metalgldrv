@@ -365,6 +365,30 @@ void Parser::finalize() {
             if (st == Stage::TessControl && !in && sh_.outLayout.vertices > 0 && n != sh_.outLayout.vertices)
                 fail("array size of output " + what + " does not match the output patch size", v.line);
         }
+        // GLSL 4.60 4.4.1: explicit varying locations (and components) may not overlap within a stage
+        // (vertex inputs and fragment outputs have their own rules)
+        for (Storage sto : {Storage::In, Storage::Out}) {
+            if ((st == Stage::Vertex && sto == Storage::In) || (st == Stage::Fragment && sto == Storage::Out) || st == Stage::Compute) continue;
+            std::map<int, uint32_t> used;  // location -> component mask
+            for (auto& v : sh_.vars) {
+                if (!v.global || v.builtin != BuiltinVar::None || v.param || v.q.storage != sto || v.q.layout.location < 0 || v.block) continue;
+                Type t = v.type;
+                bool arrayed = (st == Stage::Geometry && sto == Storage::In) || (st == Stage::TessControl && !v.q.patch) ||
+                               (st == Stage::TessEval && sto == Storage::In && !v.q.patch);
+                if (arrayed && t.isArray()) t = t.elem();
+                Type b = t.stripArrays();
+                bool dbl = b.base == BT::Double;
+                int comps = b.vec * (dbl ? 2 : 1);
+                int locsPer = (b.cols ? b.cols : 1) * (comps > 4 ? 2 : 1);
+                int n = locsPer * t.totalArrayElements();
+                int c0 = std::max(0, v.q.layout.component);
+                uint32_t mask = b.cols || comps > 4 ? 0xF : (((1u << comps) - 1) << c0) & 0xF;
+                for (int l = v.q.layout.location; l < v.q.layout.location + n; l++) {
+                    if (used[l] & mask) fail("location " + std::to_string(l) + " is used by more than one variable ('" + v.name + "')", v.line);
+                    used[l] |= mask;
+                }
+            }
+        }
         // GLSL 4.60 4.3.4/4.3.6: fragment shader double inputs must be flat, outputs cannot be double
         if (st == Stage::Fragment)
             for (auto& v : sh_.vars) {

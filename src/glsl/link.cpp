@@ -1043,6 +1043,23 @@ void Linker::assignUniforms() {
             refl.slots.push_back({SlotKind::SubroutineIndices, (uint32_t)s});
         }
     }
+    // GL 4.6 7.6.2: per-stage and combined atomic counter / atomic counter buffer limits
+    {
+        static const int kMaxAC = 1024, kMaxACB = 8;
+        int combined = 0;
+        for (int st = 0; st < (int)Stage::Count; st++) {
+            int counters = 0, buffers = 0;
+            for (auto& u : refl.uniforms)
+                if (u.atomicCounterBufferIndex >= 0 && (u.stageMask & (1u << st))) counters += std::max(1, u.arraySize);
+            for (auto& acb : refl.atomicCounterBuffers)
+                if (acb.stageMask & (1u << st)) buffers++;
+            if (counters > kMaxAC) error("too many atomic counters in one shader stage");
+            if (buffers > kMaxACB) error("too many atomic counter buffers in one shader stage");
+            combined += counters;
+        }
+        if (combined > kMaxAC) error("too many atomic counters (MAX_COMBINED_ATOMIC_COUNTERS)");
+        if ((int)refl.atomicCounterBuffers.size() > kMaxACB) error("too many atomic counter buffers (MAX_COMBINED_ATOMIC_COUNTER_BUFFERS)");
+    }
     for (auto& acb : refl.atomicCounterBuffers) {
         acb.slot = slot++;
         refl.slots.push_back({SlotKind::AtomicCounter, (uint32_t)(&acb - &refl.atomicCounterBuffers[0])});
