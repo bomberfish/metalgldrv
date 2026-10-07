@@ -25,7 +25,9 @@
 
 namespace glsl {
 
-enum class Stage : uint8_t { Vertex, TessControl, TessEval, Geometry, Fragment, Compute, Count };
+// Task and Mesh (EXT_mesh_shader) come after Compute so the classic stages keep their indices.
+enum class Stage : uint8_t { Vertex, TessControl, TessEval, Geometry, Fragment, Compute, Task, Mesh, Count };
+constexpr int kClassicStageCount = 6;  // stages without Task/Mesh (program pipeline argument table size)
 
 // ---------------------------------------------------------------------------
 // Shader objects
@@ -258,6 +260,10 @@ struct Reflection {
     int tcsOutputVertices = 0;
     uint32_t tesPrimitiveMode = 0, tesSpacing = 0, tesOrder = 0;
     bool tesPointMode = false;
+    // mesh shaders (EXT_mesh_shader)
+    int taskLocalSize[3] = {1, 1, 1}, meshLocalSize[3] = {1, 1, 1};
+    int meshMaxVertices = 0, meshMaxPrimitives = 0;
+    uint32_t meshOutputPrimitive = 0;  // GL_POINTS / GL_LINES / GL_TRIANGLES
     bool usesFragDepth = false, earlyFragmentTests = false, usesDiscard = false;
     uint16_t blendSupport = 0;              // fragment shader blend_support_* qualifiers (KHR_blend_equation_advanced)
     bool usesFp64 = false;
@@ -302,6 +308,7 @@ enum class PipelineKind : uint8_t {
     Tessellation,   // VS+TCS as compute kernel(s), TES(+GS) as object/mesh, + fragment
     Compute,
     XfbCapture,     // vertex-processing stages as compute kernel writing xfb buffers
+    Mesh,           // EXT_mesh_shader: optional task (object) + mesh, + fragment
 };
 
 struct VariantKey {

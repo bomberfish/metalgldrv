@@ -56,6 +56,7 @@ const std::vector<std::string>& supportedExtensions() {
         "GL_EXT_gpu_shader4",
         "GL_EXT_texture_array",
         "GL_EXT_geometry_shader4",
+        "GL_EXT_mesh_shader",
         "GL_AMD_vertex_shader_layer",
         "GL_AMD_vertex_shader_viewport_index",
     };

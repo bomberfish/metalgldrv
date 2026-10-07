@@ -561,8 +561,22 @@ std::string buildMSLPrelude(const std::string& body) {
         }
     }
     std::string out = "#include <metal_stdlib>\nusing namespace metal;\n\n";
-    for (size_t i = 0; i < chunks.size(); i++)
-        if (use[i]) out += chunks[i].code;
+    // Mesh pipelines address arrays in the task payload (object_data address space).
+    const bool payload = idents.count("MGLPayload") != 0;
+    for (size_t i = 0; i < chunks.size(); i++) {
+        if (!use[i]) continue;
+        if (payload && chunks[i].code.find("struct mgl_array {") != std::string::npos) {
+            std::string c = chunks[i].code;
+            const std::string last = "    const constant T& operator[](int i) const constant { return e[i]; }\n";
+            size_t at = c.find(last);
+            if (at != std::string::npos)
+                c.insert(at + last.size(), "    object_data T& operator[](int i) object_data { return e[i]; }\n"
+                                           "    const object_data T& operator[](int i) const object_data { return e[i]; }\n");
+            out += c;
+            continue;
+        }
+        out += chunks[i].code;
+    }
     out += kSysStruct;
     return out;
 }
