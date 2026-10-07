@@ -206,6 +206,17 @@ inline T mgl_int_border_gather(T v, float2 c, int2 size, int2 off, int comp, ulo
     return v;
 }
 )"});
+    // --- cube maps without TEXTURE_CUBE_MAP_SEAMLESS: keep the filter footprint inside the face ---
+    c.push_back({{"mgl_cube_noseam"}, R"(inline float3 mgl_cube_noseam(float3 d, float size, float on) {
+    if (on == 0.0f) return d;
+    float3 a = abs(d);
+    float lim = max(a.x, max(a.y, a.z)) * max(1.0f - 1.0f / size, 0.0f);
+    if (a.x >= a.y && a.x >= a.z) { d.y = clamp(d.y, -lim, lim); d.z = clamp(d.z, -lim, lim); }
+    else if (a.y >= a.z) { d.x = clamp(d.x, -lim, lim); d.z = clamp(d.z, -lim, lim); }
+    else { d.x = clamp(d.x, -lim, lim); d.y = clamp(d.y, -lim, lim); }
+    return d;
+}
+)"});
     // --- arrays ---------------------------------------------------------------------
     c.push_back({{"mgl_array"}, R"(template <typename T, int N>
 struct mgl_array {

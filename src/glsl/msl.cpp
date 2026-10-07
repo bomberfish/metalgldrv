@@ -1720,7 +1720,12 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     bool fragment = stage_ == Stage::Fragment;
     std::string ct = (dim == Dim::D3 || dim == Dim::Cube) ? "float3" : "float2";
     std::string gradFn = dim == Dim::D3 ? "gradient3d" : dim == Dim::Cube ? "gradientcube" : "gradient2d";
-    if (isLod) options = "level(" + ex(A[ai++]) + " + " + texBias + ")";
+    std::string cubeLevel = "0.0f";  // level whose size bounds non-seamless cube lookups
+    if (isLod) {
+        std::string l = "(" + ex(A[ai++]) + ") + " + texBias;
+        if (dim == Dim::Cube && !texBias_.empty()) l = cubeLevel = bind(l, "float", pre);
+        options = "level(" + l + ")";
+    }
     else if (isGrad) {
         // scaling the gradients by 2^bias raises the LOD by exactly bias
         std::string sc = bind("exp2(" + texBias + ")", "float", pre);
@@ -1748,6 +1753,8 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
             options = gradFn + "(dfdx(" + coord + ") * exp2(" + shadowBias + "), dfdy(" + coord + ") * exp2(" + shadowBias + "))";
         }
     }
+    if (dim == Dim::Cube && !texBias_.empty())
+        coord = "mgl_cube_noseam(" + coord + ", float(" + tex + ".get_width(uint(max(" + cubeLevel + ", 0.0f)))), " + texBias_ + ".y)";
     std::string args = smp + ", " + coord;
     if (!layer.empty()) args += ", " + layer;
     if (sh) args += ", " + ref;

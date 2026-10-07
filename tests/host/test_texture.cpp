@@ -376,21 +376,96 @@ TEST(texture_view_cube_from_array) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
     glViewport(0, 0, 12, 1);
-    glUseProgram(prog);
+    // Same fragment shader behind a geometry shader (mesh pipeline path).
+    const char* fsSrc = "#version 430 core\nuniform samplerCube s; out vec4 c;\n"
+                        "void main() { int i = int(gl_FragCoord.x); vec3 d[6] = vec3[6](vec3(1,-0.9,-0.9), vec3(-1,-0.9,-0.9), vec3(-0.9,1,-0.9),\n"
+                        "  vec3(-0.9,-1,-0.9), vec3(-0.9,-0.9,1), vec3(-0.9,-0.9,-1)); c = textureLod(s, d[i % 6], float(i / 6)); }";
+    const char* gsSrc = "#version 430 core\nlayout(points) in; layout(triangle_strip, max_vertices = 4) out;\n"
+                        "void main() { for (int k = 0; k < 4; k++) { gl_Position = vec4(float(k & 1) * 2.0 - 1.0, float(k >> 1) * 2.0 - 1.0, 0, 1); EmitVertex(); } }";
+    const char* vsPt = "#version 430 core\nvoid main() { gl_Position = vec4(0, 0, 0, 1); }";
+    GLuint gprog = glCreateProgram();
+    const char* srcs[3] = {vsPt, gsSrc, fsSrc};
+    GLenum kinds[3] = {GL_VERTEX_SHADER, GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER};
+    for (int k = 0; k < 3; k++) {
+        GLuint sh = glCreateShader(kinds[k]);
+        glShaderSource(sh, 1, &srcs[k], nullptr);
+        glCompileShader(sh);
+        glAttachShader(gprog, sh);
+        glDeleteShader(sh);
+    }
+    glLinkProgram(gprog);
+    GLint linked = 0;
+    glGetProgramiv(gprog, GL_LINK_STATUS, &linked);
+    CHECK(linked);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_CUBE_MAP, view);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-    uint32_t out[12] = {};
-    glReadPixels(0, 0, 12, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
-    for (int i = 0; i < 12; i++) {
-        uint32_t expect = 0xff000000u | (uint32_t)((1 + i % 6) * 30) | (uint32_t)((1 + i / 6) * 80) << 8;
-        if (out[i] != expect) testFail(__FILE__, __LINE__, "texel " + std::to_string(i) + " = " + std::to_string(out[i]) + " expected " + std::to_string(expect));
+    for (int pass = 0; pass < 2; pass++) {
+        glUseProgram(pass == 0 ? prog : gprog);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (pass == 0) glDrawArrays(GL_TRIANGLES, 0, 3);
+        else glDrawArrays(GL_POINTS, 0, 1);
+        uint32_t out[12] = {};
+        glReadPixels(0, 0, 12, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
+        for (int i = 0; i < 12; i++) {
+            uint32_t expect = 0xff000000u | (uint32_t)((1 + i % 6) * 30) | (uint32_t)((1 + i / 6) * 80) << 8;
+            if (out[i] != expect)
+                testFail(__FILE__, __LINE__, "pass " + std::to_string(pass) + " texel " + std::to_string(i) + " = " + std::to_string(out[i]) +
+                                                 " expected " + std::to_string(expect));
+        }
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(0);
     glDeleteProgram(prog);
+    glDeleteProgram(gprog);
     glDeleteFramebuffers(1, &fbo);
     GLuint ts[3] = {rt, view, arr};
     glDeleteTextures(3, ts);
+    glDeleteVertexArrays(1, &vao);
+}
+
+// Without TEXTURE_CUBE_MAP_SEAMLESS, linear filtering stays inside the selected face
+// (Metal always filters across faces).
+TEST(cube_linear_not_seamless) {
+    GLuint cube;
+    glGenTextures(1, &cube);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+    for (int f = 0; f < 6; f++) {
+        uint32_t px[4];
+        for (uint32_t& p : px) p = 0xff000000u | (uint32_t)(f * 40);
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glDisable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+    const char* vs = "#version 430 core\nvoid main() { vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4.0 - 1.0; gl_Position = vec4(p, 0, 1); }";
+    // directions close to the corners of each face
+    GLuint prog = compileProgram(vs, "#version 430 core\nuniform samplerCube s; out vec4 c;\n"
+                                     "void main() { int i = int(gl_FragCoord.x); vec3 d[6] = vec3[6](vec3(1,0.95,0.95), vec3(-1,0.95,0.95), vec3(0.95,1,0.95),\n"
+                                     "  vec3(0.95,-1,0.95), vec3(0.95,0.95,1), vec3(0.95,0.95,-1)); c = texture(s, d[i]); }");
+    GLuint vao, fbo, rt;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenTextures(1, &rt);
+    glBindTexture(GL_TEXTURE_2D, rt);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 6, 1);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+    glViewport(0, 0, 6, 1);
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    uint32_t out[6] = {};
+    glReadPixels(0, 0, 6, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
+    for (int f = 0; f < 6; f++) CHECK_EQ(out[f], 0xff000000u | (uint32_t)(f * 40));
+    CHECK_GL();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteFramebuffers(1, &fbo);
+    GLuint ts[2] = {rt, cube};
+    glDeleteTextures(2, ts);
     glDeleteVertexArrays(1, &vao);
 }

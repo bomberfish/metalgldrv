@@ -473,6 +473,21 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             uint32_t bits;
             memcpy(&bits, &bias, 4);
             v = bits;
+            // .y: 1 when a cube map is filtered without TEXTURE_CUBE_MAP_SEAMLESS. Metal always
+            // filters across cube faces; the shader keeps such lookups inside the selected face.
+            if (s.textureTarget == GL_TEXTURE_CUBE_MAP || s.textureTarget == GL_TEXTURE_CUBE_MAP_ARRAY) {
+                SamplerState st = t ? t->sampler : SamplerState();
+                if (Sampler* so = ctx->samplers[unit].get()) st = so->state;
+                bool seamless = ctx->textureCubeSeamless && st.seamless;
+                bool linear = st.magFilter == GL_LINEAR || st.minFilter == GL_LINEAR || st.minFilter == GL_LINEAR_MIPMAP_NEAREST ||
+                              st.minFilter == GL_LINEAR_MIPMAP_LINEAR;
+                if (!seamless && linear) {
+                    float one = 1.0f;
+                    uint32_t ob;
+                    memcpy(&ob, &one, 4);
+                    v |= (uint64_t)ob << 32;
+                }
+            }
             break;
         }
         case glsl::SlotKind::Image: {
