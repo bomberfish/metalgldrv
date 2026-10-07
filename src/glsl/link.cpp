@@ -1332,9 +1332,8 @@ void Linker::stageMetadata() {
         // builtin outputs captured through a gl_PerVertex redeclaration with xfb_offset
         for (auto* v : ps.used) {
             if (v->builtin == BuiltinVar::None || v->q.storage != Storage::Out || v->q.layout.xfbOffset < 0) continue;
-            int vb = v->q.layout.xfbBuffer >= 0 ? v->q.layout.xfbBuffer : stageBuffer;
-            if (v->q.layout.xfbStride > 0 && vb < 4) explicitStride[vb] = v->q.layout.xfbStride;
-            if (vb < 0 || vb > 3) { error("xfb_buffer out of range"); continue; }
+            int vb = std::max(0, v->q.layout.xfbBuffer);  // resolved by the parser
+            if (vb > 3) { error("xfb_buffer out of range"); continue; }
             XfbVarying x;
             x.name = v->name;
             x.type = glTypeEnum(v->type);
@@ -1342,7 +1341,8 @@ void Linker::stageMetadata() {
             x.buffer = vb;
             x.offset = v->q.layout.xfbOffset;
             r.xfbVaryings.push_back(x);
-            ends[vb] = std::max<uint32_t>(ends[vb], x.offset + compSize(v->type));
+            caps.push_back(xfbCaptureOf(v->type, vb, (uint32_t)x.offset));
+            caps.back().name = v->name;
             qualified = true;
         }
         if (qualified) {
