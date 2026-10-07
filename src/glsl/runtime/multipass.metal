@@ -429,6 +429,11 @@ inline void mgl_tess_unit(thread const mgl_tess& T, uint unit, threadgroup float
             }
             u -= cnt;
         }
+        if (T.domain == 0u && u == 0u && (T.ni[0] & 1u) == 0u) {  // even inner level: the innermost ring is the center point
+            co[0] = float3(1.0f / 3.0f);
+            nv = 1u;
+            idx[np++] = 0;
+        }
         return;
     }
     if (unit < sides * T.rings) {
@@ -497,6 +502,7 @@ inline uint2 mgl_tess_unit_size(thread const mgl_tess& T, uint unit) {
             }
             u -= cnt;
         }
+        if (T.domain == 0u && u == 0u && (T.ni[0] & 1u) == 0u) return uint2(1u, 1u);
         return uint2(0u);
     }
     if (unit < sides * T.rings) {
