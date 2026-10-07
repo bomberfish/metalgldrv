@@ -111,6 +111,21 @@ private:
     bool haveVsOutputs_ = false;
     bool hasShared_ = false;
     std::map<std::string, std::string> interpLeaf_;  // FS input leaf accessor (without "g.") -> In member, for interpolateAt*
+    // EXT_fragment_shading_rate coarse shading (VariantKey::fsr) while the fragment stage is emitted; fsrInterp_: the
+    // perspective flag of each interpolant (interpLeaf_ value) whose plane G keeps for interpolateAt*.
+    bool fsr_ = false;
+    std::map<std::string, bool> fsrInterp_;
+    // Coarse shading: side effects (buffer/image stores, atomics) happen only in a lane that shades a fragment
+    // with coverage (mgl_fl): the other lanes are helper invocations.
+    std::string fsrStore(const std::string& s) { return fsr_ ? "(mgl_fl ? " + s + " : (void)0)" : s; }
+    std::string fsrAtomic(const std::string& s, const std::string& type) { return fsr_ ? "(mgl_fl ? " + s + " : " + type + "(0))" : s; }
+    // Leaves the function after a coarse-shading discard (also at each loop iteration, so that execution
+    // past a discard always ends), returning the zero value.
+    std::string fsrExit() {
+        std::string r = "{ " + retWriteback_;
+        if (!curFn_ || curFn_->ret.isVoid()) return r + "return; }";
+        return r + "return " + mt(curFn_->ret) + "{}; }";
+    }
     bool needEq_ = false;
     std::string payloadSpace_ = "object_data";  // address space of G::PL (task/mesh payload)
 
@@ -403,6 +418,7 @@ private:
     // ---- statements ------------------------------------------------------------------
     void stmt(const Stmt* s, std::string& o, int ind);
     void block(const Stmt* s, std::string& o, int ind);
+    void loopBody(const Stmt* s, std::string& o, int ind);
     std::string fnSignature(const Function* f);
     std::string emitFunction(const Function* f);
 
@@ -717,9 +733,9 @@ std::string Emitter::loadAcc(const Acc& a) {
 std::string Emitter::storeAcc(const Acc& a, const std::string& v) {
     if (!a.device) fail("cannot write to a uniform");
     if (a.compStride) {
-        return "mgl_stcs_" + mt(a.type) + "(" + a.ptr + ", " + a.off + ", " + std::to_string(a.compStride) + "u, " + v + ")";
+        return fsrStore("mgl_stcs_" + mt(a.type) + "(" + a.ptr + ", " + a.off + ", " + std::to_string(a.compStride) + "u, " + v + ")");
     }
-    return storerFor(a.type, a.layout) + "(" + a.ptr + ", " + a.off + ", " + v + ")";
+    return fsrStore(storerFor(a.type, a.layout) + "(" + a.ptr + ", " + a.off + ", " + v + ")");
 }
 
 bool Emitter::isBufferRooted(const Expr* e) {
@@ -1372,6 +1388,13 @@ std::string Emitter::callBuiltin(const Expr* e) {
         {"unpackDouble2x32", "mgl_unpack_f64"}, {"anyInvocation", "simd_any"}, {"allInvocations", "simd_all"},
         {"anyInvocationARB", "simd_any"}, {"allInvocationsARB", "simd_all"},
     };
+    if (fsr_ && (n.compare(0, 4, "dFdx") == 0 || n.compare(0, 4, "dFdy") == 0 || n.compare(0, 6, "fwidth") == 0)) {
+        // coarse shading: differences to the neighbouring coarse fragments, per pixel (G::mgl_ddx / mgl_ddy)
+        if (n[0] == 'd') return std::string(n[3] == 'x' ? "mgl_ddx(" : "mgl_ddy(") + a(0) + ")";
+        std::string pre;
+        std::string v = bind(a(0), mt(A[0]->type), pre);
+        return "(" + pre + "abs(mgl_ddx(" + v + ")) + abs(mgl_ddy(" + v + ")))";
+    }
     if (auto it = direct.find(n); it != direct.end()) return simple(it->second);
     if (n == "sign") return (A[0]->type.base == BT::Int || A[0]->type.base == BT::Int64 ? "mgl_isign(" : "sign(") + a(0) + ")";
     if (n == "radians") return "(" + a(0) + " * 0.0174532925199432958f)";
@@ -1447,6 +1470,16 @@ std::string Emitter::callBuiltin(const Expr* e) {
         std::string pth;
         auto it = path(x, pth) ? interpLeaf_.find(pth) : interpLeaf_.end();
         if (it == interpLeaf_.end()) return a(0);  // not resolvable to one interpolant: value at the default location
+        if (fsr_) {
+            // coarse shading: the input's plane around the fragment centre (offsets in pixels)
+            const std::string& nm = it->second;
+            std::string off;
+            if (n == "interpolateAtCentroid") off = "(mgl_fcen - mgl_fe)";
+            else if (n == "interpolateAtSample") off = "(mgl_fcen - mgl_fe + get_sample_position(uint(" + a(1) + ")) - 0.5f)";
+            else off = "float2(" + a(1) + ")";
+            return "mgl_fsr_at(mgl_pa_" + nm + ", mgl_px_" + nm + ", mgl_py_" + nm + ", " + off + ", " +
+                   (fsrInterp_[nm] ? "true" : "false") + ")" + post;
+        }
         std::string call = "mgl_in->" + it->second;
         if (n == "interpolateAtCentroid") call += ".interpolate_at_centroid()";
         else if (n == "interpolateAtSample") call += ".interpolate_at_sample(uint(" + a(1) + "))";
@@ -1490,16 +1523,16 @@ std::string Emitter::callBuiltin(const Expr* e) {
     if (n.compare(0, 13, "atomicCounter") == 0) {
         std::string pre;
         std::string p = atomicPtr(A[0], pre);
-        if (n == "atomicCounterIncrement") return "atomic_fetch_add_explicit(" + p + ", 1u, memory_order_relaxed)";
-        if (n == "atomicCounterDecrement") return "(atomic_fetch_sub_explicit(" + p + ", 1u, memory_order_relaxed) - 1u)";
+        if (n == "atomicCounterIncrement") return fsrAtomic("atomic_fetch_add_explicit(" + p + ", 1u, memory_order_relaxed)", "uint");
+        if (n == "atomicCounterDecrement") return fsrAtomic("(atomic_fetch_sub_explicit(" + p + ", 1u, memory_order_relaxed) - 1u)", "uint");
         if (n == "atomicCounter") return "atomic_load_explicit(" + p + ", memory_order_relaxed)";
         static const std::map<std::string, std::string> ops = {
             {"atomicCounterAdd", "atomic_fetch_add_explicit"}, {"atomicCounterSubtract", "atomic_fetch_sub_explicit"},
             {"atomicCounterMin", "atomic_fetch_min_explicit"}, {"atomicCounterMax", "atomic_fetch_max_explicit"},
             {"atomicCounterAnd", "atomic_fetch_and_explicit"}, {"atomicCounterOr", "atomic_fetch_or_explicit"},
             {"atomicCounterXor", "atomic_fetch_xor_explicit"}, {"atomicCounterExchange", "atomic_exchange_explicit"}};
-        if (n == "atomicCounterCompSwap") return "mgl_atomic_cas(" + p + ", " + a(1) + ", " + a(2) + ")";
-        return ops.at(n) + "(" + p + ", " + a(1) + ", memory_order_relaxed)";
+        if (n == "atomicCounterCompSwap") return fsrAtomic("mgl_atomic_cas(" + p + ", " + a(1) + ", " + a(2) + ")", "uint");
+        return fsrAtomic(ops.at(n) + "(" + p + ", " + a(1) + ", memory_order_relaxed)", "uint");
     }
     if (n.compare(0, 6, "atomic") == 0) {
         std::string pre;
@@ -1509,8 +1542,8 @@ std::string Emitter::callBuiltin(const Expr* e) {
             {"atomicMax", "atomic_fetch_max_explicit"}, {"atomicAnd", "atomic_fetch_and_explicit"},
             {"atomicOr", "atomic_fetch_or_explicit"},   {"atomicXor", "atomic_fetch_xor_explicit"},
             {"atomicExchange", "atomic_exchange_explicit"}};
-        if (n == "atomicCompSwap") return "mgl_atomic_cas(" + p + ", " + a(1) + ", " + a(2) + ")";
-        return ops.at(n) + "(" + p + ", " + a(1) + ", memory_order_relaxed)";
+        if (n == "atomicCompSwap") return fsrAtomic("mgl_atomic_cas(" + p + ", " + a(1) + ", " + a(2) + ")", mt(rt));
+        return fsrAtomic(ops.at(n) + "(" + p + ", " + a(1) + ", memory_order_relaxed)", mt(rt));
     }
     if (n == "ftransform") {
         auto it = P->defaultOffsets.find("gl_ModelViewProjectionMatrix");
@@ -1569,6 +1602,12 @@ std::string Emitter::subgroupFn(const Expr* e) {
     if (n == "ShuffleXor") return from("(" + lane() + " ^ " + a(1) + ")");
     if (n == "ShuffleUp") return from("(" + lane() + " - " + a(1) + ")");
     if (n == "ShuffleDown") return from("(" + lane() + " + " + a(1) + ")");
+    if (fsr_ && n.compare(0, 4, "Quad") == 0) {
+        // coarse shading: the quad is the block of coarse fragments (mgl_fsr_setup)
+        if (n == "QuadBroadcast") return from("mgl_fsr_lane(uint(" + a(1) + "), " + lane() + ")");
+        std::string x = n == "QuadSwapHorizontal" ? "1u" : n == "QuadSwapVertical" ? "2u" : "3u";
+        return from("mgl_fsr_lane(mgl_bp ^ " + x + ", " + lane() + ")");
+    }
     if (n == "QuadBroadcast") return from("((" + lane() + " & ~3u) | (" + a(1) + " & 3u))");
     if (n == "QuadSwapHorizontal") return from("(" + lane() + " ^ 1u)");
     if (n == "QuadSwapVertical") return from("(" + lane() + " ^ 2u)");
@@ -1837,6 +1876,7 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     if (isQueryLod) {
         coord = dim == Dim::D1 ? "float2(" + comp(0) + ", 0.5f)" : (dim == Dim::D2 || dim == Dim::Rect) ? (pn == 2 ? P : P + ".xy") : P + ".xyz";
         std::string c = bind(coord, (dim == Dim::D3 || dim == Dim::Cube) ? "float3" : "float2", pre);
+        if (fsr_) return finish("mgl_qlod(" + tex + ", " + smp + ", " + c + ")");  // coarse shading: LOD from the coarse neighbours
         return finish("float2(" + tex + ".calculate_clamped_lod(" + smp + ", " + c + "), " + tex + ".calculate_unclamped_lod(" + smp + ", " + c + "))");
     }
     if (rect) coord = "(" + coord + " / float2(" + tex + ".get_width(), " + tex + ".get_height()))";
@@ -1941,6 +1981,12 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         if (!fragment) {
             options = "level(" + (minLod.empty() ? b : "max(" + b + ", " + minLod + ")") + ")";  // implicit LOD is 0 outside fragment shaders
             minLod.clear();
+        } else if (fsr_) {
+            // Coarse shading: the implicit derivatives are the differences to the neighbouring coarse
+            // fragments (EXT_fragment_shading_rate scales the LOD by the fragment size); 2^bias scales them.
+            coord = bind(coord, ct, pre);
+            std::string sc = bind("exp2(" + b + ")", "float", pre);
+            options = gradFn + "(mgl_gdx(" + coord + ") * " + sc + ", mgl_gdy(" + coord + ") * " + sc + ")";
         } else if (!sh) {
             options = "bias(" + b + ")";
         } else {
@@ -2081,12 +2127,13 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     if (n == "imageStore") {
         std::string w = tex + ".write(" + ex(A[ai]) + ", " + loc + ")";
         if (rw) w = "(" + w + ", " + tex + ".fence())";
-        return finish(w);
+        return finish(fsrStore(w));
     }
     std::string S = scalarName(T.sampled);
     std::string V = vecName(T.sampled, 4);
     if (T.sampled == BT::Float) fail("float image atomics are not supported by Metal");
     auto fenced = [&](std::string v) {
+        v = fsrAtomic(v, S);
         if (!resident.empty()) v = "(" + resident + " ? " + v + " : " + S + "(0))";
         if (!rw) return finish(v);
         std::string t = newTempS(S);
@@ -2109,6 +2156,17 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
 // Statements & functions
 // ===========================================================================
 static std::string ind(int n) { return std::string(n * 4, ' '); }
+
+// Loop body; under coarse shading each iteration first leaves a discarded invocation (fsrExit).
+void Emitter::loopBody(const Stmt* s, std::string& o, int in) {
+    if (!fsr_) return block(s, o, in);
+    o += "{\n" + ind(in + 1) + "if (mgl_disc) " + fsrExit() + "\n";
+    if (s->kind == SK::Block)
+        for (auto* b : s->body) stmt(b, o, in + 1);
+    else
+        stmt(s, o, in + 1);
+    o += ind(in) + "}";
+}
 
 void Emitter::block(const Stmt* s, std::string& o, int in) {
     if (s->kind == SK::Block) {
@@ -2159,18 +2217,18 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
             o += ind(in) + "{\n";
             if (s->init) stmt(s->init, o, in + 1);
             o += ind(in + 1) + "for (; " + (s->cond ? ex(s->cond) : "") + "; " + (s->incr ? ex(s->incr) : "") + ") ";
-            block(s->then, o, in + 1);
+            loopBody(s->then, o, in + 1);
             o += "\n" + ind(in) + "}\n";
             return;
         }
         case SK::While:
             o += ind(in) + "while (" + ex(s->expr) + ") ";
-            block(s->then, o, in);
+            loopBody(s->then, o, in);
             o += "\n";
             return;
         case SK::DoWhile:
             o += ind(in) + "do ";
-            block(s->then, o, in);
+            loopBody(s->then, o, in);
             o += " while (" + ex(s->expr) + ");\n";
             return;
         case SK::Switch: {
@@ -2216,7 +2274,11 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
             // 1 = all; N >= 2 = only the (N-1)th discard statement of each shader.
             static const int noDiscard = getenv("METALGLDRV_DEBUG_NODISCARD") ? atoi(getenv("METALGLDRV_DEBUG_NODISCARD")) : 0;
             int k = ++discardCount_;
-            if (!(noDiscard == 1 || (noDiscard >= 2 && k == noDiscard - 1))) o += ind(in) + "discard_fragment();\n";
+            if (noDiscard == 1 || (noDiscard >= 2 && k == noDiscard - 1)) return;
+            // Coarse shading: the entry point discards the group when its logical invocation discarded;
+            // the lane leaves main, with no further side effects.
+            if (fsr_) o += ind(in) + "{ mgl_disc = true; mgl_fl = false; " + fsrExit() + " }\n";
+            else o += ind(in) + "discard_fragment();\n";
             return;
         }
     }
@@ -2730,6 +2792,7 @@ std::string Emitter::builtinKey(BuiltinVar b) {
         case BuiltinVar::BackSecondaryColor: return "bc1";
         case BuiltinVar::TexCoord: return "tc";
         case BuiltinVar::FogFragCoord: return "fog";
+        case BuiltinVar::PrimitiveShadingRate: return "psr";  // EXT_fragment_shading_rate: a flat int varying
         default: return "";
     }
 }
@@ -2768,6 +2831,9 @@ std::vector<Emitter::Field> Emitter::producerFields(Stage st) {
                          BuiltinVar::FrontColor, BuiltinVar::FrontSecondaryColor, BuiltinVar::BackColor, BuiltinVar::BackSecondaryColor,
                          BuiltinVar::TexCoord, BuiltinVar::FogFragCoord})
         if (si.bi.count(b) && si.bi[b]->q.storage == Storage::Out) fieldsOfVar(si.bi[b], st, false, f);
+    // EXT_fragment_shading_rate: the primitive's rate (rasterOutput passes it to coarse-shading fragment shaders)
+    if (si.bi.count(BuiltinVar::PrimitiveShadingRate) && si.bi[BuiltinVar::PrimitiveShadingRate]->q.storage == Storage::Out)
+        fieldsOfVar(si.bi[BuiltinVar::PrimitiveShadingRate], st, false, f);
     for (auto* v : sc_->globals)
         if (v->q.storage == Storage::Out && v->builtin == BuiltinVar::None && !v->q.patch) fieldsOfVar(v, st, false, f);
     // de-duplicate (shader objects of one stage may redeclare outputs)
@@ -3054,9 +3120,18 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
             }
         useStage(keep);
     }
+    // EXT_fragment_shading_rate: coarse-shading fragment shaders read the primitive's rate (flat, never spilled)
+    std::string psr;
+    for (auto& f : fields)
+        if (f.key == "psr") psr = acc(f, g);
+    if (K.fsr) {
+        r.vertexStruct += "    int psr_0 [[user(psr_0)]];\n";
+        r.vertexCopy += "v.psr_0 = " + (psr.empty() ? std::string("0") : psr) + ";\n";
+        r.names.insert("psr_0");
+    }
     std::vector<Field> passed;
     for (auto& f : fields) {
-        if (f.key == "pos" || f.key == "psize" || f.key == "clipv") continue;
+        if (f.key == "pos" || f.key == "psize" || f.key == "clipv" || f.key == "psr") continue;
         if (filter && f.key != "clipd" && f.key != "culld" && !fsNames.count(f.name)) continue;
         if (f.key == "clipd" && !fsClip) continue;
         if (f.key == "culld" && !fsCull) continue;
@@ -3070,7 +3145,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
         // record slots, and the fragment shader interpolates them from [[barycentric_coord]].
         // Programs within the budgets are unaffected.
         auto scalars = [](const Type& t) { return (t.is64() ? 2 : 1) * t.components(); };
-        int vbase = 4 + ((!mesh || points) ? 1 : 0) + nclip + ncull;
+        int vbase = 4 + ((!mesh || points) ? 1 : 0) + nclip + ncull + (K.fsr ? 1 : 0);
         int pbase = (fsReadsPrimitiveId() ? 1 : 0) /* mgl_primid */ + (r.hasPrim ? (int)std::count(r.primStruct.begin(), r.primStruct.end(), ';') : 0);
         int total = 0;
         for (auto& f : passed) total += scalars(f.type);
@@ -3198,6 +3273,18 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     prepareStage(Stage::Fragment);
     useStage(Stage::Fragment);
     StageInfo& si = si_[(int)Stage::Fragment];
+    // EXT_fragment_shading_rate coarse shading (VariantKey::fsr): every lane of a 2x2 quad runs the shader
+    // for one fragment of a 2x2 block of coarse fragments (mgl_fsr_setup); inputs are re-evaluated at
+    // that fragment's centre from their planes (fsrLeaves), and each pixel takes the outputs of the lane
+    // that shaded its own coarse fragment.
+    fsr_ = K.fsr;
+    fsrInterp_.clear();
+    struct FsrLeaf {
+        std::string acc, type, plane;  // plane: interpolant name whose plane G keeps for interpolateAt*
+        bool persp, centroid;
+    };
+    std::vector<FsrLeaf> fsrLeaves;
+    std::string fsrPost;  // entry point code after mgl_fsr_setup
     // inputs used with interpolateAt* stay interpolants, reachable from G through mgl_in
     std::set<const Variable*> interpVars;
     {
@@ -3299,6 +3386,11 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 if (lt.base != BT::Float || lq.interp == Interp::Flat || spillIpp_ == 1) {
                     val = vtx(0);  // flat: vertex 0 of the record is the provoking vertex
                 } else {
+                    if (fsr_) {
+                        // coarse shading: barycentrics at the pixel centre, then the value at the fragment's
+                        fsrLeaves.push_back({leaves[i].second, mt(lt), "", lq.interp != Interp::NoPerspective, lq.centroid});
+                        lq.centroid = false;
+                    }
                     std::string mode = std::string(lq.sample ? "sample" : lq.centroid ? "centroid" : "center") +
                                        (lq.interp == Interp::NoPerspective ? "_no_perspective" : "_perspective");
                     if (lq.sample) needSid();
@@ -3322,6 +3414,22 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             // Sample shading evaluates every interpolated input at the invocation's sample.
             if (K.sampleShading && lq.interp != Interp::Flat) lq.sample = true, lq.centroid = false;
             if (lq.sample && lq.interp != Interp::Flat) perSample = true;
+            bool fsrPlane = fsr_ && lt.base == BT::Float && lq.interp != Interp::Flat && !lq.perprimitive;
+            if (fsrPlane && interpVars.count(v)) {
+                // coarse shading: interpolateAt* evaluates the input's plane (mgl_fsr_at)
+                bool persp = lq.interp != Interp::NoPerspective;
+                inS += "    " + mt(lt) + " " + nm + " [[user(" + nm + ")" + (persp ? "" : ", center_no_perspective") + "]];\n";
+                copyIn += "    " + leaves[i].second + " = in." + nm + ";\n";
+                interpLeaf_[leaves[i].second.substr(2)] = nm;  // strip "g."
+                fsrInterp_[nm] = persp;
+                fsrLeaves.push_back({leaves[i].second, mt(lt), nm, persp, lq.centroid});
+                anyIn = true;
+                continue;
+            }
+            if (fsrPlane) {
+                fsrLeaves.push_back({leaves[i].second, mt(lt), "", lq.interp != Interp::NoPerspective, lq.centroid});
+                lq.centroid = false;  // read at the pixel centre
+            }
             if (interpVars.count(v) && lt.base == BT::Float && lq.interp != Interp::Flat) {
                 std::string mode = lq.interp == Interp::NoPerspective ? "no_perspective" : "perspective";
                 inS += "    interpolant<" + mt(lt) + ", interpolation::" + mode + "> " + nm + " [[user(" + nm + ")]];\n";
@@ -3340,14 +3448,24 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             anyIn = true;
         }
     }
+    bool haveFc = false;
+    auto needFc = [&]() {
+        if (!haveFc) params += ", float4 mgl_fc [[position]]";
+        haveFc = true;
+    };
     for (auto* v : si.builtins) {
         switch (v->builtin) {
             case BuiltinVar::FragCoord: {
-                params += ", float4 mgl_fc [[position]]";
-                std::string x = "mgl_fc.x", y = "mgl_fc.y";
-                if (v->q.layout.originUpperLeft) y = "(sys.renderTargetHeight - mgl_fc.y)";
+                needFc();
+                // coarse shading: the centre of the coarse fragment, depth and 1/w from their planes
+                std::string fx = fsr_ ? "g.mgl_fe.x" : "mgl_fc.x", fy = fsr_ ? "g.mgl_fe.y" : "mgl_fc.y";
+                std::string x = fx, y = fy;
+                if (v->q.layout.originUpperLeft) y = "(sys.renderTargetHeight - " + fy + ")";
                 if (v->q.layout.pixelCenterInteger) { x = "(" + x + " - 0.5f)"; y = "(" + y + " - 0.5f)"; }
-                copyIn += "    g.bi_" + v->name + " = float4(" + x + ", " + y + ", mgl_fc.z, mgl_fc.w);\n";
+                if (fsr_)
+                    fsrPost += "    g.bi_" + v->name + " = float4(" + x + ", " + y + ", g.mgl_fsr_ip(mgl_fc.z, false, g.mgl_d), g.mgl_w0);\n";
+                else
+                    copyIn += "    g.bi_" + v->name + " = float4(" + x + ", " + y + ", mgl_fc.z, mgl_fc.w);\n";
                 break;
             }
             case BuiltinVar::FrontFacing:
@@ -3356,7 +3474,11 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 break;
             case BuiltinVar::PointCoord:
                 params += ", float2 mgl_pc [[point_coord]]";
-                copyIn += "    g.bi_" + v->name + " = float2(mgl_pc.x, (sys.flags & 2u) != 0u ? mgl_pc.y : 1.0f - mgl_pc.y);\n";
+                if (fsr_)
+                    fsrPost += "    { float2 mgl_pcr = g.mgl_fsr_ip(mgl_pc, false, g.mgl_d); g.bi_" + v->name +
+                               " = float2(mgl_pcr.x, (sys.flags & 2u) != 0u ? mgl_pcr.y : 1.0f - mgl_pcr.y); }\n";
+                else
+                    copyIn += "    g.bi_" + v->name + " = float2(mgl_pc.x, (sys.flags & 2u) != 0u ? mgl_pc.y : 1.0f - mgl_pc.y);\n";
                 break;
             case BuiltinVar::SampleID:
                 needSid();
@@ -3369,7 +3491,9 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             case BuiltinVar::SampleMaskIn:
                 params += ", uint mgl_smi [[sample_mask]]";
                 // With per-sample shading each invocation covers only its own sample.
-                if (perSample) {
+                if (fsr_) {
+                    fsrPost += "    g.bi_" + v->name + "[0] = int(g.mgl_fsr_smask(mgl_smi));\n";  // all pixels of the coarse fragment
+                } else if (perSample) {
                     needSid();
                     copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi & (1u << mgl_sid));\n";
                 } else {
@@ -3395,7 +3519,12 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 copyIn += "    g.bi_" + v->name + " = int(mgl_vpi);\n";
                 break;
             case BuiltinVar::HelperInvocation:
-                copyIn += "    g.bi_" + v->name + " = simd_is_helper_thread();\n";
+                if (fsr_) fsrPost += "    g.bi_" + v->name + " = !g.mgl_fl;\n";
+                else copyIn += "    g.bi_" + v->name + " = simd_is_helper_thread();\n";
+                break;
+            case BuiltinVar::ShadingRate:
+                if (fsr_) fsrPost += "    g.bi_" + v->name + " = int(g.mgl_rate);\n";
+                else copyIn += "    g.bi_" + v->name + " = 0;\n";  // 1x1
                 break;
             case BuiltinVar::ClipDistance:
             case BuiltinVar::CullDistance: {
@@ -3409,6 +3538,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                     }
                     inS += "    float " + nm + " [[user(" + nm + ")]];\n";
                     copyIn += "    g.bi_" + v->name + "[" + std::to_string(i) + "] = in." + nm + ";\n";
+                    if (fsr_) fsrLeaves.push_back({"g.bi_" + v->name + "[" + std::to_string(i) + "]", "float", "", true, false});
                     anyIn = true;
                 }
                 break;
@@ -3418,11 +3548,12 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     }
     if (K.sampleShading) needSid();
     bool fragDepth = biByKind.count(BuiltinVar::FragDepth) && sc_->writesFragDepth;
-    if (fragDepth && !biByKind.count(BuiltinVar::FragCoord)) params += ", float4 mgl_fc [[position]]";
+    if (fragDepth) needFc();
     if (fragDepth) copyIn += "    g.bi_gl_FragDepth = mgl_fc.z;\n";
     if (biByKind.count(BuiltinVar::SampleMask)) copyIn += "    g.bi_gl_SampleMask[0] = -1;\n";
     bool color0Float = false;
     std::string color0;
+    std::vector<std::string> colorFields;  // Out members taken from the lane that shaded the coarse fragment
     for (auto* v : sc_->globals) {
         if (v->q.storage != Storage::Out || v->builtin != BuiltinVar::None) continue;
         auto it = P->fragOutputs.find(v->name);
@@ -3440,6 +3571,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             else if (et.vec == 2) val = vt + "(" + a + ", 0, 1)";
             else if (et.vec == 3) val = vt + "(" + a + ", 1)";
             copyOut += "    o." + fn + " = " + val + ";\n";
+            colorFields.push_back("o." + fn);
             if (loc + i == 0 && idx == 0 && et.base == BT::Float) { color0Float = true; color0 = "o." + fn; }
             anyOut = true;
         }
@@ -3447,6 +3579,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     if (biByKind.count(BuiltinVar::FragColor)) {
         outS += "    float4 mgl_c0 [[color(0)]];\n";
         copyOut += "    o.mgl_c0 = g.bi_gl_FragColor;\n";
+        colorFields.push_back("o.mgl_c0");
         color0Float = true;
         color0 = "o.mgl_c0";
         anyOut = true;
@@ -3457,6 +3590,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             if (i == 0 && biByKind.count(BuiltinVar::FragColor)) continue;
             outS += "    float4 mgl_c" + std::to_string(i) + " [[color(" + std::to_string(i) + ")]];\n";
             copyOut += "    o.mgl_c" + std::to_string(i) + " = g.bi_gl_FragData[" + std::to_string(i) + "];\n";
+            colorFields.push_back("o.mgl_c" + std::to_string(i));
         }
         color0Float = true;
         color0 = "o.mgl_c0";
@@ -3477,6 +3611,11 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
         copyOut += "    o.mgl_mask = get_num_samples() > 1u ? " + m + " : 0xffffffffu;\n";
         anyOut = true;
     }
+    // coarse shading: the primitive's rate (gl_PrimitiveShadingRateEXT of the provoking vertex, 0 if not written)
+    if (fsr_) {
+        inS += "    int psr_0 [[user(psr_0), flat]];\n";
+        anyIn = true;
+    }
     outS += "};\n";
     inS += "};\n";
     std::string alpha;
@@ -3492,8 +3631,177 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                  ((K.advancedBlend & kAdvancedBlendNoDstAlpha) ? "true" : "false") + ", " +
                  ((K.advancedBlend & kAdvancedBlendClamp) ? "true" : "false") + ");\n";
     }
-    bool useInterp = !interpLeaf_.empty();
-    emitBody(Stage::Fragment, o, inS, useInterp ? "    thread In* mgl_in;\n" : "");
+    bool useInterp = !interpLeaf_.empty() && !fsr_;
+    std::string fsrMembers, fsrMethods;
+    if (fsr_) {
+        needFc();
+        params += ", uint mgl_q [[thread_index_in_quadgroup]], constant fs::MGLFsr& mgl_F [[buffer(" + std::to_string(kBufFsr) + ")]]";
+        std::string post = "    g.mgl_fsr_setup(mgl_F, mgl_fc, mgl_q, in.psr_0);\n";
+        for (auto& l : fsrLeaves) {
+            std::string pf = l.persp ? "true" : "false";
+            if (!l.plane.empty()) {
+                fsrMembers += "    " + l.type + " mgl_pa_" + l.plane + ", mgl_px_" + l.plane + ", mgl_py_" + l.plane + ";\n";
+                post += "    g.mgl_fsr_plane(" + l.acc + ", " + pf + ", g.mgl_pa_" + l.plane + ", g.mgl_px_" + l.plane + ", g.mgl_py_" + l.plane + ");\n";
+            }
+            post += "    " + l.acc + " = g.mgl_fsr_ip(" + l.acc + ", " + pf + ", " + (l.centroid ? "g.mgl_cd" : "g.mgl_d") + ");\n";
+        }
+        fsrPost = post + fsrPost;
+        inS = R"(struct MGLFsr {
+    uint state;  // glsl::MGLFsr
+    uint pad;
+    texture2d<uint> att;
+};
+// a combiner operation on log2 fragment sizes: KEEP, REPLACE, MIN, MAX, MUL
+inline uint2 mgl_fsr_comb(uint2 a, uint2 b, uint op) {
+    switch (op) {
+        case 0u: return a;
+        case 1u: return b;
+        case 2u: return min(a, b);
+        case 3u: return max(a, b);
+        default: return a + b;
+    }
+}
+)" + inS;
+        fsrMembers += R"(    // EXT_fragment_shading_rate coarse shading (mgl_fsr_setup)
+    uint mgl_q, mgl_rate, mgl_bp;
+    ushort mgl_home, mgl_bl[4];
+    bool mgl_fl, mgl_disc;
+    float2 mgl_fe, mgl_fcen, mgl_d, mgl_cd, mgl_isz;
+    float mgl_sx, mgl_sy, mgl_wn, mgl_wnx, mgl_wny, mgl_w0;
+)";
+        fsrMethods = R"(    // The effective rate (log2 width/height, clamped to the supported 1x1, 1x2, 2x1 and 2x2), and the lane roles.
+    // A 2x2 Metal quad (aligned to even pixels) covers one coarse fragment (2x2), two (2x1, 1x2) or four (1x1).
+    // Its four lanes run the shader for a 2x2 block of coarse fragments aligned to even coarse coordinates
+    // (mgl_bl: the lane of each block position, mgl_bp: this lane's), which holds the quad's fragments: each
+    // fragment with coverage is shaded by a covered lane (helper lanes cannot write memory), the other block
+    // positions are helper invocations that serve derivatives and quad operations. mgl_fl: this lane shades a
+    // fragment with coverage; mgl_home: the lane that shades the fragment of this lane's pixel.
+    void mgl_fsr_setup(constant MGLFsr& F, float4 fc, uint q, int prim) {
+        mgl_q = q;
+        mgl_disc = false;
+        uint2 l = uint2(q & 1u, q >> 1u);
+        uint2 p0 = uint2(fc.xy) - l;  // the quad's top-left pixel
+        uint st = F.state;
+        uint2 r = mgl_fsr_comb(uint2((st >> 2u) & 3u, st & 3u), uint2((uint(prim) >> 2u) & 3u, uint(prim) & 3u), (st >> 4u) & 7u);
+        uint2 ar = uint2(0u);
+        if ((st & 0x400u) != 0u) {
+            // attachment texels cover at least 2x2 pixels (aligned), so one per quad
+            uint2 tc = p0 >> uint2((st >> 11u) & 31u, (st >> 16u) & 31u);
+            if (tc.x < F.att.get_width() && tc.y < F.att.get_height()) {
+                uint v = F.att.read(tc).x;
+                ar = uint2((v >> 2u) & 3u, v & 3u);
+            }
+        }
+        r = min(mgl_fsr_comb(r, ar, (st >> 7u) & 7u), uint2(1u));
+        mgl_rate = (r.x << 2u) | r.y;
+        uint c = simd_is_helper_thread() ? 0u : 1u << q;  // covered lanes of the quad
+        c |= quad_shuffle_xor(c, ushort(1));
+        c |= quad_shuffle_xor(c, ushort(2));
+        uint fm = (r.x != 0u ? 0u : 1u) | (r.y != 0u ? 0u : 2u);  // lane i is in the quad's fragment i & fm
+        uint2 cb = uint2(r.x != 0u ? (p0.x >> 1u) & 1u : 0u, r.y != 0u ? (p0.y >> 1u) & 1u : 0u);
+        uint off = cb.x | (cb.y << 1u);  // block position of fragment f: f | off
+        uint used = 0u, real = 0u;
+        for (uint b = 0u; b < 4u; b++) mgl_bl[b] = 4;
+        for (uint f = 0u; f < 4u; f++) {
+            if ((f & ~fm) != 0u) continue;
+            uint lanes = 0u;
+            for (uint i = 0u; i < 4u; i++)
+                if ((i & fm) == f) lanes |= 1u << i;
+            uint cov = lanes & c;
+            if (cov == 0u) continue;
+            mgl_bl[f | off] = ushort(ctz(cov));
+            used |= 1u << ctz(cov);
+            real |= 1u << (f | off);
+        }
+        for (uint b = 0u; b < 4u; b++)
+            if (mgl_bl[b] == 4) {
+                uint i = ctz(~used & 15u);
+                mgl_bl[b] = ushort(i);
+                used |= 1u << i;
+            }
+        mgl_bp = 0u;
+        for (uint b = 0u; b < 4u; b++)
+            if (mgl_bl[b] == q) mgl_bp = b;
+        mgl_fl = ((real >> mgl_bp) & 1u) != 0u;
+        mgl_home = mgl_bl[(q & fm) | off];
+        float2 sz = float2(1u + r.x, 1u + r.y);
+        float2 rc = float2(p0) / sz - float2(cb) + float2(mgl_bp & 1u, mgl_bp >> 1u);  // coarse coordinates
+        mgl_fe = (rc + 0.5f) * sz;  // the fragment's centre
+        mgl_isz = 1.0f / sz;
+        mgl_d = mgl_fe - fc.xy;
+        mgl_fcen = mgl_fl ? fc.xy : mgl_fe;  // centroid: the centre of a covered pixel of the fragment
+        mgl_cd = mgl_fcen - fc.xy;
+        // planes: a value of this lane plus its differences to the horizontal and vertical neighbours
+        mgl_sx = l.x != 0u ? -1.0f : 1.0f;
+        mgl_sy = l.y != 0u ? -1.0f : 1.0f;
+        mgl_wn = fc.w;  // 1/w, affine in window coordinates
+        mgl_wnx = (quad_shuffle_xor(fc.w, ushort(1)) - fc.w) * mgl_sx;
+        mgl_wny = (quad_shuffle_xor(fc.w, ushort(2)) - fc.w) * mgl_sy;
+        mgl_w0 = mgl_wn + mgl_wnx * mgl_d.x + mgl_wny * mgl_d.y;
+    }
+    // gl_SampleMaskIn: the coverage of every pixel of the fragment, pixel by pixel (lane order)
+    uint mgl_fsr_smask(uint smi) {
+        uint s = simd_is_helper_thread() ? 0u : smi;
+        uint fm = ((mgl_rate & 4u) != 0u ? 0u : 1u) | ((mgl_rate & 1u) != 0u ? 0u : 2u);
+        uint n = get_num_samples(), m = 0u, k = 0u;
+        for (ushort i = 0; i < 4; i++) {
+            uint si = quad_shuffle(s, i);
+            if ((i & fm) == (mgl_q & fm)) {
+                m |= si << (k * n);
+                k++;
+            }
+        }
+        return mgl_fl ? m : 0u;
+    }
+    // An input at this lane's pixel centre + d: perspective-correct inputs interpolate v/w and 1/w, which
+    // are affine in window coordinates.
+    template <typename T> T mgl_fsr_ip(T v, bool persp, float2 d) {
+        T q = persp ? v * mgl_wn : v;
+        T qx = (quad_shuffle_xor(q, ushort(1)) - q) * mgl_sx, qy = (quad_shuffle_xor(q, ushort(2)) - q) * mgl_sy;
+        T r = q + qx * d.x + qy * d.y;
+        return persp ? r / (mgl_wn + mgl_wnx * d.x + mgl_wny * d.y) : r;
+    }
+    // The plane of an input around the fragment's centre (interpolateAt*), and its value at offset o.
+    template <typename T> void mgl_fsr_plane(T v, bool persp, thread T& a, thread T& x, thread T& y) {
+        T q = persp ? v * mgl_wn : v;
+        x = (quad_shuffle_xor(q, ushort(1)) - q) * mgl_sx;
+        y = (quad_shuffle_xor(q, ushort(2)) - q) * mgl_sy;
+        a = q + x * mgl_d.x + y * mgl_d.y;
+    }
+    template <typename T> T mgl_fsr_at(T a, T x, T y, float2 o, bool persp) {
+        T r = a + x * o.x + y * o.y;
+        return persp ? r / (mgl_w0 + mgl_wnx * o.x + mgl_wny * o.y) : r;
+    }
+    // Differences to the neighbouring coarse fragments (mgl_gdx/gdy: what the LOD computation scales by
+    // the fragment size), and the derivatives per pixel (dFdx/dFdy: divided by it).
+    template <typename T> T mgl_gdx(T v) {
+        T n = quad_shuffle(v, mgl_bl[mgl_bp ^ 1u]);
+        return (mgl_bp & 1u) != 0u ? v - n : n - v;
+    }
+    template <typename T> T mgl_gdy(T v) {
+        T n = quad_shuffle(v, mgl_bl[mgl_bp ^ 2u]);
+        return (mgl_bp & 2u) != 0u ? v - n : n - v;
+    }
+    template <typename T> T mgl_ddx(T v) { return mgl_gdx(v) * mgl_isz.x; }
+    template <typename T> T mgl_ddy(T v) { return mgl_gdy(v) * mgl_isz.y; }
+    // textureQueryLod: for each lane in turn, all lanes pass a coordinate whose differences across the quad
+    // are that lane's gradients.
+    template <typename TT, typename C> float2 mgl_qlod(TT t, sampler s, C c) {
+        C gx = mgl_gdx(c), gy = mgl_gdy(c);
+        float2 me = float2(mgl_q & 1u, mgl_q >> 1u), r = float2(0.0f);
+        for (ushort k = 0; k < 4; k++) {
+            float2 o = me - float2(k & 1, k >> 1);
+            C syn = quad_shuffle(c, k) + quad_shuffle(gx, k) * o.x + quad_shuffle(gy, k) * o.y;
+            float2 lod = float2(t.calculate_clamped_lod(s, syn), t.calculate_unclamped_lod(s, syn));
+            if (k == mgl_q) r = lod;
+        }
+        return r;
+    }
+    // subgroup quad operations: the simdgroup lane of a block position
+    uint mgl_fsr_lane(uint bp, uint sgl) { return (sgl & ~3u) | uint(mgl_bl[bp & 3u]); }
+)";
+    }
+    emitBody(Stage::Fragment, o, inS, (useInterp ? "    thread In* mgl_in;\n" : "") + fsrMembers, fsrMethods);
     if (useInterp) copyIn += "    g.mgl_in = &in;\n";
     if (si.sgLane) {
         params += ", uint mgl_sgl [[thread_index_in_simdgroup]]";
@@ -3506,11 +3814,21 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     if (anyIn) e += "fs::In in [[stage_in]], ";
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
     e += "    fs::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Fragment) + ";\n    g.sys = &sys;\n" + copyIn;
+    e += fsrPost;
     e += "    g.mgl_init();\n    g." + si.mainName + "();\n";
-    if (anyOut) e += "    fs::Out o;\n" + copyOut + alpha + advBlend + "    return o;\n";
+    std::string fsrOut;
+    if (fsr_) {
+        // every pixel takes the outputs (and the discard) of the lane that shaded its coarse fragment
+        e += "    bool mgl_dc = quad_shuffle(uint(g.mgl_disc), g.mgl_home) != 0u;\n";
+        for (auto& f : colorFields) fsrOut += "    " + f + " = quad_shuffle(" + f + ", g.mgl_home);\n";
+        fsrOut += "    if (mgl_dc) discard_fragment();\n";
+    }
+    if (anyOut) e += "    fs::Out o;\n" + copyOut + fsrOut + alpha + advBlend + "    return o;\n";
+    else e += fsrOut;
     e += "}\n\n";
     entries_ += e;
     out_.entryPoints.push_back({"mgl_fs", Stage::Fragment, EntryPoint::Fragment});
+    fsr_ = false;
 }
 
 void Emitter::emitCS(std::string& o) {
@@ -3935,6 +4253,14 @@ void Emitter::emitMesh(std::string& o) {
     std::set<std::string> fsNames = fragmentInputNames();
     bool flatPerVertex = false;  // a flat per-vertex varying reaches the fragment shader
     std::set<std::string> names;
+    // EXT_fragment_shading_rate: the primitive's rate, read by the coarse-shading fragment shader
+    if (K.fsr) {
+        std::string r = member(BuiltinVar::MeshPrimitives, "gl_PrimitiveShadingRateEXT");
+        ps += "    int psr_0 [[user(psr_0)]];\n";
+        pc += "p.psr_0 = " + (r.empty() ? std::string("0") : r) + ";\n";
+        pscalars++;
+        names.insert("psr_0");
+    }
     for (auto* v : SC(Stage::Mesh).globals) {
         if (v->q.storage != Storage::Out || v->builtin != BuiltinVar::None || !SC(Stage::Mesh).used.count(v)) continue;
         std::vector<Field> f;

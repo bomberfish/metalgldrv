@@ -282,6 +282,10 @@ struct Reflection {
     bool usesFp64 = false;
     bool usesFlatShading = false;           // any flat-qualified input reaching the fragment shader
     bool writesLayer = false, writesViewportIndex = false;  // by the last pre-rasterization stage
+    // EXT_fragment_shading_rate (METALGLDRV_STRICT): the last pre-rasterization stage writes
+    // gl_PrimitiveShadingRateEXT; the fragment shader forces the 1x1 rate (writes gl_FragDepth or
+    // gl_SampleMask, shades per sample, or reads gl_FragCoord without enabling the extension).
+    bool writesPrimitiveShadingRate = false, fsrForce1x1 = false;
     // VS + FS only, but the fragment inputs exceed what a classic Metal vertex function can pass (124 scalars):
     // draw through PipelineKind::MeshGeometry, which runs the vertex shader in a mesh stage and spills the excess.
     bool vsMeshPassthrough = false;
@@ -356,6 +360,11 @@ struct VariantKey {
     // (0 = none), plus kAdvancedBlendNoDstAlpha / kAdvancedBlendClamp. The shader reads the destination
     // with framebuffer fetch and blends; fixed-function blending is off for that attachment.
     uint8_t advancedBlend = 0;
+    // EXT_fragment_shading_rate (METALGLDRV_STRICT): coarse shading. The fragment shader computes the
+    // effective rate from MGLFsr (bound at kBufFsr) and runs one invocation per coarse fragment (see
+    // emitFS); the last pre-rasterization stage passes gl_PrimitiveShadingRateEXT (0 if it doesn't write
+    // it) as the flat varying psr_0.
+    bool fsr = false;
 };
 
 struct EntryPoint {
@@ -393,6 +402,18 @@ enum : uint32_t {
     kMaxVertexBuffers = 16,
     kBufXfb0 = 18,        // transform feedback buffers 0..3
     kBufStageIO = 22,     // scratch buffers for multi-pass pipelines (GS/tess)
+    kBufFsr = 23,         // MGLFsr (fragment stage of VariantKey::fsr pipelines)
+};
+
+// EXT_fragment_shading_rate state of a draw (VariantKey::fsr). `state` packs the draw rate
+// (bits 0-3, (log2 width << 2) | log2 height, as gl_ShadingRateEXT), combiner ops 0 and 1
+// (bits 4-6 and 7-9: 0 KEEP, 1 REPLACE, 2 MIN, 3 MAX, 4 MUL), bit 10 an attachment is bound,
+// and log2 of its texel width / height (bits 11-15 / 16-20). `attachment` is the MTLResourceID of
+// an R8Uint 2D view of the shading-rate attachment.
+struct alignas(16) MGLFsr {
+    uint32_t state;
+    uint32_t pad;
+    uint64_t attachment;
 };
 
 // A dvec3/dvec4 vertex input at location L arrives in two Metal attributes: L and this one.

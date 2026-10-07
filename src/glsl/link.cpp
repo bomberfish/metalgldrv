@@ -1384,6 +1384,28 @@ void Linker::stageMetadata() {
         r.earlyFragmentTests = fs.inLayout.earlyFragmentTests;
         r.blendSupport = fs.outLayout.blendSupport;
         r.usesDiscard = fs.usesDiscard;
+        if (prog_->strict) {
+            // EXT_fragment_shading_rate: the effective rate must be 1x1 for shaders that write depth or the sample
+            // mask (FRAGMENT_SHADING_RATE_WITH_SHADER_DEPTH_STENCIL_WRITES / _WITH_SAMPLE_MASK are FALSE), shade
+            // per sample, or read gl_FragCoord without enabling the extension.
+            bool enabled = false;
+            for (auto& sh : fs.shaders) {
+                auto it = sh->extensions.find("GL_EXT_fragment_shading_rate");
+                if (it != sh->extensions.end() && it->second != "disable") enabled = true;
+            }
+            bool force = fs.writesFragDepth;
+            for (auto* v : fs.used) {
+                if ((v->builtin == BuiltinVar::SampleMask && v->written) || v->builtin == BuiltinVar::SampleID ||
+                    v->builtin == BuiltinVar::SamplePosition || (v->builtin == BuiltinVar::FragCoord && !enabled))
+                    force = true;
+                if (v->q.storage != Storage::In) continue;
+                bool sample = v->q.sample;
+                if (v->block)
+                    for (auto& m : v->block->members) sample |= m.q.sample;
+                if (sample) force = true;
+            }
+            r.fsrForce1x1 = force;
+        }
     }
     // fp64 usage
     for (auto& sc : prog_->stages)
@@ -1590,6 +1612,10 @@ void Linker::stageMetadata() {
         for (auto* v : ps.used) {
             if (v->builtin == BuiltinVar::Layer && v->q.storage == Storage::Out && v->written) r.writesLayer = true;
             if (v->builtin == BuiltinVar::ViewportIndex && v->q.storage == Storage::Out && v->written) r.writesViewportIndex = true;
+            // EXT_fragment_shading_rate: the primitive's rate, from its provoking vertex (VariantKey::fsr pipelines)
+            if (prog_->strict && v->builtin == BuiltinVar::PrimitiveShadingRate && v->q.storage == Storage::Out && v->written &&
+                (pre == Stage::Vertex || pre == Stage::Geometry))
+                r.writesPrimitiveShadingRate = true;
         }
     }
     if (ok_) {

@@ -945,6 +945,73 @@ static uint8_t advancedBlendKey(Context* ctx) {
     return k;
 }
 
+// EXT_fragment_shading_rate (METALGLDRV_STRICT): a rate as log2 width << 2 | log2 height (gl_ShadingRateEXT).
+static uint32_t packedShadingRate(GLenum r) {
+    switch (r) {
+    case GL_SHADING_RATE_1X2_PIXELS_EXT: return 1;
+    case GL_SHADING_RATE_1X4_PIXELS_EXT: return 2;
+    case GL_SHADING_RATE_2X1_PIXELS_EXT: return 4;
+    case GL_SHADING_RATE_2X2_PIXELS_EXT: return 5;
+    case GL_SHADING_RATE_2X4_PIXELS_EXT: return 6;
+    case GL_SHADING_RATE_4X1_PIXELS_EXT: return 8;
+    case GL_SHADING_RATE_4X2_PIXELS_EXT: return 9;
+    case GL_SHADING_RATE_4X4_PIXELS_EXT: return 10;
+    default: return 0;
+    }
+}
+
+static Texture* shadingRateAttachment(Context* ctx) {
+    Framebuffer* fb = ctx->drawFb.get();
+    return fb && !fb->isDefault && fb->shadingRateLayers > 0 ? fb->shadingRateTex.get() : nullptr;
+}
+
+// Whether a draw may shade fragments larger than a pixel, i.e. needs the coarse-shading variant
+// (VariantKey::fsr): an upper bound of the effective rate, with the largest primitive rate (if the last
+// pre-rasterization stage may write one) and attachment rate (the combiner ops are monotonic). The
+// effective rate is 1x1 with sample shading, a SAMPLE_MASK_VALUE without all bits set, or a fragment
+// shader that forces it (Reflection::fsrForce1x1).
+static bool fsrWanted(Context* ctx, bool primRate, const glsl::Reflection* fs) {
+    if (!ctx->strict || !fs || !(fs->stageMask & (1u << (int)glsl::Stage::Fragment)) || fs->fsrForce1x1) return false;
+    if (ctx->sampleShading || ctx->sampleMaskValue != ~0u) return false;
+    auto comb = [](uint32_t a, uint32_t b, GLenum op) {
+        uint32_t ax = a >> 2, ay = a & 3, bx = b >> 2, by = b & 3, x = ax, y = ay;
+        switch (op) {
+        case GL_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_EXT: x = bx, y = by; break;
+        case GL_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_EXT: x = std::min(ax, bx), y = std::min(ay, by); break;
+        case GL_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_EXT: x = std::max(ax, bx), y = std::max(ay, by); break;
+        case GL_FRAGMENT_SHADING_RATE_COMBINER_OP_MUL_EXT: x = std::min(ax + bx, 2u), y = std::min(ay + by, 2u); break;
+        default: break;
+        }
+        return x << 2 | y;
+    };
+    uint32_t r = comb(packedShadingRate(ctx->shadingRate), primRate ? 10 : 0, ctx->shadingRateCombiner[0]);
+    return comb(r, shadingRateAttachment(ctx) ? 10 : 0, ctx->shadingRateCombiner[1]) != 0;
+}
+
+// The glsl::MGLFsr of a VariantKey::fsr draw, uploaded. Resolves the attachment's storage, which can end the
+// render pass: call before acquiring the encoder.
+static uint64_t fsrUpload(Context* ctx) {
+    glsl::MGLFsr f = {};
+    f.state = packedShadingRate(ctx->shadingRate) | (ctx->shadingRateCombiner[0] - GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT) << 4 |
+              (ctx->shadingRateCombiner[1] - GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT) << 7;
+    if (Texture* t = shadingRateAttachment(ctx); t && ensureTextureStorage(ctx, t) && t->mtl) {
+        id<MTLTexture> v = t->mtl;
+        if (v.textureType != MTLTextureType2D || v.mipmapLevelCount > 1) {
+            // layer 0, level 0 (the layer limit is 1)
+            v = [v newTextureViewWithPixelFormat:v.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)];
+            ctx->dev->retainUntil(v, ctx->serial());
+        }
+        t->lastUse = ctx->serial();
+        Framebuffer* fb = ctx->drawFb.get();
+        f.state |= 1u << 10 | (uint32_t)fb->shadingRateTexelLog2[0] << 11 | (uint32_t)fb->shadingRateTexelLog2[1] << 16;
+        MTLResourceID rid = v.gpuResourceID;
+        memcpy(&f.attachment, &rid, 8);
+    }
+    UploadAlloc u = ctx->upload(sizeof f, 16);
+    memcpy(u.cpu, &f, sizeof f);
+    return u.gpu;
+}
+
 // KHR_blend_equation_advanced draw-time errors (INVALID_OPERATION), or null.
 static const char* advancedBlendError(Context* ctx, ProgramObj* prog) {
     Framebuffer* fb = ctx->drawFb.get();
@@ -1726,6 +1793,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     s.var = ctx->pipelines_->variant(prog, vk);
     if (!s.var || !s.var->ok) return true;
     ProgramVariant* var = s.var;
+    uint64_t fsrAddr = vk.fsr ? fsrUpload(ctx) : 0;  // before any encoder
     bool hasGS = refl.stageMask & (1u << (int)glsl::Stage::Geometry);
     bool hasTess = refl.stageMask & (1u << (int)glsl::Stage::TessEval);
     uint64_t serialStart = ctx->serial();
@@ -1826,6 +1894,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
             [e setArgumentTable:table atStages:MTLRenderStageFragment];
             ctx->enc.fsTableSplit = false;
         }
+        if (fsrAddr) [table setAddress:fsrAddr atIndex:glsl::kBufFsr];
         mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts are added by the caller
         MTLPrimitiveType prim = s.listMode == GL_POINTS ? MTLPrimitiveTypePoint : s.listMode == GL_LINES ? MTLPrimitiveTypeLine
                                                                                                            : MTLPrimitiveTypeTriangle;
@@ -1884,6 +1953,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         [e setArgumentTable:table atStages:MTLRenderStageFragment];
         ctx->enc.fsTableSplit = false;
     }
+    if (fsrAddr) [table setAddress:fsrAddr atIndex:glsl::kBufFsr];
     mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts come from counted passes
     MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
     if (os) {
@@ -2342,6 +2412,10 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     vk.sparseImageSlots = sparseImageSlots(ctx, prog);
     msArraySlots(ctx, prog, vk);
     vk.advancedBlend = advancedBlendKey(ctx);
+    if (ctx->strict) {
+        ProgramObj* f = ctx->pipeline && !ctx->program ? ctx->pipeline->stages[(int)glsl::Stage::Fragment].get() : prog;
+        vk.fsr = fsrWanted(ctx, refl.writesPrimitiveShadingRate, f ? &f->refl : nullptr);
+    }
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     bool primQueries = mglQueryPrimitivesActive(ctx);
     if (vk.kind != glsl::PipelineKind::Classic) {
@@ -2351,6 +2425,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
         if ((xfbActive || primQueries) && !d.indirect) {
             glsl::VariantKey xk = vk;
             xk.kind = glsl::PipelineKind::XfbCapture;
+            xk.fsr = false;
             captured = executeMultiPass(ctx, prog, d, xk, xfbActive);
         }
         // With rasterizer discard the mesh pass only matters for shader side effects, which the
@@ -2372,6 +2447,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     if (xfbActive) {
         glsl::VariantKey xk = vk;
         xk.kind = glsl::PipelineKind::XfbCapture;
+        xk.fsr = false;
         executeMultiPass(ctx, prog, d, xk, true);
         // the capture kernel already ran the vertex shader once per vertex (side effects included)
         if (ctx->rasterizerDiscard) return;
@@ -2418,6 +2494,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
                 fk.primitive = vk.primitive;
                 fk.flatshadeLastVertex = vk.flatshadeLastVertex;
                 fk.advancedBlend = vk.advancedBlend;
+                fk.fsr = vk.fsr;
                 fsVar = ctx->pipelines_->variant(f, fk);
                 if (!fsVar || !fsVar->ok) return;
             }
@@ -2431,7 +2508,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     uint32_t minIdx = 0, maxIdx = 0;
     // GL's default provoking vertex is the LAST vertex; Metal uses the first. When the
     // program has flat varyings, rotate every primitive so Metal's first is GL's last.
-    bool rotate = frefl.usesFlatShading && ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION && !d.indirect &&
+    bool rotate = (frefl.usesFlatShading || (vk.fsr && refl.writesPrimitiveShadingRate)) && ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION && !d.indirect &&
                   d.mode != GL_POINTS && d.mode != GL_PATCHES;
     if (rotate) {
         // The vertex range is only needed for CPU-side vertex copies (client arrays / repacks).
@@ -2482,6 +2559,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     // pass), so build the argument buffer before acquiring the render encoder.
     uint64_t argAddr = buildArguments(ctx, prog, false);
     uint64_t fsArgAddr = mixedFs && fsProg ? buildArguments(ctx, fsProg, false) : 0;
+    uint64_t fsrAddr = vk.fsr ? fsrUpload(ctx) : 0;
     id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
     if (!e) return;
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
@@ -2548,6 +2626,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
         [e setArgumentTable:table atStages:MTLRenderStageFragment];
         ctx->enc.fsTableSplit = false;
     }
+    if (fsrAddr) [(mixedFs ? ctx->renderArgTableFS : table) setAddress:fsrAddr atIndex:glsl::kBufFsr];
     mglQueryNotifyDraw(ctx, d.mode, d.indirect ? 0 : (d.indexed || ii.generated ? (d.indexed ? d.count : d.count) : d.count), d.instances);
 
     if (d.indirect) {
@@ -2886,6 +2965,7 @@ static void executeMeshDraw(Context* ctx, ProgramObj* prog, ProgramObj* fsProg, 
     vk.rasterDiscard = ctx->rasterizerDiscard;
     vk.sampleShading = ctx->sampleShading && ctx->minSampleShading > 0;
     vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
+    vk.fsr = fsrWanted(ctx, true, fsProg ? &fsProg->refl : nullptr);  // the mesh shader may write the primitive's rate
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
     if (!var || !var->ok) return;
     const glsl::EntryPoint* ms = var->entry(glsl::EntryPoint::Mesh);
@@ -2900,6 +2980,7 @@ static void executeMeshDraw(Context* ctx, ProgramObj* prog, ProgramObj* fsProg, 
         fk.flatshadeLastVertex = vk.flatshadeLastVertex;
         fk.sampleShading = vk.sampleShading;
         fk.sampleMask = vk.sampleMask;
+        fk.fsr = vk.fsr;
         fsVar = ctx->pipelines_->variant(fsProg, fk);
         if (!fsVar || !fsVar->ok) return;
     }
@@ -2907,6 +2988,7 @@ static void executeMeshDraw(Context* ctx, ProgramObj* prog, ProgramObj* fsProg, 
     // Resolving bindings can end the render pass: build the arguments before acquiring the encoder.
     uint64_t argAddr = buildArguments(ctx, prog, false);
     uint64_t fsArgAddr = mixedFs && fsProg ? buildArguments(ctx, fsProg, false) : 0;
+    uint64_t fsrAddr = vk.fsr ? fsrUpload(ctx) : 0;
     id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
     if (!e) return;
     RenderPipelineKey key;
@@ -2939,6 +3021,7 @@ static void executeMeshDraw(Context* ctx, ProgramObj* prog, ProgramObj* fsProg, 
         [e setArgumentTable:table atStages:MTLRenderStageFragment];
         ctx->enc.fsTableSplit = false;
     }
+    if (fsrAddr) [(mixedFs ? ctx->renderArgTableFS : table) setAddress:fsrAddr atIndex:glsl::kBufFsr];
     mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility queries
     MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
     MTLSize objTG = os ? MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2])

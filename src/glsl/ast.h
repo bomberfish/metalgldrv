@@ -169,6 +169,8 @@ enum class BuiltinVar : uint16_t {
     DepthRange, NumSamples, CompatUniform,
     // mesh (EXT_mesh_shader)
     MeshVertices, MeshPrimitives, PrimitiveIndices, CullPrimitive, PrimitiveShadingRate,
+    // EXT_fragment_shading_rate (fragment input; PrimitiveShadingRate is the pre-rasterization output)
+    ShadingRate,
 };
 
 struct Expr;

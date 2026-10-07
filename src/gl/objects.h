@@ -270,6 +270,11 @@ public:
     bool defaultFixedSampleLocations = false;
     uint32_t version = 1;  // bumped on any attachment change
     bool isDefault = false;
+    // EXT_fragment_shading_rate_attachment (METALGLDRV_STRICT): an R8UI texture, layer 0 of it (the
+    // layer limit is 1), each texel covering 2^shadingRateTexelLog2 pixels.
+    Ref<Texture> shadingRateTex;
+    int shadingRateLayers = 0;
+    int shadingRateTexelLog2[2] = {0, 0};
     class Surface* surface = nullptr;  // default framebuffer only
 };
 

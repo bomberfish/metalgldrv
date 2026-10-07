@@ -398,6 +398,37 @@ static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment,
     setAttachment(ctx, fb, attachment, a);
 }
 
+// EXT_fragment_shading_rate_attachment (METALGLDRV_STRICT). Limits: texels of 2..16 pixels (at least 2x2,
+// so that the quad of a coarse fragment reads one texel), aspect ratio 1, one layer; not on the default
+// framebuffer.
+API void APIENTRY glFramebufferShadingRateEXT(GLenum target, GLenum attachment, GLuint texture, GLint baseLayer, GLsizei numLayers,
+                                              GLsizei texelWidth, GLsizei texelHeight) {
+    MGL_CTX();
+    if (!ctx->strict) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) return ctx->setError(GL_INVALID_ENUM);
+    if (attachment != GL_SHADING_RATE_ATTACHMENT_EXT) return ctx->setError(GL_INVALID_ENUM);
+    Framebuffer* fb = ctx->fbForTarget(target);
+    if (!fb || fb->isDefault) return ctx->setError(GL_INVALID_OPERATION, "no shading rate attachment on the default framebuffer");
+    Texture* t = nullptr;
+    if (texture) {
+        t = ctx->share->textures.get(texture);
+        if (!t || !t->target || !t->immutable) return ctx->setError(GL_INVALID_VALUE, "texture %u is not an immutable texture", texture);
+    }
+    if (baseLayer < 0 || baseLayer >= 1 || numLayers < 0 || numLayers > 1) return ctx->setError(GL_INVALID_VALUE);
+    if (texelWidth <= 0 || texelHeight <= 0 || texelWidth / texelHeight > 1 || texelHeight / texelWidth > 1) return ctx->setError(GL_INVALID_VALUE);
+    auto log2Texel = [](GLsizei s) { return s >= 2 && s <= 16 && (s & (s - 1)) == 0 ? __builtin_ctz((unsigned)s) : -1; };
+    if (log2Texel(texelWidth) < 0 || log2Texel(texelHeight) < 0) return ctx->setError(GL_INVALID_VALUE);
+    if (t) {
+        if (t->target != GL_TEXTURE_2D && t->target != GL_TEXTURE_2D_ARRAY) return ctx->setError(GL_INVALID_OPERATION);
+        if (t->levels[0][0].internalFormat != GL_R8UI) return ctx->setError(GL_INVALID_OPERATION, "shading rate attachments are R8UI");
+    }
+    fb->shadingRateTex = t;
+    fb->shadingRateLayers = t ? numLayers : 0;
+    fb->shadingRateTexelLog2[0] = log2Texel(texelWidth);
+    fb->shadingRateTexelLog2[1] = log2Texel(texelHeight);
+    fb->version++;
+}
+
 API void APIENTRY glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
     MGL_CTX();
     Framebuffer* fb = fbTarget(ctx, target);
@@ -523,6 +554,17 @@ static void fbAttachmentParam(Context* ctx, Framebuffer* fb, GLenum attachment, 
         case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING: *params = s && s->srgbCapable ? GL_SRGB : GL_LINEAR; return;
         default: return ctx->setError(GL_INVALID_ENUM);
         }
+    }
+    if (attachment == GL_SHADING_RATE_ATTACHMENT_EXT && ctx->strict) {
+        Texture* t = fb->shadingRateTex.get();
+        switch (pname) {
+        case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE: *params = t ? GL_TEXTURE : GL_NONE; return;
+        case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME: *params = t ? t->name : 0; return;
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL: if (!t) break; *params = 0; return;
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER: if (!t) break; *params = 0; return;
+        default: break;
+        }
+        return ctx->setError(t ? GL_INVALID_ENUM : GL_INVALID_OPERATION);
     }
     bool ds;
     int idx = attachmentIndex(ctx, attachment, &ds);

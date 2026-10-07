@@ -224,6 +224,9 @@ public:
     uint32_t sampleMaskValue = ~0u;
     bool sampleShading = false;
     float minSampleShading = 0;
+    // EXT_fragment_shading_rate (METALGLDRV_STRICT): the draw call rate and combiner ops 0 and 1
+    GLenum shadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+    GLenum shadingRateCombiner[2] = {GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT, GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT};
     bool colorLogicOp = false;
     GLenum logicOp = GL_COPY;
     bool dither = true, framebufferSRGB = false;

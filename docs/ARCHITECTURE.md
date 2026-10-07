@@ -135,7 +135,7 @@ emulation on the integer ALUs. Planned: move heavy ops into an
 * `./build/tests/fp64test` – fp64 bit-exactness.
 * `tools/glslc` / `tests/glsl` – compiler tests and real-world shader corpus.
 * `METALGLDRV_STRICT=1 ./build/tests/mgltest` – the same suite in strict mode
-  (`tests/host/test_strict.cpp` covers the strict-only paths).
+  (`tests/host/test_strict.cpp` and `test_fsr.cpp` cover the strict-only paths).
 
 ## Environment variables
 Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `getenv`).
@@ -153,6 +153,12 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
     (slice = layer * samples + sample). Each draw/dispatch copies the texture
     into the shadow, and writable bindings copy it back into every sample
     afterwards, which splits the render pass at each such draw.
+  * EXT_fragment_shading_rate (+ `_primitive`, `_attachment`): coarse shading
+    emulated in the fragment shader (docs/glsl-compiler.md). Supported rates
+    1x1, 1x2, 2x1, 2x2 (larger requests clamp); attachment texels 2..16 pixels,
+    one layer, not on the default framebuffer. Draws whose rate can only be 1x1
+    use the regular pipeline; coarse draws shade every pixel lane anyway (no
+    speedup), so the feature is about semantics, not performance.
 * `METALGLDRV_LOG=<0-4>`, `METALGLDRV_LOG_FILE=<path|documents>` – log level / file.
 * `METALGLDRV_STATS=1` – per-function event counters, logged every 5 s.
 * `METALGLDRV_PROFILE=core` – EGL creates core instead of compatibility contexts.

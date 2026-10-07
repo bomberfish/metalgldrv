@@ -77,6 +77,10 @@ const DeviceExtension kDeviceExtensions[] = {
     {"GL_ARB_sparse_texture", false, [](const DeviceCaps& c) { return c.sparse; }},
     {"GL_ARB_sparse_texture2", false, [](const DeviceCaps& c) { return c.sparse; }},
     {"GL_ARB_sparse_texture_clamp", false, [](const DeviceCaps& c) { return c.sparse; }},
+    // coarse shading emulated in the fragment shader (glsl msl.cpp, emitFS)
+    {"GL_EXT_fragment_shading_rate", true, [](const DeviceCaps& c) { return c.strict; }},
+    {"GL_EXT_fragment_shading_rate_attachment", false, [](const DeviceCaps& c) { return c.strict; }},
+    {"GL_EXT_fragment_shading_rate_primitive", false, [](const DeviceCaps& c) { return c.strict; }},
 };
 
 // kExtensions plus the ones that depend on the GPU (mglDeviceExtensions), sorted.
@@ -159,6 +163,24 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     if (pname == GL_MAX_IMAGE_SAMPLES && ctx->strict) {
         v = I(glsl::kStrictMaxImageSamples);
         return true;
+    }
+    if (ctx->strict) {
+        // EXT_fragment_shading_rate (+ _primitive, _attachment)
+        switch (pname) {
+        case GL_SHADING_RATE_EXT: v = E(ctx->shadingRate); return true;
+        case GL_MIN_FRAGMENT_SHADING_RATE_ATTACHMENT_TEXEL_WIDTH_EXT:
+        case GL_MIN_FRAGMENT_SHADING_RATE_ATTACHMENT_TEXEL_HEIGHT_EXT: v = I(2); return true;
+        case GL_MAX_FRAGMENT_SHADING_RATE_ATTACHMENT_TEXEL_WIDTH_EXT:
+        case GL_MAX_FRAGMENT_SHADING_RATE_ATTACHMENT_TEXEL_HEIGHT_EXT: v = I(16); return true;
+        case GL_MAX_FRAGMENT_SHADING_RATE_ATTACHMENT_TEXEL_ASPECT_RATIO_EXT: v = I(1); return true;
+        case GL_MAX_FRAGMENT_SHADING_RATE_ATTACHMENT_LAYERS_EXT: v = I(1); return true;
+        case GL_FRAGMENT_SHADING_RATE_WITH_SHADER_DEPTH_STENCIL_WRITES_SUPPORTED_EXT: v = B(false); return true;
+        case GL_FRAGMENT_SHADING_RATE_WITH_SAMPLE_MASK_SUPPORTED_EXT: v = B(false); return true;
+        case GL_FRAGMENT_SHADING_RATE_ATTACHMENT_WITH_DEFAULT_FRAMEBUFFER_SUPPORTED_EXT: v = B(false); return true;
+        case GL_FRAGMENT_SHADING_RATE_NON_TRIVIAL_COMBINERS_SUPPORTED_EXT: v = B(true); return true;
+        case GL_FRAGMENT_SHADING_RATE_PRIMITIVE_RATE_WITH_MULTI_VIEWPORT_SUPPORTED_EXT: v = B(true); return true;
+        default: break;
+        }
     }
     if (pname != 0)
         for (auto& [e, val] : kShaderLimits)

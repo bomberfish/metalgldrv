@@ -871,6 +871,15 @@ const int gl_MaxMeshOutputPrimitivesEXT = 256;
 const int gl_MaxMeshViewCountEXT = 1;
 )";
 
+// METALGLDRV_STRICT only: EXT_fragment_shading_rate (gl_ShadingRateEXT / gl_PrimitiveShadingRateEXT are
+// added per stage in builtinPreamble).
+const char* kStrictPreamble = R"(
+const int gl_ShadingRateFlag2VerticalPixelsEXT = 1;
+const int gl_ShadingRateFlag4VerticalPixelsEXT = 2;
+const int gl_ShadingRateFlag2HorizontalPixelsEXT = 4;
+const int gl_ShadingRateFlag4HorizontalPixelsEXT = 8;
+)";
+
 const char* kMeshPreamble = R"(
 out gl_MeshPerVertexEXT { vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8]; float gl_CullDistance[8]; } gl_MeshVerticesEXT[];
 perprimitiveEXT out gl_MeshPerPrimitiveEXT { int gl_PrimitiveID; int gl_Layer; int gl_ViewportIndex; bool gl_CullPrimitiveEXT;
@@ -901,6 +910,7 @@ const std::string& builtinPreamble(Stage stage, bool strict) {
 #include "limits.def"
 #undef X
             p += kCommonPreamble;
+            if (st) p += kStrictPreamble;
             switch ((Stage)s) {
                 case Stage::Vertex: p += kVertexPreamble; break;
                 case Stage::TessControl: p += kPerVertexInTess; p += kTessControlPreamble; break;
@@ -912,6 +922,8 @@ const std::string& builtinPreamble(Stage stage, bool strict) {
                 case Stage::Mesh: p += kMeshCommonPreamble; p += kMeshPreamble; break;
                 default: break;
             }
+            if (st && ((Stage)s == Stage::Vertex || (Stage)s == Stage::Geometry)) p += "out int gl_PrimitiveShadingRateEXT;\n";
+            if (st && (Stage)s == Stage::Fragment) p += "in int gl_ShadingRateEXT;\n";
             cache[st][s] = p;
         }
     }
@@ -956,7 +968,7 @@ BuiltinVar builtinVarId(const std::string& n, Stage stage) {
         {"gl_MeshVerticesEXT", BuiltinVar::MeshVertices}, {"gl_MeshPrimitivesEXT", BuiltinVar::MeshPrimitives},
         {"gl_PrimitivePointIndicesEXT", BuiltinVar::PrimitiveIndices}, {"gl_PrimitiveLineIndicesEXT", BuiltinVar::PrimitiveIndices},
         {"gl_PrimitiveTriangleIndicesEXT", BuiltinVar::PrimitiveIndices}, {"gl_CullPrimitiveEXT", BuiltinVar::CullPrimitive},
-        {"gl_PrimitiveShadingRateEXT", BuiltinVar::PrimitiveShadingRate},
+        {"gl_PrimitiveShadingRateEXT", BuiltinVar::PrimitiveShadingRate}, {"gl_ShadingRateEXT", BuiltinVar::ShadingRate},
         {"gl_SubgroupSize", BuiltinVar::SubgroupSize}, {"gl_SubgroupInvocationID", BuiltinVar::SubgroupInvocationID},
         {"gl_SubgroupEqMask", BuiltinVar::SubgroupEqMask}, {"gl_SubgroupGeMask", BuiltinVar::SubgroupGeMask},
         {"gl_SubgroupGtMask", BuiltinVar::SubgroupGtMask}, {"gl_SubgroupLeMask", BuiltinVar::SubgroupLeMask},

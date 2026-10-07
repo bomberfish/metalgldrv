@@ -237,6 +237,7 @@ void Context::unbindDeletedTexture(Texture* t) {
                 fb->version++;
                 passDirty = true;
             }
+        if (fb->shadingRateTex.get() == t) fb->shadingRateTex = nullptr;
     }
 }
 

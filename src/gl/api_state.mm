@@ -558,6 +558,48 @@ API void APIENTRY glMinSampleShading(GLfloat v) {
     ctx->minSampleShading = std::clamp(v, 0.f, 1.f);
 }
 
+// --- EXT_fragment_shading_rate (METALGLDRV_STRICT; draw.mm fsrState) ---
+static bool validShadingRate(GLenum r) {
+    switch (r) {
+    case GL_SHADING_RATE_1X1_PIXELS_EXT: case GL_SHADING_RATE_1X2_PIXELS_EXT: case GL_SHADING_RATE_1X4_PIXELS_EXT:
+    case GL_SHADING_RATE_2X1_PIXELS_EXT: case GL_SHADING_RATE_2X2_PIXELS_EXT: case GL_SHADING_RATE_2X4_PIXELS_EXT:
+    case GL_SHADING_RATE_4X1_PIXELS_EXT: case GL_SHADING_RATE_4X2_PIXELS_EXT: case GL_SHADING_RATE_4X4_PIXELS_EXT: return true;
+    default: return false;
+    }
+}
+
+API void APIENTRY glShadingRateEXT(GLenum rate) {
+    MGL_CTX();
+    if (!ctx->strict) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
+    if (!validShadingRate(rate)) return ctx->setError(GL_INVALID_ENUM);
+    ctx->shadingRate = rate;
+}
+
+API void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1) {
+    MGL_CTX();
+    if (!ctx->strict) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
+    auto valid = [](GLenum op) { return op >= GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT && op <= GL_FRAGMENT_SHADING_RATE_COMBINER_OP_MUL_EXT; };
+    if (!valid(combinerOp0) || !valid(combinerOp1)) return ctx->setError(GL_INVALID_ENUM);
+    // non-trivial combiners, the primitive and the attachment rate are all supported
+    ctx->shadingRateCombiner[0] = combinerOp0;
+    ctx->shadingRateCombiner[1] = combinerOp1;
+}
+
+// The supported rates: 1x1, 1x2, 2x1 and 2x2 (the required ones) at every sample count, as a coarse
+// fragment must fit in a 2x2 quad (see glsl msl.cpp, mgl_fsr_setup).
+API void APIENTRY glGetFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCount, GLsizei* count, GLenum* shadingRates) {
+    MGL_CTX();
+    if (!ctx->strict) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
+    if (maxCount < 0) return ctx->setError(GL_INVALID_VALUE);
+    static const GLenum kRates[] = {GL_SHADING_RATE_2X2_PIXELS_EXT, GL_SHADING_RATE_2X1_PIXELS_EXT, GL_SHADING_RATE_1X2_PIXELS_EXT,
+                                    GL_SHADING_RATE_1X1_PIXELS_EXT};
+    GLsizei n = 0;
+    if (samples == 0 || samples == 1 || samples == 2 || samples == 4)
+        for (GLenum r : kRates)
+            if (n < maxCount) shadingRates[n++] = r;
+    if (count) *count = n;
+}
+
 API void APIENTRY glPatchParameteri(GLenum pname, GLint value) {
     MGL_CTX();
     if (pname != GL_PATCH_VERTICES) return ctx->setError(GL_INVALID_ENUM);

@@ -165,6 +165,36 @@ alias them (explicit locations), as on NVIDIA.
 ### Images
 Stores and atomics on read-write images are followed by `texture.fence()` so an invocation observes its own writes.
 
+### Coarse shading (EXT_fragment_shading_rate, VariantKey::fsr, METALGLDRV_STRICT)
+Metal has no per-draw/per-primitive/attachment shading rates (rasterization rate maps are a different model), so the
+fragment shader emulates coarse fragments. The supported rates are 1x1, 1x2, 2x1 and 2x2, so a coarse fragment lies
+inside one Metal quad (quads are aligned to even pixels; lane = (x & 1) | (y & 1) << 1). `mgl_fsr_setup` (entry point,
+uniform control flow):
+* computes the effective rate from `MGLFsr` (buffer(23): draw rate, combiner ops, attachment `texture2d<uint>` with
+  log2 texel size >= 1, so one texel per quad) and the flat varying `psr_0` (gl_PrimitiveShadingRateEXT of the
+  provoking vertex, 0 if the last pre-rasterization stage doesn't write it; always passed by fsr variants), clamped
+  to <= 2 per axis;
+* assigns the quad's four lanes to a 2x2 block of coarse fragments aligned to even coarse coordinates (`mgl_bl`:
+  lane of each block position, `mgl_bp`: this lane's). Each of the quad's fragments that has coverage is shaded by
+  one of its covered lanes (helper lanes can't write memory); the remaining positions are helper invocations
+  (`mgl_fl` false), there for derivatives and quad operations. With 2x1/1x2 the lanes need not sit in a 2x2
+  arrangement (rows covered in different columns), so derivatives and quad ops shuffle by block position.
+* Inputs are re-evaluated at the lane's fragment centre (`mgl_fe`) from planes: v·(1/w) and 1/w are affine in window
+  coordinates, so the lane's value and its quad neighbours' differences extrapolate exactly (helper lanes interpolate
+  on the plane). Centroid inputs use the centre of a covered pixel (the spec allows any covered pixel);
+  interpolateAt* keep the plane (`mgl_pa_/px_/py_`). Inputs are declared center-interpolated in the In struct.
+* gl_FragCoord = fragment centre (z, w from planes), gl_HelperInvocation = !mgl_fl, gl_SampleMaskIn = the coverage
+  of all the fragment's pixels (lane order, `samples` bits each), gl_ShadingRateEXT = the rate.
+* dFdx/dFdy/fwidth: difference to the neighbouring block position / fragment width (`mgl_ddx`); implicit-LOD
+  lookups use explicit gradients of the difference (`mgl_gdx`, i.e. the LOD scaled by the fragment size);
+  textureQueryLod feeds calculate_*_lod a synthetic coordinate whose quad differences are each lane's gradients.
+* Stores and atomics are predicated on `mgl_fl`. `discard` sets `mgl_disc`, clears `mgl_fl` and returns (each loop
+  iteration also leaves a discarded lane); the entry point discards the pixel when the lane that shaded its fragment
+  (`mgl_home`) discarded, and copies that lane's color outputs.
+Fragment shaders that write gl_FragDepth / gl_SampleMask, shade per sample or read gl_FragCoord without enabling the
+extension (`Reflection::fsrForce1x1`), and draws with sample shading or a partial SAMPLE_MASK_VALUE use the regular
+variant (rate 1x1), as do draws whose rate can only be 1x1 (`fsrWanted`).
+
 ## Not yet supported
 Mesh pipelines (GS / tessellation rasterization) carry at most 124 output scalars per vertex (including gl_Position and
 point size), below GL's 128 MAX_GEOMETRY_OUTPUT_COMPONENTS. gl_CullDistance is emulated with extra clip distances (-1 when
