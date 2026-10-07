@@ -1212,6 +1212,13 @@ static void getTexImage(Context* ctx, Texture* t, GLenum target, GLint level, GL
         else bad = depth || ds || st || intTex != intFmt;
         if (bad) return ctx->setError(GL_INVALID_OPERATION);
     }
+    if (w >= 0) {
+        // §8.11.4 GetTextureSubImage: the region must lie in the image
+        int W = L.width, H = L.height, D = t->target == GL_TEXTURE_CUBE_MAP ? 6 : L.depth;
+        if (t->target == GL_TEXTURE_1D) H = D = 1;
+        else if (t->target == GL_TEXTURE_1D_ARRAY || t->target == GL_TEXTURE_2D || t->target == GL_TEXTURE_RECTANGLE) D = 1;
+        if ((int64_t)x + w > W || (int64_t)y + h > H || (int64_t)z + d > D) return ctx->setError(GL_INVALID_VALUE);
+    }
     if (w < 0) {
         w = L.width;
         h = L.height;
@@ -1337,7 +1344,9 @@ API void APIENTRY glGetTextureSubImage(GLuint texture, GLint level, GLint x, GLi
                                        GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
     MGL_CTX();
     Texture* t = namedTex(ctx, texture);
-    if (t) getTexImage(ctx, t, t->target, level, format, type, bufSize, pixels, x, y, z, w, h, d);
+    if (!t || !dsaImageQueryOk(ctx, t, level)) return;
+    if (x < 0 || y < 0 || z < 0 || w < 0 || h < 0 || d < 0) return ctx->setError(GL_INVALID_VALUE);
+    getTexImage(ctx, t, t->target, level, format, type, bufSize, pixels, x, y, z, w, h, d);
 }
 
 // Compressed image readback: raw blocks of one face/layer range.
@@ -1348,6 +1357,15 @@ static void getCompressedImage(Context* ctx, Texture* t, GLenum target, GLint le
     int face = faceIndex(target);
     const TexImageLevel& L = t->levels[face][level];
     if (!L.defined() || L.fmt->comp != Comp::Compressed) return ctx->setError(GL_INVALID_OPERATION, "not a compressed image");
+    if (w >= 0) {
+        // §8.11.4 GetCompressedTextureSubImage: the region must lie in the image and start/end on block edges
+        int W = L.width, H = L.height, D = t->target == GL_TEXTURE_CUBE_MAP ? 6 : L.depth;
+        if (t->target == GL_TEXTURE_1D) H = D = 1;
+        else if (t->target == GL_TEXTURE_1D_ARRAY || t->target == GL_TEXTURE_2D || t->target == GL_TEXTURE_RECTANGLE) D = 1;
+        if ((int64_t)x + w > W || (int64_t)y + h > H || (int64_t)z + d > D) return ctx->setError(GL_INVALID_VALUE);
+        int bw = L.fmt->blockW, bh = L.fmt->blockH;
+        if (x % bw || y % bh || (w % bw && x + w != W) || (h % bh && y + h != H)) return ctx->setError(GL_INVALID_OPERATION);
+    }
     if (w < 0) {
         w = L.width;
         h = L.height;
