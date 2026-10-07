@@ -1425,12 +1425,28 @@ static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface) {
             }
         } else {
             for (auto& u : ss.uniforms) {
-                Resource x;
-                x.name = u.arraySize > 1 ? u.name + "[0]" : u.name;
-                x.arraySize = u.arraySize;
-                x.location = u.location;
-                x.activeVariables = u.compatible;
-                out.push_back(x);
+                if (u.dims.size() <= 1) {
+                    Resource x;
+                    x.name = u.arraySize > 1 ? u.name + "[0]" : u.name;
+                    x.arraySize = u.arraySize;
+                    x.location = u.location;
+                    x.activeVariables = u.compatible;
+                    out.push_back(x);
+                    continue;
+                }
+                // arrays of arrays: one resource per innermost array, "u[i][j][0]"
+                int inner = u.dims.back();
+                for (int o = 0; o < u.arraySize / inner; o++) {
+                    Resource x;
+                    std::string sub;
+                    for (int k = (int)u.dims.size() - 2, r = o; k >= 0; r /= u.dims[k], k--)
+                        sub = "[" + std::to_string(r % u.dims[k]) + "]" + sub;
+                    x.name = u.name + sub + "[0]";
+                    x.arraySize = inner;
+                    x.location = u.location + o * inner;
+                    x.activeVariables = u.compatible;
+                    out.push_back(x);
+                }
             }
         }
         break;
