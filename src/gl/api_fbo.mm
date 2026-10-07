@@ -161,7 +161,9 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
     int s = samples == 0 ? 0 : samples <= 1 ? 1 : samples <= 2 ? 2 : 4;
     if (s == 1) s = 0;
     if (rb->mtl) ctx->dev->releaseAfter(rb->mtl, rb->lastUse);
+    if (rb->linearView) ctx->dev->retainUntil(rb->linearView, rb->lastUse);
     rb->mtl = nil;
+    rb->linearView = nil;
     rb->internalFormat = internalformat;
     rb->fmt = f;
     rb->width = w;
@@ -175,7 +177,9 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
         }
         td.storageMode = MTLStorageModePrivate;
         td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
-        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | (f->kind == FmtKind::DepthStencil ? MTLTextureUsagePixelFormatView : 0);
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+                   (f->kind == FmtKind::DepthStencil || f->srgb ? MTLTextureUsagePixelFormatView : 0);
+        if (!losslessCompressionSafe(f->mtl)) td.allowGPUOptimizedContents = NO;
         rb->mtl = [ctx->dev->mtl newTextureWithDescriptor:td];
         if (!rb->mtl) return ctx->setError(GL_OUT_OF_MEMORY);
         ctx->dev->makeResident(rb->mtl);
@@ -355,7 +359,9 @@ static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment,
     Attachment a;
     if (texture) {
         Texture* t = ctx->share->textures.get(texture);
-        if (!t) return ctx->setError(GL_INVALID_OPERATION, "texture %u does not exist", texture);
+        // GL 4.6 9.2.8: FramebufferTexture (layered) reports a missing texture as INVALID_VALUE, the
+        // other attachment commands as INVALID_OPERATION
+        if (!t || !t->target) return ctx->setError(layered ? GL_INVALID_VALUE : GL_INVALID_OPERATION, "texture %u does not exist", texture);
         if (level < 0) return ctx->setError(GL_INVALID_VALUE);
         if (t->immutable && level >= t->immutableLevels) return ctx->setError(GL_INVALID_VALUE, "level %d beyond the texture's storage", level);
         if (textarget && textarget != t->target &&
@@ -808,8 +814,11 @@ id<MTLTexture> readDepthStencilTexture(Context* ctx, Framebuffer* fb, bool stenc
 }
 
 // Resolves a multisampled texture region into a temporary single-sample texture.
-static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
+// `slice` selects the layer of a multisample array; the result is a single 2D image (slice 0).
+static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src, int* slice) {
     if (src.sampleCount <= 1) return src;
+    int layer = *slice;
+    *slice = 0;
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
     td.storageMode = MTLStorageModePrivate;
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -821,11 +830,13 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
                  src.pixelFormat == MTLPixelFormatDepth16Unorm;
     if (depth) {
         rp.depthAttachment.texture = src;
+        rp.depthAttachment.slice = layer;
         rp.depthAttachment.loadAction = MTLLoadActionLoad;
         rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
         rp.depthAttachment.resolveTexture = dst;
     } else {
         rp.colorAttachments[0].texture = src;
+        rp.colorAttachments[0].slice = layer;
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
         rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
         rp.colorAttachments[0].resolveTexture = dst;
@@ -852,7 +863,9 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
         ctx->setError(GL_INVALID_OPERATION, "no readable buffer");
         return false;
     }
-    if (isDS && f->baseFormat != GL_DEPTH_STENCIL) {  // needs a packed depth+stencil buffer
+    // DEPTH_STENCIL needs a packed depth+stencil buffer attached as both depth and stencil.
+    if (isDS && (f->baseFormat != GL_DEPTH_STENCIL ||
+                 (!fb->isDefault && (fb->att[kAttDepth].type == GL_NONE || fb->att[kAttStencil].type == GL_NONE)))) {
         ctx->setError(GL_INVALID_OPERATION, "DEPTH_STENCIL read without depth+stencil buffer");
         return false;
     }
@@ -867,7 +880,7 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
         }
     }
     ctx->applyClearNow();
-    src = resolveForRead(ctx, src);
+    src = resolveForRead(ctx, src, &slice);
     int lw = std::max(1, (int)src.width >> level), lh = std::max(1, (int)src.height >> level);
     ClientLayout cl = clientLayout(format, type, w, h, ps);
     size_t need = clientImageSize(format, type, w, h, 1, ps);
@@ -926,10 +939,16 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
     return true;
 }
 
+// §18.2.2: ReadPixels with DEPTH_STENCIL takes the packed depth/stencil types only (INVALID_ENUM).
+static GLenum readPixelsFormatTypeError(GLenum format, GLenum type) {
+    if (format == GL_DEPTH_STENCIL && type != GL_UNSIGNED_INT_24_8 && type != GL_FLOAT_32_UNSIGNED_INT_24_8_REV) return GL_INVALID_ENUM;
+    return pixelFormatTypeError(format, type);
+}
+
 API void APIENTRY glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void* pixels) {
     MGL_CTX();
     if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
-    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e, "glReadPixels format/type");
+    if (GLenum e = readPixelsFormatTypeError(format, type)) return ctx->setError(e, "glReadPixels format/type");
     Framebuffer* fb = ctx->readFb.get();
     if (!fb) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
     GLenum status;
@@ -948,7 +967,7 @@ API void APIENTRY glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fo
 API void APIENTRY glReadnPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, GLsizei bufSize, void* data) {
     MGL_CTX();
     if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
-    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
+    if (GLenum e = readPixelsFormatTypeError(format, type)) return ctx->setError(e);
     Framebuffer* fb = ctx->readFb.get();
     if (!fb) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
     GLenum status;
@@ -986,7 +1005,7 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
     ctx->endEncoder();
     auto blitOne = [&](id<MTLTexture> src, int slevel, int sslice, id<MTLTexture> dst, int dlevel, int dslice, BlitParams::What what, bool linear) {
         if (!src || !dst) return;
-        src = resolveForRead(ctx, src);
+        src = resolveForRead(ctx, src, &sslice);
         BlitParams bp;
         bp.src = src;
         bp.srcLevel = slevel;

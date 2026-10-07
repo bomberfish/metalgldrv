@@ -421,6 +421,10 @@ private:
     std::string tesLoadPatch();
     std::string tesRun(const std::string& coord, const std::string& patch, const std::string& cps);
     void emitTessEvalMesh(std::string& o);
+    bool fsReadsPrimitiveId() const {
+        const StageCode& f = SC(Stage::Fragment);
+        return f.main && f.usedNames.count("gl_PrimitiveID");
+    }
     void emitTessEvalRecords(std::string& o);
     void emitTesXfb(std::string& o);
     void emitXfb(std::string& o);
@@ -1728,7 +1732,8 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     uint8_t imgMem = imgRoot->kind == EK::Var ? imgRoot->var->q.memory : 0;
     bool rw = !(imgMem & (MemReadOnly | MemWriteOnly));
     if (n == "imageStore") {
-        if (T.ms) fail("imageStore to multisample images is not supported");
+        // Metal cannot write multisample textures: the store is dropped (the program still links).
+        if (T.ms) return finish("((void)(" + ex(A[ai]) + "))");
         std::string w = tex + ".write(" + ex(A[ai]) + ", " + loc + ")";
         if (rw) w = "(" + w + ", " + tex + ".fence())";
         return finish(w);
@@ -3033,8 +3038,10 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
     StageInfo& gsi = si_[(int)Stage::Geometry];
     bool writesPrimId = gsi.bi.count(BuiltinVar::PrimitiveID) && gsi.bi[BuiltinVar::PrimitiveID]->q.storage == Storage::Out;
     RasterOut ro = rasterOutput(Stage::Geometry, "", true, points);
-    ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
-    ro.primCopy += std::string("p.mgl_primid = ") + (writesPrimId ? "bi_gl_PrimitiveID" : "mgl_primIn") + ";\n";
+    if (fsReadsPrimitiveId()) {  // per-primitive outputs count against the 124-scalar interface limit
+        ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
+        ro.primCopy += std::string("p.mgl_primid = ") + (writesPrimId ? "bi_gl_PrimitiveID" : "mgl_primIn") + ";\n";
+    }
     std::string preG = "struct MV {\n" + ro.vertexStruct + "};\nstruct MP {\n" + ro.primStruct + "};\n";
     preG += "using MeshT = mesh<MV, MP, " + std::to_string(maxV) + ", " + std::to_string(maxP) + ", topology::" + topo + ">;\n";
     std::string members = "    thread MeshT* mgl_mo;\n    uint mgl_nv, mgl_np, mgl_strip;\n    int mgl_primIn;\n";
@@ -3255,8 +3262,10 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     prepareStage(Stage::TessEval);
     StageInfo& esi = si_[(int)Stage::TessEval];
     RasterOut ro = rasterOutput(Stage::TessEval, "g.", true, points);
-    ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
-    ro.primCopy += "p.mgl_primid = int(pl.patch);\n";
+    if (fsReadsPrimitiveId()) {
+        ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
+        ro.primCopy += "p.mgl_primid = int(pl.patch);\n";
+    }
     std::string preG = "struct MV {\n" + ro.vertexStruct + "};\nstruct MP {\n" + ro.primStruct + "};\n";
     preG += "using MeshT = mesh<MV, MP, " + std::to_string(MAXV) + ", " + std::to_string(MAXP) + ", topology::" + topo + ">;\n";
     emitBody(Stage::TessEval, o, preG);

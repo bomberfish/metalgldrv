@@ -384,6 +384,30 @@ void Parser::finalize() {
             if (st == Stage::TessControl && !in && sh_.outLayout.vertices > 0 && n != sh_.outLayout.vertices)
                 fail("array size of output " + what + " does not match the output patch size", v.line);
         }
+        // GLSL 4.60 4.4.1: explicit varying locations (and components) may not overlap within a stage
+        // (vertex inputs and fragment outputs have their own rules)
+        for (Storage sto : {Storage::In, Storage::Out}) {
+            if ((st == Stage::Vertex && sto == Storage::In) || (st == Stage::Fragment && sto == Storage::Out) || st == Stage::Compute) continue;
+            std::map<int, uint32_t> used;  // location -> component mask
+            for (auto& v : sh_.vars) {
+                if (!v.global || v.builtin != BuiltinVar::None || v.param || v.q.storage != sto || v.q.layout.location < 0 || v.block) continue;
+                Type t = v.type;
+                bool arrayed = (st == Stage::Geometry && sto == Storage::In) || (st == Stage::TessControl && !v.q.patch) ||
+                               (st == Stage::TessEval && sto == Storage::In && !v.q.patch);
+                if (arrayed && t.isArray()) t = t.elem();
+                Type b = t.stripArrays();
+                bool dbl = b.base == BT::Double;
+                int comps = b.vec * (dbl ? 2 : 1);
+                int locsPer = (b.cols ? b.cols : 1) * (comps > 4 ? 2 : 1);
+                int n = locsPer * t.totalArrayElements();
+                int c0 = std::max(0, v.q.layout.component);
+                uint32_t mask = b.cols || comps > 4 ? 0xF : (((1u << comps) - 1) << c0) & 0xF;
+                for (int l = v.q.layout.location; l < v.q.layout.location + n; l++) {
+                    if (used[l] & mask) fail("location " + std::to_string(l) + " is used by more than one variable ('" + v.name + "')", v.line);
+                    used[l] |= mask;
+                }
+            }
+        }
         // GLSL 4.60 4.3.4/4.3.6: fragment shader double inputs must be flat, outputs cannot be double
         if (st == Stage::Fragment)
             for (auto& v : sh_.vars) {
@@ -1045,6 +1069,25 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     if (blockName == "gl_PerVertex" && !preamble_) {
         // Redeclaration of a builtin block: members map onto the existing builtins.
         if (!inst.empty() && inst != "gl_in" && inst != "gl_out") fail("invalid gl_PerVertex redeclaration");
+        if (q.storage == Storage::Out && inst.empty()) {
+            // transform feedback qualifiers (enhanced layouts) apply to the builtin outputs
+            int cur = q.layout.xfbOffset;
+            for (auto& m : sd->members) {
+                int off = m.q.layout.xfbOffset >= 0 ? m.q.layout.xfbOffset : cur;
+                auto it = scopes_[0].find(m.name);
+                Variable* bv = it != scopes_[0].end() ? it->second.var : nullptr;
+                if (off >= 0 && bv && bv->builtin != BuiltinVar::None) {
+                    bv->q.layout.xfbOffset = off;
+                    if (m.q.layout.xfbBuffer >= 0) bv->q.layout.xfbBuffer = m.q.layout.xfbBuffer;
+                    else if (q.layout.xfbBuffer >= 0) bv->q.layout.xfbBuffer = q.layout.xfbBuffer;
+                    if (q.layout.xfbStride >= 0) bv->q.layout.xfbStride = q.layout.xfbStride;
+                }
+                if (off >= 0) {
+                    Type b = m.type.stripArrays();
+                    cur = off + b.components() * (b.base == BT::Double ? 8 : 4) * std::max(1, m.type.totalArrayElements());
+                }
+            }
+        }
         return;
     }
     sd->instanceName = inst;
@@ -2522,6 +2565,8 @@ Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
             !extEnabled("GL_EXT_shader_integer_mix"))
             fail("mix() with integer or boolean operands requires GLSL 4.50 or GL_EXT_shader_integer_mix", ln);
         if (name == "ftransform" && sh_.stage != Stage::Vertex) fail("ftransform() is only available in vertex shaders", ln);
+        if (name == "imageSize" && sh_.version < 430 && !sh_.extensions.count("GL_ARB_shader_image_size"))
+            fail("imageSize() requires GLSL 4.30 or GL_ARB_shader_image_size", ln);
         if (name.compare(0, 6, "atomic") == 0 && name.compare(0, 13, "atomicCounter") != 0) {
             Expr* b = args[0];
             while (b->kind == EK::Index || b->kind == EK::Field || b->kind == EK::Swizzle) b = b->args[0];

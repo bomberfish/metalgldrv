@@ -46,6 +46,19 @@ const FormatInfo* resolveInternalFormat(GLenum internalFormat, GLenum format, GL
 const FormatInfo* formatInfoForMTL(MTLPixelFormat f);
 bool isCompressedFormat(GLenum internalFormat);
 bool isDepthOrStencil(const FormatInfo* f);
+// GL 4.6 Table 8.27 view class: texel bits for uncompressed classes, 1000+n for
+// compressed classes, 0 if the format belongs to no class.
+int viewClass(GLenum internalFormat);
+// Apple GPU lossless compression canonicalizes RGB9E5 encodings and RG11B10F NaNs,
+// but GL requires bit-exact uploads, readbacks and copies: such textures opt out.
+inline bool losslessCompressionSafe(MTLPixelFormat f) {
+    return f != MTLPixelFormatRGB9E5Float && f != MTLPixelFormatRG11B10Float;
+}
+// Whether a compressed format may be used for TEXTURE_3D images (only BPTC: RGTC, ETC2/EAC,
+// S3TC and ASTC LDR are 2D/array-only).
+bool compressedSupports3D(const FormatInfo* f);
+// glCopyImageSubData format compatibility (§18.3.3).
+bool copyImageCompatible(const FormatInfo* a, const FormatInfo* b);
 
 // --- client pixel layout ---------------------------------------------------
 struct PixelStore {
@@ -58,6 +71,8 @@ struct PixelStore {
 // Bytes per pixel of client data (format,type), 0 if invalid combination.
 int clientPixelSize(GLenum format, GLenum type);
 bool isValidFormatType(GLenum format, GLenum type);
+// GL_RED_INTEGER etc.
+bool isIntegerFormat(GLenum format);
 // 0, GL_INVALID_ENUM (unknown enums) or GL_INVALID_OPERATION (incompatible pair).
 GLenum pixelFormatTypeError(GLenum format, GLenum type);
 // Also checks the client format against the texture's internal format (integer-ness,
@@ -69,6 +84,18 @@ struct ClientLayout {
 };
 ClientLayout clientLayout(GLenum format, GLenum type, int width, int height, const PixelStore& ps);
 size_t clientImageSize(GLenum format, GLenum type, int width, int height, int depth, const PixelStore& ps);
+
+// Client addressing of compressed image data (§8.7): the row length / skip / image
+// height modes apply in units of blocks when the matching COMPRESSED_BLOCK_* modes are set.
+struct CompressedLayout {
+    size_t rowBytes;     // bytes copied per block row
+    size_t rowStride;    // bytes between block rows
+    int rows;            // block rows per image
+    size_t imageStride;  // bytes between images
+    size_t skipBytes;
+    size_t extent(int depth) const { return skipBytes + (depth - 1) * imageStride + (rows - 1) * rowStride + rowBytes; }
+};
+CompressedLayout compressedLayout(const FormatInfo* f, int width, int height, int dims, const PixelStore& ps);
 
 // True if client data can be memcpy'd row-wise into the Metal format.
 bool directUploadCompatible(const FormatInfo* f, GLenum format, GLenum type);

@@ -271,6 +271,7 @@ struct Shader {
     bool xfbMode = false;                // any xfb_* qualifier used
     int xfbStride[4] = {-1, -1, -1, -1}; // explicit xfb_stride per buffer
     bool hasMain = false;
+    bool spirv = false;                  // decompiled from a SPIR-V module (interfaces match by location)
     // arenas
     std::deque<Expr> exprs;
     std::deque<Stmt> stmts;

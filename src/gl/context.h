@@ -12,7 +12,7 @@ namespace mgl {
 
 enum {
     kMaxTextureUnits = 96,      // combined units exposed (GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS)
-    kMaxImageUnits = 8,
+    kMaxImageUnits = 16,
     kMaxUniformBufferBindings = 84,
     kMaxSSBOBindings = 16,
     kMaxAtomicCounterBindings = 8,
@@ -347,6 +347,9 @@ bool ensureTextureStorage(Context* ctx, Texture* t);
 id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarget, bool stencilSampling, bool* complete);
 id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger);
 id<MTLTexture> attachmentTexture(Context* ctx, const Attachment& a, const FormatInfo** fmt, int* w, int* h);
+// The texture a color attachment is rendered through (linear view of sRGB storage when
+// GL_FRAMEBUFFER_SRGB is disabled).
+id<MTLTexture> attachmentWriteView(Context* ctx, const Attachment& a, id<MTLTexture> t);
 void markTextureWrite(Context* ctx, Texture* t);
 
 // Common entry-point prologue.

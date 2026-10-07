@@ -1162,6 +1162,23 @@ void Linker::assignUniforms() {
             refl.slots.push_back({SlotKind::SubroutineIndices, (uint32_t)s});
         }
     }
+    // GL 4.6 7.6.2: per-stage and combined atomic counter / atomic counter buffer limits
+    {
+        static const int kMaxAC = 1024, kMaxACB = 8;
+        int combined = 0;
+        for (int st = 0; st < (int)Stage::Count; st++) {
+            int counters = 0, buffers = 0;
+            for (auto& u : refl.uniforms)
+                if (u.atomicCounterBufferIndex >= 0 && (u.stageMask & (1u << st))) counters += std::max(1, u.arraySize);
+            for (auto& acb : refl.atomicCounterBuffers)
+                if (acb.stageMask & (1u << st)) buffers++;
+            if (counters > kMaxAC) error("too many atomic counters in one shader stage");
+            if (buffers > kMaxACB) error("too many atomic counter buffers in one shader stage");
+            combined += counters;
+        }
+        if (combined > kMaxAC) error("too many atomic counters (MAX_COMBINED_ATOMIC_COUNTERS)");
+        if ((int)refl.atomicCounterBuffers.size() > kMaxACB) error("too many atomic counter buffers (MAX_COMBINED_ATOMIC_COUNTER_BUFFERS)");
+    }
     for (auto& acb : refl.atomicCounterBuffers) {
         acb.slot = slot++;
         refl.slots.push_back({SlotKind::AtomicCounter, (uint32_t)(&acb - &refl.atomicCounterBuffers[0])});
@@ -1311,6 +1328,22 @@ void Linker::stageMetadata() {
             } else if (v->q.layout.xfbOffset >= 0) {
                 addQ(v->name, v->type, v->q.layout.xfbOffset);
             }
+        }
+        // builtin outputs captured through a gl_PerVertex redeclaration with xfb_offset
+        for (auto* v : ps.used) {
+            if (v->builtin == BuiltinVar::None || v->q.storage != Storage::Out || v->q.layout.xfbOffset < 0) continue;
+            int vb = v->q.layout.xfbBuffer >= 0 ? v->q.layout.xfbBuffer : stageBuffer;
+            if (v->q.layout.xfbStride > 0 && vb < 4) explicitStride[vb] = v->q.layout.xfbStride;
+            if (vb < 0 || vb > 3) { error("xfb_buffer out of range"); continue; }
+            XfbVarying x;
+            x.name = v->name;
+            x.type = glTypeEnum(v->type);
+            x.arraySize = v->type.isArray() ? v->type.dims[0] : 1;
+            x.buffer = vb;
+            x.offset = v->q.layout.xfbOffset;
+            r.xfbVaryings.push_back(x);
+            ends[vb] = std::max<uint32_t>(ends[vb], x.offset + compSize(v->type));
+            qualified = true;
         }
         if (qualified) {
             std::string err = checkXfbLayout(caps, strides);
