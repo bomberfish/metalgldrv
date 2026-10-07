@@ -375,6 +375,7 @@ int main(int argc, char** argv) {
                 case SlotKind::Ubo: slots[i] = ubo.gpuAddress; break;
                 case SlotKind::Ssbo: slots[i] = ssbo[std::min(7, r.storageBlocks[s.index].binding)].gpuAddress; break;
                 case SlotKind::BufferSize: slots[i] = kSize; break;
+                case SlotKind::LodBias: slots[i] = 0; break;
                 case SlotKind::AtomicCounter: slots[i] = acb.gpuAddress; break;
                 case SlotKind::SubroutineIndices: {
                     const StageSubroutines& ss = r.subroutines[s.index];
