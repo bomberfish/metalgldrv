@@ -247,6 +247,16 @@ void presentSurface(Context* ctx, Surface* s, id<CAMetalDrawable> drawable) {
     id<MTLTexture> dst = drawable.texture;
     // Resolve MSAA default framebuffer first.
     ctx->endEncoder();
+    if (s->msColor) {
+        MTL4RenderPassDescriptor* rrp = [MTL4RenderPassDescriptor new];
+        rrp.colorAttachments[0].texture = s->msColor;
+        rrp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rrp.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+        rrp.colorAttachments[0].resolveTexture = s->color;
+        id<MTL4RenderCommandEncoder> re = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rrp];
+        [re barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment visibilityOptions:MTL4VisibilityOptionDevice];
+        [re endEncoding];
+    }
     id<MTLTexture> srcTex = s->color;
     if (s->outWidth > s->width && (int)dst.width == s->outWidth && (int)dst.height == s->outHeight) {
         if (id<MTLTexture> up = metalfxUpscale(ctx, s, s->outWidth, s->outHeight)) srcTex = up;
@@ -332,6 +342,7 @@ void clearWithQuad(Context* ctx, const QuadClear& q) {
     std::string key = "clear_" + sig + "_s" + std::to_string(p.samples) + (layered ? "_L" : "");
     for (int i = 0; i < kMaxDrawBuffers; i++) {
         masks[i] = (q.drawBufferMask & (1u << i)) ? q.colorWriteMask[i] : 0;
+        if (p.color[i].noAlpha) masks[i] &= ~8u;  // alpha-less default framebuffer keeps alpha at 1
         key += "_" + std::to_string(colors[i]) + ":" + std::to_string(masks[i]);
     }
     id<MTLRenderPipelineState> pso = internalPipeline(key, lib, layered ? @"quad_vs_layered" : @"quad_vs", @"clear_fs", colors, masks, p.samples);

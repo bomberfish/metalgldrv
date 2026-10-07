@@ -242,6 +242,7 @@ void addTextureFunctions(Ctx& c) {
             }
             if (!rect) {
                 c.add("textureQueryLod", Type::vector(BT::Float, 2), {T, vecT(BT::Float, cd)});
+                c.add("textureQueryLOD", Type::vector(BT::Float, 2), {T, vecT(BT::Float, cd)});  // ARB_texture_query_lod spelling
                 c.add("textureQueryLevels", I, {T});
             }
             // texture

@@ -182,8 +182,10 @@ def ios_run_chunk(a, cl, log, stdout_path):
     if not ios_copy(a, "to", cl, "Documents/caselist.txt"):
         return -1, False, None
     env = {k: v for k, v in os.environ.items() if k.startswith("METALGLDRV_")}
+    # devicectl can't decode an empty object, so only pass the flag when there's something to pass
+    envargs = ["--environment-variables", json.dumps(env)] if env else []
     cmd = ["xcrun", "devicectl", "device", "process", "launch", "--device", a.ios_device, "--console",
-           "--terminate-existing", "--environment-variables", json.dumps(env), a.ios_bundle,
+           "--terminate-existing"] + envargs + [a.ios_bundle,
            "--deqp-caselist-file=@docs/caselist.txt", "--deqp-log-filename=@docs/log.qpa"] + a.extra
     timed_out = False
     with open(stdout_path, "w") as so:

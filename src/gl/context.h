@@ -64,6 +64,7 @@ public:
     int samples = 0;
     MTLPixelFormat colorFormat = MTLPixelFormatRGBA8Unorm;
     bool hasDepth = true, hasStencil = true;
+    bool hasAlpha = true;  // EGL config with alpha bits; without them alpha reads and blends as 1
     bool srgbCapable = false;
     int swapInterval = 1;
     id<MTLTexture> color = nil, depthStencil = nil, msColor = nil;
@@ -92,6 +93,7 @@ struct UploadAlloc {
 struct PassAttachment {
     id<MTLTexture> tex = nil;
     int level = 0, slice = 0, depthPlane = 0;
+    bool noAlpha = false;  // default framebuffer without alpha bits: alpha stays 1 (never written, cleared to 1)
     bool operator==(const PassAttachment& o) const {
         return tex == o.tex && level == o.level && slice == o.slice && depthPlane == o.depthPlane;
     }

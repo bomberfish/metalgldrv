@@ -825,7 +825,7 @@ static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Refle
             bk.eqRGB = blendOp(b.eqRGB);
             bk.eqA = blendOp(b.eqA);
         }
-        bk.writeMask = b.colorMask;
+        bk.writeMask = p.color[i].noAlpha ? b.colorMask & ~8u : b.colorMask;
         // A fragment output must exist for the attachment; if the shader doesn't
         // write it, Metal leaves it unchanged (writes are masked by output presence).
     }
