@@ -477,6 +477,7 @@ bool Context::resolvePass(PassDesc& p) {
 
 void Context::beginPass() {
     MGL_STAT("render-pass");
+    passCounter++;
     PassDesc p;
     if (!resolvePass(p)) {
         passOpen = false;

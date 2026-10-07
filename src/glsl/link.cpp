@@ -1010,6 +1010,8 @@ void Linker::assignUniforms() {
             pushSlots(SlotKind::Texture);
             ob.samplerSlot = slot;
             pushSlots(SlotKind::Sampler);
+            ob.biasSlot = slot;
+            pushSlots(SlotKind::LodBias);
         } else if (bt.base == BT::Image) {
             ob.kind = SlotKind::Image;
             ob.slot = slot;

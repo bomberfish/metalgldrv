@@ -239,6 +239,74 @@ static void flushImageWritebacks(Context* ctx) {
     ctx->imageWritebacks.clear();
 }
 
+// Feedback loops (GL 4.6 §9.3.1, ARB_texture_barrier): a texture sampled while it is a color
+// attachment of the draw framebuffer. On tile-based GPUs the shader's memory reads race with the
+// pass's tile loads/stores (texels near tile edges read stale or partial data), so sampling uses a
+// copy taken before the render pass. GL only defines reads of texels not written since the last
+// glTextureBarrier, which ends the pass; every pass gets a fresh copy.
+static id<MTLTexture> feedbackSnapshot(Context* ctx, Texture* t, id<MTLTexture> view) {
+    Framebuffer* fb = ctx->drawFb.get();
+    if (!fb || fb->isDefault || !t->mtl || t->target == GL_TEXTURE_BUFFER) return view;
+    id<MTLTexture> base = t->mtl.parentTexture ? t->mtl.parentTexture : t->mtl;
+    // only attachments the pass writes (enabled draw buffers) at a level the sampler can read
+    NSUInteger lo = view.parentTexture ? view.parentRelativeLevel : 0, n = view.mipmapLevelCount;
+    bool attached = false;
+    for (int j = 0; j < kMaxDrawBuffers && !attached; j++) {
+        GLenum db = fb->drawBuffers[j];
+        if (db < GL_COLOR_ATTACHMENT0 || db >= GL_COLOR_ATTACHMENT0 + kMaxDrawBuffers) continue;
+        const Attachment& at = fb->att[db - GL_COLOR_ATTACHMENT0];
+        Texture* a = at.tex.get();
+        if (at.type != GL_TEXTURE || !a || !a->mtl) continue;
+        id<MTLTexture> ab = a->mtl.parentTexture ? a->mtl.parentTexture : a->mtl;
+        NSUInteger lvl = (NSUInteger)at.level + (a->mtl.parentTexture ? a->mtl.parentRelativeLevel : 0);
+        attached = ab == base && lvl >= lo && lvl < lo + n;
+    }
+    if (!attached || t->mtl.parentTexture) return view;
+    uint64_t pass = ctx->passOpen ? ctx->passCounter : ctx->passCounter + 1;
+    if (!t->fbSnapshot || t->fbSnapshotSrc != t->mtl || t->fbSnapshotPass != pass) {
+        if (!t->fbSnapshot || t->fbSnapshotSrc != t->mtl) {
+            MTLTextureDescriptor* d = [MTLTextureDescriptor new];
+            d.textureType = t->mtl.textureType;
+            d.pixelFormat = t->mtl.pixelFormat;
+            d.width = t->mtl.width;
+            d.height = t->mtl.height;
+            d.depth = t->mtl.depth;
+            d.arrayLength = t->mtl.arrayLength;
+            d.mipmapLevelCount = t->mtl.mipmapLevelCount;
+            d.sampleCount = t->mtl.sampleCount;
+            d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+            d.storageMode = MTLStorageModePrivate;
+            d.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+            if (t->fbSnapshot) ctx->dev->releaseAfter(t->fbSnapshot, ctx->serial());
+            t->fbSnapshot = [ctx->dev->mtl newTextureWithDescriptor:d];
+            t->fbSnapshotSrc = t->mtl;
+            for (auto& [k, v] : t->fbSnapshotViews) ctx->dev->retainUntil(v, ctx->serial());
+            t->fbSnapshotViews.clear();
+            if (!t->fbSnapshot) return view;
+            ctx->dev->makeResident(t->fbSnapshot);
+        }
+        MGL_STAT("feedback-snapshot");
+        id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();  // ends the render pass
+        [e copyFromTexture:t->mtl toTexture:t->fbSnapshot];
+        ctx->endEncoder();
+        t->fbSnapshotPass = ctx->passCounter + 1;  // the pass this draw will open
+    }
+    if (view == t->mtl) return t->fbSnapshot;
+    NSUInteger slices = view.arrayLength * (view.textureType == MTLTextureTypeCube || view.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+    Texture::ViewKey key{(uint64_t)view.pixelFormat | (uint64_t)view.textureType << 16 | (uint64_t)view.parentRelativeLevel << 24 |
+                             (uint64_t)view.mipmapLevelCount << 32,
+                         (uint64_t)view.swizzle.red | (uint64_t)view.swizzle.green << 8 | (uint64_t)view.swizzle.blue << 16 |
+                             (uint64_t)view.swizzle.alpha << 24 | (uint64_t)view.parentRelativeSlice << 32};
+    auto it = t->fbSnapshotViews.find(key);
+    if (it != t->fbSnapshotViews.end()) return it->second;
+    id<MTLTexture> v = [t->fbSnapshot newTextureViewWithPixelFormat:view.pixelFormat textureType:view.textureType
+                                                              levels:NSMakeRange(view.parentRelativeLevel, view.mipmapLevelCount)
+                                                              slices:NSMakeRange(view.parentRelativeSlice, slices) swizzle:view.swizzle];
+    if (!v) return view;
+    t->fbSnapshotViews[key] = v;
+    return v;
+}
+
 static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) {
     const glsl::Reflection& r = prog->refl;
     size_t nslots = r.slots.size();
@@ -333,6 +401,7 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                 if (so) t->sampler = so->state;  // completeness uses the effective sampler
                 view = textureSamplingView(ctx, t, s.textureTarget, false, &complete);
                 if (so) t->sampler = saved;
+                if (view && !forCompute) view = feedbackSnapshot(ctx, t, view);
                 if (view) {
                     t->lastUse = serial;
                     // Kind mismatch (e.g. float sampler on int texture) is undefined; keep the view.
@@ -370,6 +439,19 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             id<MTLSamplerState> ss = samplerStateFor(st, isInt);
             MTLResourceID rid = ss.gpuResourceID;
             memcpy(&v, &rid, 8);
+            break;
+        }
+        case glsl::SlotKind::LodBias: {
+            // GL_TEXTURE_LOD_BIAS of the effective sampler state, added by the shader
+            int unit = std::clamp(prog->samplerUnits[i], 0, kMaxTextureUnits - 1);
+            int ti = texTargetIndex(s.textureTarget);
+            Texture* t = ti >= 0 ? ctx->textures[unit][ti].get() : nullptr;
+            float bias = t ? t->sampler.lodBias : 0.0f;
+            if (Sampler* so = ctx->samplers[unit].get()) bias = so->state.lodBias;
+            bias = std::clamp(bias, -16.0f, 16.0f);  // MAX_TEXTURE_LOD_BIAS
+            uint32_t bits;
+            memcpy(&bits, &bias, 4);
+            v = bits;
             break;
         }
         case glsl::SlotKind::Image: {

@@ -88,8 +88,11 @@ const std::vector<std::string>& supportedSpirvExtensions();
 //   Sampler                                : MTLResourceID of the sampler state
 //   BufferSize                             : uint64 byte size of the bound SSBO range
 //                                            (for runtime-sized arrays .length())
+//   LodBias                                : float (low 32 bits) texture LOD bias of the sampler
+//                                            (Metal sampler states carry no bias; shaders add it)
 enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer,
-                                SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */ };
+                                SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */,
+                                LodBias /* like Sampler: float (low 32 bits) GL_TEXTURE_LOD_BIAS of the unit's effective sampler */ };
 
 struct Slot {
     SlotKind kind;

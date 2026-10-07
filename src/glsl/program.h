@@ -60,6 +60,7 @@ struct OpaqueBinding {
     SlotKind kind;   // Texture (sampler uniforms), Image, AtomicCounter
     int slot = -1;   // first texture/image slot
     int samplerSlot = -1;
+    int biasSlot = -1;  // sampler uniforms: LodBias slots (count elements)
     int count = 1;   // array elements
     bool isArray = false;  // declared as an array (also when count == 1)
     int uniformIndex = -1;

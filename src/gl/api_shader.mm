@@ -51,7 +51,8 @@ void setupLinkedProgram(ProgramObj* p) {
     // Initial opaque bindings from layout(binding=)
     for (size_t s = 0; s < r.slots.size(); s++) {
         const auto& sl = r.slots[s];
-        if (sl.kind == glsl::SlotKind::Texture || sl.kind == glsl::SlotKind::Sampler || sl.kind == glsl::SlotKind::Image) {
+        if (sl.kind == glsl::SlotKind::Texture || sl.kind == glsl::SlotKind::Sampler || sl.kind == glsl::SlotKind::Image ||
+            sl.kind == glsl::SlotKind::LodBias) {
             if (sl.index < r.uniforms.size()) p->samplerUnits[s] = r.uniforms[sl.index].binding + sl.element;
         }
     }
@@ -980,7 +981,9 @@ static void setUniform(Context* ctx, ProgramObj* p, GLint location, GLsizei coun
         for (size_t s = 0; s < p->refl.slots.size(); s++) {
             const auto& sl = p->refl.slots[s];
             if ((int)sl.index != loc.uniform) continue;
-            if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Sampler && sl.kind != glsl::SlotKind::Image) continue;
+            if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Sampler && sl.kind != glsl::SlotKind::Image &&
+                sl.kind != glsl::SlotKind::LodBias)
+                continue;
             int e = (int)sl.element - loc.element;
             if (e >= 0 && e < n) p->samplerUnits[s] = v[e];
         }
