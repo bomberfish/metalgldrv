@@ -39,7 +39,7 @@ struct CompileResult {
 
 // Implementation limits the compiler enforces (must match the runtime's GL_MAX_* queries, src/gl/context.h).
 constexpr int kMaxCombinedTextureImageUnits = 96;
-constexpr int kMaxImageUnits = 8;
+constexpr int kMaxImageUnits = 16;  // must match mgl::kMaxImageUnits (static_assert in context.mm)
 constexpr int kMaxUniformBufferBindings = 84;
 constexpr int kMaxShaderStorageBufferBindings = 16;
 constexpr int kMaxAtomicCounterBufferBindings = 8;
