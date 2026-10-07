@@ -350,6 +350,16 @@ enum : uint32_t {
     kBufStageIO = 22,     // scratch buffers for multi-pass pipelines (GS/tess)
 };
 
+// A dvec3/dvec4 vertex input at location L arrives in two Metal attributes: L and this one.
+// `wideMask` has a bit set for every location holding a dvec3/dvec4. Metal has attributes 0..30,
+// so the second half of location 15 takes the slot of a location without one.
+inline int secondHalfAttribute(int loc, uint32_t wideMask) {
+    if (loc < 15) return 16 + loc;
+    for (int i = 0; i < 15; i++)
+        if (!(wideMask >> i & 1)) return 16 + i;
+    return 31;
+}
+
 struct alignas(16) MGLSys {
     float depthRangeNear, depthRangeFar;   // glDepthRange
     uint32_t depthMode;                    // 0: GL [-1,1] -> [0,1] remap, 1: GL_ZERO_TO_ONE

@@ -1186,10 +1186,12 @@ void Parser::noteXfb(const Layout& L, Storage storage, int buffer, int ln) {
 void Parser::finalizeXfb() {
     if (!sh_.xfbMode) return;
     std::vector<XfbCapture> caps;
+    int bufStream[4] = {-1, -1, -1, -1};
     for (auto& g : sh_.globals) {
         if (g.kind != GlobalDecl::Var || !g.var || g.var->q.storage != Storage::Out) continue;
         Variable* v = g.var;
         int buffer = v->q.layout.xfbBuffer;
+        size_t ncaps = caps.size();
         if (v->block) {
             int boff = v->block->blockQ.layout.xfbOffset;
             int cur = boff;
@@ -1211,6 +1213,13 @@ void Parser::finalizeXfb() {
             XfbCapture c = xfbCaptureOf(v->type, buffer, v->q.layout.xfbOffset);
             c.name = v->name;
             caps.push_back(c);
+        }
+        // All outputs captured to one buffer must belong to the same vertex stream (§4.4.2.1).
+        if (caps.size() > ncaps && buffer >= 0 && buffer < 4) {
+            int stream = std::max(0, v->q.layout.stream);
+            if (bufStream[buffer] >= 0 && bufStream[buffer] != stream)
+                fail("'xfb_buffer' : outputs from different vertex streams are captured to buffer " + std::to_string(buffer));
+            bufStream[buffer] = stream;
         }
     }
     std::string err = checkXfbLayout(caps, sh_.xfbStride);

@@ -144,3 +144,60 @@ void main() { blk.x = c; blk.y = b; blk.w = a; gl_Position = vec4(0); })";
     glDeleteProgram(p);
     CHECK_GL();
 }
+
+// xfb_offset on a struct-typed output captures every member, written or not, at consecutive offsets.
+TEST(xfb_struct_output) {
+    const char* vs = R"(#version 440 core
+struct S { vec2 a; float b; vec4 c; };
+layout(xfb_offset = 4) out S s;
+in vec4 in_vs;
+void main() { s.a = in_vs.xy; s.c = in_vs; gl_Position = vec4(0); })";
+    GLuint p = buildProgram({{GL_VERTEX_SHADER, vs}});
+    CHECK(glGetProgramResourceIndex(p, GL_TRANSFORM_FEEDBACK_VARYING, "s.c") != GL_INVALID_INDEX);
+    const float attrib[4] = {1, 2, 3, 4};
+    std::vector<float> out = captureVertex(p, attrib, 9);
+    CHECK(out[0] == -1 && out[1] == 1 && out[2] == 2 && out[4] == 1 && out[5] == 2 && out[6] == 3 && out[7] == 4 &&
+          out[8] == -1);
+    glDeleteProgram(p);
+    CHECK_GL();
+}
+
+// dvec4 inputs at the last two locations: each takes two Metal attributes, and Metal has only 31.
+TEST(dvec4_inputs_at_last_locations) {
+    const char* vs = R"(#version 440 core
+layout(location = 14) in dvec4 a;
+layout(location = 15) in dvec4 b;
+flat out int ok;
+void main() {
+    ok = int(a == dvec4(1, 2, 3, 4) && b == dvec4(5, 6, 7, 8));
+    gl_Position = vec4(0, 0, 0, 1);
+    gl_PointSize = 64.0;
+})";
+    const char* fs = R"(#version 440 core
+flat in int ok;
+out vec4 c;
+void main() { c = ok != 0 ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1); })";
+    GLuint p = compileProgram(vs, fs);
+    CHECK(p != 0);
+    const double data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    GLuint vao, vbo;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof data, data, GL_STATIC_DRAW);
+    glVertexAttribLPointer(14, 4, GL_DOUBLE, 0, nullptr);
+    glVertexAttribLPointer(15, 4, GL_DOUBLE, 0, (const void*)32);
+    glEnableVertexAttribArray(14);
+    glEnableVertexAttribArray(15);
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    glUseProgram(p);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_POINTS, 0, 1);
+    CHECK_PIXEL(32, 32, 0, 255, 0, 255);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(p);
+    CHECK_GL();
+}
