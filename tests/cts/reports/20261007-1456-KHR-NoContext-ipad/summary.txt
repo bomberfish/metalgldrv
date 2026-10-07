@@ -1,0 +1,7 @@
+group                      Pass   total
+---------------------------------------
+KHR-NoContext.gl45            8       8
+---------------------------------------
+TOTAL                         8       8
+
+8 cases in 3.9s, 1 glcts process(es)

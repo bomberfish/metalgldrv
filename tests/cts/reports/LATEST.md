@@ -17,5 +17,8 @@ allowed only for optional features the implementation doesn't expose.
 | KHR-GL46-cfg6-113x47 | 926bb9c | 2026-10-07T06:55:05 | 19714 | 15218 | 4495 | 0 | 0 | 1 | 99.99 | [reports/20261007-0655-KHR-GL46-cfg6-113x47](reports/20261007-0655-KHR-GL46-cfg6-113x47/results.csv) |
 | KHR-GL46-fbo-64xD | 926bb9c | 2026-10-07T06:01:28 | 19714 | 15218 | 4495 | 0 | 0 | 1 | 99.99 | [reports/20261007-0601-KHR-GL46-fbo-64xD](reports/20261007-0601-KHR-GL46-fbo-64xD/results.csv) |
 | KHR-GL46-fbo-Dx64 | 926bb9c | 2026-10-07T06:04:12 | 19714 | 15218 | 4495 | 0 | 0 | 1 | 99.99 | [reports/20261007-0604-KHR-GL46-fbo-Dx64](reports/20261007-0604-KHR-GL46-fbo-Dx64/results.csv) |
+| KHR-GL46-ipad | 90f9b17 | 2026-10-07T14:15:25 | 19714 | 18066 | 1647 | 0 | 0 | 1 | 99.99 | [reports/20261007-1415-KHR-GL46-ipad](reports/20261007-1415-KHR-GL46-ipad/results.csv) |
 | KHR-NoContext | 926bb9c | 2026-10-07T06:56:06 | 8 | 8 | 0 | 0 | 0 | 0 | 100.00 | [reports/20261007-0656-KHR-NoContext](reports/20261007-0656-KHR-NoContext/results.csv) |
+| KHR-NoContext-ipad | 2c4aba6 | 2026-10-07T14:56:04 | 8 | 8 | 0 | 0 | 0 | 0 | 100.00 | [reports/20261007-1456-KHR-NoContext-ipad](reports/20261007-1456-KHR-NoContext-ipad/results.csv) |
 | KHR-Single-GL46 | 926bb9c | 2026-10-07T06:56:05 | 11348 | 5056 | 6292 | 0 | 0 | 0 | 100.00 | [reports/20261007-0656-KHR-Single-GL46](reports/20261007-0656-KHR-Single-GL46/results.csv) |
+| KHR-Single-GL46-ipad | 2c4aba6 | 2026-10-07T14:55:55 | 11348 | 11340 | 8 | 0 | 0 | 0 | 100.00 | [reports/20261007-1455-KHR-Single-GL46-ipad](reports/20261007-1455-KHR-Single-GL46-ipad/results.csv) |

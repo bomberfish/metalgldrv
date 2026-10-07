@@ -13,3 +13,6 @@ date,commit,dirty,caselist,platform,surface,total,pass,fail,not_supported,qualit
 2026-10-07T06:55:05,926bb9c,0,KHR-GL46-cfg6-113x47,macOS 27.0 / Apple GPU,pbuffer -c 6 --width 113 --height 47 --seed 2,19714,15218,0,4495,0,1,0,0,0,77.19,99.99,reports/20261007-0655-KHR-GL46-cfg6-113x47
 2026-10-07T06:56:05,926bb9c,0,KHR-Single-GL46,macOS 27.0 / Apple GPU,pbuffer ,11348,5056,0,6292,0,0,0,0,0,44.55,100.00,reports/20261007-0656-KHR-Single-GL46
 2026-10-07T06:56:06,926bb9c,0,KHR-NoContext,macOS 27.0 / Apple GPU,window ,8,8,0,0,0,0,0,0,0,100.00,100.00,reports/20261007-0656-KHR-NoContext
+2026-10-07T14:15:25,90f9b17,0,KHR-GL46-ipad,iPadOS 27.0.1 / Apple M5,pbuffer,19714,18066,0,1647,0,1,0,0,0,91.64,99.99,reports/20261007-1415-KHR-GL46-ipad
+2026-10-07T14:55:55,2c4aba6,0,KHR-Single-GL46-ipad,iPadOS 27.0.1 / Apple M5,pbuffer,11348,11340,0,8,0,0,0,0,0,99.93,100.00,reports/20261007-1455-KHR-Single-GL46-ipad
+2026-10-07T14:56:04,2c4aba6,0,KHR-NoContext-ipad,iPadOS 27.0.1 / Apple M5,window,8,8,0,0,0,0,0,0,0,100.00,100.00,reports/20261007-1456-KHR-NoContext-ipad

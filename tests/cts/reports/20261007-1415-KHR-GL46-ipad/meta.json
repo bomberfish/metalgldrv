@@ -1,0 +1,20 @@
+{
+ "date": "2026-10-07T14:15:25",
+ "commit": "90f9b17",
+ "dirty": 0,
+ "caselist": "KHR-GL46-ipad",
+ "platform": "iPadOS 27.0.1 / Apple M5",
+ "surface": "pbuffer",
+ "total": 19714,
+ "pass": 18066,
+ "fail": 0,
+ "not_supported": 1647,
+ "quality_warning": 0,
+ "compatibility_warning": 1,
+ "crash": 0,
+ "timeout": 0,
+ "other": 0,
+ "pass_pct": "91.64",
+ "pass_or_not_supported_pct": "99.99",
+ "report_dir": "reports/20261007-1415-KHR-GL46-ipad"
+}

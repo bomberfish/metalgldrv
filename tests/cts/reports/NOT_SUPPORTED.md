@@ -63,3 +63,36 @@ functionality, for limits above the spec minimum, or where the test itself doesn
 - `KHR-GL46.direct_state_access.framebuffers_check_status`: CompatibilityWarning, which counts as a pass. The test expects
   INCOMPLETE_LAYER_TARGETS for a 3D texture attached with FramebufferTexture3D next to a 2D texture. By the spec that
   attachment isn't layered, so metalgldrv reports COMPLETE, as Mesa does.
+
+# iPad receipts (iPadOS 27.0.1 / Apple M5, driver commit 90f9b17)
+
+The `*-ipad` runs use the shipping device and a newer driver than the Mac matrix above. Since 926bb9c
+the driver gained KHR_shader_subgroup, ARB_shader_ballot, ARB_gpu_shader_int64, EXT_mesh_shader, the
+ARB_sparse_texture/texture2/texture_clamp/buffer family, KHR_blend_equation_advanced(_coherent),
+ARB_texture_filter_minmax (Apple10 GPUs only), EXT_texture_shadow_lod, ARB_shader_viewport_layer_array,
+renderable RGB9_E5, METALGLDRV_STRICT, and fixes for several Metal resource leaks.
+
+## NotSupported in KHR-GL46-ipad (1647)
+
+| group | cases | reason |
+|---|---|---|
+| fragment_shading_rate | 1067 | EXT_fragment_shading_rate is optional (Metal's rasterization rate maps don't match GL's per-draw/per-primitive rates) |
+| sparse_texture_tests (SparseDSATextureCommitment, TextureParameterQueries) | 248 | 240 need GL_EXT_direct_state_access, which isn't exposed; 8 are skipped by the test when sparse_texture2 is present |
+| texture_swizzle | 192 | the test's own static exclusions (see above) |
+| sample_variables, es_31_compatibility.sample_variables | 76 | 8-sample variants; GL_MAX_SAMPLES is 4 (the GPU supports 1/2/4) |
+| shader_image_size, shader_image_load_store, shader_texture_image_samples_tests (multisample) | 39 | GL_MAX_IMAGE_SAMPLES is 0 in the default mode; all pass with METALGLDRV_STRICT=1 |
+| cull_distance item 8 | 16 | test design (see above) |
+| texture_query_lod | 3 | viewport too small at 64x64 |
+| post_depth_coverage_tests | 2 | not implementable on Metal: the fragment sample-mask input doesn't reflect depth/stencil results |
+| texture_cube_map_array (2), draw_elements_base_vertex_tests (1) | 3 | ES-only tests |
+| shaders.shader_integer_mix.prototypes | 1 | the test skips GLSL < 4.50 by design |
+
+KHR-Single-GL46-ipad: the 8 NotSupported are `meshShader` multiview variants (GL_MAX_MESH_MULTIVIEW_VIEW_COUNT_EXT is 1,
+the minimum).
+
+## Known deviations
+
+- EXT_mesh_shader: two limits sit just below the extension's required minimums because of Metal's threadgroup-memory
+  cap. GL_MAX_TASK_SHARED_MEMORY_SIZE_EXT is 32752 (minimum 32768), and GL_MAX_MESH_OUTPUT_MEMORY_SIZE_EXT is 30720
+  (minimum 32768). The CTS passes with these values.
+- ARB_sparse_texture: after a page is decommitted, the GPU may read its old contents for about 0.2–0.5 s.
