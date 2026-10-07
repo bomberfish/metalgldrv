@@ -2027,6 +2027,10 @@ static bool validateDraw(Context* ctx, GLenum mode) {
     }
     ProgramObj* prog = mglPipelineDrawProgram(ctx);
     if (!prog && ctx->coreProfile) return false;  // no program/pipeline: undefined rendering, not an error
+    if (prog && (prog->refl.stageMask & (1u << (int)glsl::Stage::Mesh))) {
+        ctx->setError(GL_INVALID_OPERATION, "programs with a mesh shader draw with glDrawMeshTasks*EXT");
+        return false;
+    }
     bool hasTess = prog && (prog->refl.stageMask & (1u << (int)glsl::Stage::TessEval));
     if (mode == GL_PATCHES && !hasTess) {
         ctx->setError(GL_INVALID_OPERATION);
@@ -2623,6 +2627,186 @@ API void APIENTRY glMultiDrawArraysIndirectCountARB(GLenum mode, const void* ind
 API void APIENTRY glMultiDrawElementsIndirectCountARB(GLenum mode, GLenum type, const void* indirect, GLintptr drawcount, GLsizei maxdrawcount,
                                                       GLsizei stride) {
     glMultiDrawElementsIndirectCount(mode, type, indirect, drawcount, maxdrawcount, stride);
+}
+
+// ---------------------------------------------------------------------------
+// EXT_mesh_shader draws: an object (task) + mesh render pipeline, no vertex input.
+// ---------------------------------------------------------------------------
+// Program of the current program / pipeline providing the mesh (and task) stages (null if none);
+// *fsProg receives the program of the fragment stage (may differ in a program pipeline).
+static ProgramObj* meshDrawProgram(Context* ctx, ProgramObj** fsProg) {
+    const uint32_t meshBit = 1u << (int)glsl::Stage::Mesh;
+    if (ctx->program) {
+        ProgramObj* p = ctx->program.get();
+        *fsProg = p;
+        return p->program && (p->refl.stageMask & meshBit) ? p : nullptr;
+    }
+    if (!ctx->pipeline) return nullptr;
+    ProgramPipelineObj* pp = ctx->pipeline.get();
+    ProgramObj* m = pp->stages[(int)glsl::Stage::Mesh].get();
+    if (!m || !m->program) return nullptr;
+    // the task stage must come from the mesh stage's program (both run from one variant)
+    ProgramObj* t = pp->stages[(int)glsl::Stage::Task].get();
+    if (t && t != m) return nullptr;
+    if (!t && (m->refl.stageMask & (1u << (int)glsl::Stage::Task))) return nullptr;
+    *fsProg = pp->stages[(int)glsl::Stage::Fragment].get();
+    return m;
+}
+
+// Validation shared by the mesh draw commands; returns the mesh program or null (error set).
+static ProgramObj* validateMeshDraw(Context* ctx, ProgramObj** fsProg) {
+    if (ctx->pipeline && !ctx->program) {
+        std::string err = pipelineValidationError(ctx->pipeline.get());
+        if (!err.empty()) {
+            ctx->setError(GL_INVALID_OPERATION, "%s", err.c_str());
+            return nullptr;
+        }
+    }
+    ProgramObj* prog = meshDrawProgram(ctx, fsProg);
+    if (!prog) {
+        ctx->setError(GL_INVALID_OPERATION, "no active program with a mesh shader");
+        return nullptr;
+    }
+    Framebuffer* fb = ctx->drawFb.get();
+    if (!fb || framebufferStatus(ctx, fb) != GL_FRAMEBUFFER_COMPLETE) {
+        ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return nullptr;
+    }
+    if (ctx->xfb && ctx->xfb->active && !ctx->xfb->paused) {
+        ctx->setError(GL_INVALID_OPERATION, "mesh draws cannot be used with active transform feedback");
+        return nullptr;
+    }
+    return prog;
+}
+
+// One mesh draw: direct (x, y, z) or with the group counts read by the GPU at `indirect`.
+static void executeMeshDraw(Context* ctx, ProgramObj* prog, ProgramObj* fsProg, GLuint x, GLuint y, GLuint z, Buffer* indirect,
+                            GLintptr indirectOffset, int drawID) {
+    MGL_STAT("draw");
+    if (!indirect && (!x || !y || !z)) return;
+    if (!mglCheckDrawConditional(ctx)) return;
+    const glsl::Reflection& refl = prog->refl;
+    glsl::VariantKey vk;
+    vk.kind = glsl::PipelineKind::Mesh;
+    vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
+    vk.rasterDiscard = ctx->rasterizerDiscard;
+    vk.sampleShading = ctx->sampleShading && ctx->minSampleShading > 0;
+    vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
+    ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
+    if (!var || !var->ok) return;
+    const glsl::EntryPoint* ms = var->entry(glsl::EntryPoint::Mesh);
+    const glsl::EntryPoint* os = var->entry(glsl::EntryPoint::Object);
+    if (!ms) return;
+    // Program pipeline whose fragment stage comes from another separable program (or none).
+    bool mixedFs = fsProg != prog;
+    ProgramVariant* fsVar = nullptr;
+    if (mixedFs && fsProg) {
+        glsl::VariantKey fk;
+        fk.kind = glsl::PipelineKind::Classic;
+        fk.flatshadeLastVertex = vk.flatshadeLastVertex;
+        fk.sampleShading = vk.sampleShading;
+        fk.sampleMask = vk.sampleMask;
+        fsVar = ctx->pipelines_->variant(fsProg, fk);
+        if (!fsVar || !fsVar->ok) return;
+    }
+    const glsl::Reflection& frefl = fsProg ? fsProg->refl : refl;
+    // Resolving bindings can end the render pass: build the arguments before acquiring the encoder.
+    uint64_t argAddr = buildArguments(ctx, prog, false);
+    uint64_t fsArgAddr = mixedFs && fsProg ? buildArguments(ctx, fsProg, false) : 0;
+    id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
+    if (!e) return;
+    RenderPipelineKey key;
+    key.variant = var;
+    if (mixedFs) {
+        key.fsVariant = fsVar;
+        key.fsVariantUid = fsVar ? fsVar->uid : ~0ull;
+    }
+    fillColorKey(ctx, key, frefl);
+    key.rasterEnabled = !ctx->rasterizerDiscard;
+    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    if (!pso) return;
+    if (ctx->enc.pipeline != pso) {
+        [e setRenderPipelineState:pso];
+        ctx->enc.pipeline = pso;
+    }
+    applyDynamicState(ctx, e, refl.meshOutputPrimitive, refl.writesViewportIndex);
+    id<MTL4ArgumentTable> table = ctx->renderArgTable;
+    uint64_t sysAddr = buildSys(ctx, prog, drawID, 0, 0, 0, false);
+    [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+    [table setAddress:sysAddr atIndex:glsl::kBufSys];
+    if (mixedFs) {
+        if (!ctx->enc.fsTableSplit) {
+            [e setArgumentTable:ctx->renderArgTableFS atStages:MTLRenderStageFragment];
+            ctx->enc.fsTableSplit = true;
+        }
+        [ctx->renderArgTableFS setAddress:fsArgAddr ? fsArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+        [ctx->renderArgTableFS setAddress:fsProg ? buildSys(ctx, fsProg, drawID, 0, 0, 0, false) : sysAddr atIndex:glsl::kBufSys];
+    } else if (ctx->enc.fsTableSplit) {
+        [e setArgumentTable:table atStages:MTLRenderStageFragment];
+        ctx->enc.fsTableSplit = false;
+    }
+    mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility queries
+    MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
+    MTLSize objTG = os ? MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2])
+                       : MTLSizeMake(1, 1, 1);
+    if (indirect) {
+        // DrawMeshTasksIndirectCommandEXT {x, y, z} matches MTLDispatchThreadgroupsIndirectArguments
+        [e drawMeshThreadgroupsWithIndirectBuffer:indirect->gpuAddress() + indirectOffset threadsPerObjectThreadgroup:objTG
+                        threadsPerMeshThreadgroup:meshTG];
+        indirect->lastUse = ctx->serial();
+    } else {
+        [e drawMeshThreadgroups:MTLSizeMake(x, y, z) threadsPerObjectThreadgroup:objTG threadsPerMeshThreadgroup:meshTG];
+    }
+    flushImageWritebacks(ctx);
+}
+
+API void APIENTRY glDrawMeshTasksEXT(GLuint x, GLuint y, GLuint z) {
+    MGL_CTX();
+    ProgramObj* fsProg = nullptr;
+    ProgramObj* prog = validateMeshDraw(ctx, &fsProg);
+    if (!prog) return;
+    // GL_MAX_TASK/MESH_WORK_GROUP_COUNT_EXT and _TOTAL_COUNT_EXT
+    if (x > 65535 || y > 65535 || z > 65535 || (uint64_t)x * y * z > (1u << 22)) return ctx->setError(GL_INVALID_VALUE);
+    executeMeshDraw(ctx, prog, fsProg, x, y, z, nullptr, 0, 0);
+}
+
+API void APIENTRY glMultiDrawMeshTasksIndirectEXT(GLintptr indirect, GLsizei drawcount, GLsizei stride) {
+    MGL_CTX();
+    if (drawcount <= 0 || (stride % 4)) return ctx->setError(GL_INVALID_VALUE);
+    ProgramObj* fsProg = nullptr;
+    ProgramObj* prog = validateMeshDraw(ctx, &fsProg);
+    if (!prog) return;
+    if (indirect < 0) return ctx->setError(GL_INVALID_VALUE);
+    GLsizei s = stride ? stride : 12;
+    Buffer* b = indirectBuffer(ctx, (const void*)indirect, (size_t)s * (drawcount - 1) + 12);
+    if (!b) return;
+    for (int i = 0; i < drawcount; i++) executeMeshDraw(ctx, prog, fsProg, 0, 0, 0, b, indirect + (GLintptr)i * s, i);
+}
+
+API void APIENTRY glDrawMeshTasksIndirectEXT(GLintptr indirect) {
+    MGL_CTX();
+    ProgramObj* fsProg = nullptr;
+    ProgramObj* prog = validateMeshDraw(ctx, &fsProg);
+    if (!prog) return;
+    if (indirect < 0) return ctx->setError(GL_INVALID_VALUE);
+    Buffer* b = indirectBuffer(ctx, (const void*)indirect, 12);
+    if (!b) return;
+    executeMeshDraw(ctx, prog, fsProg, 0, 0, 0, b, indirect, 0);
+}
+
+API void APIENTRY glMultiDrawMeshTasksIndirectCountEXT(GLintptr indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
+    MGL_CTX();
+    if (maxdrawcount < 0 || (stride % 4)) return ctx->setError(GL_INVALID_VALUE);
+    GLsizei n = readDrawCount(ctx, drawcount, maxdrawcount);
+    if (n < 0) return;
+    ProgramObj* fsProg = nullptr;
+    ProgramObj* prog = validateMeshDraw(ctx, &fsProg);
+    if (!prog || n == 0) return;
+    if (indirect < 0) return ctx->setError(GL_INVALID_VALUE);
+    GLsizei s = stride ? stride : 12;
+    Buffer* b = indirectBuffer(ctx, (const void*)indirect, (size_t)s * (n - 1) + 12);
+    if (!b) return;
+    for (int i = 0; i < n; i++) executeMeshDraw(ctx, prog, fsProg, 0, 0, 0, b, indirect + (GLintptr)i * s, i);
 }
 
 // ---------------------------------------------------------------------------

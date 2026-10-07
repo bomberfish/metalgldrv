@@ -50,7 +50,7 @@ const char* kExtensions[] = {
     "GL_EXT_blend_color", "GL_EXT_blend_equation_separate", "GL_EXT_blend_func_separate", "GL_EXT_blend_minmax",
     "GL_EXT_blend_subtract", "GL_EXT_draw_buffers2", "GL_EXT_draw_instanced", "GL_EXT_draw_range_elements",
     "GL_EXT_framebuffer_blit", "GL_EXT_framebuffer_multisample", "GL_EXT_framebuffer_object", "GL_EXT_framebuffer_sRGB",
-    "GL_EXT_gpu_program_parameters", "GL_EXT_gpu_shader4", "GL_EXT_multi_draw_arrays", "GL_EXT_packed_depth_stencil",
+    "GL_EXT_gpu_program_parameters", "GL_EXT_gpu_shader4", "GL_EXT_mesh_shader", "GL_EXT_multi_draw_arrays", "GL_EXT_packed_depth_stencil",
     "GL_EXT_packed_float", "GL_EXT_packed_pixels", "GL_EXT_pixel_buffer_object", "GL_EXT_polygon_offset_clamp",
     "GL_EXT_provoking_vertex", "GL_EXT_rescale_normal", "GL_EXT_separate_specular_color", "GL_EXT_shader_integer_mix",
     "GL_EXT_shadow_funcs", "GL_EXT_stencil_two_side", "GL_EXT_stencil_wrap", "GL_EXT_texture3D", "GL_EXT_texture_array",
@@ -237,6 +237,38 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_MAX_COMPUTE_WORK_GROUP_SIZE: { int64_t s[3] = {1024, 1024, 64}; v = I(s[std::min(idx, 2)]); return true; }
     case GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS: v = I(1024); return true;
     case GL_MAX_COMPUTE_SHARED_MEMORY_SIZE: v = I(32768); return true;
+    // EXT_mesh_shader: task shaders run as Metal object functions, mesh shaders as mesh functions whose outputs
+    // are staged in threadgroup memory before they are copied into the Metal mesh. Apple GPUs give a threadgroup
+    // 32 KB (an object threadgroup 16 bytes less: Metal reserves them for the mesh grid properties) and a mesh
+    // threadgroup 60 KB of threadgroup memory + mesh output together; the payload is separate (at most 16 KB).
+    // Two limits are below the EXT minimums for that reason (see docs/glsl-compiler.md, mesh shaders).
+    case GL_MAX_TASK_WORK_GROUP_TOTAL_COUNT_EXT: case GL_MAX_MESH_WORK_GROUP_TOTAL_COUNT_EXT: v = I(1 << 22); return true;
+    case GL_MAX_TASK_WORK_GROUP_COUNT_EXT: case GL_MAX_MESH_WORK_GROUP_COUNT_EXT: v = I(65535); return true;
+    case GL_MAX_TASK_WORK_GROUP_INVOCATIONS_EXT: case GL_MAX_MESH_WORK_GROUP_INVOCATIONS_EXT: v = I(128); return true;
+    case GL_MAX_TASK_WORK_GROUP_SIZE_EXT: case GL_MAX_MESH_WORK_GROUP_SIZE_EXT: v = I(128); return true;
+    case GL_MAX_TASK_PAYLOAD_SIZE_EXT: v = I(16384); return true;
+    case GL_MAX_TASK_SHARED_MEMORY_SIZE_EXT: v = I(32752); return true;  // EXT minimum 32768
+    case GL_MAX_TASK_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT: v = I(32768); return true;
+    case GL_MAX_MESH_SHARED_MEMORY_SIZE_EXT: case GL_MAX_MESH_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT: v = I(28672); return true;
+    case GL_MAX_MESH_OUTPUT_MEMORY_SIZE_EXT: v = I(30720); return true;  // EXT minimum 32768: outputs are held twice
+    case GL_MAX_MESH_PAYLOAD_AND_OUTPUT_MEMORY_SIZE_EXT: v = I(48128); return true;
+    case GL_MAX_MESH_OUTPUT_COMPONENTS_EXT: v = I(128); return true;
+    case GL_MAX_MESH_OUTPUT_VERTICES_EXT: case GL_MAX_MESH_OUTPUT_PRIMITIVES_EXT: v = I(256); return true;
+    case GL_MAX_MESH_OUTPUT_LAYERS_EXT: v = I(8); return true;
+    case GL_MAX_MESH_MULTIVIEW_VIEW_COUNT_EXT: v = I(1); return true;
+    case GL_MESH_OUTPUT_PER_VERTEX_GRANULARITY_EXT: case GL_MESH_OUTPUT_PER_PRIMITIVE_GRANULARITY_EXT: v = I(1); return true;
+    case GL_MAX_PREFERRED_TASK_WORK_GROUP_INVOCATIONS_EXT: case GL_MAX_PREFERRED_MESH_WORK_GROUP_INVOCATIONS_EXT: v = I(32); return true;
+    case GL_MESH_PREFERS_LOCAL_INVOCATION_VERTEX_OUTPUT_EXT: case GL_MESH_PREFERS_LOCAL_INVOCATION_PRIMITIVE_OUTPUT_EXT:
+    case GL_MESH_PREFERS_COMPACT_VERTEX_OUTPUT_EXT: case GL_MESH_PREFERS_COMPACT_PRIMITIVE_OUTPUT_EXT:
+        v = B(false); return true;
+    case GL_MAX_TASK_UNIFORM_BLOCKS_EXT: case GL_MAX_MESH_UNIFORM_BLOCKS_EXT: v = I(14); return true;
+    case GL_MAX_TASK_TEXTURE_IMAGE_UNITS_EXT: case GL_MAX_MESH_TEXTURE_IMAGE_UNITS_EXT: v = I(32); return true;
+    case GL_MAX_TASK_IMAGE_UNIFORMS_EXT: case GL_MAX_MESH_IMAGE_UNIFORMS_EXT: v = I(kMaxImageUnits); return true;
+    case GL_MAX_TASK_UNIFORM_COMPONENTS_EXT: case GL_MAX_MESH_UNIFORM_COMPONENTS_EXT: v = I(16384); return true;
+    case GL_MAX_COMBINED_TASK_UNIFORM_COMPONENTS_EXT: case GL_MAX_COMBINED_MESH_UNIFORM_COMPONENTS_EXT: v = I(16384 + 14 * 65536 / 4); return true;
+    case GL_MAX_TASK_ATOMIC_COUNTER_BUFFERS_EXT: case GL_MAX_MESH_ATOMIC_COUNTER_BUFFERS_EXT: v = I(kMaxAtomicCounterBindings); return true;
+    case GL_MAX_TASK_ATOMIC_COUNTERS_EXT: case GL_MAX_MESH_ATOMIC_COUNTERS_EXT: v = I(1024); return true;
+    case GL_MAX_TASK_SHADER_STORAGE_BLOCKS_EXT: case GL_MAX_MESH_SHADER_STORAGE_BLOCKS_EXT: v = I(kMaxSSBOBindings); return true;
     case GL_MAX_CLIP_DISTANCES: case GL_MAX_CULL_DISTANCES: case GL_MAX_COMBINED_CLIP_AND_CULL_DISTANCES: v = I(8); return true;
     case GL_MAX_SUBROUTINES: v = I(256); return true;
     case GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS: v = I(1024); return true;

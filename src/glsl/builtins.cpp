@@ -446,6 +446,10 @@ Ctx& ctx() {
         addTextureFunctions(*c);
         addImageFunctions(*c);
         addMatrixFunctions(*c);
+        // EXT_mesh_shader
+        c->add("EmitMeshTasksEXT", Type::voidT(), {Type::scalar(BT::UInt), Type::scalar(BT::UInt), Type::scalar(BT::UInt)})->stageMask =
+            1u << (int)Stage::Task;
+        c->add("SetMeshOutputsEXT", Type::voidT(), {Type::scalar(BT::UInt), Type::scalar(BT::UInt)})->stageMask = 1u << (int)Stage::Mesh;
         return c;
     }();
     return *c;
@@ -629,6 +633,32 @@ in uvec3 gl_GlobalInvocationID;
 in uint gl_LocalInvocationIndex;
 )";
 
+// EXT_mesh_shader: task and mesh shaders run workgroups like compute shaders.
+const char* kMeshCommonPreamble = R"(
+in uvec3 gl_NumWorkGroups;
+const uvec3 gl_WorkGroupSize = uvec3(1, 1, 1);
+in uvec3 gl_WorkGroupID;
+in uvec3 gl_LocalInvocationID;
+in uvec3 gl_GlobalInvocationID;
+in uint gl_LocalInvocationIndex;
+in int gl_DrawID;
+in int gl_DrawIDARB;
+const ivec3 gl_MaxTaskWorkGroupSizeEXT = ivec3(128, 128, 128);
+const ivec3 gl_MaxMeshWorkGroupSizeEXT = ivec3(128, 128, 128);
+const int gl_MaxMeshOutputVerticesEXT = 256;
+const int gl_MaxMeshOutputPrimitivesEXT = 256;
+const int gl_MaxMeshViewCountEXT = 1;
+)";
+
+const char* kMeshPreamble = R"(
+out gl_MeshPerVertexEXT { vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8]; float gl_CullDistance[8]; } gl_MeshVerticesEXT[];
+perprimitiveEXT out gl_MeshPerPrimitiveEXT { int gl_PrimitiveID; int gl_Layer; int gl_ViewportIndex; bool gl_CullPrimitiveEXT;
+  int gl_PrimitiveShadingRateEXT; } gl_MeshPrimitivesEXT[];
+out uint gl_PrimitivePointIndicesEXT[];
+out uvec2 gl_PrimitiveLineIndicesEXT[];
+out uvec3 gl_PrimitiveTriangleIndicesEXT[];
+)";
+
 }  // namespace
 
 const std::vector<const Builtin*>* findBuiltins(const std::string& name) {
@@ -655,6 +685,8 @@ const std::string& builtinPreamble(Stage stage) {
                 case Stage::Geometry: p += kPerVertexIn; p += kGeometryPreamble; break;
                 case Stage::Fragment: p += kFragmentPreamble; break;
                 case Stage::Compute: p += kComputePreamble; break;
+                case Stage::Task: p += kMeshCommonPreamble; break;
+                case Stage::Mesh: p += kMeshCommonPreamble; p += kMeshPreamble; break;
                 default: break;
             }
             cache[s] = p;
@@ -698,6 +730,10 @@ BuiltinVar builtinVarId(const std::string& n, Stage stage) {
         {"gl_LocalInvocationID", BuiltinVar::LocalInvocationID}, {"gl_GlobalInvocationID", BuiltinVar::GlobalInvocationID},
         {"gl_LocalInvocationIndex", BuiltinVar::LocalInvocationIndex}, {"gl_WorkGroupSize", BuiltinVar::WorkGroupSize},
         {"gl_DepthRange", BuiltinVar::DepthRange}, {"gl_NumSamples", BuiltinVar::NumSamples},
+        {"gl_MeshVerticesEXT", BuiltinVar::MeshVertices}, {"gl_MeshPrimitivesEXT", BuiltinVar::MeshPrimitives},
+        {"gl_PrimitivePointIndicesEXT", BuiltinVar::PrimitiveIndices}, {"gl_PrimitiveLineIndicesEXT", BuiltinVar::PrimitiveIndices},
+        {"gl_PrimitiveTriangleIndicesEXT", BuiltinVar::PrimitiveIndices}, {"gl_CullPrimitiveEXT", BuiltinVar::CullPrimitive},
+        {"gl_PrimitiveShadingRateEXT", BuiltinVar::PrimitiveShadingRate},
     };
     if (n == "gl_Color") return stage == Stage::Fragment ? BuiltinVar::FragColorIn : BuiltinVar::Color;
     if (n == "gl_SecondaryColor") return stage == Stage::Fragment ? BuiltinVar::SecondaryColorIn : BuiltinVar::SecondaryColor;

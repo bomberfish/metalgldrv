@@ -274,7 +274,8 @@ void Linker::collectStage(Stage s) {
             }
     if (!sc.main) {
         error(std::string("missing main() in ") +
-              (s == Stage::Vertex ? "vertex" : s == Stage::Fragment ? "fragment" : s == Stage::Compute ? "compute" : s == Stage::Geometry ? "geometry" : "tessellation") +
+              (s == Stage::Vertex ? "vertex" : s == Stage::Fragment ? "fragment" : s == Stage::Compute ? "compute" : s == Stage::Geometry ? "geometry"
+               : s == Stage::Task ? "task" : s == Stage::Mesh ? "mesh" : "tessellation") +
               " shader");
         return;
     }
@@ -283,12 +284,14 @@ void Linker::collectStage(Stage s) {
         auto merge = [&](Layout& d, const Layout& l) {
             // GLSL 4.60 4.4: all declarations of a layout across a stage's shaders must agree
             if (l.maxVertices >= 0 && d.maxVertices >= 0 && l.maxVertices != d.maxVertices) error("conflicting max_vertices declarations");
+            if (l.maxPrimitives >= 0 && d.maxPrimitives >= 0 && l.maxPrimitives != d.maxPrimitives) error("conflicting max_primitives declarations");
             if (l.vertices >= 0 && d.vertices >= 0 && l.vertices != d.vertices) error("conflicting output patch vertex counts");
             if (l.invocations >= 0 && d.invocations >= 0 && l.invocations != d.invocations) error("conflicting invocations declarations");
             if (l.primitive != Layout::kNoPrimitive && d.primitive != Layout::kNoPrimitive && l.primitive != d.primitive)
                 error("conflicting primitive type declarations");
             for (int i = 0; i < 3; i++) if (l.localSize[i] >= 0) d.localSize[i] = l.localSize[i];
             if (l.maxVertices >= 0) d.maxVertices = l.maxVertices;
+            if (l.maxPrimitives >= 0) d.maxPrimitives = l.maxPrimitives;
             if (l.invocations >= 0) d.invocations = l.invocations;
             if (l.vertices >= 0) d.vertices = l.vertices;
             if (l.primitive != Layout::kNoPrimitive) d.primitive = l.primitive;
@@ -300,10 +303,10 @@ void Linker::collectStage(Stage s) {
         const Layout& l = sh->inLayout;
         bool has = l.localSize[0] >= 0 || l.localSize[1] >= 0 || l.localSize[2] >= 0;
         bool had = sc.inLayout.localSize[0] >= 0 || sc.inLayout.localSize[1] >= 0 || sc.inLayout.localSize[2] >= 0;
-        if (s == Stage::Compute && has && had)
+        if ((s == Stage::Compute || s == Stage::Task || s == Stage::Mesh) && has && had)
             for (int i = 0; i < 3; i++)
                 if (std::max(1, l.localSize[i]) != std::max(1, sc.inLayout.localSize[i])) {
-                    error("compute shaders declare conflicting local sizes");
+                    error(std::string(s == Stage::Compute ? "compute" : s == Stage::Task ? "task" : "mesh") + " shaders declare conflicting local sizes");
                     break;
                 }
         merge(sc.inLayout, sh->inLayout);
@@ -941,7 +944,8 @@ void Linker::assignUniforms() {
         static const int kMax[(int)Stage::Count] = {
             limitValue("gl_MaxVertexAtomicCounters"), limitValue("gl_MaxTessControlAtomicCounters"),
             limitValue("gl_MaxTessEvaluationAtomicCounters"), limitValue("gl_MaxGeometryAtomicCounters"),
-            limitValue("gl_MaxFragmentAtomicCounters"), limitValue("gl_MaxComputeAtomicCounters")};
+            limitValue("gl_MaxFragmentAtomicCounters"), limitValue("gl_MaxComputeAtomicCounters"),
+            limitValue("gl_MaxComputeAtomicCounters"), limitValue("gl_MaxComputeAtomicCounters")};  // task, mesh
         int counters[(int)Stage::Count] = {};
         for (auto& e : opaques)
             if (e.v->type.stripArrays().base == BT::AtomicUint)
@@ -1070,9 +1074,10 @@ void Linker::assignUniforms() {
         };
         static const int stageMax[(int)Stage::Count] = {k_gl_MaxVertexImageUniforms, k_gl_MaxTessControlImageUniforms,
                                                         k_gl_MaxTessEvaluationImageUniforms, k_gl_MaxGeometryImageUniforms,
-                                                        k_gl_MaxFragmentImageUniforms, k_gl_MaxComputeImageUniforms};
+                                                        k_gl_MaxFragmentImageUniforms, k_gl_MaxComputeImageUniforms,
+                                                        k_gl_MaxComputeImageUniforms, k_gl_MaxComputeImageUniforms};
         static const char* stageName[(int)Stage::Count] = {"vertex", "tessellation control", "tessellation evaluation",
-                                                           "geometry", "fragment", "compute"};
+                                                           "geometry", "fragment", "compute", "task", "mesh"};
         int perStage[(int)Stage::Count] = {}, combined = 0;
         for (auto& lf : leaves) {
             if (lf.type.stripArrays().base != BT::Image) continue;
@@ -1246,9 +1251,18 @@ void Linker::checkVaryings() {
             }
         }
     }
+    // Task -> mesh: the taskPayloadSharedEXT declarations must match.
+    if (prog_->stages[(int)Stage::Task].main && prog_->stages[(int)Stage::Mesh].main) {
+        const Variable *tp = nullptr, *mp = nullptr;
+        for (auto* v : prog_->stages[(int)Stage::Task].globals) if (v->q.storage == Storage::TaskPayload) tp = v;
+        for (auto* v : prog_->stages[(int)Stage::Mesh].globals) if (v->q.storage == Storage::TaskPayload) mp = v;
+        if (tp && mp && tp->type.str() != mp->type.str() &&
+            !(tp->type.base == BT::Struct && mp->type.base == BT::Struct && tp->type.sdef->name == mp->type.sdef->name && tp->type.dims == mp->type.dims))
+            error("taskPayloadSharedEXT declarations of the task and mesh shaders do not match");
+    }
     // Find the last pre-rasterization stage and verify fragment inputs.
     Stage pre = Stage::Count;
-    for (Stage s : {Stage::Geometry, Stage::TessEval, Stage::Vertex})
+    for (Stage s : {Stage::Mesh, Stage::Geometry, Stage::TessEval, Stage::Vertex})
         if (prog_->stages[(int)s].main) { pre = s; break; }
     const StageCode& fs = prog_->stages[(int)Stage::Fragment];
     if (pre == Stage::Count) return;
@@ -1266,6 +1280,16 @@ void Linker::checkVaryings() {
             continue;
         }
         Type a = it->second->type, b = v->type;
+        if (pre == Stage::Mesh) {
+            if (a.isArray()) a = a.elem();  // mesh outputs are per-vertex / per-primitive arrays
+            if (it->second->q.perprimitive != v->q.perprimitive) {
+                error("perprimitiveEXT qualifier mismatch for varying '" + v->name + "'");
+                continue;
+            }
+        } else if (v->q.perprimitive) {
+            error("fragment input '" + v->name + "' is perprimitiveEXT but the program has no mesh shader");
+            continue;
+        }
         if (a.str() != b.str() && !(a.base == BT::Struct && b.base == BT::Struct && a.sdef->name == b.sdef->name))
             error("type mismatch for varying '" + v->name + "' ('" + a.str() + "' vs '" + b.str() + "')");
     }
@@ -1296,6 +1320,32 @@ void Linker::stageMetadata() {
         r.tesOrder = te.inLayout.order ? te.inLayout.order : gl::CCW;
         r.tesPointMode = te.inLayout.pointMode;
         if (!r.tesPrimitiveMode) error("tessellation evaluation shader does not declare a primitive mode");
+    }
+    for (Stage st : {Stage::Task, Stage::Mesh}) {
+        auto& sc = prog_->stages[(int)st];
+        if (!sc.main) continue;
+        int* ls = st == Stage::Task ? r.taskLocalSize : r.meshLocalSize;
+        for (int i = 0; i < 3; i++) ls[i] = std::max(1, sc.inLayout.localSize[i]);
+        if (sc.inLayout.localSize[0] < 0 && sc.inLayout.localSize[1] < 0 && sc.inLayout.localSize[2] < 0)
+            error(std::string(st == Stage::Task ? "task" : "mesh") + " shader does not declare a local size");
+    }
+    if (auto& ms = prog_->stages[(int)Stage::Mesh]; ms.main) {
+        r.meshMaxVertices = ms.outLayout.maxVertices;
+        r.meshMaxPrimitives = ms.outLayout.maxPrimitives;
+        r.meshOutputPrimitive = ms.outLayout.primitive != Layout::kNoPrimitive ? ms.outLayout.primitive : 0;
+        if (ms.outLayout.primitive == Layout::kNoPrimitive) error("mesh shader does not declare an output primitive type");
+        if (r.meshMaxVertices < 0) error("mesh shader does not declare max_vertices");
+        if (r.meshMaxPrimitives < 0) error("mesh shader does not declare max_primitives");
+        // per-primitive gl_Layer / gl_ViewportIndex written through gl_MeshPrimitivesEXT[]
+        for (auto& sh : ms.shaders)
+            for (auto& e : sh->exprs) {
+                if (e.kind != EK::Field || e.args[0]->kind != EK::Index || e.args[0]->args[0]->kind != EK::Var) continue;
+                const Variable* v = e.args[0]->args[0]->var;
+                if (v->builtin != BuiltinVar::MeshPrimitives || !ms.used.count(v)) continue;
+                const std::string& m = v->block->members[e.field].name;
+                if (m == "gl_Layer") r.writesLayer = true;
+                if (m == "gl_ViewportIndex") r.writesViewportIndex = true;
+            }
     }
     if (auto& fs = prog_->stages[(int)Stage::Fragment]; fs.main) {
         // Metal passes at most 124 user scalars from a vertex function to a fragment function
@@ -1609,7 +1659,15 @@ LinkResult Linker::run() {
     // GL 4.6 7.3: only non-separable programs need a TES alongside a TCS.
     if (!in_.separable && (prog_->stageMask & (1u << (int)Stage::TessEval)) == 0 && (prog_->stageMask & (1u << (int)Stage::TessControl)))
         error("tessellation control shader requires a tessellation evaluation shader");
-    if (!in_.separable && (prog_->stageMask & ~(1u << (int)Stage::Compute)) && !(prog_->stageMask & (1u << (int)Stage::Vertex)))
+    const uint32_t meshStages = (1u << (int)Stage::Task) | (1u << (int)Stage::Mesh);
+    const uint32_t vertexStages = (1u << (int)Stage::Vertex) | (1u << (int)Stage::TessControl) | (1u << (int)Stage::TessEval) |
+                                  (1u << (int)Stage::Geometry);
+    if ((prog_->stageMask & meshStages) && (prog_->stageMask & vertexStages))
+        error("mesh and task shaders cannot be linked with vertex, tessellation or geometry shaders");
+    if (!in_.separable && (prog_->stageMask & (1u << (int)Stage::Task)) && !(prog_->stageMask & (1u << (int)Stage::Mesh)))
+        error("a task shader requires a mesh shader");
+    if (!in_.separable && (prog_->stageMask & ~(1u << (int)Stage::Compute)) && !(prog_->stageMask & (1u << (int)Stage::Vertex)) &&
+        !(prog_->stageMask & (1u << (int)Stage::Mesh)))
         error("program has no vertex shader");
     for (int s = 0; s < (int)Stage::Count && ok_; s++)
         if (!prog_->stages[s].shaders.empty()) collectStage((Stage)s);

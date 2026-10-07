@@ -126,6 +126,29 @@ Vertex ids come from the uint32 list `indexBuffer` (+ `baseVertex`).
 * The tessellator chunk sets `#pragma METAL fp math_mode(safe)` / `fp contract(off)` (shared vertices must be bit-identical); this
   applies to the rest of the generated source.
 
+### Mesh shaders (EXT_mesh_shader, PipelineKind::Mesh)
+* The task shader is the Metal object function `mgl_ts`, the mesh shader the mesh function `mgl_ms`, both with the
+  GL local size as threadgroup size (`EntryPoint::threadsPerThreadgroup`); `glDrawMeshTasks*EXT` draw
+  `drawMeshThreadgroups` (indirect: `drawMeshThreadgroupsWithIndirectBuffer`, whose arguments match
+  DrawMeshTasksIndirectCommandEXT). gl_DrawID = `MGLSys::drawID` (one draw per multi-draw command).
+* `taskPayloadSharedEXT` lives in the Metal payload (`object_data`, `EntryPoint::payloadBytes` = MSL size of the
+  variable), reached through `G::PL`; `mgl_array` gets object_data accessors in shaders that use a payload.
+  EmitMeshTasksEXT() records the counts (and returns from main); invocation 0 calls `set_threadgroups_per_grid`.
+* Mesh outputs (user arrays, one array per used member of gl_MeshVerticesEXT / gl_MeshPrimitivesEXT, the index
+  arrays) live in threadgroup memory; after main and a barrier the workgroup copies the SetMeshOutputsEXT()
+  counts into the Metal mesh (vertex: position, point size for points, clip/cull distances, the per-vertex
+  varyings the fragment shader reads; primitive: perprimitiveEXT varyings, `mgl_primid`, gl_Layer,
+  gl_ViewportIndex). gl_CullPrimitiveEXT compacts the primitive list. Per-primitive fragment inputs are flat.
+  Flat per-vertex inputs follow GL's provoking vertex (indices rotated for GL_LAST_VERTEX_CONVENTION).
+* Limits that follow from Metal: a threadgroup has 32 KB, an object threadgroup 16 bytes less (Metal keeps the mesh
+  grid properties there), so GL_MAX_TASK_SHARED_MEMORY_SIZE_EXT is 32752; a mesh threadgroup has 60 KB of
+  threadgroup memory + mesh output together, and the outputs are held twice (staging + Metal mesh), so
+  GL_MAX_MESH_OUTPUT_MEMORY_SIZE_EXT is 30720. Both are below the EXT minimums (32768). The 124-scalar vertex +
+  primitive interface limit applies (no varying spill for mesh shaders).
+* Metal compiler workaround: an object function whose only buffer accesses go through argument-buffer pointers
+  and that writes its payload crashes the pipeline compiler (XPC_ERROR_CONNECTION_INTERRUPTED); `mgl_ts` reads
+  `sys` directly to avoid it.
+
 ### Subroutines
 `Reflection::subroutines[stage]`: `functions` (GL subroutine index = position), `uniforms` (location, arraySize, compatible indices),
 `numLocations`. Stages that use subroutine uniforms get a `SlotKind::SubroutineIndices` slot (index = stage) holding the GPU address of

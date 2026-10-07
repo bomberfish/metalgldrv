@@ -225,7 +225,8 @@ std::vector<bool> usedArrayElements(const StageCode& sc, const Variable* v, int 
 void reflectProgramInterface(const LinkedProgram& P, Reflection& r) {
     r.programInputs.clear();
     r.programOutputs.clear();
-    static const Stage order[] = {Stage::Vertex, Stage::TessControl, Stage::TessEval, Stage::Geometry, Stage::Fragment, Stage::Compute};
+    static const Stage order[] = {Stage::Vertex, Stage::TessControl, Stage::TessEval, Stage::Geometry, Stage::Task, Stage::Mesh,
+                                  Stage::Fragment, Stage::Compute};
     Stage first = Stage::Count, last = Stage::Count;
     for (Stage s : order) {
         if (!P.stages[(int)s].main) continue;

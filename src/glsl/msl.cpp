@@ -42,7 +42,7 @@ bool isSimpleIdent(const std::string& s) {
 }
 
 const char* kSwz = "xyzw";
-static const char* const kStageNs[] = {"vs", "tcs", "tes", "gs", "fs", "cs"};
+static const char* const kStageNs[] = {"vs", "tcs", "tes", "gs", "fs", "cs", "ts", "ms"};
 
 class Emitter {
 public:
@@ -109,6 +109,7 @@ private:
     bool hasShared_ = false;
     std::map<std::string, std::string> interpLeaf_;  // FS input leaf accessor (without "g.") -> In member, for interpolateAt*
     bool needEq_ = false;
+    std::string payloadSpace_ = "object_data";  // address space of G::PL (task/mesh payload)
 
     [[noreturn]] void fail(const std::string& m) { throw EmitError{m}; }
 
@@ -297,7 +298,15 @@ private:
         if (perThread) return false;
         if (stage_ == Stage::TessControl) return v->q.storage == Storage::In || v->q.storage == Storage::Out;
         if (stage_ == Stage::TessEval) return v->q.storage == Storage::In;
+        if (stage_ == Stage::Mesh) return v->q.storage == Storage::Out;  // outputs are shared by the workgroup
         return false;
+    }
+    // gl_MeshVerticesEXT / gl_MeshPrimitivesEXT: stored as one threadgroup array per used member
+    static bool isMeshBlock(const Variable* v) {
+        return v->builtin == BuiltinVar::MeshVertices || v->builtin == BuiltinVar::MeshPrimitives;
+    }
+    static std::string meshMemberArray(const Variable* v, int member) {
+        return "S->bi_" + v->name + "_" + v->block->members[member].name;
     }
     bool rootInThreadgroup(const Expr* e) const {
         while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
@@ -306,6 +315,7 @@ private:
     std::string varName(const Variable* v) {
         if (v->builtin != BuiltinVar::None) return (inThreadgroup(v) ? "S->bi_" : "bi_") + v->name;
         if (v->global) {
+            if (v->q.storage == Storage::TaskPayload) return "PL->g_" + v->name;
             if (inThreadgroup(v)) return "S->g_" + v->name;
             return "g_" + v->name;
         }
@@ -367,6 +377,7 @@ private:
         std::map<const Variable*, std::set<int>> usedMembers;  // members of gl_in/gl_out referenced by the stage
         std::string mainName;
         bool hasShared = false;
+        bool hasPayload = false;  // task/mesh: taskPayloadSharedEXT variable (G::PL)
         bool prepared = false;
     };
     StageInfo si_[(int)Stage::Count];
@@ -439,6 +450,9 @@ private:
     std::string tesRun(const std::string& coord, const std::string& patch, const std::string& cps);
     void emitTessEvalMesh(std::string& o);
     void emitVertexMesh(std::string& o);
+    void emitMesh(std::string& o);
+    std::string workgroupBuiltins(Stage st, const int* localSize, std::string& params);
+    std::set<std::string> fragmentInputNames();
     bool fsReadsPrimitiveId() const {
         const StageCode& f = SC(Stage::Fragment);
         return f.main && f.usedNames.count("gl_PrimitiveID");
@@ -872,8 +886,8 @@ std::string Emitter::ex(const Expr* e) {
                 if (v->builtin == BuiltinVar::NumSamples) return "int(get_num_samples())";
                 if (v->builtin == BuiltinVar::WorkGroupSize) {
                     const auto& r = P->refl;
-                    return "uint3(" + std::to_string(r.localSize[0]) + "u, " + std::to_string(r.localSize[1]) + "u, " +
-                           std::to_string(r.localSize[2]) + "u)";
+                    const int* ls = stage_ == Stage::Task ? r.taskLocalSize : stage_ == Stage::Mesh ? r.meshLocalSize : r.localSize;
+                    return "uint3(" + std::to_string(ls[0]) + "u, " + std::to_string(ls[1]) + "u, " + std::to_string(ls[2]) + "u)";
                 }
                 if (v->type.isOpaque()) fail("opaque variable '" + v->name + "' used as a value");
                 if (v->constVal && v->q.storage == Storage::Const && !v->param) {
@@ -882,7 +896,13 @@ std::string Emitter::ex(const Expr* e) {
                 }
                 return varName(v);
             }
-            if (e->kind == EK::Field) return ex(e->args[0]) + ".m_" + e->args[0]->type.sdef->members[e->field].name;
+            if (e->kind == EK::Field) {
+                // mesh built-in output blocks live in threadgroup memory as one array per used member
+                const Expr* b = e->args[0];
+                if (b->kind == EK::Index && b->args[0]->kind == EK::Var && isMeshBlock(b->args[0]->var))
+                    return meshMemberArray(b->args[0]->var, e->field) + "[" + ex(b->args[1]) + "]";
+                return ex(e->args[0]) + ".m_" + e->args[0]->type.sdef->members[e->field].name;
+            }
             const Expr* b = e->args[0];
             std::string idx = ex(e->args[1]);
             if (b->type.isOpaque() || b->type.stripArrays().isOpaque()) fail("opaque array used as a value");
@@ -1380,9 +1400,13 @@ std::string Emitter::callBuiltin(const Expr* e) {
         return withOuts(callee, e, bi->paramOut, bi->params, rt, [&](size_t i, const Expr* x) { return ex(x); });
     }
     if (n == "ldexp") return "ldexp(" + a(0) + ", " + a(1) + ")";
+    if (n == "EmitMeshTasksEXT") return "mgl_EmitMeshTasks(uint3(" + a(0) + ", " + a(1) + ", " + a(2) + "))";
+    if (n == "SetMeshOutputsEXT") return "mgl_SetMeshOutputs(" + a(0) + ", " + a(1) + ")";
     if (n == "barrier") {
         if (stage_ == Stage::TessControl) return "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)";
         if (stage_ == Stage::Compute) return "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device | mem_flags::mem_texture)";
+        if (stage_ == Stage::Task) return "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device | mem_flags::mem_texture | mem_flags::mem_object_data)";
+        if (stage_ == Stage::Mesh) return "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device | mem_flags::mem_texture)";
         return "((void)0)";
     }
     if (n == "memoryBarrier" || n == "memoryBarrierBuffer" || n == "memoryBarrierImage" || n == "memoryBarrierAtomicCounter" ||
@@ -1391,8 +1415,9 @@ std::string Emitter::callBuiltin(const Expr* e) {
                           : n == "memoryBarrierImage" ? "mem_flags::mem_texture"
                           : n == "memoryBarrier" || n == "groupMemoryBarrier" ? "mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture"
                           : "mem_flags::mem_device";
-        if (stage_ != Stage::Compute && n == "memoryBarrierShared") return "((void)0)";
-        if (stage_ != Stage::Compute) flags = "mem_flags::mem_device | mem_flags::mem_texture";
+        bool workgroup = stage_ == Stage::Compute || stage_ == Stage::Task || stage_ == Stage::Mesh;
+        if (!workgroup && n == "memoryBarrierShared") return "((void)0)";
+        if (!workgroup) flags = "mem_flags::mem_device | mem_flags::mem_texture";
         return "atomic_thread_fence(" + flags + ", memory_order_seq_cst)";
     }
     if (n.compare(0, 13, "atomicCounter") == 0) {
@@ -1873,7 +1898,12 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
             block(s, o, in);
             o += "\n";
             return;
-        case SK::Expr: o += ind(in) + ex(s->expr) + ";\n"; return;
+        case SK::Expr:
+            o += ind(in) + ex(s->expr) + ";\n";
+            // EmitMeshTasksEXT() terminates the task shader invocation
+            if (s->expr->kind == EK::Builtin && s->expr->fn->name == "EmitMeshTasksEXT" && curFn_ && curFn_->name == "main")
+                o += ind(in) + "return;\n";
+            return;
         case SK::Decl:
             for (auto* v : s->vars) {
                 if (v->type.isOpaque()) fail("local variables of opaque type are not supported");
@@ -2105,7 +2135,7 @@ void Emitter::flatten(const Type& t, const std::string& acc, std::vector<std::pa
 }
 
 std::string Emitter::interpAttr(const Qualifiers& q, const Type& leaf) {
-    if (leaf.base == BT::Int || leaf.base == BT::UInt || leaf.base == BT::Bool || q.interp == Interp::Flat) return ", flat";
+    if (leaf.base == BT::Int || leaf.base == BT::UInt || leaf.base == BT::Bool || q.interp == Interp::Flat || q.perprimitive) return ", flat";
     if (q.interp == Interp::NoPerspective)
         return q.centroid ? ", centroid_no_perspective" : q.sample ? ", sample_no_perspective" : ", center_no_perspective";
     if (q.centroid) return ", centroid_perspective";
@@ -2217,7 +2247,7 @@ void Emitter::emitArgs(std::string& o) {
     o += "};\n\n";
 }
 
-static const char* kNsNames[] = {"vs", "tcs", "tes", "gs", "fs", "cs"};
+static const char* kNsNames[] = {"vs", "tcs", "tes", "gs", "fs", "cs", "ts", "ms"};
 
 static std::string replaceJ(const std::string& s, const std::string& j) {
     std::string r = s;
@@ -2258,7 +2288,8 @@ void Emitter::prepareStage(Stage s) {
         if (e->kind == EK::Field) {
             const Expr* b = e->args[0];
             if (b->kind == EK::Index) b = b->args[0];
-            if (b->kind == EK::Var && b->var->block && (b->var->builtin == BuiltinVar::In || b->var->builtin == BuiltinVar::Out))
+            if (b->kind == EK::Var && b->var->block &&
+                (b->var->builtin == BuiltinVar::In || b->var->builtin == BuiltinVar::Out || isMeshBlock(b->var)))
                 si.usedMembers[b->var].insert(e->field);
         }
         for (auto* a : e->args) ve(a);
@@ -2316,12 +2347,18 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     }
 
     members += "    constant MGLArgs* A;\n    constant MGLSys* sys;\n";
-    std::string sharedDecl;
+    std::string sharedDecl, payloadDecl;
     std::set<std::string> declared;
     for (auto* v : sc_->globals) {
         if (declared.count(v->name)) continue;
         declared.insert(v->name);
         if (v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer) continue;
+        if (v->q.storage == Storage::TaskPayload) {
+            payloadDecl += "    " + mt(v->type) + " g_" + v->name + ";\n";
+            continue;
+        }
+        // mesh outputs nothing writes or reads take no threadgroup memory
+        if (s == Stage::Mesh && v->q.storage == Storage::Out && !sc_->used.count(v)) continue;
         if (v->type.isArray() && v->type.dims[0] == 0) fail("unsized global array '" + v->name + "'");
         if (inThreadgroup(v)) {
             sharedDecl += "    " + mt(v->type) + " g_" + v->name + ";\n";
@@ -2332,6 +2369,12 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         if (!v->init && v->q.storage != Storage::In) zero += "        " + varName(v) + " = {};\n";
     }
     for (auto* v : si.builtins) {
+        if (isMeshBlock(v)) {
+            for (int mi : si.usedMembers[v])
+                sharedDecl += "    " + mt(v->block->members[mi].type.arrayOf(v->type.dims[0])) + " bi_" + v->name + "_" +
+                              v->block->members[mi].name + ";\n";
+            continue;
+        }
         if (inThreadgroup(v)) sharedDecl += "    " + mt(v->type) + " bi_" + v->name + ";\n";
         else {
             members += "    " + mt(v->type) + " bi_" + v->name + ";\n";
@@ -2342,8 +2385,11 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         members += "    float4 bi_gl_Position;\n";
         zero += "        bi_gl_Position = {};\n";
     }
+    if (s == Stage::Mesh) sharedDecl += "    uint mgl_nv, mgl_np;\n";  // SetMeshOutputsEXT()
     si.hasShared = hasShared_ = !sharedDecl.empty();
     if (hasShared_) members += "    threadgroup MGLShared* S;\n";
+    si.hasPayload = !payloadDecl.empty();
+    if (si.hasPayload) members += "    " + payloadSpace_ + " MGLPayload* PL;\n";
 
     for (auto& [m, f] : sc_->defs)
         if (sc_->reachable.count(f)) funcs += emitFunction(f);
@@ -2382,6 +2428,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         o += "; }\n";
     }
     if (hasShared_) o += "struct MGLShared {\n" + sharedDecl + "};\n";
+    if (si.hasPayload) o += "struct MGLPayload {\n" + payloadDecl + "};\n";
     o += helpers_;
     o += preG;
     o += "struct G {\n" + members + extraMembers + init + funcs + extraMethods + "};\n";
@@ -2943,6 +2990,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                     mn = mn.substr(0, mn.find_first_of(".["));
                     int mi = v->block->findMember(mn);
                     if (mi >= 0) lq = v->block->members[mi].q;
+                    lq.perprimitive = lq.perprimitive || q.perprimitive;
                 }
             }
             if (spIt != spillIdx_.end()) {
@@ -3398,6 +3446,297 @@ void Emitter::emitVertexMesh(std::string& o) {
     noteSpill(ro, ipp);
     fragInputsAvailable_ = ro.names;
     haveVsOutputs_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Mesh shaders (EXT_mesh_shader): the task shader runs as a Metal object function, the mesh shader as a Metal
+// mesh function. Mesh outputs are written to threadgroup memory (they are shared by the workgroup and indexed
+// freely); after the shader the workgroup copies the SetMeshOutputsEXT() counts of vertices and primitives
+// into the Metal mesh.
+// ---------------------------------------------------------------------------
+// Size and alignment of a type in MSL (as declared by mt()).
+static void mslLayout(const Type& t, uint32_t& size, uint32_t& align) {
+    if (!t.dims.empty()) {
+        uint32_t es, ea;
+        mslLayout(t.elem(), es, ea);
+        size = es * (uint32_t)std::max(1, t.dims[0]);
+        align = ea;
+        return;
+    }
+    if (t.base == BT::Struct) {
+        uint32_t off = 0, al = 1;
+        for (auto& m : t.sdef->members) {
+            if (m.type.isArray() && m.type.dims[0] == 0) continue;
+            uint32_t ms, ma;
+            mslLayout(m.type, ms, ma);
+            off = (off + ma - 1) / ma * ma + ms;
+            al = std::max(al, ma);
+        }
+        size = std::max<uint32_t>(al, (off + al - 1) / al * al);
+        align = al;
+        return;
+    }
+    uint32_t sc = t.base == BT::Double ? 8 : t.base == BT::Bool ? 1 : 4;
+    auto vecSize = [&](int n) { return n == 1 ? sc : n == 2 ? 2 * sc : 4 * sc; };
+    if (t.cols) {
+        size = t.cols * vecSize(t.vec);
+        align = vecSize(t.vec);
+        return;
+    }
+    size = align = vecSize(t.vec);
+}
+
+// Entry point parameters and G initialization of the workgroup built-ins of task / mesh shaders.
+std::string Emitter::workgroupBuiltins(Stage st, const int* ls, std::string& params) {
+    params += ", uint3 mgl_wid [[threadgroup_position_in_grid]], uint3 mgl_lid [[thread_position_in_threadgroup]], "
+              "uint mgl_lidx [[thread_index_in_threadgroup]]";
+    std::string c;
+    bool nwg = false;
+    for (auto* v : si_[(int)st].builtins) {
+        std::string m = "    g.bi_" + v->name + " = ";
+        switch (v->builtin) {
+            case BuiltinVar::NumWorkGroups:
+                if (!nwg) params += ", uint3 mgl_nwg [[threadgroups_per_grid]]";
+                nwg = true;
+                c += m + "mgl_nwg;\n";
+                break;
+            case BuiltinVar::WorkGroupID: c += m + "mgl_wid;\n"; break;
+            case BuiltinVar::LocalInvocationID: c += m + "mgl_lid;\n"; break;
+            case BuiltinVar::GlobalInvocationID:
+                c += m + "mgl_wid * uint3(" + std::to_string(ls[0]) + "u, " + std::to_string(ls[1]) + "u, " + std::to_string(ls[2]) +
+                     "u) + mgl_lid;\n";
+                break;
+            case BuiltinVar::LocalInvocationIndex:
+                c += m + "(mgl_lid.z * " + std::to_string(ls[1]) + "u + mgl_lid.y) * " + std::to_string(ls[0]) + "u + mgl_lid.x;\n";
+                break;
+            case BuiltinVar::DrawID: c += m + "sys.drawID;\n"; break;
+            default: break;
+        }
+    }
+    return c;
+}
+
+void Emitter::emitMesh(std::string& o) {
+    const Reflection& MR = RF(Stage::Mesh);
+    const bool hasTask = SC(Stage::Task).main != nullptr;
+    const uint32_t outPrim = MR.meshOutputPrimitive;
+    const bool points = outPrim == gl::POINTS, lines = outPrim == gl::LINES;
+    const int ipp = points ? 1 : lines ? 2 : 3;
+    const int maxV = std::clamp(MR.meshMaxVertices, 1, 256), maxP = std::clamp(MR.meshMaxPrimitives, 1, 256);
+    const std::string MV = std::to_string(maxV), MP = std::to_string(maxP);
+    uint32_t payloadBytes = 0;
+
+    // ---- task shader -> object function
+    if (hasTask) {
+        payloadSpace_ = "object_data";
+        const int* ls = RF(Stage::Task).taskLocalSize;
+        prepareStage(Stage::Task);
+        emitBody(Stage::Task, o, "", "    uint3 mgl_tasks;\n", "    void mgl_EmitMeshTasks(uint3 n) { mgl_tasks = n; }\n");
+        StageInfo& tsi = si_[(int)Stage::Task];
+        o += "}  // namespace ts\n\n";
+        std::string params;
+        std::string bi = workgroupBuiltins(Stage::Task, ls, params);
+        std::string e = "[[object]] void mgl_ts(";
+        if (tsi.hasPayload) {
+            e += "object_data ts::MGLPayload& mgl_pl [[payload]], ";
+            for (auto* v : SC(Stage::Task).globals)
+                if (v->q.storage == Storage::TaskPayload) {
+                    uint32_t sz, al;
+                    mslLayout(v->type, sz, al);
+                    payloadBytes = (sz + al - 1) / al * al;
+                }
+            if (payloadBytes > 16384) fail("taskPayloadSharedEXT variable exceeds GL_MAX_TASK_PAYLOAD_SIZE_EXT (16384 bytes)");
+        }
+        e += "mesh_grid_properties mgl_mgp, constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
+        if (tsi.hasShared) e += "    threadgroup ts::MGLShared mgl_shared;\n";
+        e += "    ts::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Task) + ";\n    g.sys = &sys;\n    g.mgl_tasks = uint3(0u);\n";
+        if (tsi.hasShared) e += "    g.S = &mgl_shared;\n";
+        if (tsi.hasPayload) e += "    g.PL = &mgl_pl;\n";
+        e += bi;
+        // EmitMeshTasksEXT() is called in uniform control flow: the first invocation's counts size the mesh grid.
+        // The (always true) sys test works around a Metal compiler crash at pipeline creation: an object function whose
+        // only buffer accesses go through pointers loaded from the argument buffer, and that writes its payload, takes
+        // down the compiler service (XPC_ERROR_CONNECTION_INTERRUPTED); a read of a directly bound buffer avoids it.
+        e += "    g.mgl_init();\n    g." + tsi.mainName + "();\n"
+             "    if (mgl_lidx == 0u && sys.depthMode != 0xffffffffu) mgl_mgp.set_threadgroups_per_grid(g.mgl_tasks);\n}\n\n";
+        entries_ += e;
+        EntryPoint ep{"mgl_ts", Stage::Task, EntryPoint::Object};
+        for (int i = 0; i < 3; i++) ep.threadsPerThreadgroup[i] = ls[i];
+        ep.payloadBytes = payloadBytes;
+        out_.entryPoints.push_back(ep);
+    }
+
+    // ---- mesh shader -> mesh function
+    const int* ls = MR.meshLocalSize;
+    const int NT = ls[0] * ls[1] * ls[2];
+    prepareStage(Stage::Mesh);
+    useStage(Stage::Mesh);
+    StageInfo& msi = si_[(int)Stage::Mesh];
+    // accessor of a used member of gl_MeshVerticesEXT / gl_MeshPrimitivesEXT for element `k` ("" when unused)
+    auto member = [&](BuiltinVar block, const char* name) -> std::string {
+        auto it = msi.bi.find(block);
+        if (it == msi.bi.end()) return "";
+        const Variable* v = it->second;
+        int mi = v->block->findMember(name);
+        if (mi < 0 || !msi.usedMembers[v].count(mi)) return "";
+        return "g." + meshMemberArray(v, mi) + "[k]";
+    };
+    auto byName = [&](const char* name) -> const Variable* {
+        for (auto* v : msi.builtins)
+            if (v->name == name) return v;
+        return nullptr;
+    };
+    std::string vs, vc, ps, pc;  // vertex / primitive struct members and copies
+    int vscalars = 4, pscalars = 0;
+    vs += "    float4 mgl_pos [[position]];\n";
+    std::string pos = member(BuiltinVar::MeshVertices, "gl_Position");
+    vc += "v.mgl_pos = " + (pos.empty() ? std::string("float4(0.0f)") : pos) + ";\n";
+    vc += "if ((sys.flags & 4u) == 0u) v.mgl_pos.y = -v.mgl_pos.y;\n";
+    vc += "if (sys.depthMode == 0u) v.mgl_pos.z = (v.mgl_pos.z + v.mgl_pos.w) * 0.5f;\n";
+    if (points) {
+        std::string psz = member(BuiltinVar::MeshVertices, "gl_PointSize");
+        vs += "    float mgl_psize [[point_size]];\n";
+        vc += "v.mgl_psize = " + (psz.empty() ? std::string("sys.pointSize") : "(sys.flags & 1u) != 0u ? " + psz + " : sys.pointSize") + ";\n";
+        vscalars++;
+    }
+    std::string clipD = member(BuiltinVar::MeshVertices, "gl_ClipDistance"), cullD = member(BuiltinVar::MeshVertices, "gl_CullDistance");
+    int nclip = clipD.empty() ? 0 : 8, ncull = cullD.empty() ? 0 : 8;
+    if (nclip + ncull > 0) {
+        vs += "    float mgl_clip [[clip_distance]] [" + std::to_string(nclip + ncull) + "];\n";
+        vscalars += nclip + ncull;
+    }
+    for (int i = 0; i < nclip; i++)
+        vc += "v.mgl_clip[" + std::to_string(i) + "] = ((sys.clipDistanceMask >> " + std::to_string(i) + "u) & 1u) != 0u ? " + clipD + "[" +
+              std::to_string(i) + "] : 1.0f;\n";
+    for (int i = 0; i < ncull; i++)
+        vc += "v.mgl_clip[" + std::to_string(nclip + i) + "] = " + cullD + "[" + std::to_string(i) + "] < 0.0f ? -1.0f : 1e20f;\n";
+    // per-primitive built-ins
+    if (fsReadsPrimitiveId()) {
+        std::string pid = member(BuiltinVar::MeshPrimitives, "gl_PrimitiveID");
+        ps += "    int mgl_primid [[user(mgl_primid)]];\n";
+        pc += "p.mgl_primid = " + (pid.empty() ? std::string("int(k)") : pid) + ";\n";
+        pscalars++;
+    }
+    if (std::string l = member(BuiltinVar::MeshPrimitives, "gl_Layer"); !l.empty()) {
+        ps += "    uint mgl_layer [[render_target_array_index]];\n";
+        pc += "p.mgl_layer = uint(" + l + ");\n";
+        pscalars++;
+    }
+    if (std::string l = member(BuiltinVar::MeshPrimitives, "gl_ViewportIndex"); !l.empty()) {
+        ps += "    uint mgl_vp [[viewport_array_index]];\n";
+        pc += "p.mgl_vp = uint(" + l + ");\n";
+        pscalars++;
+    }
+    std::string cull = member(BuiltinVar::MeshPrimitives, "gl_CullPrimitiveEXT");
+    // user varyings the fragment shader reads
+    std::set<std::string> fsNames = fragmentInputNames();
+    bool flatPerVertex = false;  // a flat per-vertex varying reaches the fragment shader
+    std::set<std::string> names;
+    for (auto* v : SC(Stage::Mesh).globals) {
+        if (v->q.storage != Storage::Out || v->builtin != BuiltinVar::None || !SC(Stage::Mesh).used.count(v)) continue;
+        std::vector<Field> f;
+        fieldsOfVar(v, Stage::Mesh, true, f);
+        for (auto& x : f) {
+            if (!fsNames.count(x.name) || !names.insert(x.name).second) continue;
+            if (x.type.base == BT::Bool) fail("boolean varyings are not allowed");
+            bool dbl = x.type.base == BT::Double;
+            std::string decl = "    " + (dbl ? std::string("uint2") : mt(x.type)) + " " + x.name + " [[user(" + x.name + ")]];\n";
+            std::string val = dbl ? "as_type<uint2>(" + acc(x, "g.", "k") + ")" : acc(x, "g.", "k");
+            int n = (dbl ? 2 : 1) * x.type.components();
+            if (v->q.perprimitive) {
+                ps += decl;
+                pc += "p." + x.name + " = " + val + ";\n";
+                pscalars += n;
+            } else {
+                vs += decl;
+                vc += "v." + x.name + " = " + val + ";\n";
+                vscalars += n;
+                if (x.type.base != BT::Float || v->q.interp == Interp::Flat) flatPerVertex = true;
+            }
+        }
+    }
+    // Metal: at most 124 unique scalars per vertex + primitive and 32 KB per mesh
+    if (vscalars + pscalars > kMeshOutputScalars)
+        fail("mesh shader outputs read by the fragment shader exceed 124 scalars per vertex and primitive");
+    if (maxV * 4 * vscalars + maxP * (4 * pscalars + 2 * ipp) > kMeshBytes)
+        fail("mesh shader outputs exceed the mesh output memory (max_vertices / max_primitives too large for the outputs)");
+    if (ps.empty()) ps = "    uint mgl_unused [[user(mgl_unused)]];\n";  // keep the primitive struct non-empty
+    std::string topo = points ? "point" : lines ? "line" : "triangle";
+    std::string preG = "struct MV {\n" + vs + "};\nstruct MP {\n" + ps + "};\n";
+    preG += "using MeshT = mesh<MV, MP, " + MV + ", " + MP + ", topology::" + topo + ">;\n";
+    payloadSpace_ = hasTask ? "const object_data" : "thread";
+    emitBody(Stage::Mesh, o, preG, "", "    void mgl_SetMeshOutputs(uint nv, uint np) { S->mgl_nv = nv; S->mgl_np = np; }\n");
+    o += "}  // namespace ms\n\n";
+
+    std::string params;
+    std::string bi = workgroupBuiltins(Stage::Mesh, ls, params);
+    std::string e = "[[mesh]] void mgl_ms(ms::MeshT mgl_mo, ";
+    if (msi.hasPayload && hasTask) e += "const object_data ms::MGLPayload& mgl_pl [[payload]], ";
+    e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
+    e += "    threadgroup ms::MGLShared mgl_shared;\n";
+    e += "    if (mgl_lidx == 0u) {\n        mgl_shared.mgl_nv = 0u;\n        mgl_shared.mgl_np = 0u;\n    }\n";
+    e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    ms::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Mesh) + ";\n    g.sys = &sys;\n    g.S = &mgl_shared;\n";
+    if (msi.hasPayload) {
+        if (!hasTask) e += "    ms::MGLPayload mgl_pl = {};  // no task shader: the payload is undefined\n";
+        e += "    g.PL = &mgl_pl;\n";
+    }
+    e += bi;
+    e += "    g.mgl_init();\n    g." + msi.mainName + "();\n";
+    e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    uint nv = min(mgl_shared.mgl_nv, " + MV + "u), np = min(mgl_shared.mgl_np, " + MP + "u);\n";
+    e += "    for (uint k = mgl_lidx; k < nv; k += " + std::to_string(NT) + "u) {\n        ms::MV v;\n" + indentBy(vc, 8) +
+         "        mgl_mo.set_vertex(k, v);\n    }\n";
+    // indices (GL's last-vertex provoking convention rotates flat-shaded primitives)
+    const Variable* iv = byName(points ? "gl_PrimitivePointIndicesEXT" : lines ? "gl_PrimitiveLineIndicesEXT" : "gl_PrimitiveTriangleIndicesEXT");
+    std::string ixT = points ? "uint" : lines ? "uint2" : "uint3";
+    std::string idx = ixT + " ix = min(" + (iv ? "g." + varName(iv) + "[k]" : ixT + "(0u)") + ", " + ixT + "(" + MV + "u - 1u));\n";
+    std::vector<std::string> order = points ? std::vector<std::string>{"ix"} : lines ? std::vector<std::string>{"ix.x", "ix.y"}
+                                                                                     : std::vector<std::string>{"ix.x", "ix.y", "ix.z"};
+    if (K.flatshadeLastVertex && flatPerVertex && !points) std::rotate(order.begin(), order.end() - 1, order.end());
+    auto prim = [&](const std::string& slot) {
+        std::string c = idx;
+        for (int i = 0; i < ipp; i++)
+            c += "mgl_mo.set_index(" + slot + " * " + std::to_string(ipp) + "u + " + std::to_string(i) + "u, " + order[i] + ");\n";
+        c += "ms::MP p;\n" + (pc.empty() ? std::string("p.mgl_unused = 0u;\n") : pc) + "mgl_mo.set_primitive(" + slot + ", p);\n";
+        return c;
+    };
+    if (cull.empty()) {
+        e += "    for (uint k = mgl_lidx; k < np; k += " + std::to_string(NT) + "u) {\n" + indentBy(prim("k"), 8) + "    }\n";
+        e += "    if (mgl_lidx == 0u) mgl_mo.set_primitive_count(np);\n";
+    } else {
+        // gl_CullPrimitiveEXT: compact the kept primitives
+        e += "    if (mgl_lidx == 0u) {\n        uint j = 0u;\n        for (uint k = 0u; k < np; k++) {\n            if (" + cull +
+             ") continue;\n" + indentBy(prim("j"), 12) + "            j++;\n        }\n        mgl_mo.set_primitive_count(j);\n    }\n";
+    }
+    e += "}\n\n";
+    entries_ += e;
+    EntryPoint ep{"mgl_ms", Stage::Mesh, EntryPoint::Mesh};
+    for (int i = 0; i < 3; i++) ep.threadsPerThreadgroup[i] = ls[i];
+    ep.maxMeshVertices = maxV;
+    ep.maxMeshPrimitives = maxP;
+    out_.entryPoints.push_back(ep);
+    fragInputsAvailable_ = names;
+    haveVsOutputs_ = true;
+}
+
+// Varying leaf names the fragment shader reads (user inputs and compatibility varyings).
+std::set<std::string> Emitter::fragmentInputNames() {
+    std::set<std::string> fsNames;
+    if (!SC(Stage::Fragment).main) return fsNames;
+    Stage keep = stage_;
+    prepareStage(Stage::Fragment);
+    useStage(Stage::Fragment);
+    for (auto* v : sc_->globals) {
+        if (v->q.storage != Storage::In || v->builtin != BuiltinVar::None) continue;
+        std::vector<std::pair<Type, std::string>> leaves;
+        flatten(v->type, "", leaves);
+        splitDoubleLeaves(leaves);
+        std::string key = varyingKey(v, Stage::Fragment);
+        for (size_t i = 0; i < leaves.size(); i++) fsNames.insert(key + "_" + std::to_string(i));
+    }
+    useStage(keep);
+    return fsNames;
 }
 
 // ---------------------------------------------------------------------------
@@ -4012,11 +4351,18 @@ MSLOutput Emitter::run() {
             case PipelineKind::XfbCapture:
                 emitXfb(o);
                 break;
+            case PipelineKind::Mesh:
+                if (!SC(Stage::Mesh).main) fail("program has no mesh shader");
+                emitMesh(o);
+                if (SC(Stage::Fragment).main) emitFS(o, true);
+                else emitNullFS();
+                break;
         }
         if (multi_) {
             // one argument buffer per stage program; unused stages keep a placeholder
             o += "struct MGLArgs {\n";
-            for (int i = 0; i < (int)Stage::Count; i++)
+            const uint32_t meshStages = (1u << (int)Stage::Task) | (1u << (int)Stage::Mesh);
+            for (int i = 0; i < ((stageMask_ & meshStages) ? (int)Stage::Count : kClassicStageCount); i++)
                 o += argsEmitted_[i] ? std::string("    constant ") + kStageNs[i] + "::MGLArgs* " + kStageNs[i] + ";\n"
                                      : std::string("    ulong ") + kStageNs[i] + ";\n";
             o += "};\n\n";

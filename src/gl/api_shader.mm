@@ -23,6 +23,8 @@ static glsl::Stage stageForType(GLenum type, bool* ok) {
     case GL_GEOMETRY_SHADER: return glsl::Stage::Geometry;
     case GL_FRAGMENT_SHADER: return glsl::Stage::Fragment;
     case GL_COMPUTE_SHADER: return glsl::Stage::Compute;
+    case GL_TASK_SHADER_EXT: return glsl::Stage::Task;
+    case GL_MESH_SHADER_EXT: return glsl::Stage::Mesh;
     default: *ok = false; return glsl::Stage::Vertex;
     }
 }
@@ -536,7 +538,9 @@ API void APIENTRY glLinkProgram(GLuint program) {
     bool multiPass = sm & ((1u << (int)glsl::Stage::Geometry) | (1u << (int)glsl::Stage::TessEval));
     if (!multiPass && !envFlag("METALGLDRV_LAZY_COMPILE")) {
         glsl::VariantKey vk;
-        vk.kind = (sm & (1u << (int)glsl::Stage::Compute)) ? glsl::PipelineKind::Compute : glsl::PipelineKind::Classic;
+        vk.kind = (sm & (1u << (int)glsl::Stage::Compute)) ? glsl::PipelineKind::Compute
+                : (sm & (1u << (int)glsl::Stage::Mesh))    ? glsl::PipelineKind::Mesh
+                                                           : glsl::PipelineKind::Classic;
         ProgramVariant* v = ctx->pipelines_->variant(p, vk);
         if (v && !v->ok) {
             // Report backend failures through the link status so apps see them.
@@ -639,6 +643,18 @@ API void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
         params[0] = r.localSize[0];
         params[1] = r.localSize[1];
         params[2] = r.localSize[2];
+        break;
+    // EXT_mesh_shader
+    case GL_TASK_WORK_GROUP_SIZE_EXT:
+        if (!p->linked || !(r.stageMask & (1 << (int)glsl::Stage::Task))) return ctx->setError(GL_INVALID_OPERATION);
+        for (int i = 0; i < 3; i++) params[i] = r.taskLocalSize[i];
+        break;
+    case GL_MESH_WORK_GROUP_SIZE_EXT: case GL_MESH_VERTICES_OUT_EXT: case GL_MESH_PRIMITIVES_OUT_EXT: case GL_MESH_OUTPUT_TYPE_EXT:
+        if (!p->linked || !(r.stageMask & (1 << (int)glsl::Stage::Mesh))) return ctx->setError(GL_INVALID_OPERATION);
+        if (pname == GL_MESH_WORK_GROUP_SIZE_EXT) for (int i = 0; i < 3; i++) params[i] = r.meshLocalSize[i];
+        else if (pname == GL_MESH_VERTICES_OUT_EXT) *params = r.meshMaxVertices;
+        else if (pname == GL_MESH_PRIMITIVES_OUT_EXT) *params = r.meshMaxPrimitives;
+        else *params = (GLint)r.meshOutputPrimitive;
         break;
     case GL_PROGRAM_SEPARABLE: *params = p->linked && p->linkedSeparable; break;
     case GL_PROGRAM_BINARY_RETRIEVABLE_HINT: *params = p->retrievableHint; break;
@@ -886,6 +902,8 @@ API void APIENTRY glGetActiveUniformBlockiv(GLuint program, GLuint index, GLenum
     case GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER: *params = !!(b.stageMask & (1 << (int)S::Geometry)); break;
     case GL_UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER: *params = !!(b.stageMask & (1 << (int)S::Fragment)); break;
     case GL_UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER: *params = !!(b.stageMask & (1 << (int)S::Compute)); break;
+    case GL_UNIFORM_BLOCK_REFERENCED_BY_TASK_SHADER_EXT: *params = !!(b.stageMask & (1 << (int)S::Task)); break;
+    case GL_UNIFORM_BLOCK_REFERENCED_BY_MESH_SHADER_EXT: *params = !!(b.stageMask & (1 << (int)S::Mesh)); break;
     default: ctx->setError(GL_INVALID_ENUM);
     }
 }
@@ -924,6 +942,8 @@ API void APIENTRY glGetActiveAtomicCounterBufferiv(GLuint program, GLuint index,
     case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_GEOMETRY_SHADER: *params = !!(a.stageMask & (1 << (int)S::Geometry)); break;
     case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_FRAGMENT_SHADER: *params = !!(a.stageMask & (1 << (int)S::Fragment)); break;
     case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_COMPUTE_SHADER: *params = !!(a.stageMask & (1 << (int)S::Compute)); break;
+    case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TASK_SHADER_EXT: *params = !!(a.stageMask & (1 << (int)S::Task)); break;
+    case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_MESH_SHADER_EXT: *params = !!(a.stageMask & (1 << (int)S::Mesh)); break;
     default: ctx->setError(GL_INVALID_ENUM);
     }
 }
@@ -1270,6 +1290,7 @@ int propertySupported(GLenum iface, GLenum prop) {
     case GL_BUFFER_DATA_SIZE: return ub || sb || acb;
     case GL_REFERENCED_BY_VERTEX_SHADER: case GL_REFERENCED_BY_TESS_CONTROL_SHADER: case GL_REFERENCED_BY_TESS_EVALUATION_SHADER:
     case GL_REFERENCED_BY_GEOMETRY_SHADER: case GL_REFERENCED_BY_FRAGMENT_SHADER: case GL_REFERENCED_BY_COMPUTE_SHADER:
+    case GL_REFERENCED_BY_TASK_SHADER_EXT: case GL_REFERENCED_BY_MESH_SHADER_EXT:
         return uni || ub || acb || sb || bv || in || out;
     case GL_TOP_LEVEL_ARRAY_SIZE: case GL_TOP_LEVEL_ARRAY_STRIDE: return bv;
     case GL_NUM_COMPATIBLE_SUBROUTINES: case GL_COMPATIBLE_SUBROUTINES: return isSubUniform;
@@ -1565,6 +1586,8 @@ API void APIENTRY glGetProgramResourceiv(GLuint program, GLenum iface, GLuint in
         case GL_REFERENCED_BY_GEOMETRY_SHADER: vals.push_back(!!(x.stageMask & (1 << (int)S::Geometry))); break;
         case GL_REFERENCED_BY_FRAGMENT_SHADER: vals.push_back(!!(x.stageMask & (1 << (int)S::Fragment))); break;
         case GL_REFERENCED_BY_COMPUTE_SHADER: vals.push_back(!!(x.stageMask & (1 << (int)S::Compute))); break;
+        case GL_REFERENCED_BY_TASK_SHADER_EXT: vals.push_back(!!(x.stageMask & (1 << (int)S::Task))); break;
+        case GL_REFERENCED_BY_MESH_SHADER_EXT: vals.push_back(!!(x.stageMask & (1 << (int)S::Mesh))); break;
         case GL_TOP_LEVEL_ARRAY_SIZE: vals.push_back(x.topLevelArraySize); break;
         case GL_TOP_LEVEL_ARRAY_STRIDE: vals.push_back(x.topLevelArrayStride); break;
         case GL_LOCATION: vals.push_back(x.location); break;
@@ -1723,7 +1746,12 @@ std::string pipelineValidationError(ProgramPipelineObj* pp) {
     if (!pp->stages[(int)glsl::Stage::Vertex] &&
         (pp->stages[(int)glsl::Stage::Geometry] || pp->stages[(int)glsl::Stage::TessControl] || pp->stages[(int)glsl::Stage::TessEval]))
         return "pipeline has geometry or tessellation stages but no vertex program";
-    if (!pp->stages[(int)glsl::Stage::Vertex] && !pp->stages[(int)glsl::Stage::Compute])
+    if (pp->stages[(int)glsl::Stage::Mesh] &&
+        (pp->stages[(int)glsl::Stage::Vertex] || pp->stages[(int)glsl::Stage::Geometry] || pp->stages[(int)glsl::Stage::TessControl] ||
+         pp->stages[(int)glsl::Stage::TessEval]))
+        return "pipeline has both mesh and vertex processing stages";
+    if (pp->stages[(int)glsl::Stage::Task] && !pp->stages[(int)glsl::Stage::Mesh]) return "pipeline has a task program but no mesh program";
+    if (!pp->stages[(int)glsl::Stage::Vertex] && !pp->stages[(int)glsl::Stage::Compute] && !pp->stages[(int)glsl::Stage::Mesh])
         return "pipeline has no vertex or compute program";
     return "";
 }
@@ -1747,7 +1775,7 @@ API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint 
     ProgramPipelineObj* pp = pipelineObj(ctx, pipeline, true);
     if (!pp) return;
     const GLbitfield all = GL_VERTEX_SHADER_BIT | GL_TESS_CONTROL_SHADER_BIT | GL_TESS_EVALUATION_SHADER_BIT | GL_GEOMETRY_SHADER_BIT |
-                           GL_FRAGMENT_SHADER_BIT | GL_COMPUTE_SHADER_BIT;
+                           GL_FRAGMENT_SHADER_BIT | GL_COMPUTE_SHADER_BIT | GL_TASK_SHADER_BIT_EXT | GL_MESH_SHADER_BIT_EXT;
     if (stages != GL_ALL_SHADER_BITS && (stages & ~all)) return ctx->setError(GL_INVALID_VALUE);
     ProgramObj* p = nullptr;
     if (program) {
@@ -1758,7 +1786,8 @@ API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint 
     const std::pair<GLbitfield, glsl::Stage> map[] = {
         {GL_VERTEX_SHADER_BIT, glsl::Stage::Vertex}, {GL_TESS_CONTROL_SHADER_BIT, glsl::Stage::TessControl},
         {GL_TESS_EVALUATION_SHADER_BIT, glsl::Stage::TessEval}, {GL_GEOMETRY_SHADER_BIT, glsl::Stage::Geometry},
-        {GL_FRAGMENT_SHADER_BIT, glsl::Stage::Fragment}, {GL_COMPUTE_SHADER_BIT, glsl::Stage::Compute}};
+        {GL_FRAGMENT_SHADER_BIT, glsl::Stage::Fragment}, {GL_COMPUTE_SHADER_BIT, glsl::Stage::Compute},
+        {GL_TASK_SHADER_BIT_EXT, glsl::Stage::Task}, {GL_MESH_SHADER_BIT_EXT, glsl::Stage::Mesh}};
     for (auto& [bit, st] : map) {
         if (!(stages & bit)) continue;
         pp->stages[(int)st] = (p && (p->refl.stageMask & (1u << (int)st))) ? p : nullptr;
@@ -1799,6 +1828,8 @@ API void APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* p
     case GL_GEOMETRY_SHADER: *params = nm(pp->stages[(int)glsl::Stage::Geometry].get()); break;
     case GL_FRAGMENT_SHADER: *params = nm(pp->stages[(int)glsl::Stage::Fragment].get()); break;
     case GL_COMPUTE_SHADER: *params = nm(pp->stages[(int)glsl::Stage::Compute].get()); break;
+    case GL_TASK_SHADER_EXT: *params = nm(pp->stages[(int)glsl::Stage::Task].get()); break;
+    case GL_MESH_SHADER_EXT: *params = nm(pp->stages[(int)glsl::Stage::Mesh].get()); break;
     case GL_VALIDATE_STATUS: *params = pp->validated; break;
     case GL_INFO_LOG_LENGTH: *params = pp->infoLog.empty() ? 0 : (GLint)pp->infoLog.size() + 1; break;
     default: ctx->setError(GL_INVALID_ENUM);

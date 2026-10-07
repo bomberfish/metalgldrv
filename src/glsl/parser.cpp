@@ -91,7 +91,7 @@ const std::unordered_set<std::string>& qualifierKeywords() {
     static const std::unordered_set<std::string> s = {
         "const", "in", "out", "inout", "attribute", "varying", "uniform", "buffer", "shared", "centroid", "sample", "patch",
         "flat", "smooth", "noperspective", "invariant", "precise", "coherent", "volatile", "restrict", "readonly",
-        "writeonly", "lowp", "mediump", "highp", "layout", "subroutine"};
+        "writeonly", "lowp", "mediump", "highp", "layout", "subroutine", "perprimitiveEXT", "taskPayloadSharedEXT"};
     return s;
 }
 
@@ -321,6 +321,13 @@ private:
     void checkWriteOnlyReads();
     Expr* parseInitializer(const Type& t);
     void applyStageLayout(const Qualifiers& q);
+    // Mesh shader outputs are arrays of max_vertices (per-vertex) or max_primitives (per-primitive) elements.
+    void sizeMeshOutput(Type& t, const Qualifiers& q, BuiltinVar b) {
+        if (sh_.stage != Stage::Mesh || t.dims.empty() || t.dims[0] != 0) return;
+        bool prim = q.perprimitive || b == BuiltinVar::MeshPrimitives || b == BuiltinVar::PrimitiveIndices;
+        int n = prim ? sh_.outLayout.maxPrimitives : sh_.outLayout.maxVertices;
+        if (n > 0) t.dims[0] = n;
+    }
     bool redeclareBuiltin(const Qualifiers& q, const Type& t, const std::string& name);
     void finalize();
 
@@ -403,7 +410,7 @@ void Parser::finalize() {
             if (st == Stage::TessControl && in && v.q.patch) fail("tessellation control shader inputs cannot be per-patch: " + what, v.line);
             if (st == Stage::TessEval && !in && v.q.patch) fail("tessellation evaluation shader outputs cannot be per-patch: " + what, v.line);
             bool arrayed = (st == Stage::Geometry && in) || (st == Stage::TessControl && !v.q.patch) ||
-                           (st == Stage::TessEval && in && !v.q.patch);
+                           (st == Stage::TessEval && in && !v.q.patch) || (st == Stage::Mesh && !in);
             if (!arrayed) continue;
             if (!v.type.isArray()) fail(what + " must be declared as an array", v.line);
             int n = v.type.dims[0];
@@ -424,7 +431,7 @@ void Parser::finalize() {
                 if (!v.global || v.builtin != BuiltinVar::None || v.param || v.q.storage != sto || v.q.layout.location < 0 || v.block) continue;
                 Type t = v.type;
                 bool arrayed = (st == Stage::Geometry && sto == Storage::In) || (st == Stage::TessControl && !v.q.patch) ||
-                               (st == Stage::TessEval && sto == Storage::In && !v.q.patch);
+                               (st == Stage::TessEval && sto == Storage::In && !v.q.patch) || (st == Stage::Mesh && sto == Storage::Out);
                 if (arrayed && t.isArray()) t = t.elem();
                 Type b = t.stripArrays();
                 bool dbl = b.base == BT::Double;
@@ -458,6 +465,13 @@ void Parser::finalize() {
             fail("invalid output patch vertex count", 0);
         if (st == Stage::Geometry && sh_.outLayout.maxVertices > 256) fail("max_vertices exceeds gl_MaxGeometryOutputVertices", 0);
         if (st == Stage::Geometry && sh_.inLayout.invocations > 32) fail("invocations exceeds gl_MaxGeometryShaderInvocations", 0);
+        if (st == Stage::Mesh) {
+            for (auto& v : sh_.vars) {
+                if (!v.global || v.q.storage != Storage::Out || v.param || v.type.dims.empty() || v.type.dims[0] != 0) continue;
+                if (v.builtin != BuiltinVar::None && !v.used && !v.written) continue;
+                fail("mesh shader output '" + (v.block ? v.block->name : v.name) + "' needs max_vertices / max_primitives", v.line);
+            }
+        }
     }
     {
         bool clipV = false, clipD = false;
@@ -585,6 +599,7 @@ bool Parser::isQualifierAt(int k) {
     static const std::unordered_set<std::string> soft = {
         "sample", "patch", "buffer", "shared", "precise", "coherent", "volatile", "restrict", "readonly", "writeonly",
         "attribute", "varying", "smooth", "flat", "noperspective", "centroid", "invariant"};
+    if ((t.text == "perprimitiveEXT" || t.text == "taskPayloadSharedEXT") && !preamble_ && !extEnabled("GL_EXT_mesh_shader")) return false;
     if (!soft.count(t.text)) return true;
     if (!preamble_ && !sh_.es) {
         if (t.text == "sample" && sh_.version < 400 && !extEnabled("GL_ARB_gpu_shader5") && !extEnabled("GL_ARB_sample_shading")) return false;
@@ -618,6 +633,13 @@ bool Parser::parseQualifiers(Qualifiers& q) {
         } else if (k == "uniform") q.storage = Storage::Uniform;
         else if (k == "buffer") q.storage = Storage::Buffer;
         else if (k == "shared") q.storage = Storage::Shared;
+        else if (k == "taskPayloadSharedEXT") {
+            if (sh_.stage != Stage::Task && sh_.stage != Stage::Mesh) fail("'taskPayloadSharedEXT' is only allowed in task and mesh shaders");
+            q.storage = Storage::TaskPayload;
+        } else if (k == "perprimitiveEXT") {
+            if (sh_.stage != Stage::Mesh && sh_.stage != Stage::Fragment) fail("'perprimitiveEXT' is only allowed in mesh and fragment shaders");
+            q.perprimitive = true;
+        }
         else if (k == "centroid") q.centroid = true;
         else if (k == "sample") q.sample = true;
         else if (k == "patch") q.patch = true;
@@ -689,6 +711,7 @@ void Parser::parseLayout(Qualifiers& q) {
         else if (lid == "local_size_y") L.localSize[1] = need();
         else if (lid == "local_size_z") L.localSize[2] = need();
         else if (lid == "max_vertices") L.maxVertices = need();
+        else if (lid == "max_primitives") L.maxPrimitives = need();
         else if (lid == "invocations") L.invocations = need();
         else if (lid == "vertices") L.vertices = need();
         else if (lid == "stream") L.stream = need();
@@ -756,7 +779,8 @@ void Parser::applyStageLayout(const Qualifiers& q) {
         return;
     }
     Layout& T = (q.storage == Storage::Out) ? sh_.outLayout : sh_.inLayout;
-    if (q.storage == Storage::In && sh_.stage == Stage::Compute && (L.localSize[0] >= 0 || L.localSize[1] >= 0 || L.localSize[2] >= 0)) {
+    const bool workgroupStage = sh_.stage == Stage::Compute || sh_.stage == Stage::Task || sh_.stage == Stage::Mesh;
+    if (q.storage == Storage::In && workgroupStage && (L.localSize[0] >= 0 || L.localSize[1] >= 0 || L.localSize[2] >= 0)) {
         // Every local size declaration in a shader must agree (unspecified components are 1).
         bool declared = T.localSize[0] >= 0 || T.localSize[1] >= 0 || T.localSize[2] >= 0;
         for (int i = 0; i < 3 && declared; i++)
@@ -765,11 +789,13 @@ void Parser::applyStageLayout(const Qualifiers& q) {
     for (int i = 0; i < 3; i++) if (L.localSize[i] >= 0) T.localSize[i] = L.localSize[i];
     // GLSL 4.60 4.4: repeated stage layout declarations must agree
     if (L.maxVertices >= 0 && T.maxVertices >= 0 && L.maxVertices != T.maxVertices) fail("conflicting max_vertices declarations");
+    if (L.maxPrimitives >= 0 && T.maxPrimitives >= 0 && L.maxPrimitives != T.maxPrimitives) fail("conflicting max_primitives declarations");
     if (L.invocations >= 0 && T.invocations >= 0 && L.invocations != T.invocations) fail("conflicting invocations declarations");
     if (L.vertices >= 0 && T.vertices >= 0 && L.vertices != T.vertices) fail("conflicting vertices declarations");
     if (L.primitive != Layout::kNoPrimitive && T.primitive != Layout::kNoPrimitive && L.primitive != T.primitive)
         fail("conflicting primitive type declarations");
     if (L.maxVertices >= 0) T.maxVertices = L.maxVertices;
+    if (L.maxPrimitives >= 0) T.maxPrimitives = L.maxPrimitives;
     if (L.invocations >= 0) T.invocations = L.invocations;
     if (L.vertices >= 0) T.vertices = L.vertices;
     if (L.primitive != Layout::kNoPrimitive) T.primitive = L.primitive;
@@ -786,14 +812,18 @@ void Parser::applyStageLayout(const Qualifiers& q) {
         noteXfb(L, q.storage, L.xfbBuffer >= 0 ? L.xfbBuffer : xfbCurBuffer_, line());
         if (L.xfbBuffer >= 0) xfbCurBuffer_ = L.xfbBuffer;
     }
-    if (q.storage == Storage::In && sh_.stage == Stage::Compute && (L.localSize[0] >= 0 || L.localSize[1] >= 0 || L.localSize[2] >= 0)) {
+    if (q.storage == Storage::In && workgroupStage && (L.localSize[0] >= 0 || L.localSize[1] >= 0 || L.localSize[2] >= 0)) {
         static const int kMaxSize[3] = {1024, 1024, 64};  // GL_MAX_COMPUTE_WORK_GROUP_SIZE
+        static const int kMaxMeshSize[3] = {128, 128, 128};  // GL_MAX_TASK/MESH_WORK_GROUP_SIZE_EXT
+        const bool cs = sh_.stage == Stage::Compute;
         int64_t total = 1;
         for (int i = 0; i < 3; i++) {
-            if (L.localSize[i] == 0 || L.localSize[i] > kMaxSize[i]) fail("local_size exceeds GL_MAX_COMPUTE_WORK_GROUP_SIZE");
+            if (L.localSize[i] == 0 || L.localSize[i] > (cs ? kMaxSize : kMaxMeshSize)[i])
+                fail(cs ? "local_size exceeds GL_MAX_COMPUTE_WORK_GROUP_SIZE" : "local_size exceeds the maximum task/mesh work group size");
             total *= std::max(1, T.localSize[i]);
         }
-        if (total > 1024) fail("local size exceeds GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS");
+        if (total > (cs ? 1024 : 128))
+            fail(cs ? "local size exceeds GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS" : "local size exceeds the maximum task/mesh work group invocations");
         // update gl_WorkGroupSize constant
         Sym* s = &scopes_[0]["gl_WorkGroupSize"];
         if (s->var) {
@@ -814,6 +844,16 @@ void Parser::applyStageLayout(const Qualifiers& q) {
                 if (sym.var && sym.var->global && sym.var->q.storage == Storage::In && !sym.var->type.dims.empty() &&
                     sym.var->type.dims[0] == 0)
                     sym.var->type.dims[0] = n;
+    }
+    if (q.storage == Storage::Out && sh_.stage == Stage::Mesh) {
+        if (L.maxVertices > 256) fail("max_vertices exceeds gl_MaxMeshOutputVerticesEXT");
+        if (L.maxPrimitives > 256) fail("max_primitives exceeds gl_MaxMeshOutputPrimitivesEXT");
+        if (L.primitive != Layout::kNoPrimitive && L.primitive != gl::POINTS && L.primitive != gl::LINES && L.primitive != gl::TRIANGLES)
+            fail("mesh shader output primitive must be points, lines or triangles");
+        // size the per-vertex / per-primitive output arrays declared so far (built-ins included)
+        for (auto& sc : scopes_)
+            for (auto& [name, sym] : sc)
+                if (sym.var && sym.var->global && sym.var->q.storage == Storage::Out) sizeMeshOutput(sym.var->type, sym.var->q, sym.var->builtin);
     }
     if (q.storage == Storage::Out && sh_.stage == Stage::TessControl && L.vertices > 0) {
         for (auto& sc : scopes_)
@@ -1106,6 +1146,14 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
             t.dims[0] = 32;
         else if (sh_.stage == Stage::TessControl && q.storage == Storage::Out && !q.patch && sh_.outLayout.vertices > 0)
             t.dims[0] = sh_.outLayout.vertices;
+        else if (q.storage == Storage::Out)
+            sizeMeshOutput(t, q, preamble_ ? builtinVarId(inst, sh_.stage) : BuiltinVar::None);
+    }
+    if ((blockName == "gl_MeshPerVertexEXT" || blockName == "gl_MeshPerPrimitiveEXT") && !preamble_ && sh_.stage == Stage::Mesh) {
+        // Redeclaration of a mesh built-in block: the members map onto the existing built-in arrays.
+        if (inst != (blockName == "gl_MeshPerVertexEXT" ? "gl_MeshVerticesEXT" : "gl_MeshPrimitivesEXT"))
+            fail("invalid " + blockName + " redeclaration");
+        return;
     }
     if (blockName == "gl_PerVertex" && !preamble_) {
         // Redeclaration of a builtin block: members map onto the existing builtins.
@@ -1246,7 +1294,7 @@ void Parser::checkInterfaceLocations() {
         std::string name;
     };
     Stage st = sh_.stage;
-    if (st == Stage::Compute) return;
+    if (st == Stage::Compute || st == Stage::Task) return;
     for (Storage dir : {Storage::In, Storage::Out}) {
         bool in = dir == Storage::In;
         int maxLoc;
@@ -1255,9 +1303,11 @@ void Parser::checkInterfaceLocations() {
             case Stage::TessControl: maxLoc = limitConst(in ? "gl_MaxTessControlInputComponents" : "gl_MaxTessControlOutputComponents") / 4; break;
             case Stage::TessEval: maxLoc = limitConst(in ? "gl_MaxTessEvaluationInputComponents" : "gl_MaxTessEvaluationOutputComponents") / 4; break;
             case Stage::Geometry: maxLoc = limitConst(in ? "gl_MaxGeometryInputComponents" : "gl_MaxGeometryOutputComponents") / 4; break;
+            case Stage::Mesh: maxLoc = 128 / 4; break;  // GL_MAX_MESH_OUTPUT_COMPONENTS_EXT
             default: maxLoc = in ? limitConst("gl_MaxFragmentInputComponents") / 4 : limitConst("gl_MaxDrawBuffers"); break;
         }
-        bool arrayed = in ? (st == Stage::TessControl || st == Stage::TessEval || st == Stage::Geometry) : st == Stage::TessControl;
+        bool arrayed = in ? (st == Stage::TessControl || st == Stage::TessEval || st == Stage::Geometry)
+                          : (st == Stage::TessControl || st == Stage::Mesh);
         std::vector<Slot> slots;
         // appends the slots of type t starting at location loc / component comp; returns the next location
         std::function<int(const Type&, int, int, const Qualifiers&, bool, const std::string&, int)> add =
@@ -1543,6 +1593,16 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
         if (global && (sh_.stage == Stage::TessControl || sh_.stage == Stage::TessEval) && q.storage == Storage::In &&
             !q.patch && !t.dims.empty() && t.dims[0] == 0)
             v->type.dims[0] = 32;
+        if (global && q.storage == Storage::Out) sizeMeshOutput(v->type, v->q, v->builtin);
+        if (global && !preamble_ && (sh_.stage == Stage::Task || sh_.stage == Stage::Mesh) &&
+            (q.storage == Storage::In || (q.storage == Storage::Out && sh_.stage == Stage::Task)))
+            fail("'" + name + "' : " + (sh_.stage == Stage::Task ? "task shaders cannot declare input or output variables"
+                                                                    : "mesh shaders cannot declare input variables"));
+        if (global && !preamble_ && q.storage == Storage::TaskPayload) {
+            for (auto* o : sh_.globalVars)
+                if (o->q.storage == Storage::TaskPayload) fail("'" + name + "' : only one taskPayloadSharedEXT variable may be declared");
+            if (t.stripArrays().isOpaque() || t.base == BT::Bool) fail("'" + name + "' : invalid type for a taskPayloadSharedEXT variable");
+        }
         declareVar(v);
         if (global) {
             sh_.globalVars.push_back(v);
@@ -2638,11 +2698,13 @@ Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
         if (name.compare(0, 6, "atomic") == 0 && name.compare(0, 13, "atomicCounter") != 0) {
             Expr* b = args[0];
             while (b->kind == EK::Index || b->kind == EK::Field || b->kind == EK::Swizzle) b = b->args[0];
-            if (b->kind != EK::Var || (b->var->q.storage != Storage::Buffer && b->var->q.storage != Storage::Shared))
+            if (b->kind != EK::Var || (b->var->q.storage != Storage::Buffer && b->var->q.storage != Storage::Shared &&
+                                       b->var->q.storage != Storage::TaskPayload))
                 fail("'" + name + "' : first argument must be a buffer or shared variable", ln);
         }
-        if (name == "barrier" && sh_.stage != Stage::Compute && sh_.stage != Stage::TessControl)
-            fail("barrier() is only available in compute and tessellation control shaders", ln);
+        if (name == "barrier" && sh_.stage != Stage::Compute && sh_.stage != Stage::TessControl && sh_.stage != Stage::Task &&
+            sh_.stage != Stage::Mesh)
+            fail("barrier() is only available in compute, tessellation control, task and mesh shaders", ln);
         if ((name == "EmitVertex" || name == "EndPrimitive" || name == "EmitStreamVertex" || name == "EndStreamPrimitive") &&
             sh_.stage != Stage::Geometry)
             fail("'" + name + "' is only available in geometry shaders", ln);

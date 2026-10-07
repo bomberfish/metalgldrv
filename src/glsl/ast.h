@@ -72,6 +72,7 @@ struct Layout {
     int location = -1, component = -1, binding = -1, offset = -1, align = -1, index = -1, set = -1;
     int localSize[3] = {-1, -1, -1};
     int maxVertices = -1, invocations = -1, vertices = -1, stream = -1;
+    int maxPrimitives = -1;  // mesh shaders
     int xfbBuffer = -1, xfbOffset = -1, xfbStride = -1;
     Packing packing = Packing::None;
     int matrix = 0;           // 0 unspecified, 1 column_major, 2 row_major
@@ -85,7 +86,7 @@ struct Layout {
     bool blendSupportAll = false;
 };
 
-enum class Storage : uint8_t { Temp, Const, In, Out, InOut, Uniform, Buffer, Shared, Attribute, Varying };
+enum class Storage : uint8_t { Temp, Const, In, Out, InOut, Uniform, Buffer, Shared, Attribute, Varying, TaskPayload /* taskPayloadSharedEXT */ };
 enum class Interp : uint8_t { Smooth, Flat, NoPerspective };
 
 enum : uint8_t { MemCoherent = 1, MemVolatile = 2, MemRestrict = 4, MemReadOnly = 8, MemWriteOnly = 16 };
@@ -95,6 +96,7 @@ struct Qualifiers {
     Interp interp = Interp::Smooth;
     bool interpExplicit = false;
     bool centroid = false, sample = false, patch = false, invariant = false, precise = false;
+    bool perprimitive = false;  // EXT_mesh_shader perprimitiveEXT (mesh outputs / fragment inputs)
     uint8_t memory = 0;
     bool subroutine = false;
     std::vector<std::string> subroutineTypes;  // subroutine(type, ...) on function definitions
@@ -158,6 +160,8 @@ enum class BuiltinVar : uint16_t {
     NumWorkGroups, WorkGroupID, LocalInvocationID, GlobalInvocationID, LocalInvocationIndex, WorkGroupSize,
     // uniforms
     DepthRange, NumSamples, CompatUniform,
+    // mesh (EXT_mesh_shader)
+    MeshVertices, MeshPrimitives, PrimitiveIndices, CullPrimitive, PrimitiveShadingRate,
 };
 
 struct Expr;
