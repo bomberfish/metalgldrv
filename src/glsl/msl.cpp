@@ -3174,7 +3174,10 @@ void Emitter::emitCS(std::string& o) {
     StageInfo& si = si_[(int)Stage::Compute];
     o += "}  // namespace cs\n\n";
     const auto& r = P->refl;
-    std::string e = "kernel void mgl_cs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint3 mgl_gid [[thread_position_in_grid]], "
+    // The local size is usually absent from the body; state it so kernels that differ only in
+    // local size get distinct AIR (Metal's pipeline cache ignores requiredThreadsPerThreadgroup).
+    std::string e = "[[max_total_threads_per_threadgroup(" + std::to_string(r.localSize[0] * r.localSize[1] * r.localSize[2]) +
+                    ")]] kernel void mgl_cs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint3 mgl_gid [[thread_position_in_grid]], "
                     "uint3 mgl_lid [[thread_position_in_threadgroup]], uint3 mgl_wid [[threadgroup_position_in_grid]], uint mgl_lidx [[thread_index_in_threadgroup]], "
                     "uint3 mgl_nwg [[threadgroups_per_grid]]) {\n";
     if (si.hasShared) e += "    threadgroup cs::MGLShared mgl_shared;\n";

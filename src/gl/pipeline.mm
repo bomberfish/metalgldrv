@@ -204,17 +204,35 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
     return pso;
 }
 
+static id<MTLComputePipelineState> newComputePipeline(Device* dev, ProgramVariant* v, const glsl::EntryPoint* cs) {
+    MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
+    d.computeFunctionDescriptor = fn(v->lib, cs->name);
+    MTLSize tg = MTLSizeMake(cs->threadsPerThreadgroup[0], cs->threadsPerThreadgroup[1], cs->threadsPerThreadgroup[2]);
+    d.requiredThreadsPerThreadgroup = tg;
+    NSError* err = nil;
+    id<MTLComputePipelineState> p = [dev->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
+    if (!p) {
+        MGL_ERR("compute pipeline %s creation failed: %s", cs->name.c_str(), err.localizedDescription.UTF8String);
+        return nil;
+    }
+    // Metal's pipeline cache does not key on requiredThreadsPerThreadgroup: a kernel whose AIR
+    // matches one compiled for a smaller threadgroup can come back limited to that size, and
+    // dispatches above the limit are silently dropped. Kernels whose body does not depend on the
+    // threadgroup size carry it as [[max_total_threads_per_threadgroup]] (glsl/msl.cpp).
+    if (p.maxTotalThreadsPerThreadgroup < tg.width * tg.height * tg.depth) {
+        MGL_ERR("compute pipeline %s allows %lu threads per threadgroup, needs %lux%lux%lu", cs->name.c_str(),
+                (unsigned long)p.maxTotalThreadsPerThreadgroup, (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth);
+        return nil;
+    }
+    return p;
+}
+
 id<MTLComputePipelineState> PipelineCache::computePipeline(ProgramVariant* v, const std::string& name) {
     auto it = v->computeByName.find(name);
     if (it != v->computeByName.end()) return it->second;
     const glsl::EntryPoint* cs = v->entry(name);
     if (!cs || cs->kind != glsl::EntryPoint::Kernel) return nil;
-    MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
-    d.computeFunctionDescriptor = fn(v->lib, cs->name);
-    d.requiredThreadsPerThreadgroup = MTLSizeMake(cs->threadsPerThreadgroup[0], cs->threadsPerThreadgroup[1], cs->threadsPerThreadgroup[2]);
-    NSError* err = nil;
-    id<MTLComputePipelineState> p = [ctx_->dev->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
-    if (!p) MGL_ERR("compute pipeline %s creation failed: %s", name.c_str(), err.localizedDescription.UTF8String);
+    id<MTLComputePipelineState> p = newComputePipeline(ctx_->dev, v, cs);
     v->computeByName[name] = p;
     return p;
 }
@@ -223,12 +241,7 @@ id<MTLComputePipelineState> PipelineCache::computePipeline(ProgramVariant* v) {
     if (v->compute) return v->compute;
     const glsl::EntryPoint* cs = v->entry(glsl::EntryPoint::Kernel);
     if (!cs) return nil;
-    MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
-    d.computeFunctionDescriptor = fn(v->lib, cs->name);
-    d.requiredThreadsPerThreadgroup = MTLSizeMake(cs->threadsPerThreadgroup[0], cs->threadsPerThreadgroup[1], cs->threadsPerThreadgroup[2]);
-    NSError* err = nil;
-    v->compute = [ctx_->dev->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
-    if (!v->compute) MGL_ERR("compute pipeline creation failed: %s", err.localizedDescription.UTF8String);
+    v->compute = newComputePipeline(ctx_->dev, v, cs);
     return v->compute;
 }
 
