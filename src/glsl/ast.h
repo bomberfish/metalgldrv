@@ -15,7 +15,7 @@ namespace glsl {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-enum class BT : uint8_t { Void, Bool, Int, UInt, Float, Double, Struct, Sampler, Image, AtomicUint, Subroutine, Error };
+enum class BT : uint8_t { Void, Bool, Int, UInt, Float, Double, Int64, UInt64, Struct, Sampler, Image, AtomicUint, Subroutine, Error };
 enum class Dim : uint8_t { None, D1, D2, D3, Cube, Rect, Buffer };
 
 struct StructDef;
@@ -43,7 +43,10 @@ struct Type {
     bool isMatrix() const { return cols != 0 && dims.empty(); }
     bool isVector() const { return cols == 0 && vec > 1 && dims.empty() && isNumericBase(); }
     bool isScalar() const { return cols == 0 && vec == 1 && dims.empty() && isNumericBase(); }
-    bool isNumericBase() const { return base == BT::Bool || base == BT::Int || base == BT::UInt || base == BT::Float || base == BT::Double; }
+    bool isNumericBase() const {
+        return base == BT::Bool || base == BT::Int || base == BT::UInt || base == BT::Float || base == BT::Double || base == BT::Int64 ||
+               base == BT::UInt64;
+    }
     bool isNumeric() const { return dims.empty() && isNumericBase(); }  // scalar, vector or matrix
     bool isOpaque() const { return base == BT::Sampler || base == BT::Image || base == BT::AtomicUint; }
     bool containsOpaque() const;
@@ -51,7 +54,8 @@ struct Type {
     bool isError() const { return base == BT::Error; }
     bool isVoid() const { return base == BT::Void && dims.empty(); }
     bool isFloatLike() const { return base == BT::Float || base == BT::Double; }
-    bool isIntLike() const { return base == BT::Int || base == BT::UInt; }
+    bool isIntLike() const { return base == BT::Int || base == BT::UInt || base == BT::Int64 || base == BT::UInt64; }
+    bool is64() const { return base == BT::Double || base == BT::Int64 || base == BT::UInt64; }  // 8-byte components
     int components() const { return cols ? cols * vec : vec; }  // of a non-array numeric type
     Type elem() const { Type t = *this; if (!t.dims.empty()) t.dims.erase(t.dims.begin()); return t; }  // strip outer array
     Type arrayOf(int n) const { Type t = *this; t.dims.insert(t.dims.begin(), n); return t; }
@@ -158,6 +162,9 @@ enum class BuiltinVar : uint16_t {
     HelperInvocation, FragColorIn /*gl_Color in FS*/, SecondaryColorIn,
     // compute
     NumWorkGroups, WorkGroupID, LocalInvocationID, GlobalInvocationID, LocalInvocationIndex, WorkGroupSize,
+    // subgroups (KHR_shader_subgroup); NumSubgroups and SubgroupID are compute only
+    SubgroupSize, SubgroupInvocationID, SubgroupEqMask, SubgroupGeMask, SubgroupGtMask, SubgroupLeMask, SubgroupLtMask,
+    NumSubgroups, SubgroupID,
     // uniforms
     DepthRange, NumSamples, CompatUniform,
     // mesh (EXT_mesh_shader)

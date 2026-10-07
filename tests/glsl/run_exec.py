@@ -43,6 +43,7 @@ pipes = [
     ("gs_points", P("gs_points.vert", "gs_points.geom", "gs_points.frag"), ["--verts", "0,0", "--vpp", "1"], "rows=0..31"),
     ("gs_points_inst", P("gs_points.vert", "gs_points.geom", "gs_points.frag"), ["--verts", "0,0,0,0", "--vpp", "1", "--inst", "3"], "pass=1024 fail=0"),
     ("tess_tri", P("tess_tri.vert", "tess_tri.tesc", "tess_tri.tese", "tess_tri.frag"), [], "fail=0 uncovered=0"),
+    ("gs_int64", P("gs_int64.vert", "gs_int64.geom", "gs_int64.frag"), [], "fail=0 uncovered=0"),
     ("gs_spill", P("gs_pass.vert", "gs_spill.geom", "gs_spill.frag"), [], "fail=0 uncovered=0"),
     ("gs_spill_big", P("gs_pass.vert", "gs_spill_big.geom", "gs_spill.frag"), [], "fail=0 uncovered=0"),
     ("gs_spill_lines", P("gs_pass.vert", "gs_spill_lines.geom", "gs_spill_lines.frag"), [], "pass=912 fail=0"),

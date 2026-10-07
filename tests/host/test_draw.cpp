@@ -362,6 +362,78 @@ void main() { uint i = gl_GlobalInvocationID.x; if (i < values.length()) values[
     CHECK_GL();
 }
 
+// ARB_gpu_shader_int64 uniforms and buffers; KHR_shader_subgroup queries.
+TEST(compute_int64_uniforms_and_subgroup_queries) {
+    const char* cs = R"(#version 450 core
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 32) in;
+layout(std430, binding = 1) buffer Data { int64_t s; u64vec2 v; uint64_t lanes[32]; };
+uniform int64_t uS;
+uniform u64vec2 uV;
+void main() {
+    if (gl_LocalInvocationIndex == 0u) { s = uS * 2l; v = uV + 1ul; }
+    lanes[gl_LocalInvocationIndex] = uint64_t(gl_SubgroupInvocationID) << 40;
+}
+)";
+    GLuint s = glCreateShader(GL_COMPUTE_SHADER);
+    glShaderSource(s, 1, &cs, nullptr);
+    glCompileShader(s);
+    GLint ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    CHECK(ok);
+    GLuint p = glCreateProgram();
+    glAttachShader(p, s);
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+    GLint locS = glGetUniformLocation(p, "uS"), locV = glGetUniformLocation(p, "uV");
+    GLint size = 0;
+    GLenum type = 0;
+    char name[16];
+    GLint nu = 0;
+    glGetProgramiv(p, GL_ACTIVE_UNIFORMS, &nu);
+    bool sawV = false;
+    for (GLint i = 0; i < nu; i++) {
+        glGetActiveUniform(p, (GLuint)i, sizeof name, nullptr, &size, &type, name);
+        if (!strcmp(name, "uV")) sawV = type == GL_UNSIGNED_INT64_VEC2_ARB;
+    }
+    CHECK(sawV);
+    glUseProgram(p);
+    glUniform1i64ARB(locS, -0x123456789ll);
+    const GLuint64 v2[2] = {0xFFFFFFFF00000000ull, 41};
+    glProgramUniform2ui64vARB(p, locV, 1, v2);
+    GLint64 gs = 0;
+    glGetUniformi64vARB(p, locS, &gs);
+    CHECK_EQ(gs, (GLint64)-0x123456789ll);
+    glUniform1i(locS, 1);  // type mismatch
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);
+    GLuint b;
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, b);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 32 + 8 * 32, nullptr, GL_DYNAMIC_COPY);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, b);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    std::vector<uint64_t> out(4 + 32);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 8 * out.size(), out.data());
+    CHECK_EQ((int64_t)out[0], (int64_t)-0x2468ACF12ll);
+    CHECK_EQ(out[2], 0xFFFFFFFF00000001ull);  // v at offset 16
+    CHECK_EQ(out[3], 42ull);
+    CHECK_EQ(out[4 + 5], 5ull << 40);
+    GLint sgSize = 0, stages = 0, features = 0;
+    glGetIntegerv(GL_SUBGROUP_SIZE_KHR, &sgSize);
+    glGetIntegerv(GL_SUBGROUP_SUPPORTED_STAGES_KHR, &stages);
+    glGetIntegerv(GL_SUBGROUP_SUPPORTED_FEATURES_KHR, &features);
+    CHECK_EQ(sgSize, 32);
+    CHECK_EQ(stages, 0x3F);
+    CHECK_EQ(features, 0x1FF);
+    glDeleteBuffers(1, &b);
+    glDeleteShader(s);
+    glDeleteProgram(p);
+    CHECK_GL();
+}
+
 // gl_LocalInvocationIndex / gl_LocalInvocationID for multi-dimensional work groups
 // (compute_shader.one-work-group).
 static GLuint computeProgram(const std::string& src) {

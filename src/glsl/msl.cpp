@@ -34,6 +34,8 @@ struct Acc {
     std::string sizeExpr;     // SSBO bound size expression
 };
 
+bool isSubgroupVar(BuiltinVar b) { return b >= BuiltinVar::SubgroupSize && b <= BuiltinVar::SubgroupID; }
+
 bool isSimpleIdent(const std::string& s) {
     if (s.empty()) return false;
     for (char c : s)
@@ -120,6 +122,8 @@ private:
             case BT::Double: return "ulong";
             case BT::Int: return "int";
             case BT::UInt: return "uint";
+            case BT::Int64: return "long";
+            case BT::UInt64: return "ulong";
             case BT::Bool: return "bool";
             default: return "void";
         }
@@ -202,6 +206,11 @@ private:
                 return v < 0 ? "(" + std::to_string(v) + ")" : std::to_string(v);
             }
             case BT::UInt: return std::to_string((uint32_t)s.u) + "u";
+            case BT::Int64: {
+                if (s.i == INT64_MIN) return "(-9223372036854775807l - 1l)";
+                return s.i < 0 ? "(" + std::to_string(s.i) + "l)" : std::to_string(s.i) + "l";
+            }
+            case BT::UInt64: return std::to_string(s.u) + "ul";
             case BT::Bool: return s.b ? "true" : "false";
             default: return "0";
         }
@@ -244,6 +253,8 @@ private:
                 case BT::Float: return "mgl_f64_from_float(" + s + ")";
                 case BT::Int: return "mgl_f64_from_int(" + s + ")";
                 case BT::UInt: return "mgl_f64_from_uint(" + s + ")";
+                case BT::Int64: return "mgl_f64_from_i64(" + s + ")";
+                case BT::UInt64: return "mgl_f64_from_u64(" + s + ")";
                 case BT::Bool: return "mgl_f64_from_bool(" + s + ")";
                 default: fail("bad conversion to double");
             }
@@ -254,10 +265,14 @@ private:
                 case BT::Float: return "mgl_f64_to_float(" + s + ")";
                 case BT::Int: return "mgl_f64_to_int(" + s + ")";
                 case BT::UInt: return "mgl_f64_to_uint(" + s + ")";
+                case BT::Int64: return "mgl_f64_to_i64(" + s + ")";
+                case BT::UInt64: return "mgl_f64_to_u64(" + s + ")";
                 case BT::Bool: return "mgl_f64_to_bool(" + s + ")";
                 default: fail("bad conversion from double");
             }
         }
+        if ((from.base == BT::Int64 || from.base == BT::UInt64) && (to.base == BT::Int || to.base == BT::UInt))  // keep the low 32 bits
+            return mt(to) + "(" + mt(to.withBase(BT::UInt)) + "(" + mt(from.withBase(BT::UInt64)) + "(" + s + ") & 0xFFFFFFFFul))";
         return mt(to) + "(" + s + ")";
     }
     std::string f64one(const Type& t) {
@@ -294,7 +309,7 @@ private:
         bool perThread = v->builtin == BuiltinVar::InvocationID || v->builtin == BuiltinVar::PrimitiveID ||
                          v->builtin == BuiltinVar::PatchVerticesIn || v->builtin == BuiltinVar::TessCoord ||
                          v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange ||
-                         v->builtin == BuiltinVar::NumSamples;
+                         v->builtin == BuiltinVar::NumSamples || isSubgroupVar(v->builtin);
         if (perThread) return false;
         if (stage_ == Stage::TessControl) return v->q.storage == Storage::In || v->q.storage == Storage::Out;
         if (stage_ == Stage::TessEval) return v->q.storage == Storage::In;
@@ -351,6 +366,8 @@ private:
     std::string ctor(const Expr* e);
     std::string callUser(const Expr* e);
     std::string callBuiltin(const Expr* e);
+    std::string subgroupFn(const Expr* e);
+    bool sgLane_ = false;
     std::string textureFn(const Expr* e, const std::string& name);
     std::string imageFn(const Expr* e, const std::string& name);
     std::string atomicPtr(const Expr* e, std::string& pre);
@@ -379,6 +396,7 @@ private:
         bool hasShared = false;
         bool hasPayload = false;  // task/mesh: taskPayloadSharedEXT variable (G::PL)
         bool prepared = false;
+        bool sgLane = false;  // G::mgl_sgl (subgroup lane) is used
     };
     StageInfo si_[(int)Stage::Count];
     std::string entries_;  // entry point functions, appended after all namespaces
@@ -403,6 +421,10 @@ private:
     std::vector<Field> arrayedFields(Stage st, Storage storage);
     std::vector<Field> patchFields(Stage st, Storage storage);
     std::string acc(const Field& f, const std::string& prefix, const std::string& j = "");
+    // record slot of a varying leaf (int64 travels as its ulong bits)
+    static std::string pk(const Field& f, const std::string& a) {
+        return "mgl_pk(" + (f.type.base == BT::Int64 ? "as_type<ulong>(" + a + ")" : a) + ")";
+    }
     std::string vsInputs(bool stageIn, std::string& inStruct, bool& anyIn, const std::string& g);
     std::string runVS(const std::string& gv, const std::string& vid, const std::string& inst);
     struct RasterOut {
@@ -467,12 +489,12 @@ private:
     void collectStructs(std::vector<const StructDef*>& order);
     void emitArgs(std::string& o);
     void flatten(const Type& t, const std::string& acc, std::vector<std::pair<Type, std::string>>& leaves);
-    // double vectors travel as one flat uint2 varying per component
+    // double (and 64-bit integer) vectors travel as one flat uint2 varying per component
     static void splitDoubleLeaves(std::vector<std::pair<Type, std::string>>& leaves) {
         std::vector<std::pair<Type, std::string>> out;
         for (auto& [t, acc] : leaves) {
-            if (t.base == BT::Double && t.isVector())
-                for (int c = 0; c < t.vec; c++) out.push_back({Type::scalar(BT::Double), acc + "." + kSwz[c]});
+            if (t.is64() && t.isVector())
+                for (int c = 0; c < t.vec; c++) out.push_back({Type::scalar(t.base), acc + "." + kSwz[c]});
             else
                 out.push_back({t, acc});
         }
@@ -527,7 +549,7 @@ bool Emitter::bufAccess(const Expr* e, Acc& a) {
             if (!bufAccess(e->args[0], a)) return false;
             std::string idx;
             const Expr* ie = e->args[1];
-            if (ie->cv) idx = std::to_string(ie->type.base == BT::UInt ? (uint32_t)ie->cv->c[0].u : (uint32_t)ie->cv->c[0].i) + "u";
+            if (ie->cv) idx = std::to_string((uint32_t)ie->cv->c[0].u) + "u";
             else idx = "uint(" + ex(ie) + ")";
             if (a.blockArray) {
                 a.blockArray = false;
@@ -1283,6 +1305,14 @@ std::string Emitter::callBuiltin(const Expr* e) {
     };
     if (n.compare(0, 7, "texture") == 0 || n.compare(0, 6, "shadow") == 0 || n.compare(0, 10, "texelFetch") == 0)
         return textureFn(e, n);
+    if (n.compare(0, 8, "subgroup") == 0) return subgroupFn(e);
+    // ARB_shader_ballot
+    if (n == "ballotARB") return "ulong(simd_ballot(" + ex(A[0]) + "))";
+    if (n == "readInvocationARB") return "mgl_sg_shfl(" + ex(A[0]) + ", " + ex(A[1]) + ")";
+    if (n == "readFirstInvocationARB") return "mgl_sg_first(" + ex(A[0]) + ")";
+    if (n == "doubleBitsToInt64" || n == "doubleBitsToUint64" || n == "int64BitsToDouble" || n == "uint64BitsToDouble" ||
+        n == "packInt2x32" || n == "packUint2x32" || n == "unpackInt2x32" || n == "unpackUint2x32")
+        return "as_type<" + mt(rt) + ">(" + ex(A[0]) + ")";  // ARB_gpu_shader_int64 (doubles are ulong bit patterns)
     bool anyDouble = rt.stripArrays().base == BT::Double;
     for (auto* x : A) anyDouble |= x->type.stripArrays().base == BT::Double;
     if (anyDouble) return builtinF64(e);
@@ -1306,7 +1336,7 @@ std::string Emitter::callBuiltin(const Expr* e) {
         {"anyInvocationARB", "simd_any"}, {"allInvocationsARB", "simd_all"},
     };
     if (auto it = direct.find(n); it != direct.end()) return simple(it->second);
-    if (n == "sign") return (A[0]->type.base == BT::Int ? "mgl_isign(" : "sign(") + a(0) + ")";
+    if (n == "sign") return (A[0]->type.base == BT::Int || A[0]->type.base == BT::Int64 ? "mgl_isign(" : "sign(") + a(0) + ")";
     if (n == "radians") return "(" + a(0) + " * 0.0174532925199432958f)";
     if (n == "degrees") return "(" + a(0) + " * 57.2957795130823209f)";
     if (n == "atan") return A.size() == 2 ? "atan2(" + a(0) + ", " + a(1) + ")" : "atan(" + a(0) + ")";
@@ -1457,6 +1487,86 @@ std::string Emitter::callBuiltin(const Expr* e) {
     if (n == "EmitStreamVertex") return "mgl_EmitVertex(int(" + a(0) + "))";
     if (n == "EndStreamPrimitive") return "mgl_EndPrimitive(int(" + a(0) + "))";
     fail("builtin function '" + n + "' is not supported yet");
+}
+
+// KHR_shader_subgroup: SIMD-group functions (prelude mgl_sg_*; doubles are ulong bit patterns, mgl_sgd_*).
+std::string Emitter::subgroupFn(const Expr* e) {
+    const std::string n = e->fn->name.substr(8);
+    const auto& A = e->args;
+    auto a = [&](size_t i) { return ex(A[i]); };
+    auto lane = [&]() {
+        sgLane_ = true;
+        return std::string("mgl_sgl");
+    };
+    if (n == "Barrier") {
+        bool tg = stage_ != Stage::Vertex && stage_ != Stage::Fragment;  // the other stages run in kernels / mesh functions
+        return std::string("simdgroup_barrier(mem_flags::mem_device") + (tg ? " | mem_flags::mem_threadgroup" : "") + " | mem_flags::mem_texture)";
+    }
+    if (n.compare(0, 13, "MemoryBarrier") == 0) {
+        std::string k = n.substr(13);
+        std::string flags = k == "Shared" ? "mem_flags::mem_threadgroup"
+                          : k == "Image" ? "mem_flags::mem_texture"
+                          : k == "Buffer" ? "mem_flags::mem_device"
+                          : "mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture";
+        if (stage_ != Stage::Compute && k == "") flags = "mem_flags::mem_device | mem_flags::mem_texture";
+        return "atomic_thread_fence(" + flags + ", memory_order_seq_cst, thread_scope_simdgroup)";
+    }
+    if (n == "Elect") return "(" + lane() + " == ctz(mgl_sg_mask()))";
+    if (n == "All") return "simd_all(mgl_sg_k(" + a(0) + "))";
+    if (n == "Any") return "simd_any(mgl_sg_k(" + a(0) + "))";
+    if (n == "Ballot") return "mgl_sg_ballot(" + a(0) + ")";
+    if (n == "InverseBallot") return "mgl_sg_bit(" + a(0) + ", " + lane() + ")";
+    if (n == "BallotBitExtract") return "mgl_sg_bit(" + a(0) + ", " + a(1) + ")";
+    if (n == "BallotBitCount") return "popcount(" + a(0) + ".x)";
+    if (n == "BallotInclusiveBitCount") return "popcount(" + a(0) + ".x & (0xffffffffu >> (31u - " + lane() + ")))";
+    if (n == "BallotExclusiveBitCount") return "popcount(" + a(0) + ".x & ((1u << " + lane() + ") - 1u))";
+    if (n == "BallotFindLSB") return "ctz(" + a(0) + ".x)";
+    if (n == "BallotFindMSB") return "(31u - clz(" + a(0) + ".x))";
+    const Type& t = A[0]->type;
+    bool dbl = t.base == BT::Double;
+    if (n == "AllEqual") return std::string(dbl ? "mgl_sgd_alleq(" : "mgl_sg_alleq(") + a(0) + ")";
+    // permutations: read the value of another lane
+    auto from = [&](const std::string& src) { return "mgl_sg_shfl(" + a(0) + ", " + src + ")"; };
+    if (n == "Broadcast" || n == "Shuffle") return from(a(1));
+    if (n == "BroadcastFirst") return "mgl_sg_first(" + a(0) + ")";
+    if (n == "ShuffleXor") return from("(" + lane() + " ^ " + a(1) + ")");
+    if (n == "ShuffleUp") return from("(" + lane() + " - " + a(1) + ")");
+    if (n == "ShuffleDown") return from("(" + lane() + " + " + a(1) + ")");
+    if (n == "QuadBroadcast") return from("((" + lane() + " & ~3u) | (" + a(1) + " & 3u))");
+    if (n == "QuadSwapHorizontal") return from("(" + lane() + " ^ 1u)");
+    if (n == "QuadSwapVertical") return from("(" + lane() + " ^ 2u)");
+    if (n == "QuadSwapDiagonal") return from("(" + lane() + " ^ 3u)");
+    if (n == "PartitionNV") return std::string(dbl ? "mgl_sgd_part(" : "mgl_sg_part(") + a(0) + ")";
+    // arithmetic
+    int kind = 0;  // 0 reduce, 1 inclusive, 2 exclusive, 3 clustered
+    std::string op = n;
+    bool part = op.compare(0, 11, "Partitioned") == 0;  // NV_shader_subgroup_partitioned: within the lanes of a ballot
+    if (part) op = op.substr(11, op.size() - 13);
+    if (op.compare(0, 9, "Inclusive") == 0) kind = 1, op = op.substr(9);
+    else if (op.compare(0, 9, "Exclusive") == 0) kind = 2, op = op.substr(9);
+    else if (op.compare(0, 9, "Clustered") == 0) kind = 3, op = op.substr(9);
+    static const std::map<std::string, std::string> ops = {{"Add", "add"}, {"Mul", "mul"}, {"Min", "min"}, {"Max", "max"},
+                                                           {"And", "and"}, {"Or", "or"}, {"Xor", "xor"}};
+    auto it = ops.find(op);
+    if (it == ops.end()) fail("builtin function 'subgroup" + n + "' is not supported yet");
+    const std::string& o = it->second;
+    bool boolean = t.base == BT::Bool;
+    std::string v = a(0);
+    if (boolean) v = vecName(BT::UInt, t.vec) + "(" + v + ")";
+    std::string r;
+    if (part) r = "mgl_sg_pred<" + std::string(dbl ? "mgl_sgd_" : "mgl_sg_") + o + ">(" + v + ", " + lane() + ", " + a(1) + ", " +
+                  std::to_string(kind) + ")";
+    // native reductions and scans (operand through mgl_sg_k, see the prelude)
+    else if (!dbl && kind == 0 && o != "add" && o != "mul") r = "simd_" + o + "(mgl_sg_k(" + v + "))";
+    else if (!dbl && kind == 0) r = std::string(o == "add" ? "simd_sum(" : "simd_product(") + "mgl_sg_k(" + v + "))";
+    else if (!dbl && kind != 3 && (o == "add" || o == "mul"))
+        r = std::string("simd_prefix_") + (kind == 1 ? "inclusive_" : "exclusive_") + (o == "add" ? "sum(" : "product(") + "mgl_sg_k(" + v + "))";
+    else {
+        std::string O = (dbl ? "mgl_sgd_" : "mgl_sg_") + o;
+        if (kind == 1 || kind == 2) r = "mgl_sg_scan<" + O + ">(" + v + ", " + lane() + ", " + (kind == 1 ? "true" : "false") + ")";
+        else r = "mgl_sg_red<" + O + ">(" + v + ", " + lane() + ", " + (kind == 3 ? "uint(" + a(1) + ")" : "32u") + ")";
+    }
+    return boolean ? "(" + r + " != 0u)" : r;
 }
 
 std::string Emitter::builtinF64(const Expr* e) {
@@ -2135,7 +2245,7 @@ void Emitter::flatten(const Type& t, const std::string& acc, std::vector<std::pa
 }
 
 std::string Emitter::interpAttr(const Qualifiers& q, const Type& leaf) {
-    if (leaf.base == BT::Int || leaf.base == BT::UInt || leaf.base == BT::Bool || q.interp == Interp::Flat || q.perprimitive) return ", flat";
+    if (leaf.isIntLike() || leaf.base == BT::Bool || q.interp == Interp::Flat || q.perprimitive) return ", flat";
     if (q.interp == Interp::NoPerspective)
         return q.centroid ? ", centroid_no_perspective" : q.sample ? ", sample_no_perspective" : ", center_no_perspective";
     if (q.centroid) return ", centroid_perspective";
@@ -2324,6 +2434,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     helpers_.clear();
     helperByKey_.clear();
     needEq_ = false;
+    sgLane_ = false;
     fnNames_.clear();
     tempN_ = 0;
     ns_ = kNsNames[(int)s];
@@ -2395,6 +2506,40 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         if (sc_->reachable.count(f)) funcs += emitFunction(f);
     funcs += subroutineDispatchers();
     temps_.clear();
+    // Subgroup builtins, from the lane index: compute and fragment entry points set mgl_sgl from
+    // [[thread_index_in_simdgroup]], other stages (which may run in vertex functions) derive it.
+    std::string sgInit;
+    for (auto* v : si.builtins) {
+        std::string m = "        bi_" + v->name + " = ";
+        if (v->type.base == BT::UInt64) {  // ARB_shader_ballot masks
+            switch (v->builtin) {
+                case BuiltinVar::SubgroupEqMask: sgInit += m + "ulong(1u << mgl_sgl);\n"; break;
+                case BuiltinVar::SubgroupGeMask: sgInit += m + "ulong(0xffffffffu << mgl_sgl);\n"; break;
+                case BuiltinVar::SubgroupGtMask: sgInit += m + "ulong(0xfffffffeu << mgl_sgl);\n"; break;
+                case BuiltinVar::SubgroupLeMask: sgInit += m + "ulong(0xffffffffu >> (31u - mgl_sgl));\n"; break;
+                case BuiltinVar::SubgroupLtMask: sgInit += m + "ulong((1u << mgl_sgl) - 1u);\n"; break;
+                default: continue;
+            }
+            sgLane_ = true;
+            continue;
+        }
+        switch (v->builtin) {
+            case BuiltinVar::SubgroupSize: sgInit += m + "32u;\n"; break;
+            case BuiltinVar::SubgroupInvocationID: sgInit += m + "mgl_sgl;\n"; break;
+            case BuiltinVar::SubgroupEqMask: sgInit += m + "uint4(1u << mgl_sgl, 0u, 0u, 0u);\n"; break;
+            case BuiltinVar::SubgroupGeMask: sgInit += m + "uint4(0xffffffffu << mgl_sgl, 0u, 0u, 0u);\n"; break;
+            case BuiltinVar::SubgroupGtMask: sgInit += m + "uint4(0xfffffffeu << mgl_sgl, 0u, 0u, 0u);\n"; break;
+            case BuiltinVar::SubgroupLeMask: sgInit += m + "uint4(0xffffffffu >> (31u - mgl_sgl), 0u, 0u, 0u);\n"; break;
+            case BuiltinVar::SubgroupLtMask: sgInit += m + "uint4((1u << mgl_sgl) - 1u, 0u, 0u, 0u);\n"; break;
+            default: continue;
+        }
+        if (v->builtin != BuiltinVar::SubgroupSize) sgLane_ = true;
+    }
+    si.sgLane = sgLane_;
+    if (sgLane_) {
+        members += "    uint mgl_sgl;\n";
+        if (s != Stage::Fragment && s != Stage::Compute) sgInit = "        mgl_sgl = mgl_sg_lane();\n" + sgInit;
+    }
     std::string initBody;
     declared.clear();
     for (auto* v : sc_->globals) {
@@ -2405,7 +2550,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     }
     init = "    void mgl_init() {\n";
     for (auto& t : temps_) init += "        " + t + "\n";
-    init += initBody + "    }\n";
+    init += sgInit + initBody + "    }\n";
     // Zeroes the members nothing else initializes (outputs, globals without initializer). Entry
     // points call this instead of value-initializing G: on Apple GPUs, zeroing all of a large G
     // (whether `G g = {}` or member by member) broke fragment shaders that can discard, which
@@ -2792,7 +2937,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
         // spilled: each vertex writes them to a device buffer record, primitives carry their vertices'
         // record slots, and the fragment shader interpolates them from [[barycentric_coord]].
         // Programs within the budgets are unaffected.
-        auto scalars = [](const Type& t) { return (t.base == BT::Double ? 2 : 1) * t.components(); };
+        auto scalars = [](const Type& t) { return (t.is64() ? 2 : 1) * t.components(); };
         int vbase = 4 + ((!mesh || points) ? 1 : 0) + nclip + ncull;
         int pbase = (fsReadsPrimitiveId() ? 1 : 0) /* mgl_primid */ + (r.hasPrim ? (int)std::count(r.primStruct.begin(), r.primStruct.end(), ';') : 0);
         int total = 0;
@@ -2823,7 +2968,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
     }
     for (auto& f : passed) {
         std::string a = acc(f, g);
-        if (f.type.base == BT::Double) {
+        if (f.type.is64()) {
             r.vertexStruct += "    uint2 " + f.name + " [[user(" + f.name + ")]];\n";
             r.vertexCopy += "v." + f.name + " = as_type<uint2>(" + a + ");\n";
         } else {
@@ -2841,7 +2986,7 @@ std::string Emitter::spillVertexCode(const RasterOut& ro, const std::string& g, 
     std::string c = slot + " = atomic_fetch_add_explicit(" + D + "spillCounter, 1u, memory_order_relaxed);\n";
     c += "if (" + slot + " < " + D + "spillCapacity) {\n    device uint4* mgl_w = " + D + "spillBuffer + " + slot + " * " +
          std::to_string(NS) + "u;\n";
-    for (size_t i = 0; i < NS; i++) c += "    mgl_w[" + std::to_string(i) + "] = mgl_pk(" + acc(ro.spill[i], g) + ");\n";
+    for (size_t i = 0; i < NS; i++) c += "    mgl_w[" + std::to_string(i) + "] = " + pk(ro.spill[i], acc(ro.spill[i], g)) + ";\n";
     c += "} else {\n    " + slot + " = 0xffffffffu;\n}\n";
     return c;
 }
@@ -3016,7 +3161,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                     copyIn += "    bool mgl_spok = " + ok + ";\n";
                     anyIn = true;
                 }
-                std::string tn = lt.base == BT::Double ? "ulong" : mt(lt);
+                std::string tn = mt(lt);
                 auto vtx = [&](int k) { return "mgl_upk_" + tn + "(mgl_sr" + std::to_string(k) + "[" + std::to_string(si0) + "])"; };
                 std::string val;
                 if (lt.base != BT::Float || lq.interp == Interp::Flat || spillIpp_ == 1) {
@@ -3036,9 +3181,9 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 copyIn += "    if (mgl_spok) " + leaves[i].second + " = " + val + ";\n";
                 continue;
             }
-            if (lt.base == BT::Double) {
+            if (lt.is64()) {
                 inS += "    uint2 " + nm + " [[user(" + nm + "), flat]];\n";
-                copyIn += "    " + leaves[i].second + " = as_type<ulong>(in." + nm + ");\n";
+                copyIn += "    " + leaves[i].second + " = as_type<" + mt(lt) + ">(in." + nm + ");\n";
                 anyIn = true;
                 continue;
             }
@@ -3218,6 +3363,10 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     bool useInterp = !interpLeaf_.empty();
     emitBody(Stage::Fragment, o, inS, useInterp ? "    thread In* mgl_in;\n" : "");
     if (useInterp) copyIn += "    g.mgl_in = &in;\n";
+    if (si.sgLane) {
+        params += ", uint mgl_sgl [[thread_index_in_simdgroup]]";
+        copyIn += "    g.mgl_sgl = mgl_sgl;\n";
+    }
     o += outS + "}  // namespace fs\n\n";
     std::string e;
     if (sc_->inLayout.earlyFragmentTests) e += "[[early_fragment_tests]]\n";
@@ -3242,10 +3391,15 @@ void Emitter::emitCS(std::string& o) {
     std::string e = "[[max_total_threads_per_threadgroup(" + std::to_string(r.localSize[0] * r.localSize[1] * r.localSize[2]) +
                     ")]] kernel void mgl_cs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint3 mgl_gid [[thread_position_in_grid]], "
                     "uint3 mgl_lid [[thread_position_in_threadgroup]], uint3 mgl_wid [[threadgroup_position_in_grid]], uint mgl_lidx [[thread_index_in_threadgroup]], "
-                    "uint3 mgl_nwg [[threadgroups_per_grid]]) {\n";
+                    "uint3 mgl_nwg [[threadgroups_per_grid]]";
+    if (si.sgLane) e += ", uint mgl_sgl [[thread_index_in_simdgroup]]";
+    if (si.bi.count(BuiltinVar::SubgroupID)) e += ", uint mgl_sgid [[simdgroup_index_in_threadgroup]]";
+    if (si.bi.count(BuiltinVar::NumSubgroups)) e += ", uint mgl_nsg [[simdgroups_per_threadgroup]]";
+    e += ") {\n";
     if (si.hasShared) e += "    threadgroup cs::MGLShared mgl_shared;\n";
     e += "    cs::G g;\n    g.A = &A;\n    g.sys = &sys;\n";
     if (si.hasShared) e += "    g.S = &mgl_shared;\n";
+    if (si.sgLane) e += "    g.mgl_sgl = mgl_sgl;\n";
     for (auto* v : si.builtins) {
         switch (v->builtin) {
             case BuiltinVar::NumWorkGroups: e += "    g.bi_" + v->name + " = mgl_nwg;\n"; break;
@@ -3257,6 +3411,8 @@ void Emitter::emitCS(std::string& o) {
                 e += "    g.bi_" + v->name + " = (mgl_lid.z * " + std::to_string(r.localSize[1]) + "u + mgl_lid.y) * " +
                      std::to_string(r.localSize[0]) + "u + mgl_lid.x;\n";
                 break;
+            case BuiltinVar::SubgroupID: e += "    g.bi_" + v->name + " = mgl_sgid;\n"; break;
+            case BuiltinVar::NumSubgroups: e += "    g.bi_" + v->name + " = mgl_nsg;\n"; break;
             default: break;
         }
     }
@@ -3370,7 +3526,7 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
         e += "    if (mgl_tid < " + N + "u) {\n";
         e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_tid] + uint(D.baseVertex)", "mgl_inst"), 8);
         useStage(Stage::Vertex);
-        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_tid].s[" + std::to_string(i) + "] = mgl_pk(" + acc(vf[i], "vg.") + ");\n";
+        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_tid].s[" + std::to_string(i) + "] = " + pk(vf[i], acc(vf[i], "vg.")) + ";\n";
         e += "    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
         loop += indentBy(gsUnpack(vf, "mgl_vin[j].s[$I]", "g."), 12);
     } else {
@@ -3822,21 +3978,21 @@ void Emitter::emitTessControlPass(std::string& o) {
         e += "    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);\n";
         useStage(Stage::TessControl);
         e += "    {\n        device uint4* r = (device uint4*)(D.tcsVertexOut + (mgl_gp * " + std::to_string(OUTV) + "u + mgl_tid) * " + sVB + ");\n";
-        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = mgl_pk(" + acc(recV[i], "", "mgl_tid") + ");\n";
+        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "", "mgl_tid")) + ";\n";
         e += "    }\n    if (mgl_tid == 0u) {\n        device float* lv = (device float*)mgl_pout;\n";
         const Variable* lo = tsi.bi.count(BuiltinVar::TessLevelOuter) ? tsi.bi[BuiltinVar::TessLevelOuter] : nullptr;
         const Variable* li = tsi.bi.count(BuiltinVar::TessLevelInner) ? tsi.bi[BuiltinVar::TessLevelInner] : nullptr;
         for (int i = 0; i < 4; i++) e += "        lv[" + std::to_string(i) + "] = " + (lo ? varName(lo) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
         for (int i = 0; i < 2; i++) e += "        lv[" + std::to_string(4 + i) + "] = " + (li ? varName(li) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
         e += "        device uint4* pr = (device uint4*)(mgl_pout + 32u);\n";
-        for (size_t i = 0; i < recP.size(); i++) e += "        pr[" + std::to_string(i) + "] = mgl_pk(" + acc(recP[i], "") + ");\n";
+        for (size_t i = 0; i < recP.size(); i++) e += "        pr[" + std::to_string(i) + "] = " + pk(recP[i], acc(recP[i], "")) + ";\n";
         e += "    }\n}\n\n";
     } else {
         threads1 = 32;
         e += "    uint mgl_cp = mgl_tid;\n    if (mgl_cp < mgl_pv) {\n" + indentBy(vsRun, 8);
         useStage(Stage::Vertex);
         e += "        device uint4* r = (device uint4*)(D.tcsVertexOut + (mgl_gp * mgl_pv + mgl_cp) * " + sVB + ");\n";
-        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = mgl_pk(" + acc(recV[i], "vg.") + ");\n";
+        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "vg.")) + ";\n";
         e += "    }\n    if (mgl_tid == 0u) {\n        device float* lv = (device float*)mgl_pout;\n";
         e += "        for (int i = 0; i < 4; i++) lv[i] = sys.tessDefaultOuter[i];\n        lv[4] = sys.tessDefaultInner[0];\n"
              "        lv[5] = sys.tessDefaultInner[1];\n    }\n}\n\n";
@@ -4026,7 +4182,7 @@ void Emitter::emitTessEvalRecords(std::string& o) {
     e += indentBy(tesRun("mgl_co[k]", "patch", "cps"), 8);
     e += "        device uint4* rec = (device uint4*)(D.tesVertexOut + (vo + k) * " + std::to_string(tesRB_) + "u);\n";
     useStage(Stage::TessEval);
-    for (size_t i = 0; i < tesRec_.size(); i++) e += "        rec[" + std::to_string(i) + "] = mgl_pk(" + acc(tesRec_[i], "g.") + ");\n";
+    for (size_t i = 0; i < tesRec_.size(); i++) e += "        rec[" + std::to_string(i) + "] = " + pk(tesRec_[i], acc(tesRec_[i], "g.")) + ";\n";
     e += "    }\n";
     e += "    for (uint k = mgl_tid; k < np * " + ipp + "; k += " + std::to_string(NT) + "u) D.tesPrimOut[po * " + ipp + " + k] = vo + uint(mgl_idx[k]);\n}\n\n";
     entries_ += e;
@@ -4120,7 +4276,7 @@ void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tupl
             int n = lt.vec;
             for (int c = 0; c < n; c++) {
                 std::string comp = n == 1 ? la : la + "." + kSwz[c];
-                if (lt.base == BT::Double) {
+                if (lt.is64()) {
                     out.push_back({x.buffer, off, "as_type<uint2>(" + comp + ").x"});
                     out.push_back({x.buffer, off + 4, "as_type<uint2>(" + comp + ").y"});
                     off += 8;
@@ -4280,7 +4436,7 @@ void Emitter::emitGeometryXfb(std::string& o, bool fromTes) {
         e += "    vs::Rec mgl_vin[" + N + "];\n    for (uint mgl_j = 0; mgl_j < " + N + "u; mgl_j++) {\n";
         e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_j] + uint(D.baseVertex)", "mgl_inst"), 8);
         useStage(Stage::Vertex);
-        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_j].s[" + std::to_string(i) + "] = mgl_pk(" + acc(vf[i], "vg.") + ");\n";
+        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_j].s[" + std::to_string(i) + "] = " + pk(vf[i], acc(vf[i], "vg.")) + ";\n";
         e += "    }\n";
         loop = "    for (uint j = 0; j < " + N + "u; j++) {\n" + indentBy(gsUnpack(vf, "mgl_vin[j].s[$I]", "g."), 8) + "    }\n";
     } else {

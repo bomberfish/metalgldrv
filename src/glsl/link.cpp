@@ -17,7 +17,7 @@ std::vector<bool> usedArrayElements(const StageCode& sc, const Variable* v, int 
 // ---------------------------------------------------------------------------
 // Layout engine
 // ---------------------------------------------------------------------------
-uint32_t scalarSize(BT b) { return b == BT::Double ? 8 : 4; }
+uint32_t scalarSize(BT b) { return b == BT::Double || b == BT::Int64 || b == BT::UInt64 ? 8 : 4; }
 
 // Value of a GLSL built-in limit constant (src/glsl/limits.def).
 static int limitValue(const char* name) {
@@ -117,7 +117,7 @@ XfbCapture xfbCaptureOf(const Type& t, int buffer, uint32_t offset) {
             for (auto& m : ty.sdef->members) walk(m.type);
             return;
         }
-        uint32_t cs = ty.base == BT::Double ? 8 : 4;
+        uint32_t cs = scalarSize(ty.base);
         if (first) c.align = cs;
         first = false;
         if (cs == 8) c.dbl = true;
@@ -658,6 +658,7 @@ static void writeScalarBytes(BT b, const Scalar& sc, uint8_t* dst) {
         case BT::Int: { int32_t i = (int32_t)sc.i; std::memcpy(dst, &i, 4); break; }
         case BT::UInt: { uint32_t u = (uint32_t)sc.u; std::memcpy(dst, &u, 4); break; }
         case BT::Bool: { uint32_t u = sc.b ? 1u : 0u; std::memcpy(dst, &u, 4); break; }
+        case BT::Int64: case BT::UInt64: std::memcpy(dst, &sc.u, 8); break;
         default: break;
     }
 }
@@ -1367,7 +1368,7 @@ void Linker::stageMetadata() {
                         for (auto& m : b.sdef->members) c += count(m.type);
                         return n * c;
                     }
-                    return n * b.components() * (b.base == BT::Double ? 2 : 1);
+                    return n * b.components() * (b.is64() ? 2 : 1);
                 };
                 scalars += count(v->type);
             }
@@ -1393,7 +1394,7 @@ void Linker::stageMetadata() {
         int comps = b.base == BT::Struct ? 0 : b.components();
         if (b.base == BT::Struct)
             for (auto& m : b.sdef->members) comps += m.type.stripArrays().components() * std::max(1, m.type.totalArrayElements());
-        return comps * (b.base == BT::Double ? 8 : 4) * std::max(1, t.totalArrayElements());
+        return comps * (b.is64() ? 8 : 4) * std::max(1, t.totalArrayElements());
     };
     if (pre != Stage::Count) {
         const StageCode& ps = prog_->stages[(int)pre];
@@ -1427,7 +1428,7 @@ void Linker::stageMetadata() {
                     }
                     return;
                 }
-                if (t.stripArrays().base == BT::Double) off = roundUp(off, 8);
+                if (t.stripArrays().is64()) off = roundUp(off, 8);
                 XfbVarying x;
                 x.name = name;
                 x.type = glTypeEnum(t);
@@ -1572,11 +1573,11 @@ void Linker::stageMetadata() {
         for (auto* v : fs.used) {
             if (v->q.storage != Storage::In || v->builtin != BuiltinVar::None) continue;
             Type b = v->type.stripArrays();
-            bool flat = v->q.interp == Interp::Flat || b.base == BT::Int || b.base == BT::UInt || b.base == BT::Double;
+            bool flat = v->q.interp == Interp::Flat || b.isIntLike() || b.base == BT::Double;
             if (v->block)
                 for (auto& m : v->block->members) {
                     Type mb = m.type.stripArrays();
-                    flat |= m.q.interp == Interp::Flat || mb.base == BT::Int || mb.base == BT::UInt || mb.base == BT::Double;
+                    flat |= m.q.interp == Interp::Flat || mb.isIntLike() || mb.base == BT::Double;
                 }
             if (flat) r.usesFlatShading = true;
         }

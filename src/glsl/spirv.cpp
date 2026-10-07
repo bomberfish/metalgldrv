@@ -47,7 +47,7 @@ struct SpirvModule {
 
 const std::vector<std::string>& supportedSpirvExtensions() {
     static const std::vector<std::string> exts = {"SPV_KHR_shader_draw_parameters", "SPV_KHR_storage_buffer_storage_class",
-                                                  "SPV_KHR_no_integer_wrap_decoration"};
+                                                  "SPV_KHR_no_integer_wrap_decoration", "SPV_NV_shader_subgroup_partitioned"};
     return exts;
 }
 
@@ -175,6 +175,7 @@ private:
     std::map<int, uint32_t> usedBuiltins_;  // builtin -> type (arrays: for redeclarations)
     std::set<uint32_t> neededConsts_;
     bool usesFp64_ = false;
+    bool usesInt64_ = false;  // the generated GLSL enables GL_ARB_gpu_shader_int64
 
     // per function
     std::unordered_map<uint32_t, Block> blk_;
@@ -249,6 +250,7 @@ private:
         switch (op(t)) {
             case OpTypeBool: return "bool";
             case OpTypeInt:
+                if (in(t)[2] == 64) { usesInt64_ = true; return in(t)[3] ? "int64_t" : "uint64_t"; }
                 if (in(t)[2] != 32) fail(num(in(t)[2]) + "-bit integers are not supported");
                 return in(t)[3] ? "int" : "uint";
             case OpTypeFloat:
@@ -260,7 +262,7 @@ private:
     }
     std::string vecPrefix(uint32_t s) {
         std::string n = scalarName(s);
-        return n == "bool" ? "b" : n == "int" ? "i" : n == "uint" ? "u" : n == "double" ? "d" : "";
+        return n == "bool" ? "b" : n == "int" ? "i" : n == "uint" ? "u" : n == "double" ? "d" : n == "int64_t" ? "i64" : n == "uint64_t" ? "u64" : "";
     }
     std::string vecName(uint32_t s, int n) { return n == 1 ? scalarName(s) : vecPrefix(s) + "vec" + num(n); }
     std::string typeBase(uint32_t t) {
@@ -494,7 +496,13 @@ private:
         switch (op(t)) {
             case OpTypeBool: return bits ? "true" : "false";
             case OpTypeInt: {
-                if (in(t)[2] != 32) fail("64-bit integers are not supported");
+                if (in(t)[2] == 64) {
+                    usesInt64_ = true;
+                    if (!in(t)[3]) return std::to_string(bits) + "ul";
+                    if (bits == 0x8000000000000000ull) return "(-9223372036854775807l - 1l)";
+                    return (int64_t)bits < 0 ? "(" + std::to_string((int64_t)bits) + "l)" : std::to_string((int64_t)bits) + "l";
+                }
+                if (in(t)[2] != 32) fail(num(in(t)[2]) + "-bit integers are not supported");
                 if (!in(t)[3]) return num((uint32_t)bits) + "u";
                 int32_t v = (int32_t)(uint32_t)bits;
                 if (v == INT32_MIN) return "(-2147483647 - 1)";
@@ -615,6 +623,8 @@ private:
     std::string val(uint32_t id, uint32_t to) { return conv(ex(id), typeOf(id), to); }
     std::string intName(uint32_t t, bool sgn) {
         int n = comps(t);
+        if (isIntT(t) && widthOf(t) == 64)
+            return n == 1 ? std::string(sgn ? "int64_t" : "uint64_t") : std::string(sgn ? "i64vec" : "u64vec") + num(n);
         return n == 1 ? std::string(sgn ? "int" : "uint") : std::string(sgn ? "ivec" : "uvec") + num(n);
     }
     std::string asInt(uint32_t id, bool sgn) { return conv(ex(id), typeOf(id), intName(typeOf(id), sgn)); }
@@ -656,6 +666,15 @@ private:
             case BuiltInBaseVertex: return "gl_BaseVertex";
             case BuiltInBaseInstance: return "gl_BaseInstance";
             case BuiltInDrawIndex: return "gl_DrawID";
+            case BuiltInSubgroupSize: return "gl_SubgroupSize";
+            case BuiltInSubgroupLocalInvocationId: return "gl_SubgroupInvocationID";
+            case BuiltInSubgroupEqMask: return "gl_SubgroupEqMask";
+            case BuiltInSubgroupGeMask: return "gl_SubgroupGeMask";
+            case BuiltInSubgroupGtMask: return "gl_SubgroupGtMask";
+            case BuiltInSubgroupLeMask: return "gl_SubgroupLeMask";
+            case BuiltInSubgroupLtMask: return "gl_SubgroupLtMask";
+            case BuiltInNumSubgroups: return "gl_NumSubgroups";
+            case BuiltInSubgroupId: return "gl_SubgroupID";
             default: fail("unsupported BuiltIn " + num(b));
         }
     }
@@ -778,6 +797,13 @@ std::string Decompiler::globalName(uint32_t id) {
     switch (sc) {
         case StorageClassUniformConstant:
             if (d.location >= 0) return "_uL" + num(d.location);
+            if (d.binding >= 0) {
+                // opaque uniforms of separately compiled stages match by binding (and type), not by id
+                std::string tn = typeName(t);
+                for (char& c : tn)
+                    if (!isalnum((unsigned char)c)) c = '_';
+                return "_uB" + num(d.binding) + "_" + tn;
+            }
             return "_u" + num(id);
         case StorageClassAtomicCounter: return "_ac" + num(std::max(0, d.binding)) + "_" + num(std::max(0, d.offset)) + "_" + num(id);
         case StorageClassUniform:
@@ -952,6 +978,10 @@ std::string Decompiler::valueExpr(uint32_t opc, uint32_t rt, const uint32_t* a, 
             if (isFloatT(rt) && widthOf(rt) == 64 && isIntT(ft) && comps(ft) == 2 && comps(rt) == 1) return "packDouble2x32(" + asInt(a[0], false) + ")";
             if (isIntT(rt) && comps(rt) == 2 && isFloatT(ft) && widthOf(ft) == 64 && comps(ft) == 1) return R + "(unpackDouble2x32(" + A(0) + "))";
             if (isIntT(rt) && isIntT(ft)) return R + "(" + A(0) + ")";
+            if (isIntT(rt) && widthOf(rt) == 64 && isFloatT(ft) && widthOf(ft) == 64)
+                return (isSignedT(rt) ? "doubleBitsToInt64(" : "doubleBitsToUint64(") + A(0) + ")";
+            if (isFloatT(rt) && widthOf(rt) == 64 && isIntT(ft) && widthOf(ft) == 64)
+                return (isSignedT(ft) ? "int64BitsToDouble(" : "uint64BitsToDouble(") + A(0) + ")";
             fail("unsupported OpBitcast");
         }
         case OpCompositeConstruct: {
@@ -1017,6 +1047,64 @@ std::string Decompiler::valueExpr(uint32_t opc, uint32_t rt, const uint32_t* a, 
         case OpDPdxCoarse: return "dFdxCoarse(" + A(0) + ")";
         case OpDPdyCoarse: return "dFdyCoarse(" + A(0) + ")";
         case OpFwidthCoarse: return "fwidthCoarse(" + A(0) + ")";
+        // KHR_shader_subgroup (a[0] is the execution scope, always Subgroup in GLSL-derived modules)
+        case OpGroupNonUniformElect: return "subgroupElect()";
+        case OpGroupNonUniformPartitionNV: return "subgroupPartitionNV(" + A(0) + ")";  // no scope operand
+        case OpGroupNonUniformAll: return "subgroupAll(" + A(1) + ")";
+        case OpGroupNonUniformAny: return "subgroupAny(" + A(1) + ")";
+        case OpGroupNonUniformAllEqual: return "subgroupAllEqual(" + A(1) + ")";
+        case OpGroupNonUniformBroadcast: return "subgroupBroadcast(" + val(a[1], rt) + ", uint(" + A(2) + "))";
+        case OpGroupNonUniformBroadcastFirst: return "subgroupBroadcastFirst(" + val(a[1], rt) + ")";
+        case OpGroupNonUniformBallot: return "subgroupBallot(" + A(1) + ")";
+        case OpGroupNonUniformInverseBallot: return "subgroupInverseBallot(" + asInt(a[1], false) + ")";
+        case OpGroupNonUniformBallotBitExtract: return "subgroupBallotBitExtract(" + asInt(a[1], false) + ", uint(" + A(2) + "))";
+        case OpGroupNonUniformBallotBitCount: {
+            const char* f = a[1] == 1 ? "subgroupBallotInclusiveBitCount(" : a[1] == 2 ? "subgroupBallotExclusiveBitCount(" : "subgroupBallotBitCount(";
+            if (a[1] > 2) fail("unsupported group operation " + num(a[1]));
+            return R + "(" + f + asInt(a[2], false) + "))";
+        }
+        case OpGroupNonUniformBallotFindLSB: return R + "(subgroupBallotFindLSB(" + asInt(a[1], false) + "))";
+        case OpGroupNonUniformBallotFindMSB: return R + "(subgroupBallotFindMSB(" + asInt(a[1], false) + "))";
+        case OpGroupNonUniformShuffle: return "subgroupShuffle(" + val(a[1], rt) + ", uint(" + A(2) + "))";
+        case OpGroupNonUniformShuffleXor: return "subgroupShuffleXor(" + val(a[1], rt) + ", uint(" + A(2) + "))";
+        case OpGroupNonUniformShuffleUp: return "subgroupShuffleUp(" + val(a[1], rt) + ", uint(" + A(2) + "))";
+        case OpGroupNonUniformShuffleDown: return "subgroupShuffleDown(" + val(a[1], rt) + ", uint(" + A(2) + "))";
+        case OpGroupNonUniformQuadBroadcast: return "subgroupQuadBroadcast(" + val(a[1], rt) + ", uint(" + A(2) + "))";
+        case OpGroupNonUniformQuadSwap: {
+            uint64_t dir = 0;
+            if (!constBits(a[2], dir) || dir > 2) fail("quad swap direction must be a constant");
+            return std::string(dir == 0 ? "subgroupQuadSwapHorizontal(" : dir == 1 ? "subgroupQuadSwapVertical(" : "subgroupQuadSwapDiagonal(") +
+                   val(a[1], rt) + ")";
+        }
+        case OpGroupNonUniformIAdd: case OpGroupNonUniformFAdd: case OpGroupNonUniformIMul: case OpGroupNonUniformFMul:
+        case OpGroupNonUniformSMin: case OpGroupNonUniformUMin: case OpGroupNonUniformFMin: case OpGroupNonUniformSMax:
+        case OpGroupNonUniformUMax: case OpGroupNonUniformFMax: case OpGroupNonUniformBitwiseAnd: case OpGroupNonUniformBitwiseOr:
+        case OpGroupNonUniformBitwiseXor: case OpGroupNonUniformLogicalAnd: case OpGroupNonUniformLogicalOr:
+        case OpGroupNonUniformLogicalXor: {
+            const char* o = "";
+            int sgn = -1;  // integer signedness the operation needs (-1: as typed)
+            switch (opc) {
+                case OpGroupNonUniformIAdd: case OpGroupNonUniformFAdd: o = "Add"; break;
+                case OpGroupNonUniformIMul: case OpGroupNonUniformFMul: o = "Mul"; break;
+                case OpGroupNonUniformSMin: o = "Min"; sgn = 1; break;
+                case OpGroupNonUniformUMin: o = "Min"; sgn = 0; break;
+                case OpGroupNonUniformFMin: o = "Min"; break;
+                case OpGroupNonUniformSMax: o = "Max"; sgn = 1; break;
+                case OpGroupNonUniformUMax: o = "Max"; sgn = 0; break;
+                case OpGroupNonUniformFMax: o = "Max"; break;
+                case OpGroupNonUniformBitwiseAnd: case OpGroupNonUniformLogicalAnd: o = "And"; break;
+                case OpGroupNonUniformBitwiseOr: case OpGroupNonUniformLogicalOr: o = "Or"; break;
+                default: o = "Xor"; break;
+            }
+            // group operations: 0 reduce, 1/2 inclusive/exclusive scan, 3 clustered, 6/7/8 partitioned (NV)
+            static const char* const kKinds[] = {"", "Inclusive", "Exclusive", "Clustered", nullptr, nullptr, "", "Inclusive", "Exclusive"};
+            if (a[1] > 8 || !kKinds[a[1]]) fail("unsupported group operation " + num(a[1]));
+            bool part = a[1] >= 6;
+            std::string v = sgn < 0 ? val(a[2], rt) : asInt(a[2], sgn);
+            std::string extra = a[1] == 3 ? ", uint(" + A(3) + ")" : part ? ", " + asInt(a[3], false) : "";
+            std::string r = std::string("subgroup") + (part ? "Partitioned" : "") + kKinds[a[1]] + o + (part ? "NV(" : "(") + v + extra + ")";
+            return sgn < 0 || R == intName(rt, sgn) ? r : R + "(" + r + ")";
+        }
         default: fail("unsupported instruction (opcode " + num(opc) + ")");
     }
 }
@@ -1525,6 +1613,7 @@ void Decompiler::emitInsn(size_t o) {
             uint64_t exec = 0;
             constBits(w[1], exec);
             if (exec == ScopeWorkgroup) line("barrier();");
+            else if (exec == ScopeSubgroup) line("subgroupBarrier();");
             else {
                 // a memory barrier at most
                 uint64_t sem = 0;
@@ -1540,7 +1629,12 @@ void Decompiler::emitInsn(size_t o) {
             uint32_t kinds = (uint32_t)sem & (MemorySemanticsUniformMemoryMask | MemorySemanticsWorkgroupMemoryMask |
                                               MemorySemanticsAtomicCounterMemoryMask | MemorySemanticsImageMemoryMask);
             if (scope == ScopeWorkgroup) line("groupMemoryBarrier();");
-            else if (kinds == MemorySemanticsWorkgroupMemoryMask) line("memoryBarrierShared();");
+            else if (scope == ScopeSubgroup) {
+                const char* k = kinds == MemorySemanticsWorkgroupMemoryMask && stage_ == Stage::Compute ? "Shared"
+                              : kinds == MemorySemanticsImageMemoryMask ? "Image"
+                              : kinds == MemorySemanticsUniformMemoryMask ? "Buffer" : "";
+                line(std::string("subgroupMemoryBarrier") + k + "();");
+            } else if (kinds == MemorySemanticsWorkgroupMemoryMask) line("memoryBarrierShared();");
             else if (kinds == MemorySemanticsImageMemoryMask) line("memoryBarrierImage();");
             else if (kinds == MemorySemanticsUniformMemoryMask) line("memoryBarrierBuffer();");
             else if (kinds == MemorySemanticsAtomicCounterMemoryMask) line("memoryBarrierAtomicCounter();");
@@ -2212,7 +2306,10 @@ std::string Decompiler::run() {
         CapabilitySampled1D, CapabilityImage1D, CapabilitySampledCubeArray, CapabilitySampledBuffer, CapabilityImageBuffer,
         CapabilityImageMSArray, CapabilityStorageImageExtendedFormats, CapabilityImageQuery, CapabilityDerivativeControl,
         CapabilityInterpolationFunction, CapabilityTransformFeedback, CapabilityGeometryStreams, CapabilityStorageImageReadWithoutFormat,
-        CapabilityStorageImageWriteWithoutFormat, CapabilityMultiViewport, CapabilityDrawParameters};
+        CapabilityStorageImageWriteWithoutFormat, CapabilityMultiViewport, CapabilityDrawParameters, CapabilityGroupNonUniform,
+        CapabilityGroupNonUniformVote, CapabilityGroupNonUniformArithmetic, CapabilityGroupNonUniformBallot,
+        CapabilityGroupNonUniformShuffle, CapabilityGroupNonUniformShuffleRelative, CapabilityGroupNonUniformClustered,
+        CapabilityGroupNonUniformQuad, CapabilityGroupNonUniformPartitionedNV, CapabilityInt64};
     for (uint32_t c : caps)
         if (!okCaps.count(c)) fail("unsupported capability " + num(c));
     for (auto& e : exts) {
@@ -2383,6 +2480,7 @@ std::string Decompiler::run() {
 
     std::string globals = declareGlobals();
     std::string src = "#version 460 core\n";
+    if (usesInt64_) src += "#extension GL_ARB_gpu_shader_int64 : enable\n";
     src += layouts + globals + "\n" + functions;
     return src;
 }

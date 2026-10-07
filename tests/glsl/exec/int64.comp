@@ -1,0 +1,49 @@
+#version 450 core
+#extension GL_ARB_gpu_shader_int64 : require
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+// runtime values the compiler cannot fold
+int64_t L(int64_t v) { return v + int64_t(seq[0]); }
+uint64_t UL(uint64_t v) { return v + uint64_t(seq[0]); }
+double D(double v) { return v + double(seq[0]); }
+
+const uint64_t K = 1ul << 40;
+const int64_t NK = -int64_t(K) * 3l;
+
+void main() {
+    int64_t a = L(0x123456789l);
+    uint64_t b = UL(0xFFFFFFFFFFFFFFFFul);
+    check(a * 16l == 0x1234567890l);
+    check(b + 1ul == 0ul && b == 0xFFFFFFFFFFFFFFFFul);
+    check((a >> 32) == 1l && (L(-8l) >> 1) == -4l && (b >> 60) == 15ul);
+    check((L(1l) << 40) == int64_t(K) && K == 0x10000000000ul && NK == -0x30000000000l);
+    check(L(-7l) / 2l == -3l && L(-7l) % 2l == -1l && UL(7ul) % 4ul == 3ul);
+    check((a & 0xFFl) == 0x89l && (a | 0x6l) == 0x12345678Fl && (a ^ a) == 0l && ~L(0l) == -1l);
+    check(L(-5l) < L(3l) && UL(3ul) < b && !(b < UL(3ul)));
+    // conversions
+    check(int64_t(-1) == -1l && uint64_t(-1) == b && int(a) == 0x23456789 && uint(b) == 0xFFFFFFFFu);
+    check(int64_t(D(-3.75)) == -3l && uint64_t(D(1e15lf)) == 1000000000000000ul);
+    check(double(L(-1099511627776l)) == -1099511627776.0 && double(UL(1ul << 63)) == 9223372036854775808.0);
+    check(int64_t(float(L(1l << 30))) == (1l << 30));
+    uint64_t imp = 5u;          // implicit uint -> uint64_t
+    int64_t imp2 = 5;           // implicit int -> int64_t
+    check(imp + imp2 == 10ul);
+    // builtins
+    check(abs(L(-5l)) == 5l && sign(L(-5l)) == -1l && sign(L(0l)) == 0l);
+    check(min(L(-5l), 3l) == -5l && max(UL(5ul), 9ul) == 9ul && clamp(L(100l), -1l, 4l) == 4l);
+    check(all(equal(mix(i64vec2(1l, 2l), i64vec2(3l, 4l), bvec2(true, false)), i64vec2(3l, 2l))));
+    check(doubleBitsToInt64(D(1.0)) == 0x3FF0000000000000l && uint64BitsToDouble(UL(0x4000000000000000ul)) == 2.0);
+    check(packInt2x32(ivec2(1, -1)) == int64_t(0xFFFFFFFF00000001ul) && unpackUint2x32(UL(0x500000007ul)) == uvec2(7u, 5u));
+    check(all(lessThan(u64vec3(UL(1ul), 2ul, 3ul), u64vec3(2ul, 3ul, 4ul))));
+    // vectors and swizzles
+    i64vec4 v = i64vec4(a, -a, L(2l), 3l);
+    v.yx += i64vec2(1l);
+    check(v.x == a + 1l && v.y == 1l - a && v.zw * 2l == i64vec2(4l, 6l));
+    // shared/local arrays
+    uint64_t arr[3] = uint64_t[3](UL(1ul), 2ul, 3ul);
+    arr[int(seq[0]) + 1] <<= 33;
+    check(arr[1] == (2ul << 33) && arr[0] + arr[2] == 4ul);
+}

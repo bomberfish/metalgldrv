@@ -31,6 +31,8 @@ static const char* baseName(BT b) {
         case BT::UInt: return "uint";
         case BT::Float: return "float";
         case BT::Double: return "double";
+        case BT::Int64: return "int64_t";
+        case BT::UInt64: return "uint64_t";
         case BT::AtomicUint: return "atomic_uint";
         case BT::Error: return "<error>";
         default: return "?";
@@ -43,6 +45,8 @@ static const char* vecPrefix(BT b) {
         case BT::Int: return "i";
         case BT::UInt: return "u";
         case BT::Double: return "d";
+        case BT::Int64: return "i64";
+        case BT::UInt64: return "u64";
         default: return "";
     }
 }
@@ -81,7 +85,7 @@ std::string Type::str() const {
 
 std::string typeMangle(const Type& t) { return t.str(); }
 
-bool isIntegerType(const Type& t) { return t.base == BT::Int || t.base == BT::UInt; }
+bool isIntegerType(const Type& t) { return t.isIntLike(); }
 
 uint32_t glTypeEnum(const Type& t0) {
     Type t = t0.stripArrays();
@@ -106,6 +110,11 @@ uint32_t glTypeEnum(const Type& t0) {
         case BT::Int: { static const uint32_t v[4] = {INT, INT_VEC2, INT_VEC3, INT_VEC4}; return v[t.vec - 1]; }
         case BT::UInt: { static const uint32_t v[4] = {UNSIGNED_INT, UNSIGNED_INT_VEC2, UNSIGNED_INT_VEC3, UNSIGNED_INT_VEC4}; return v[t.vec - 1]; }
         case BT::Bool: { static const uint32_t v[4] = {BOOL, BOOL_VEC2, BOOL_VEC3, BOOL_VEC4}; return v[t.vec - 1]; }
+        case BT::Int64: { static const uint32_t v[4] = {INT64, INT64_VEC2, INT64_VEC3, INT64_VEC4}; return v[t.vec - 1]; }
+        case BT::UInt64: {
+            static const uint32_t v[4] = {UNSIGNED_INT64, UNSIGNED_INT64_VEC2, UNSIGNED_INT64_VEC3, UNSIGNED_INT64_VEC4};
+            return v[t.vec - 1];
+        }
         case BT::AtomicUint: return UNSIGNED_INT_ATOMIC_COUNTER;
         case BT::Sampler: {
             int k = t.sampled == BT::Int ? 1 : t.sampled == BT::UInt ? 2 : 0;
@@ -185,6 +194,8 @@ static std::unordered_map<std::string, Type> buildTypeKeywords() {
     m["uint"] = Type::scalar(BT::UInt);
     m["float"] = Type::scalar(BT::Float);
     m["double"] = Type::scalar(BT::Double);
+    m["int64_t"] = Type::scalar(BT::Int64);
+    m["uint64_t"] = Type::scalar(BT::UInt64);
     m["atomic_uint"] = Type::scalar(BT::AtomicUint);
     for (int n = 2; n <= 4; n++) {
         std::string s = std::to_string(n);
@@ -193,6 +204,8 @@ static std::unordered_map<std::string, Type> buildTypeKeywords() {
         m["ivec" + s] = Type::vector(BT::Int, n);
         m["uvec" + s] = Type::vector(BT::UInt, n);
         m["bvec" + s] = Type::vector(BT::Bool, n);
+        m["i64vec" + s] = Type::vector(BT::Int64, n);
+        m["u64vec" + s] = Type::vector(BT::UInt64, n);
         m["mat" + s] = Type::matrix(BT::Float, n, n);
         m["dmat" + s] = Type::matrix(BT::Double, n, n);
         for (int r = 2; r <= 4; r++) {

@@ -177,6 +177,54 @@ std::vector<Chunk> buildChunks() {
     // The library is generated from src/glsl/runtime/fp64.metal by the build as a string literal.
     c.push_back({{"mgl_f64_lib"}, kFp64Library});
     // --- integer border color emulation (b[0] = color, b[1].x = clamp-to-border axis mask) ---
+    c.push_back({{"mgl_f64_from_i64", "mgl_f64_from_u64", "mgl_f64_to_i64", "mgl_f64_to_u64"}, R"(inline ulong mgl_f64_from_u64(ulong u) {
+    return u == 0ul ? 0ul : mgl_f64_normroundpack(0ul, 1023 + 62, u);
+}
+inline ulong mgl_f64_from_i64(long i) {
+    if (i == 0) return 0ul;
+    return mgl_f64_normroundpack(i < 0 ? MGL_F64_SIGN : 0ul, 1023 + 62, i < 0 ? 0ul - ulong(i) : ulong(i));
+}
+inline long mgl_f64_to_i64(ulong a) {
+    int e = mgl_f64_expf(a);
+    if (e == 0x7FF && (a & MGL_F64_FRAC)) return 0;
+    int k = e - 1023;
+    if (k < 0) return 0;
+    if (k > 62) return (a & MGL_F64_SIGN) ? long(0x8000000000000000ul) : long(0x7FFFFFFFFFFFFFFFul);
+    ulong m = (a & MGL_F64_FRAC) | MGL_F64_HIDDEN;
+    long v = long(k >= 52 ? m << uint(k - 52) : m >> uint(52 - k));
+    return (a & MGL_F64_SIGN) ? -v : v;
+}
+inline ulong mgl_f64_to_u64(ulong a) {
+    if (a & MGL_F64_SIGN) return 0ul;
+    int e = mgl_f64_expf(a);
+    if (e == 0x7FF) return (a & MGL_F64_FRAC) ? 0ul : 0xFFFFFFFFFFFFFFFFul;
+    int k = e - 1023;
+    if (k < 0) return 0ul;
+    if (k > 63) return 0xFFFFFFFFFFFFFFFFul;
+    ulong m = (a & MGL_F64_FRAC) | MGL_F64_HIDDEN;
+    return k >= 52 ? m << uint(k - 52) : m >> uint(52 - k);
+}
+template <int N> inline vec<ulong, N> mgl_f64_from_u64(vec<ulong, N> a) {
+    vec<ulong, N> r;
+    for (int i = 0; i < N; i++) r[i] = mgl_f64_from_u64(a[i]);
+    return r;
+}
+template <int N> inline vec<ulong, N> mgl_f64_from_i64(vec<long, N> a) {
+    vec<ulong, N> r;
+    for (int i = 0; i < N; i++) r[i] = mgl_f64_from_i64(a[i]);
+    return r;
+}
+template <int N> inline vec<long, N> mgl_f64_to_i64(vec<ulong, N> a) {
+    vec<long, N> r;
+    for (int i = 0; i < N; i++) r[i] = mgl_f64_to_i64(a[i]);
+    return r;
+}
+template <int N> inline vec<ulong, N> mgl_f64_to_u64(vec<ulong, N> a) {
+    vec<ulong, N> r;
+    for (int i = 0; i < N; i++) r[i] = mgl_f64_to_u64(a[i]);
+    return r;
+}
+)"});
     c.push_back({{"mgl_int_border"}, R"(template <typename T, typename C>
 inline T mgl_int_border(T v, C c, ulong addr) {
     constant int4* b = (constant int4*)addr;
@@ -264,6 +312,24 @@ struct mgl_array {
             c.push_back({{"mgl_stcs_" + V}, "inline void mgl_stcs_" + V + "(device uchar* p, uint o, uint s, " + V + " v) { for (int i = 0; i < " + N +
                                                 "; i++) mgl_st_ulong(p, o + i * s, v[i]); }\n"});
         }
+    }
+    // 64-bit integers (ARB_gpu_shader_int64): the bits of the ulong accessors
+    {
+        std::string ld, st;
+        for (const char* as : {"constant", "device const", "threadgroup const"})
+            ld += std::string("inline long mgl_ld_long(") + as + " uchar* p, uint o) { return as_type<long>(*(" + as + " uint2*)(p + o)); }\n";
+        c.push_back({{"mgl_ld_long"}, ld});
+        c.push_back({{"mgl_st_long"}, "inline void mgl_st_long(device uchar* p, uint o, long v) { *(device uint2*)(p + o) = as_type<uint2>(v); }\n"});
+        for (int n = 2; n <= 4; n++) {
+            std::string V = "long" + std::to_string(n), U = "ulong" + std::to_string(n);
+            c.push_back({{"mgl_ld_" + V}, "template <typename P> inline " + V + " mgl_ld_" + V + "(P p, uint o) { return " + V + "(mgl_ld_" + U + "(p, o)); }\n"});
+            c.push_back({{"mgl_st_" + V}, "inline void mgl_st_" + V + "(device uchar* p, uint o, " + V + " v) { mgl_st_" + U + "(p, o, " + U + "(v)); }\n"});
+            c.push_back({{"mgl_ldcs_" + V}, "template <typename P> inline " + V + " mgl_ldcs_" + V + "(P p, uint o, uint s) { return " + V + "(mgl_ldcs_" + U +
+                                                "(p, o, s)); }\n"});
+            c.push_back({{"mgl_stcs_" + V}, "inline void mgl_stcs_" + V + "(device uchar* p, uint o, uint s, " + V + " v) { mgl_stcs_" + U + "(p, o, s, " +
+                                                U + "(v)); }\n"});
+        }
+        c.push_back({{"mgl_upk_long"}, "inline long mgl_upk_long(uint4 u) { return as_type<long>(u.xy); }\n"});
     }
     c.push_back({{"mgl_dmat"}, kDmatHelpers});
     c.push_back({{"mgl_eq_f64_overloads"}, R"(inline bool mgl_eq(ulong a, ulong b) { return mgl_f64_eq(a, b); }
@@ -467,6 +533,146 @@ inline float4 mgl_blend_advanced(float4 s, float4 d, uint mode, bool noDstAlpha,
         default: return true;
     }
 }
+)"});
+    // KHR_shader_subgroup on SIMD-groups (32 lanes on Apple GPUs). Inactive lanes take no part:
+    // lane loops walk the active mask, which is the same in all active lanes.
+    c.push_back({{"mgl_sg_lane", "mgl_sg_mask", "mgl_sg_ballot", "mgl_sg_bit", "mgl_sg_shfl", "mgl_sg_first", "mgl_sg_alleq",
+                  "mgl_sg_red", "mgl_sg_scan", "mgl_sg_add", "mgl_sg_mul", "mgl_sg_min", "mgl_sg_max", "mgl_sg_and", "mgl_sg_or",
+                  "mgl_sg_xor", "mgl_sg_k", "mgl_sg_part", "mgl_sg_pred"},
+                 R"(inline uint mgl_sg_mask() { return uint(ulong(simd_ballot(true))); }
+// Operations whose result depends on the set of active lanes (reductions, scans, votes) take their operand
+// through mgl_sg_k: XOR with "no lane is active", always 0 in a running lane. The Metal compiler otherwise
+// merges such a call with an identical one in a dominating block that ran with more lanes active.
+template <typename T> struct mgl_sg_u { typedef uint t; };
+template <typename T, int N> struct mgl_sg_u<vec<T, N>> { typedef vec<uint, N> t; };
+template <typename T> inline T mgl_sg_k(T v) {
+    typedef typename mgl_sg_u<T>::t U;
+    return as_type<T>(as_type<U>(v) ^ U(uint(mgl_sg_mask() == 0u)));
+}
+inline bool mgl_sg_k(bool v) { return v != (mgl_sg_mask() == 0u); }
+// Lane index without [[thread_index_in_simdgroup]] (vertex functions): the k-th set bit of the active mask,
+// k = the number of active lanes below this one.
+inline uint mgl_sg_lane() {
+    uint m = mgl_sg_mask(), k = simd_prefix_exclusive_sum(mgl_sg_k(1u)), pos = 0u;
+    for (uint w = 16u; w != 0u; w >>= 1u) {
+        uint c = popcount(m & ((1u << w) - 1u));
+        if (k >= c) { k -= c; m >>= w; pos += w; }
+    }
+    return pos;
+}
+inline uint4 mgl_sg_ballot(bool b) { return uint4(uint(ulong(simd_ballot(b))), 0u, 0u, 0u); }
+inline bool mgl_sg_bit(uint4 v, uint i) { return i < 32u && ((v.x >> i) & 1u) != 0u; }
+template <typename T> inline T mgl_sg_shfl(T v, uint l) { return simd_shuffle(v, ushort(l)); }
+inline bool mgl_sg_shfl(bool v, uint l) { return simd_shuffle(uint(v), ushort(l)) != 0u; }
+template <int N> inline vec<bool, N> mgl_sg_shfl(vec<bool, N> v, uint l) { return simd_shuffle(vec<uint, N>(v), ushort(l)) != 0u; }
+inline ulong mgl_sg_shfl(ulong v, uint l) { return as_type<ulong>(simd_shuffle(as_type<uint2>(v), ushort(l))); }
+template <int N> inline vec<ulong, N> mgl_sg_shfl(vec<ulong, N> v, uint l) {
+    vec<ulong, N> r;
+    for (int i = 0; i < N; i++) r[i] = mgl_sg_shfl(v[i], l);
+    return r;
+}
+template <typename T> inline T mgl_sg_first(T v) { return mgl_sg_shfl(v, ctz(mgl_sg_mask())); }
+template <typename T> inline bool mgl_sg_alleq(T v) { return simd_all(mgl_sg_k(all(v == mgl_sg_first(v)))); }
+inline bool mgl_sg_alleq(bool v) { return simd_all(mgl_sg_k(v == mgl_sg_first(v))); }
+inline bool mgl_sg_alleq(float v) { return simd_all(mgl_sg_k(v == mgl_sg_first(v))); }
+inline bool mgl_sg_alleq(int v) { return simd_all(mgl_sg_k(v == mgl_sg_first(v))); }
+inline bool mgl_sg_alleq(uint v) { return simd_all(mgl_sg_k(v == mgl_sg_first(v))); }
+template <typename T> struct mgl_sg_e { typedef T t; };
+template <typename T, int N> struct mgl_sg_e<vec<T, N>> { typedef T t; };
+inline float mgl_sg_hi(float) { return INFINITY; }
+inline int mgl_sg_hi(int) { return 0x7fffffff; }
+inline uint mgl_sg_hi(uint) { return 0xffffffffu; }
+inline float mgl_sg_lo(float) { return -INFINITY; }
+inline int mgl_sg_lo(int) { return int(0x80000000u); }
+inline uint mgl_sg_lo(uint) { return 0u; }
+// operations: f combines, id is the identity (element type)
+struct mgl_sg_add { template <typename T> static T f(T a, T b) { return a + b; } template <typename E> static E id(E) { return E(0); } };
+struct mgl_sg_mul { template <typename T> static T f(T a, T b) { return a * b; } template <typename E> static E id(E) { return E(1); } };
+struct mgl_sg_min { template <typename T> static T f(T a, T b) { return min(a, b); } template <typename E> static E id(E e) { return mgl_sg_hi(e); } };
+struct mgl_sg_max { template <typename T> static T f(T a, T b) { return max(a, b); } template <typename E> static E id(E e) { return mgl_sg_lo(e); } };
+struct mgl_sg_and { template <typename T> static T f(T a, T b) { return a & b; } template <typename E> static E id(E) { return E(~0u); } };
+struct mgl_sg_or { template <typename T> static T f(T a, T b) { return a | b; } template <typename E> static E id(E) { return E(0); } };
+struct mgl_sg_xor { template <typename T> static T f(T a, T b) { return a ^ b; } template <typename E> static E id(E) { return E(0); } };
+// Reduction over the active lanes of each cluster of c lanes (c = 32: the whole SIMD-group).
+template <typename O, typename T> inline T mgl_sg_red(T v, uint lane, uint c) {
+    uint m = mgl_sg_mask();
+    c = min(c, 32u);
+    if (m == 0xffffffffu) {
+        for (uint d = 1u; d < c; d <<= 1u) v = O::f(v, mgl_sg_shfl(v, lane ^ d));
+        return v;
+    }
+    T r = T(O::id(typename mgl_sg_e<T>::t()));
+    uint base = lane & ~(c - 1u);
+    for (; m != 0u; m &= m - 1u) {
+        uint i = ctz(m);
+        T x = mgl_sg_shfl(v, i);
+        if ((i & ~(c - 1u)) == base) r = O::f(r, x);
+    }
+    return r;
+}
+// NV_shader_subgroup_partitioned: the active lanes holding the same value, and operations over the
+// active lanes of a ballot (kind 0 reduce, 1 inclusive scan, 2 exclusive scan).
+template <typename T> inline bool mgl_sg_same(T a, T b) { return all(a == b); }
+inline bool mgl_sg_same(bool a, bool b) { return a == b; }
+inline bool mgl_sg_same(float a, float b) { return a == b; }
+inline bool mgl_sg_same(int a, int b) { return a == b; }
+inline bool mgl_sg_same(uint a, uint b) { return a == b; }
+inline bool mgl_sg_same(ulong a, ulong b) { return a == b; }
+template <typename T> inline uint4 mgl_sg_part(T v) {
+    uint r = 0u;
+    for (uint m = mgl_sg_mask(); m != 0u; m &= m - 1u) {
+        uint i = ctz(m);
+        if (mgl_sg_same(mgl_sg_shfl(v, i), v)) r |= 1u << i;
+    }
+    return uint4(r, 0u, 0u, 0u);
+}
+template <typename O, typename T> inline T mgl_sg_pred(T v, uint lane, uint4 b, int kind) {
+    T r = T(O::id(typename mgl_sg_e<T>::t()));
+    for (uint m = mgl_sg_mask(); m != 0u; m &= m - 1u) {
+        uint i = ctz(m);
+        T x = mgl_sg_shfl(v, i);
+        if (((b.x >> i) & 1u) != 0u && (kind == 0 || i < lane || (kind == 1 && i == lane))) r = O::f(r, x);
+    }
+    return r;
+}
+// Inclusive / exclusive scan over the active lanes.
+template <typename O, typename T> inline T mgl_sg_scan(T v, uint lane, bool incl) {
+    uint m = mgl_sg_mask();
+    T id = T(O::id(typename mgl_sg_e<T>::t()));
+    if ((m & (m + 1u)) == 0u) {  // lanes 0..n-1 active
+        for (uint d = 1u; d < 32u; d <<= 1u) {
+            T x = mgl_sg_shfl(v, lane - d);
+            if (lane >= d) v = O::f(x, v);
+        }
+        if (incl) return v;
+        T x = mgl_sg_shfl(v, lane - 1u);
+        return lane == 0u ? id : x;
+    }
+    T r = id;
+    for (; m != 0u; m &= m - 1u) {
+        uint i = ctz(m);
+        T x = mgl_sg_shfl(v, i);
+        if (i < lane || (incl && i == lane)) r = O::f(r, x);
+    }
+    return r;
+}
+)"});
+    // doubles (ulong bit patterns, fp64 library arithmetic)
+    c.push_back({{"mgl_sgd_alleq", "mgl_sgd_part", "mgl_sgd_add", "mgl_sgd_mul", "mgl_sgd_min", "mgl_sgd_max"},
+                 R"(inline bool mgl_sgd_alleq(ulong v) { return simd_all(mgl_sg_k(mgl_f64_eq(v, mgl_sg_first(v)))); }
+template <int N> inline bool mgl_sgd_alleq(vec<ulong, N> v) { return simd_all(mgl_sg_k(all(mgl_f64_eq(v, mgl_sg_first(v))))); }
+template <typename T> inline uint4 mgl_sgd_part(T v) {
+    uint r = 0u;
+    for (uint m = mgl_sg_mask(); m != 0u; m &= m - 1u) {
+        uint i = ctz(m);
+        if (all(mgl_f64_eq(mgl_sg_shfl(v, i), v))) r |= 1u << i;
+    }
+    return uint4(r, 0u, 0u, 0u);
+}
+struct mgl_sgd_add { template <typename T> static T f(T a, T b) { return mgl_f64_add(a, b); } static ulong id(ulong) { return 0ul; } };
+struct mgl_sgd_mul { template <typename T> static T f(T a, T b) { return mgl_f64_mul(a, b); } static ulong id(ulong) { return 0x3FF0000000000000ul; } };
+struct mgl_sgd_min { template <typename T> static T f(T a, T b) { return mgl_f64_min(a, b); } static ulong id(ulong) { return 0x7FF0000000000000ul; } };
+struct mgl_sgd_max { template <typename T> static T f(T a, T b) { return mgl_f64_max(a, b); } static ulong id(ulong) { return 0xFFF0000000000000ul; } };
 )"});
     // multi-pass helpers: split the embedded file at "//@chunk sym..." markers
     {
