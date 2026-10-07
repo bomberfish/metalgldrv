@@ -123,8 +123,9 @@ TEST(lod_bias_sweep) {
     CHECK_EQ(lodBiasSweep(false), 0);
     CHECK_EQ(lodBiasSweep(true, 1), 0);
     CHECK_EQ(lodBiasSweep(true, 2), 0);
-    // Not checked: shader bias() together with a nonzero GL_TEXTURE_LOD_BIAS loses LOD precision on
-    // Apple GPUs (up to ~1/4 level; KHR-GL46.texture_lod_bias_all's one failing combination).
+    // both together (Apple GPUs lose precision when a sampler lodBias meets bias(); shaders add the
+    // texture bias themselves)
+    CHECK_EQ(lodBiasSweep(true), 0);
     CHECK_GL();
 }
 

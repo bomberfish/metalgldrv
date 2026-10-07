@@ -345,6 +345,7 @@ private:
     bool addressable(const Expr* e);
     bool isBufferRooted(const Expr* e);
     std::pair<std::string, std::string> texRef(const Expr* e);
+    std::string texBias_;  // LOD bias (float) of the sampler resolved by the last texRef(), "" for images
     std::string withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs, const std::vector<Type>& ptypes,
                          const Type& ret, const std::function<std::string(size_t, const Expr*)>& argFn, const std::string& firstArg = "");
     std::string subroutineDispatchers();
@@ -1096,8 +1097,10 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         if (it == P->opaque.end()) fail("internal: opaque uniform '" + p + "' has no binding");
         const OpaqueBinding& ob = it->second;
         std::string t = "A->s" + std::to_string(ob.slot), sm = ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : "";
+        texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         if (e->kind == EK::Index) {
             std::string idx = ex(e->args[1]);
+            if (!texBias_.empty()) texBias_ += "[" + idx + "]";
             return {t + "[" + idx + "]", sm.empty() ? "" : sm + "[" + idx + "]"};
         }
         return {t, sm};
@@ -1106,16 +1109,20 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         const Variable* v = e->var;
         if (v->param) {
             std::string n = varName(v);
+            texBias_ = v->type.base == BT::Sampler ? n + "_b" : "";
             return {n + "_t", n + "_s"};
         }
         auto it = P->opaque.find(v->name);
         if (it == P->opaque.end()) fail("internal: opaque uniform '" + v->name + "' has no binding");
         const OpaqueBinding& ob = it->second;
+        texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
     }
     if (e->kind == EK::Index && e->args[0]->kind == EK::Var) {
         auto r = texRef(e->args[0]);
+        std::string b = texBias_;
         std::string idx = ex(e->args[1]);
+        texBias_ = b.empty() ? "" : b + "[" + idx + "]";
         return {r.first + "[" + idx + "]", r.second.empty() ? "" : r.second + "[" + idx + "]"};
     }
     fail("unsupported sampler/image expression");
@@ -1134,7 +1141,7 @@ std::string Emitter::callUser(const Expr* e) {
     return withOuts(fnNames_.at(f), e, outs, ptypes, f->ret, [&](size_t i, const Expr* a) -> std::string {
         if (a->type.base == BT::Sampler) {
             auto r = texRef(a);
-            return r.first + ", " + r.second;
+            return r.first + ", " + r.second + ", " + texBias_;
         }
         if (a->type.base == BT::Image) return texRef(a).first;
         if (a->type.base == BT::AtomicUint) {
@@ -1457,6 +1464,9 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     const auto& A = e->args;
     const Type T = A[0]->type.stripArrays();
     auto [tex, smp] = texRef(A[0]);
+    // GL_TEXTURE_LOD_BIAS of the bound sampler: Metal sampler states carry no bias (combining a
+    // sampler lodBias with bias() loses LOD precision on Apple GPUs), so lookups add it here.
+    const std::string texBias = texBias_.empty() ? std::string("0.0f") : texBias_ + ".x";
     std::string pre;
     const bool sh = T.shadow, arr = T.arrayed, rect = T.dim == Dim::Rect;
     const Dim dim = T.dim;
@@ -1632,9 +1642,14 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         return finish(tex + (sh ? ".gather_compare(" : ".gather(") + args + ")");
     }
     std::string options, offset;
-    if (isLod) options = "level(" + ex(A[ai++]) + ")";
+    bool fragment = stage_ == Stage::Fragment;
+    std::string ct = (dim == Dim::D3 || dim == Dim::Cube) ? "float3" : "float2";
+    std::string gradFn = dim == Dim::D3 ? "gradient3d" : dim == Dim::Cube ? "gradientcube" : "gradient2d";
+    if (isLod) options = "level(" + ex(A[ai++]) + " + " + texBias + ")";
     else if (isGrad) {
-        std::string dx = ex(A[ai++]), dy = ex(A[ai++]);
+        // scaling the gradients by 2^bias raises the LOD by exactly bias
+        std::string sc = bind("exp2(" + texBias + ")", "float", pre);
+        std::string dx = "(" + ex(A[ai++]) + ") * " + sc, dy = "(" + ex(A[ai++]) + ") * " + sc;
         if (dim == Dim::D1) options = "gradient2d(float2(" + dx + ", 0.0f), float2(" + dy + ", 0.0f))";
         else if (dim == Dim::D3) options = "gradient3d(" + dx + ", " + dy + ")";
         else if (dim == Dim::Cube) options = "gradientcube(" + dx + ", " + dy + ")";
@@ -1644,13 +1659,21 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         std::string o = ex(A[ai++]);
         offset = dim == Dim::D1 ? "int2(" + o + ", 0)" : o;
     }
-    if (ai < A.size() && !isLod && !isGrad) options = "bias(" + ex(A[ai++]) + ")";
+    if (!isLod && !isGrad) {
+        std::string b = texBias;
+        if (ai < A.size()) b = "(" + ex(A[ai++]) + ") + " + texBias;
+        if (!fragment) options = "level(" + b + ")";  // implicit LOD is 0 outside fragment shaders
+        else if (!sh) options = "bias(" + b + ")";
+        else {
+            // sample_compare has no bias(): scale the implicit derivatives instead
+            coord = bind(coord, ct, pre);
+            std::string sc = bind("exp2(" + b + ")", "float", pre);
+            options = gradFn + "(dfdx(" + coord + ") * " + sc + ", dfdy(" + coord + ") * " + sc + ")";
+        }
+    }
     std::string args = smp + ", " + coord;
     if (!layer.empty()) args += ", " + layer;
-    if (sh) {
-        args += ", " + ref;
-        if (options.compare(0, 4, "bias") == 0) options.clear();
-    }
+    if (sh) args += ", " + ref;
     if (!options.empty()) args += ", " + options;
     if (!offset.empty()) args += ", " + offset;
     return finish(tex + (sh ? ".sample_compare(" : ".sample(") + args + ")");
@@ -1883,9 +1906,10 @@ std::string Emitter::fnSignature(const Function* f) {
             if (t.dims.size() > 1) fail("arrays of arrays of samplers as function parameters are not supported");
             if (t.isArray()) {
                 std::string N = std::to_string(t.dims[0]);
-                r += "constant array<" + texType(t.stripArrays(), 0) + ", " + N + ">& " + n + "_t, constant array<sampler, " + N + ">& " + n + "_s";
+                r += "constant array<" + texType(t.stripArrays(), 0) + ", " + N + ">& " + n + "_t, constant array<sampler, " + N + ">& " + n +
+                     "_s, constant array<float2, " + N + ">& " + n + "_b";
             } else {
-                r += texType(t, 0) + " " + n + "_t, sampler " + n + "_s";
+                r += texType(t, 0) + " " + n + "_t, sampler " + n + "_s, float2 " + n + "_b";
             }
             continue;
         }
@@ -2045,6 +2069,7 @@ void Emitter::emitArgs(std::string& o) {
         if (ob.kind == SlotKind::Texture) {
             group(ob.slot, texType(ob.type, 0));
             group(ob.samplerSlot, "sampler");
+            if (ob.biasSlot >= 0) group(ob.biasSlot, "float2");
         } else if (ob.kind == SlotKind::Image) {
             group(ob.slot, texType(ob.type, ob.memory));
         }

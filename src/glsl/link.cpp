@@ -879,6 +879,9 @@ void Linker::assignUniforms() {
             ob.samplerSlot = slot;
             for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::Sampler, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
             slot += n;
+            ob.biasSlot = slot;
+            for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::LodBias, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
+            slot += n;
         } else if (bt.base == BT::Image) {
             ob.kind = SlotKind::Image;
             ob.slot = slot;

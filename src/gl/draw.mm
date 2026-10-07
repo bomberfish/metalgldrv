@@ -441,6 +441,19 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             memcpy(&v, &rid, 8);
             break;
         }
+        case glsl::SlotKind::LodBias: {
+            // GL_TEXTURE_LOD_BIAS of the effective sampler state, added by the shader
+            int unit = std::clamp(prog->samplerUnits[i], 0, kMaxTextureUnits - 1);
+            int ti = texTargetIndex(s.textureTarget);
+            Texture* t = ti >= 0 ? ctx->textures[unit][ti].get() : nullptr;
+            float bias = t ? t->sampler.lodBias : 0.0f;
+            if (Sampler* so = ctx->samplers[unit].get()) bias = so->state.lodBias;
+            bias = std::clamp(bias, -16.0f, 16.0f);  // MAX_TEXTURE_LOD_BIAS
+            uint32_t bits;
+            memcpy(&bits, &bias, 4);
+            v = bits;
+            break;
+        }
         case glsl::SlotKind::Image: {
             int unit = std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1);
             ImageUnit& iu = ctx->imageUnits[unit];
