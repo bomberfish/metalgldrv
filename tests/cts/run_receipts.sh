@@ -26,8 +26,10 @@ run KHR-GL46-113x47 gl46 pbuffer --width 113 --height 47 --seed 2
 run KHR-GL46-fbo-64xD gl46 fbo -c rgba8888d24s8 --width 64 --height -1 --seed 3
 run KHR-GL46-fbo-Dx64 gl46 fbo -c rgba8888d24s8 --width -1 --height 64 --seed 3
 # The runner's other-config table: every other EGL config (src/egl/egl.mm kConfigs ids 2-6)
-# runs the main list at 64x64 seed 1 and 113x47 seed 2.
-for id in 2 3 4 5 6; do
+# runs the main list at 64x64 seed 1 and 113x47 seed 2. Multisampled configs are excluded
+# ("Multisampled: Not testable", glcConfigListEGL.cpp requires EGL_SAMPLES == 0), so id 4
+# (4x MSAA) is not part of the matrix.
+for id in 2 3 5 6; do
     run KHR-GL46-cfg$id gl46 pbuffer -c $id
     run KHR-GL46-cfg$id-113x47 gl46 pbuffer -c $id --width 113 --height 47 --seed 2
 done
