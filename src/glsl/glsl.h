@@ -46,7 +46,10 @@ enum : int {
 };
 }  // namespace limits_detail
 constexpr int kMaxCombinedTextureImageUnits = limits_detail::gl_MaxCombinedTextureImageUnits_v;
-constexpr int kMaxImageUnits = limits_detail::gl_MaxImageUnits_v;  // must match mgl::kMaxImageUnits (static_assert in context.mm)
+constexpr int kMaxImageUnits = limits_detail::gl_MaxImageUnits_v;
+// GL_MAX_IMAGE_SAMPLES / gl_MaxImageSamples under METALGLDRV_STRICT (limits.def has the default, 0):
+// multisample images through per-sample shadows (src/gl/draw.mm).
+constexpr int kStrictMaxImageSamples = 4;  // must match mgl::kMaxImageUnits (static_assert in context.mm)
 constexpr int kMaxUniformBufferBindings = 84;
 constexpr int kMaxShaderStorageBufferBindings = 16;
 constexpr int kMaxAtomicCounterBufferBindings = limits_detail::gl_MaxAtomicCounterBindings_v;
@@ -54,6 +57,7 @@ constexpr int kMaxAtomicCounterBufferBindings = limits_detail::gl_MaxAtomicCount
 struct CompileOptions {
     bool compatibilityProfile = true;  // accept GL compatibility builtins (gl_Vertex, ftransform, ...)
     int maxVersion = 460;
+    bool strict = false;  // METALGLDRV_STRICT (limits that differ, e.g. gl_MaxImageSamples)
 };
 
 CompileResult compile(Stage stage, const std::vector<std::string>& sources, const CompileOptions& opts = {});
@@ -100,7 +104,8 @@ const std::vector<std::string>& supportedSpirvExtensions();
 enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer,
                                 SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */,
                                 LodBias /* like Sampler: float (low 32 bits) GL_TEXTURE_LOD_BIAS of the unit's effective sampler */,
-                                SamplerBorder /* integer samplers: GPU address of int4[2] {border color, clamp-to-border axis mask} */ };
+                                SamplerBorder /* integer samplers: GPU address of int4[2] {border color, clamp-to-border axis mask} */,
+                                ImageSamples /* multisample images: uint2 {sample count of the bound image, 0} */ };
 
 struct Slot {
     SlotKind kind;
@@ -195,6 +200,11 @@ struct LinkInput {
     std::vector<std::string> xfbVaryings;         // glTransformFeedbackVaryings
     bool xfbInterleaved = true;
     bool separable = false;
+    // METALGLDRV_STRICT: emit the accuracy features that cost performance and aren't needed for
+    // conformance (integer border colors, ...).
+    bool strict = false;
+    // texelFetch outside the texture / mip range returns zero (robust access; on under strict).
+    bool robustTexelFetch = false;
 };
 
 struct LinkedProgram;  // opaque compiled program state (holds the per-stage IR)

@@ -99,6 +99,23 @@ struct MSIntArgs { texture2d_ms<int> src; };
 struct MSUintArgs { texture2d_ms<uint> src; };
 fragment int4 resolve_fs_int(QuadOut in [[stage_in]], constant MSIntArgs& a [[buffer(1)]]) { return a.src.read(uint2(in.uv), 0); }
 fragment uint4 resolve_fs_uint(QuadOut in [[stage_in]], constant MSUintArgs& a [[buffer(1)]]) { return a.src.read(uint2(in.uv), 0); }
+// Multisample images (METALGLDRV_STRICT, draw.mm): per-sample 2D-array shadows of multisample
+// textures, slice = layer * samples + sample. p = {samples, arrayed}.
+#define MS_SHADOW(T, sfx)                                                                                              \
+struct MSShadowArgs_##sfx { texture2d_ms<T> ms; texture2d_ms_array<T> msa; texture2d_array<T, access::write> shadow; }; \
+kernel void ms_to_shadow_##sfx(constant MSShadowArgs_##sfx& a [[buffer(0)]], constant uint2& p [[buffer(1)]],          \
+                               uint3 g [[thread_position_in_grid]]) {                                                 \
+    if (g.x >= a.shadow.get_width() || g.y >= a.shadow.get_height() || g.z >= a.shadow.get_array_size()) return;    \
+    a.shadow.write(p.y ? a.msa.read(g.xy, g.z / p.x, g.z % p.x) : a.ms.read(g.xy, g.z), g.xy, g.z);                 \
+}                                                                                                                     \
+struct ShadowArgs_##sfx { texture2d_array<T> shadow; };                                                              \
+fragment vec<T, 4> shadow_to_ms_##sfx(QuadOut in [[stage_in]], uint s [[sample_id]], constant ShadowArgs_##sfx& a [[buffer(1)]], \
+                                      constant QuadArgs& q [[buffer(0)]]) {                                           \
+    return a.shadow.read(uint2(in.pos.xy), q.slice + s);                                                             \
+}
+MS_SHADOW(float, f)
+MS_SHADOW(int, i)
+MS_SHADOW(uint, u)
 // GL_RGB32{F,I,UI} buffer textures: tightly packed 12-byte texels -> RGBA32 (alpha = 1).
 kernel void expand_rgb32(device const uint* src [[buffer(0)]], device uint4* dst [[buffer(1)]], constant uint2& p [[buffer(2)]],
                          uint i [[thread_position_in_grid]]) {
@@ -420,6 +437,84 @@ void resolveSample0(Context* ctx, id<MTLTexture> src, id<MTLTexture> dst, bool i
         [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     }
     [e endEncoding];
+}
+
+static const char* const kShadowSuffix[3] = {"f", "i", "u"};
+
+void msImageToShadow(Context* ctx, id<MTLTexture> ms, id<MTLTexture> shadow, int kind) {
+    static std::mutex m;
+    static id<MTLComputePipelineState> psos[3];
+    id<MTLComputePipelineState> pso;
+    {
+        std::lock_guard<std::mutex> g(m);
+        if (!psos[kind]) {
+            MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
+            d.computeFunctionDescriptor = fnDesc(internalLibrary(), [NSString stringWithFormat:@"ms_to_shadow_%s", kShadowSuffix[kind]]);
+            NSError* err = nil;
+            psos[kind] = [Device::get()->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
+            if (!psos[kind]) MGL_ERR("ms_to_shadow pipeline failed: %s", err.localizedDescription.UTF8String);
+        }
+        pso = psos[kind];
+    }
+    if (!pso) return;
+    bool arrayed = ms.textureType == MTLTextureType2DMultisampleArray;
+    UploadAlloc aa = ctx->upload(24, 8);
+    MTLResourceID rids[3] = {arrayed ? MTLResourceID{0} : ms.gpuResourceID, arrayed ? ms.gpuResourceID : MTLResourceID{0}, shadow.gpuResourceID};
+    memcpy(aa.cpu, rids, sizeof rids);
+    UploadAlloc pa = ctx->upload(8);
+    uint32_t p[2] = {(uint32_t)ms.sampleCount, arrayed ? 1u : 0u};
+    memcpy(pa.cpu, p, 8);
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    [e barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    [e setComputePipelineState:pso];
+    [ctx->computeArgTable setAddress:aa.gpu atIndex:0];
+    [ctx->computeArgTable setAddress:pa.gpu atIndex:1];
+    [e dispatchThreads:MTLSizeMake(shadow.width, shadow.height, shadow.arrayLength) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+    [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+}
+
+void msImageFromShadow(Context* ctx, id<MTLTexture> shadow, id<MTLTexture> ms, int kind) {
+    ctx->endEncoder();
+    MTLPixelFormat colors[kMaxDrawBuffers];
+    for (int i = 0; i < kMaxDrawBuffers; i++) colors[i] = MTLPixelFormatInvalid;
+    colors[0] = ms.pixelFormat;
+    NSString* fs = [NSString stringWithFormat:@"shadow_to_ms_%s", kShadowSuffix[kind]];
+    std::string key = std::string("shadow_to_ms_") + kShadowSuffix[kind] + "_" + std::to_string(colors[0]) + "_" + std::to_string(ms.sampleCount);
+    id<MTLRenderPipelineState> pso = internalPipeline(key, internalLibrary(), @"quad_vs", fs, colors, nullptr, (int)ms.sampleCount);
+    if (!pso) return;
+    NSUInteger layers = ms.textureType == MTLTextureType2DMultisampleArray ? ms.arrayLength : 1;
+    UploadAlloc pa = ctx->upload(8);
+    MTLResourceID rid = shadow.gpuResourceID;
+    memcpy(pa.cpu, &rid, 8);
+    for (NSUInteger l = 0; l < layers; l++) {
+        // every sample of every pixel is written: per-sample shading ([[sample_id]]) of a full quad
+        MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
+        rp.colorAttachments[0].texture = ms;
+        rp.colorAttachments[0].slice = l;
+        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        rp.renderTargetWidth = ms.width;
+        rp.renderTargetHeight = ms.height;
+        id<MTL4RenderCommandEncoder> e = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rp];
+        [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment | MTLStageVertex visibilityOptions:MTL4VisibilityOptionDevice];
+        [e setArgumentTable:ctx->renderArgTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [e setRenderPipelineState:pso];
+        MTLViewport vp = {0, 0, (double)ms.width, (double)ms.height, 0, 1};
+        [e setViewport:vp];
+        UploadAlloc qa = ctx->upload(sizeof(QuadArgsCPU));
+        QuadArgsCPU q;
+        q.rect[0] = -1; q.rect[1] = -1; q.rect[2] = 1; q.rect[3] = 1;
+        q.srcRect[0] = 0; q.srcRect[1] = 0; q.srcRect[2] = 0; q.srcRect[3] = 0;
+        q.depth = 0;
+        q.lod = 0;
+        q.slice = (uint32_t)(l * ms.sampleCount);
+        q.pad = 0;
+        memcpy(qa.cpu, &q, sizeof q);
+        [ctx->renderArgTable setAddress:qa.gpu atIndex:0];
+        [ctx->renderArgTable setAddress:pa.gpu atIndex:1];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        [e endEncoding];
+    }
 }
 
 void expandRgb32(Context* ctx, uint64_t srcAddr, uint64_t dstAddr, uint32_t texels, uint32_t alphaBits) {

@@ -193,6 +193,9 @@ public:
     id<MTLTexture> fbSnapshotSrc = nil;
     uint64_t fbSnapshotPass = 0;
     std::unordered_map<ViewKey, id<MTLTexture>, ViewKeyHash> fbSnapshotViews;
+    // Multisample textures bound as images (METALGLDRV_STRICT): per-sample 2D-array shadow, see
+    // msImageShadow() in draw.mm.
+    id<MTLTexture> msShadow = nil;
 
     // Drops cached views, keeping them alive until in-flight GPU work that may
     // reference them (by MTLResourceID) has completed.

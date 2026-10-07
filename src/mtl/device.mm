@@ -69,7 +69,9 @@ bool Device::init() {
         caps.bcCompression = mtl.supportsBCTextureCompression;
         caps.maxThreadsPerThreadgroup = (uint32_t)mtl.maxThreadsPerThreadgroup.width;
         caps.maxThreadgroupMemory = (uint32_t)mtl.maxThreadgroupMemoryLength;
-        MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression);
+        caps.strict = envFlag("METALGLDRV_STRICT", false);
+        MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d%s)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression,
+                 caps.strict ? ", strict" : "");
     }
     return true;
 }

@@ -368,7 +368,7 @@ bool Parser::run(const PPResult& pp) {
         preamble_ = true;
         {
             CompileOptions o;
-            PPResult pre = preprocess({builtinPreamble(sh_.stage)}, sh_.stage, o);
+            PPResult pre = preprocess({builtinPreamble(sh_.stage, opts_.strict)}, sh_.stage, o);
             parseTokens(pre.tokens);
         }
         preamble_ = false;

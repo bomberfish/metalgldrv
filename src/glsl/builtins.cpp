@@ -1,5 +1,6 @@
 #include "glsl/builtins.h"
 
+#include <cstring>
 #include <sstream>
 #include <unordered_map>
 
@@ -637,14 +638,16 @@ const std::vector<const Builtin*>* findBuiltins(const std::string& name) {
     return it == c.byName.end() ? nullptr : &it->second;
 }
 
-const std::string& builtinPreamble(Stage stage) {
-    static std::string cache[(int)Stage::Count];
+const std::string& builtinPreamble(Stage stage, bool strict) {
+    static std::string cache[2][(int)Stage::Count];
     static bool init = false;
     if (!init) {
         init = true;
+        for (int st = 0; st < 2; st++)
         for (int s = 0; s < (int)Stage::Count; s++) {
             std::string p;
-#define X(name, glenum, value) p += "const int " #name " = " + std::to_string(value) + ";\n";
+#define X(name, glenum, value) \
+    p += "const int " #name " = " + std::to_string(st && !std::strcmp(#name, "gl_MaxImageSamples") ? kStrictMaxImageSamples : value) + ";\n";
 #include "limits.def"
 #undef X
             p += kCommonPreamble;
@@ -657,10 +660,10 @@ const std::string& builtinPreamble(Stage stage) {
                 case Stage::Compute: p += kComputePreamble; break;
                 default: break;
             }
-            cache[s] = p;
+            cache[st][s] = p;
         }
     }
-    return cache[(int)stage];
+    return cache[strict ? 1 : 0][(int)stage];
 }
 
 BuiltinVar builtinVarId(const std::string& n, Stage stage) {

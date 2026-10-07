@@ -53,7 +53,7 @@ void setupLinkedProgram(ProgramObj* p) {
         const auto& sl = r.slots[s];
         if (sl.kind == glsl::SlotKind::Texture || sl.kind == glsl::SlotKind::Sampler || sl.kind == glsl::SlotKind::Image ||
             sl.kind == glsl::SlotKind::LodBias ||
-            sl.kind == glsl::SlotKind::SamplerBorder) {
+            sl.kind == glsl::SlotKind::SamplerBorder || sl.kind == glsl::SlotKind::ImageSamples) {
             if (sl.index < r.uniforms.size()) p->samplerUnits[s] = r.uniforms[sl.index].binding + sl.element;
         }
     }
@@ -173,6 +173,7 @@ API void APIENTRY glCompileShader(GLuint shader) {
     glsl::Stage st = stageForType(s->type, &ok);
     glsl::CompileOptions opts;
     opts.compatibilityProfile = !ctx->coreProfile;
+    opts.strict = ctx->strict;
     glsl::CompileResult r = glsl::compile(st, s->sources, opts);
     s->shader = r.shader;
     s->compiled = r.shader != nullptr;
@@ -279,6 +280,7 @@ API void APIENTRY glSpecializeShader(GLuint shader, const GLchar* pEntryPoint, G
     for (GLuint i = 0; i < n; i++) constants.push_back({idx[i], val[i]});
     glsl::CompileOptions opts;
     opts.compatibilityProfile = false;
+    opts.strict = ctx->strict;
     glsl::SpecializeResult r = glsl::specializeSpirv(*s->spirvModule, st, pEntryPoint, constants, opts);
     switch (r.status) {
     case glsl::SpecializeStatus::BadEntryPoint: return ctx->setError(GL_INVALID_VALUE, "no SPIR-V entry point '%s' for this stage", pEntryPoint);
@@ -485,6 +487,8 @@ API void APIENTRY glLinkProgram(GLuint program) {
     in.xfbVaryings = p->xfbVaryings;
     in.xfbInterleaved = p->xfbBufferMode == GL_INTERLEAVED_ATTRIBS;
     in.separable = p->separable;
+    in.strict = ctx->strict;
+    in.robustTexelFetch = ctx->robustAccess;
     p->linkGeneration++;
     // A failed (re)link keeps the previous executable (p->program, refl, variants): GL keeps
     // using it while the program stays current (§7.3); only LINK_STATUS turns false.
@@ -984,7 +988,7 @@ static void setUniform(Context* ctx, ProgramObj* p, GLint location, GLsizei coun
             if ((int)sl.index != loc.uniform) continue;
             if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Sampler && sl.kind != glsl::SlotKind::Image &&
                 sl.kind != glsl::SlotKind::LodBias &&
-                sl.kind != glsl::SlotKind::SamplerBorder)
+                sl.kind != glsl::SlotKind::SamplerBorder && sl.kind != glsl::SlotKind::ImageSamples)
                 continue;
             int e = (int)sl.element - loc.element;
             if (e >= 0 && e < n) p->samplerUnits[s] = v[e];

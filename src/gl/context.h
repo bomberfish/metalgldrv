@@ -137,6 +137,7 @@ public:
     Ref<ShareGroup> share;
     int majorVersion, minorVersion;
     bool coreProfile, debugContext, forwardCompatible, robustAccess, noErrorMode;
+    bool strict;  // dev->caps.strict (METALGLDRV_STRICT)
     bool loseContextOnReset = false;
     GLenum clampReadColor = GL_FIXED_ONLY;  // glClampColor(GL_CLAMP_READ_COLOR)  // RESET_NOTIFICATION_STRATEGY requested at creation
     bool everCurrent = false;
@@ -295,6 +296,13 @@ public:
         NSUInteger level, z;
     };
     std::vector<ImageSliceWriteback> imageWritebacks;
+    // Writable multisample image bindings (METALGLDRV_STRICT): per-sample shadows written back into
+    // their multisample textures after the draw/dispatch (draw.mm, msImageShadow).
+    struct MSImageWriteback {
+        id<MTLTexture> shadow, ms;
+        int kind;  // 0 float, 1 int, 2 uint
+    };
+    std::vector<MSImageWriteback> msImageWritebacks;
     uint64_t drawFbVersionSeen = 0;
     id<MTL4RenderCommandEncoder> renderEnc = nil;
     id<MTL4ComputeCommandEncoder> computeEnc = nil;

@@ -116,6 +116,10 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
 #include "glsl/limits.def"
 #undef X
     };
+    if (pname == GL_MAX_IMAGE_SAMPLES && ctx->strict) {
+        v = I(glsl::kStrictMaxImageSamples);
+        return true;
+    }
     if (pname != 0)
         for (auto& [e, val] : kShaderLimits)
             if (e == pname) {

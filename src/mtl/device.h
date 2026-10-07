@@ -21,6 +21,9 @@ struct DeviceCaps {
     uint32_t maxThreadgroupMemory = 32768;
     bool hasFamilyApple9 = false;
     bool bcCompression = false;
+    // METALGLDRV_STRICT=1, read once at startup: accuracy features that cost performance and
+    // aren't needed for conformance (docs/ARCHITECTURE.md, "Environment variables").
+    bool strict = false;
 };
 
 class Device {

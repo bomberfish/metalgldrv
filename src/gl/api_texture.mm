@@ -2078,9 +2078,12 @@ API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, G
     bool reinterpret = tf && t->target != GL_TEXTURE_BUFFER && formatInfo(format)->mtl != tf->mtl;
     bool needView = reinterpret && !t->needsFormatView;
     if (needView) t->needsFormatView = true;
-    if (!t->needsShaderWrite || needView) {
-        t->needsShaderWrite = true;
-        bool missing = t->mtl && (!(t->mtl.usage & MTLTextureUsageShaderWrite) ||
+    // Multisample images are accessed through a shadow (draw.mm, msImageShadow): the texture
+    // itself only needs a format view.
+    bool ms = t->samples > 0;
+    if ((!t->needsShaderWrite && !ms) || needView) {
+        t->needsShaderWrite |= !ms;
+        bool missing = t->mtl && ((!ms && !(t->mtl.usage & MTLTextureUsageShaderWrite)) ||
                                   (needView && !(t->mtl.usage & MTLTextureUsagePixelFormatView)));
         if (missing && t->target != GL_TEXTURE_BUFFER) {
             // Reallocate with write (and format view) usage, copying contents.

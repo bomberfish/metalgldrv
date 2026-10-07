@@ -1023,6 +1023,12 @@ void Linker::assignUniforms() {
             ob.slot = slot;
             for (int gi = 0; gi < groups; gi++) us[gi].slot = slot + gi * inner;
             pushSlots(SlotKind::Image);
+            // Multisample images are per-sample 2D-array shadows (slice = layer * samples + sample),
+            // so the shader needs the sample count.
+            if (bt.ms) {
+                ob.samplesSlot = slot;
+                pushSlots(SlotKind::ImageSamples);
+            }
         } else {  // atomic_uint
             ob.kind = SlotKind::AtomicCounter;
             int binding = declBinding.count(v->name) ? declBinding[v->name] : 0;
@@ -1598,6 +1604,8 @@ void Linker::checkBlockInterfaces() {
 LinkResult Linker::run() {
     prog_ = std::make_shared<LinkedProgram>();
     prog_->separable = in_.separable;
+    prog_->strict = in_.strict;
+    prog_->robustTexelFetch = in_.robustTexelFetch || in_.strict;
     for (auto& sh : in_.shaders) {
         if (!sh) { error("attempt to link an uncompiled shader"); continue; }
         prog_->stages[(int)sh->stage].shaders.push_back(sh);

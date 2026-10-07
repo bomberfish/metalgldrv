@@ -141,7 +141,10 @@ private:
             if (t.dim == Dim::Cube) return t.arrayed ? "depthcube_array<float>" : "depthcube<float>";
             return t.arrayed ? "depth2d_array<float>" : "depth2d<float>";
         }
-        if (t.ms) return (t.arrayed ? "texture2d_ms_array<" : "texture2d_ms<") + T + (image ? ", access::read" : "") + ">";
+        // Metal can't write multisample textures: multisample images are bound as per-sample
+        // 2D-array shadows (draw.mm, msImageShadow), slice = layer * samples + sample.
+        if (t.ms && image) return "texture2d_array<" + T + acc + ">";
+        if (t.ms) return t.arrayed ? "texture2d_ms_array<" + T + ">" : "texture2d_ms<" + T + ">";
         switch (t.dim) {
             case Dim::D1:
             case Dim::D2:
@@ -350,6 +353,7 @@ private:
     std::string opaqueIndex(const Expr* e, const Expr*& base);
     std::string texBias_;  // LOD bias (float) of the sampler resolved by the last texRef(), "" for images
     std::string texBorder_;  // emulated integer border (GPU address) of the last texRef(), "" if none
+    std::string texSamples_;  // uint2 sample count of the multisample image of the last texRef(), "" if none
     std::string withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs, const std::vector<Type>& ptypes,
                          const Type& ret, const std::function<std::string(size_t, const Expr*)>& argFn, const std::string& firstArg = "");
     std::string subroutineDispatchers();
@@ -1121,10 +1125,12 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         std::string t = "A->s" + std::to_string(ob.slot), sm = ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : "";
         texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         texBorder_ = ob.borderSlot >= 0 ? "A->s" + std::to_string(ob.borderSlot) : "";
+        texSamples_ = ob.samplesSlot >= 0 ? "A->s" + std::to_string(ob.samplesSlot) : "";
         if (e->kind == EK::Index) {
             std::string idx = ex(e->args[1]);
             if (!texBias_.empty()) texBias_ += "[" + idx + "]";
             if (!texBorder_.empty()) texBorder_ += "[" + idx + "]";
+            if (!texSamples_.empty()) texSamples_ += "[" + idx + "]";
             return {t + "[" + idx + "]", sm.empty() ? "" : sm + "[" + idx + "]"};
         }
         return {t, sm};
@@ -1135,6 +1141,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
             std::string n = varName(v);
             texBias_ = v->type.base == BT::Sampler ? n + "_b" : "";
             texBorder_ = "";  // not emulated through function parameters
+            texSamples_ = v->type.base == BT::Image && v->type.ms ? n + "_n" : "";
             return {n + "_t", n + "_s"};
         }
         auto it = P->opaque.find(v->name);
@@ -1142,6 +1149,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         const OpaqueBinding& ob = it->second;
         texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         texBorder_ = ob.borderSlot >= 0 ? "A->s" + std::to_string(ob.borderSlot) : "";
+        texSamples_ = ob.samplesSlot >= 0 ? "A->s" + std::to_string(ob.samplesSlot) : "";
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
     }
     if (e->kind == EK::Index) {
@@ -1150,6 +1158,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         auto r = texRef(base);
         texBias_ = texBias_.empty() ? "" : texBias_ + "[" + idx + "]";
         texBorder_ = texBorder_.empty() ? "" : texBorder_ + "[" + idx + "]";
+        texSamples_ = texSamples_.empty() ? "" : texSamples_ + "[" + idx + "]";
         return {r.first + "[" + idx + "]", r.second.empty() ? "" : r.second + "[" + idx + "]"};
     }
     fail("unsupported sampler/image expression");
@@ -1194,7 +1203,10 @@ std::string Emitter::callUser(const Expr* e) {
             auto r = texRef(a);
             return r.first + ", " + r.second + ", " + texBias_;
         }
-        if (a->type.base == BT::Image) return texRef(a).first;
+        if (a->type.base == BT::Image) {
+            std::string t = texRef(a).first;
+            return a->type.ms ? t + ", " + texSamples_ : t;
+        }
         if (a->type.base == BT::AtomicUint) {
             std::string pre;
             return atomicPtr(a, pre);
@@ -1568,10 +1580,14 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
             return finish(r);
         }
         // Out-of-range texel coordinates or levels read as zero (as robust GL implementations
-        // do; Metal's read() is undefined there). Casting to uint folds the < 0 test in.
+        // do; Metal's read() is undefined there). Casting to uint folds the < 0 test in. GL leaves
+        // these reads undefined without robust access, so only robust contexts and
+        // METALGLDRV_STRICT pay for the size queries.
+        const bool robust = this->P->robustTexelFetch;
         if (dim == Dim::Buffer) {
             P = bind(P, "int", pre);
             r = tex + ".read(uint(" + P + "))";
+            if (!robust) return finish(r);
             return finish("(uint(" + P + ") < " + tex + ".get_width() ? " + r + " : decltype(" + r + ")(0))");
         }
         bool hasLod = !(dim == Dim::Rect || A.size() < 3 || (off && A.size() < 4));
@@ -1601,6 +1617,7 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
             r = tex + ".read(uint2(" + P + ")" + lod + ")";
             inb = "all(uint2(" + P + ") < uint2(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + ")))";
         }
+        if (!robust) return finish(r);
         if (hasLod) inb = L + " < " + tex + ".get_num_mip_levels() && " + inb;
         return finish("(" + inb + " ? " + r + " : decltype(" + r + ")(0))");
     }
@@ -1781,21 +1798,34 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     std::string tex = texRef(A[0]).first;
     std::string pre;
     auto finish = [&](const std::string& r) { return pre.empty() ? r : "(" + pre + r + ")"; };
+    const std::string samples = T.ms ? "(" + texSamples_ + ").x" : "";
     if (n == "imageSize") {
         std::string w = tex + ".get_width()", h = tex + ".get_height()";
         std::string r;
-        if (T.dim == Dim::Buffer) r = "int(" + w + ")";
+        if (T.ms) r = T.arrayed ? "int3(" + w + ", " + h + ", int(" + tex + ".get_array_size() / max(" + samples + ", 1u)))" : "int2(" + w + ", " + h + ")";
+        else if (T.dim == Dim::Buffer) r = "int(" + w + ")";
         else if (T.dim == Dim::D1) r = T.arrayed ? "int2(" + w + ", " + tex + ".get_array_size())" : "int(" + w + ")";
         else if (T.dim == Dim::D3) r = "int3(" + w + ", " + h + ", " + tex + ".get_depth())";
         else if (T.dim == Dim::Cube) r = T.arrayed ? "int3(" + w + ", " + h + ", int(" + tex + ".get_array_size()) / 6)" : "int2(" + w + ", " + h + ")";
         else r = T.arrayed ? "int3(" + w + ", " + h + ", " + tex + ".get_array_size())" : "int2(" + w + ", " + h + ")";
         return r;
     }
-    if (n == "imageSamples") return "int(" + tex + ".get_num_samples())";
+    if (n == "imageSamples") return "int(" + samples + ")";
     std::string P = bind(ex(A[1]), mt(A[1]->type), pre);
     std::string coord, layer;
     bool layered = T.arrayed || T.dim == Dim::Cube;
-    switch (T.dim) {
+    size_t ai = 2;
+    if (T.ms) {
+        // per-sample shadow: slice = layer * samples + sample
+        std::string s = "uint(" + ex(A[ai++]) + ")";
+        if (T.arrayed) {
+            coord = "uint2(" + P + ".xy)";
+            layer = "(uint(" + P + ".z) * " + samples + " + " + s + ")";
+        } else {
+            coord = "uint2(" + P + ")";
+            layer = s;
+        }
+    } else switch (T.dim) {
         case Dim::D1:
             coord = T.arrayed ? "uint2(uint(" + P + ".x), 0u)" : "uint2(uint(" + P + "), 0u)";
             if (T.arrayed) layer = "uint(" + P + ".y)";
@@ -1810,19 +1840,14 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
         case Dim::Buffer: coord = "uint(" + P + ")"; break;
         default: fail("bad image");
     }
-    size_t ai = 2;
-    std::string sample;
-    if (T.ms) sample = "uint(" + ex(A[ai++]) + ")";
     std::string loc = coord + (layer.empty() ? "" : ", " + layer);
-    if (n == "imageLoad") return finish(tex + ".read(" + loc + (sample.empty() ? "" : ", " + sample) + ")");
+    if (n == "imageLoad") return finish(tex + ".read(" + loc + ")");
     // read_write textures need fence() so the invocation sees its own writes (GLSL guarantees this)
     const Expr* imgRoot = A[0];
     while (imgRoot->kind == EK::Index) imgRoot = imgRoot->args[0];
     uint8_t imgMem = imgRoot->kind == EK::Var ? imgRoot->var->q.memory : 0;
     bool rw = !(imgMem & (MemReadOnly | MemWriteOnly));
     if (n == "imageStore") {
-        // Metal cannot write multisample textures: the store is dropped (the program still links).
-        if (T.ms) return finish("((void)(" + ex(A[ai]) + "))");
         std::string w = tex + ".write(" + ex(A[ai]) + ", " + loc + ")";
         if (rw) w = "(" + w + ", " + tex + ".fence())";
         return finish(w);
@@ -2012,9 +2037,10 @@ std::string Emitter::fnSignature(const Function* f) {
         if (t.base == BT::Image) {
             if (t.dims.size() > 1) fail("arrays of arrays of images as function parameters are not supported");
             if (t.isArray())
-                r += "constant array<" + texType(t.stripArrays(), p->q.memory) + ", " + std::to_string(t.dims[0]) + ">& " + n + "_t";
+                r += "constant array<" + texType(t.stripArrays(), p->q.memory) + ", " + std::to_string(t.dims[0]) + ">& " + n + "_t" +
+                     (t.ms ? ", constant array<uint2, " + std::to_string(t.dims[0]) + ">& " + n + "_n" : "");
             else
-                r += texType(t, p->q.memory) + " " + n + "_t";
+                r += texType(t, p->q.memory) + " " + n + "_t" + (t.ms ? ", uint2 " + n + "_n" : "");
             continue;
         }
         if (t.base == BT::AtomicUint) {
@@ -2200,6 +2226,7 @@ void Emitter::emitArgs(std::string& o) {
             if (ob.borderSlot >= 0) group(ob.borderSlot, "ulong");
         } else if (ob.kind == SlotKind::Image) {
             group(ob.slot, texType(ob.type, ob.memory));
+            if (ob.samplesSlot >= 0) group(ob.samplesSlot, "uint2");
         }
     }
     for (auto& acb : P->refl.atomicCounterBuffers) decl[acb.slot] = "device uchar* s" + std::to_string(acb.slot) + ";";

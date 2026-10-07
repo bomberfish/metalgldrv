@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include "gl/gltypes.h"
+#include "gl/internal_shaders.h"
 #include "gl/pipeline.h"
 #include "util/log.h"
 #include "util/stats.h"
@@ -226,8 +227,61 @@ static id<MTLTexture> imageSliceCopy(Context* ctx, id<MTLTexture> src, MTLPixelF
     return pf == tmp.pixelFormat ? tmp : [tmp newTextureViewWithPixelFormat:pf];
 }
 
-// Copies image slices written through imageSliceCopy() back into their 3D textures.
+// Multisample images (METALGLDRV_STRICT; otherwise GL_MAX_IMAGE_SAMPLES is 0 and these image
+// units are invalid). Metal can't write multisample textures from shaders, so the shader sees a
+// per-sample 2D-array shadow (slice = layer * samples + sample, see imageFn() in msl.cpp). Each
+// draw/dispatch copies the texture into the shadow first, and writable bindings copy the shadow
+// back into every sample afterwards (flushImageWritebacks), so all other uses of the texture
+// (sampling, attachments, blits, later image bindings) see the image writes.
+static id<MTLTexture> msImageShadow(Context* ctx, Texture* t, const ImageUnit& iu, MTLPixelFormat pf, const FormatInfo* f) {
+    id<MTLTexture> ms = t->mtl;
+    if (pf != ms.pixelFormat) {
+        ms = [ms newTextureViewWithPixelFormat:pf];
+        if (!ms) return nil;
+        ctx->dev->retainUntil(ms, ctx->serial());
+    }
+    NSUInteger S = ms.sampleCount, layers = ms.textureType == MTLTextureType2DMultisampleArray ? ms.arrayLength : 1;
+    id<MTLTexture> sh = t->msShadow;
+    if (!sh || sh.pixelFormat != pf || sh.width != ms.width || sh.height != ms.height || sh.arrayLength != layers * S) {
+        MTLTextureDescriptor* d = [MTLTextureDescriptor new];
+        d.textureType = MTLTextureType2DArray;
+        d.pixelFormat = pf;
+        d.width = ms.width;
+        d.height = ms.height;
+        d.arrayLength = layers * S;
+        d.storageMode = MTLStorageModePrivate;
+        d.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        if (pf == MTLPixelFormatR32Uint || pf == MTLPixelFormatR32Sint) d.usage |= MTLTextureUsageShaderAtomic;
+        if (t->msShadow) ctx->dev->releaseAfter(t->msShadow, ctx->serial());
+        t->msShadow = sh = [ctx->dev->mtl newTextureWithDescriptor:d];
+        if (!sh) return nil;
+        ctx->dev->makeResident(sh);
+    }
+    FmtKind k = f ? f->kind : t->storageFmt->kind;
+    int kind = k == FmtKind::UInt ? 2 : k == FmtKind::SInt ? 1 : 0;
+    MGL_STAT("ms-image-shadow");
+    msImageToShadow(ctx, ms, sh, kind);
+    if (iu.access != GL_READ_ONLY) {
+        bool queued = false;
+        for (auto& wb : ctx->msImageWritebacks) queued |= wb.shadow == sh;
+        if (!queued) ctx->msImageWritebacks.push_back({sh, ms, kind});
+    }
+    if (layers > 1 && !iu.layered) {
+        if ((NSUInteger)iu.layer >= layers) return nil;
+        id<MTLTexture> v = [sh newTextureViewWithPixelFormat:pf textureType:MTLTextureType2DArray levels:NSMakeRange(0, 1)
+                                                      slices:NSMakeRange(iu.layer * S, S)];
+        if (v) ctx->dev->retainUntil(v, ctx->serial());
+        return v;
+    }
+    return sh;
+}
+
+// Copies image slices written through imageSliceCopy() back into their 3D textures, and
+// multisample image shadows back into their textures.
 static void flushImageWritebacks(Context* ctx) {
+    for (auto& wb : ctx->msImageWritebacks) msImageFromShadow(ctx, wb.shadow, wb.ms, wb.kind);
+    ctx->msImageWritebacks.clear();
     if (ctx->imageWritebacks.empty()) return;
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
     [e barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
@@ -502,6 +556,9 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                     view = t->mtl;
                     // image stores go to the buffer's memory: CPU access must wait for them
                     if (t->buffer) t->buffer->lastUse = t->buffer->lastGpuWrite = serial;
+                } else if (t->mtl.sampleCount > 1) {
+                    if (pf != t->mtl.pixelFormat && !(t->mtl.usage & MTLTextureUsagePixelFormatView)) pf = t->mtl.pixelFormat;
+                    if (ctx->strict) view = msImageShadow(ctx, t, iu, pf, f);
                 } else {
                     MTLTextureType vt = mtlTextureType(s.textureTarget, t->samples);
                     // imageCube / imageCubeArray are declared as texture2d_array in MSL.
@@ -532,6 +589,12 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             } else {
                 v = 0;
             }
+            break;
+        }
+        case glsl::SlotKind::ImageSamples: {
+            // uint2 {samples, 0}: the multisample image's shadow has samples slices per layer
+            const ImageUnit& iu = ctx->imageUnits[std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1)];
+            v = ctx->strict && iu.tex && iu.tex->mtl ? iu.tex->mtl.sampleCount : 0;
             break;
         }
         case glsl::SlotKind::SubroutineIndices: {
@@ -2651,9 +2714,10 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
         st.csInvocations = (uint64_t)g[0] * g[1] * g[2] * prog->refl.localSize[0] * prog->refl.localSize[1] * prog->refl.localSize[2];
         mglStatsCountDraw(ctx, st);
     }
+    // Arguments first: binding them may encode copies (image shadows) into the compute encoder.
+    uint64_t argAddr = buildArguments(ctx, prog, true);
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
     [e setComputePipelineState:pso];
-    uint64_t argAddr = buildArguments(ctx, prog, true);
     [ctx->computeArgTable setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
     [ctx->computeArgTable setAddress:buildSys(ctx, prog, 0, 0, 0, 0) atIndex:glsl::kBufSys];
     MTLSize tg = MTLSizeMake(prog->refl.localSize[0], prog->refl.localSize[1], prog->refl.localSize[2]);
