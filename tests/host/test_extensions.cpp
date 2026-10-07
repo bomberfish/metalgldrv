@@ -152,3 +152,37 @@ TEST(layer_written_nonlayered_fbo) {
         CHECK_GL();
     }
 }
+
+// ARB_texture_filter_minmax: a 2x2 R8 texture {0, 255, 255, 255} sampled at its center with
+// GL_LINEAR gives the average, the minimum or the maximum of the four texels.
+TEST(texture_filter_minmax) {
+    if (!hasExtension("GL_ARB_texture_filter_minmax")) return;
+    const char* vs = "#version 330 core\nin vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0, 1); }";
+    const char* fs = "#version 330 core\nuniform sampler2D s;\nout vec4 c;\nvoid main() { c = texture(s, vec2(0.5)); }";
+    GLuint p = compileProgram(vs, fs);
+    glUseProgram(p);
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    static const uint8_t texels[] = {0, 255, 255, 255};
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 2, 2, 0, GL_RED, GL_UNSIGNED_BYTE, texels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    const GLenum modes[] = {GL_WEIGHTED_AVERAGE_ARB, GL_MIN, GL_MAX};
+    const int expect[] = {191, 0, 255};
+    for (int m = 0; m < 3; m++) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_REDUCTION_MODE_ARB, modes[m]);
+        GLint q = 0;
+        glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_REDUCTION_MODE_ARB, &q);
+        CHECK_EQ(q, (GLint)modes[m]);
+        drawQuad(p);
+        uint8_t px[4];
+        readPixel(8, 8, px);
+        if (abs(px[0] - expect[m]) > 2) {
+            testFail(__FILE__, __LINE__, "reduction 0x" + std::to_string(modes[m]) + ": got " + std::to_string(px[0]) +
+                                             " expected " + std::to_string(expect[m]));
+        }
+    }
+    CHECK_GL();
+}

@@ -368,6 +368,11 @@ struct DrawStats {
 void mglStatsCountDraw(Context* ctx, const DrawStats& st);
 uint64_t mglStatsGpuSlot(Context* ctx, bool gs, bool tess);
 
+// Extensions advertised only on GPUs that can do them (api_get.mm): GL_EXTENSIONS names, and
+// the GLSL #extension names the shader compiler accepts on this device (CompileOptions).
+std::vector<const char*> mglDeviceExtensions(const DeviceCaps& caps);
+const std::vector<std::string>& mglDeviceGlslExtensions(const DeviceCaps& caps);
+
 // Common entry-point prologue.
 // The entry point's name is remembered for GL error logging (METALGLDRV_LOG=3) only.
 extern thread_local const char* t_apiName;

@@ -67,6 +67,9 @@ bool Device::init() {
 #endif
         caps.hasFamilyApple9 = [mtl supportsFamily:MTLGPUFamilyApple9];
         caps.bcCompression = mtl.supportsBCTextureCompression;
+        // Sampler min/max reduction: an Apple10 GPU (M5) applies reductionMode; an Apple9 one (M4 Pro)
+        // accept the descriptor but always average.
+        caps.samplerReduction = [mtl supportsFamily:MTLGPUFamilyApple10];
         caps.maxThreadsPerThreadgroup = (uint32_t)mtl.maxThreadsPerThreadgroup.width;
         caps.maxThreadgroupMemory = (uint32_t)mtl.maxThreadgroupMemoryLength;
         MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression);

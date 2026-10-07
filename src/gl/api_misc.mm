@@ -242,6 +242,14 @@ API void APIENTRY glGetInternalformativ(GLenum target, GLenum internalformat, GL
     case GL_TEXTURE_COMPRESSED_BLOCK_WIDTH: params[0] = f ? f->blockW : 0; return;
     case GL_TEXTURE_COMPRESSED_BLOCK_HEIGHT: params[0] = f ? f->blockH : 0; return;
     case GL_TEXTURE_COMPRESSED_BLOCK_SIZE: params[0] = f && f->comp == Comp::Compressed ? f->bytesPerPixel : 0; return;
+    case GL_TEXTURE_REDUCTION_MODE_ARB:  // ARB_texture_filter_minmax: filterable formats
+        if (!ctx->dev->caps.samplerReduction) return ctx->setError(GL_INVALID_ENUM);
+        if (!f)  // unsized base formats choose a filterable format
+            params[0] = internalformat == GL_RED || internalformat == GL_RG || internalformat == GL_RGB || internalformat == GL_RGBA ||
+                        internalformat == GL_DEPTH_COMPONENT || internalformat == GL_DEPTH_STENCIL;
+        else
+            params[0] = f->kind != FmtKind::SInt && f->kind != FmtKind::UInt && f->kind != FmtKind::Stencil;
+        return;
     default: params[0] = 0; return;
     }
 }

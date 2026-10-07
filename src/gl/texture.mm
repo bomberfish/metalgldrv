@@ -439,7 +439,7 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     int32_t k[] = {(int32_t)s.minFilter, (int32_t)s.magFilter, (int32_t)s.wrapS, (int32_t)s.wrapT, (int32_t)s.wrapR,
                    q(s.minLod, 0.0f, 1000.0f), q(s.maxLod, 0.0f, 1000.0f), 0,
                    s.compareMode == GL_COMPARE_REF_TO_TEXTURE ? (int32_t)s.compareFunc : 0,
-                   (int32_t)std::clamp(lroundf(s.maxAnisotropy), 1L, 16L), border, isInteger ? 1 : 0};
+                   (int32_t)std::clamp(lroundf(s.maxAnisotropy), 1L, 16L), border, isInteger ? 1 : 0, (int32_t)s.reductionMode};
     std::string key((const char*)k, sizeof k);
     std::lock_guard<std::mutex> g(m);
     auto it = cache.find(key);
@@ -468,6 +468,15 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     d.maxAnisotropy = std::clamp((NSUInteger)lroundf(s.maxAnisotropy), (NSUInteger)1, (NSUInteger)16);
     if (d.maxAnisotropy > 1 && d.mipFilter == MTLSamplerMipFilterNotMipmapped) d.maxAnisotropy = 1;
     if (s.compareMode == GL_COMPARE_REF_TO_TEXTURE) d.compareFunction = compareFunc(s.compareFunc);
+    if (s.reductionMode != GL_WEIGHTED_AVERAGE_ARB && !isInteger) {
+        // ARB_texture_filter_minmax. Metal ignores the reduction mode without mipmap filtering,
+        // so a non-mipmapped GL_LINEAR lookup becomes a linear-mip one confined to the base level.
+        d.reductionMode = s.reductionMode == GL_MIN ? MTLSamplerReductionModeMinimum : MTLSamplerReductionModeMaximum;
+        if (d.mipFilter == MTLSamplerMipFilterNotMipmapped) {
+            d.mipFilter = MTLSamplerMipFilterLinear;
+            d.lodMinClamp = d.lodMaxClamp = 0;
+        }
+    }
     d.supportArgumentBuffers = YES;
     d.normalizedCoordinates = YES;
     id<MTLSamplerState> st = [Device::get()->mtl newSamplerStateWithDescriptor:d];

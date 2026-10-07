@@ -21,6 +21,7 @@ struct DeviceCaps {
     uint32_t maxThreadgroupMemory = 32768;
     bool hasFamilyApple9 = false;
     bool bcCompression = false;
+    bool samplerReduction = false;  // MTLSamplerDescriptor.reductionMode honored (ARB_texture_filter_minmax)
 };
 
 class Device {

@@ -108,6 +108,7 @@ struct SamplerState {
     GLenum wrapS = GL_REPEAT, wrapT = GL_REPEAT, wrapR = GL_REPEAT;
     float minLod = -1000, maxLod = 1000, lodBias = 0;
     GLenum compareMode = GL_NONE, compareFunc = GL_LEQUAL;
+    GLenum reductionMode = GL_WEIGHTED_AVERAGE_ARB;  // ARB_texture_filter_minmax
     float maxAnisotropy = 1;
     float borderColor[4] = {0, 0, 0, 0};
     bool borderIsInt = false;

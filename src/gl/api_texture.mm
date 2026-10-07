@@ -702,6 +702,11 @@ static bool samplerParam(Context* ctx, SamplerState& s, GLenum pname, const doub
         s.maxAnisotropy = (float)std::min(v[0], 16.0);
         return true;
     case GL_TEXTURE_CUBE_MAP_SEAMLESS: s.seamless = v[0] != 0; return true;
+    case GL_TEXTURE_REDUCTION_MODE_ARB:
+        if (!ctx->dev->caps.samplerReduction) return false;
+        if (e != GL_WEIGHTED_AVERAGE_ARB && e != GL_MIN && e != GL_MAX) return ctx->setError(GL_INVALID_ENUM), true;
+        s.reductionMode = e;
+        return true;
     default: return false;
     }
 }
@@ -714,7 +719,7 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
         switch (pname) {
         case GL_TEXTURE_MIN_FILTER: case GL_TEXTURE_MAG_FILTER: case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T: case GL_TEXTURE_WRAP_R:
         case GL_TEXTURE_MIN_LOD: case GL_TEXTURE_MAX_LOD: case GL_TEXTURE_LOD_BIAS: case GL_TEXTURE_COMPARE_MODE:
-        case GL_TEXTURE_COMPARE_FUNC: case GL_TEXTURE_MAX_ANISOTROPY: case GL_TEXTURE_BORDER_COLOR:
+        case GL_TEXTURE_COMPARE_FUNC: case GL_TEXTURE_MAX_ANISOTROPY: case GL_TEXTURE_BORDER_COLOR: case GL_TEXTURE_REDUCTION_MODE_ARB:
             return ctx->setError(dsa ? GL_INVALID_OPERATION : GL_INVALID_ENUM, "sampler state on a multisample texture");
         default: break;
         }
@@ -843,6 +848,7 @@ static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int
     case GL_TEXTURE_COMPARE_MODE: out[0] = s.compareMode; return true;
     case GL_TEXTURE_COMPARE_FUNC: out[0] = s.compareFunc; return true;
     case GL_TEXTURE_MAX_ANISOTROPY: out[0] = s.maxAnisotropy; return true;
+    case GL_TEXTURE_REDUCTION_MODE_ARB: out[0] = s.reductionMode; return ctx->dev->caps.samplerReduction;
     case GL_TEXTURE_BORDER_COLOR: *n = 4; for (int k = 0; k < 4; k++) out[k] = s.borderColor[k]; return true;
     case GL_TEXTURE_BASE_LEVEL: out[0] = t->baseLevel; return true;
     case GL_TEXTURE_MAX_LEVEL: out[0] = t->maxLevel; return true;
@@ -2257,6 +2263,10 @@ static bool getSamplerParam(Context* ctx, GLuint sampler, GLenum pname, double* 
     case GL_TEXTURE_COMPARE_MODE: out[0] = st.compareMode; return true;
     case GL_TEXTURE_COMPARE_FUNC: out[0] = st.compareFunc; return true;
     case GL_TEXTURE_MAX_ANISOTROPY: out[0] = st.maxAnisotropy; return true;
+    case GL_TEXTURE_REDUCTION_MODE_ARB:
+        if (!ctx->dev->caps.samplerReduction) return ctx->setError(GL_INVALID_ENUM), false;
+        out[0] = st.reductionMode;
+        return true;
     case GL_TEXTURE_CUBE_MAP_SEAMLESS: out[0] = st.seamless; return true;
     case GL_TEXTURE_BORDER_COLOR: *n = 4; for (int k = 0; k < 4; k++) out[k] = st.borderColor[k]; return true;
     default: ctx->setError(GL_INVALID_ENUM); return false;

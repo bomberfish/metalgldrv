@@ -63,18 +63,34 @@ const char* kExtensions[] = {
     "GL_KHR_robustness", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
     "GL_NV_depth_clamp", "GL_NV_texture_barrier",
 };
-const int kNumExtensions = sizeof(kExtensions) / sizeof(kExtensions[0]);
+struct DeviceExtension {
+    const char* name;
+    bool glsl;  // also a GLSL #extension
+    bool (*supported)(const DeviceCaps&);
+};
+const DeviceExtension kDeviceExtensions[] = {
+    {"GL_ARB_texture_filter_minmax", false, [](const DeviceCaps& c) { return c.samplerReduction; }},
+};
 
-std::string& extensionString() {
-    static std::string s = [] {
-        std::string r;
-        for (auto e : kExtensions) {
-            if (!r.empty()) r += ' ';
-            r += e;
+// kExtensions plus the ones that depend on the GPU (mglDeviceExtensions), sorted.
+struct ExtensionList {
+    std::vector<const char*> names;
+    std::string joined;
+};
+
+const ExtensionList& extensions(Context* ctx) {
+    static const ExtensionList l = [ctx] {
+        ExtensionList r;
+        r.names.assign(std::begin(kExtensions), std::end(kExtensions));
+        for (const char* e : mglDeviceExtensions(ctx->dev->caps)) r.names.push_back(e);
+        std::sort(r.names.begin(), r.names.end(), [](const char* a, const char* b) { return strcmp(a, b) < 0; });
+        for (auto e : r.names) {
+            if (!r.joined.empty()) r.joined += ' ';
+            r.joined += e;
         }
         return r;
     }();
-    return s;
+    return l;
 }
 
 enum class VT { Bool, Int, Int64, Float, Double, Enum };
@@ -104,6 +120,23 @@ Value B4(bool a, bool b, bool c, bool d) { Value v; v.type = VT::Bool; v.n = 4; 
 GLuint nameOf(Object* o) { return o ? o->name : 0; }
 
 }  // namespace
+
+std::vector<const char*> mgl::mglDeviceExtensions(const DeviceCaps& caps) {
+    std::vector<const char*> r;
+    for (const auto& e : kDeviceExtensions)
+        if (e.supported(caps)) r.push_back(e.name);
+    return r;
+}
+
+const std::vector<std::string>& mgl::mglDeviceGlslExtensions(const DeviceCaps& caps) {
+    static const std::vector<std::string> r = [&caps] {
+        std::vector<std::string> v;
+        for (const auto& e : kDeviceExtensions)
+            if (e.glsl && e.supported(caps)) v.push_back(e.name);
+        return v;
+    }();
+    return r;
+}
 
 bool mglIsEnabled(Context* ctx, GLenum cap, int index, bool* out);
 bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat);  // compat.mm
@@ -137,7 +170,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
         return true;
     }
     case GL_CONTEXT_PROFILE_MASK: v = I(ctx->coreProfile ? GL_CONTEXT_CORE_PROFILE_BIT : GL_CONTEXT_COMPATIBILITY_PROFILE_BIT); return true;
-    case GL_NUM_EXTENSIONS: v = I(kNumExtensions); return true;
+    case GL_NUM_EXTENSIONS: v = I((int64_t)extensions(ctx).names.size()); return true;
     case GL_NUM_SHADING_LANGUAGE_VERSIONS: v = I(17); return true;
     case GL_NUM_SPIR_V_EXTENSIONS: v = I((int)glsl::supportedSpirvExtensions().size()); return true;
     case GL_CLAMP_READ_COLOR: v = E(ctx->clampReadColor); return true;
@@ -598,7 +631,7 @@ API const GLubyte* APIENTRY glGetString(GLenum name) {
             ctx->setError(GL_INVALID_ENUM);
             return nullptr;
         }
-        return (const GLubyte*)extensionString().c_str();
+        return (const GLubyte*)extensions(ctx).joined.c_str();
     default: ctx->setError(GL_INVALID_ENUM); return nullptr;
     }
 }
@@ -607,11 +640,12 @@ API const GLubyte* APIENTRY glGetStringi(GLenum name, GLuint index) {
     MGL_CTX_RET(nullptr);
     static const char* glslVersions[] = {"460", "450", "440", "430", "420", "410", "400", "330", "150", "140", "130", "120", "110", "100", "300 es", "310 es", ""};
     if (name == GL_EXTENSIONS) {
-        if (index >= (GLuint)kNumExtensions) {
+        const auto& names = extensions(ctx).names;
+        if (index >= names.size()) {
             ctx->setError(GL_INVALID_VALUE);
             return nullptr;
         }
-        return (const GLubyte*)kExtensions[index];
+        return (const GLubyte*)names[index];
     }
     if (name == GL_SHADING_LANGUAGE_VERSION) {
         if (index >= 17) {
