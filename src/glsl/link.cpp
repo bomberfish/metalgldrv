@@ -1439,7 +1439,8 @@ void Linker::stageMetadata() {
                     if (!t.isArray() || elem >= t.dims[0]) { error("transform feedback varying '" + name + "' index out of range"); continue; }
                     t = t.elem();
                 }
-                if (t.stripArrays().base == BT::Double && (offset & 7)) offset = (offset + 7) & ~7;
+                // glTransformFeedbackVaryings packs tightly, doubles included (only xfb_offset
+                // qualifiers must be 8-byte aligned).
                 XfbVarying x;
                 x.name = name;
                 x.type = glTypeEnum(t);

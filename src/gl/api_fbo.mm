@@ -154,7 +154,9 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
     if (internalformat == GL_STENCIL_INDEX || internalformat == GL_STENCIL_INDEX1 || internalformat == GL_STENCIL_INDEX4 ||
         internalformat == GL_STENCIL_INDEX16)
         f = formatInfo(GL_STENCIL_INDEX8);
-    if (!f || !f->renderable) return ctx->setError(GL_INVALID_ENUM, "renderbuffer format 0x%x", internalformat);
+    // RGB9_E5 is accepted (as Mesa does on desktop GL) but leaves the framebuffer incomplete.
+    if (!f || (!f->renderable && f->internalFormat != GL_RGB9_E5))
+        return ctx->setError(GL_INVALID_ENUM, "renderbuffer format 0x%x", internalformat);
     if (w < 0 || h < 0 || samples < 0) return ctx->setError(GL_INVALID_VALUE);
     if (w > 16384 || h > 16384) return ctx->setError(GL_INVALID_VALUE);
     if (samples > 4) return ctx->setError(GL_INVALID_OPERATION);
@@ -177,7 +179,7 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
         }
         td.storageMode = MTLStorageModePrivate;
         td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
-        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+        td.usage = (f->renderable ? MTLTextureUsageRenderTarget : 0) | MTLTextureUsageShaderRead |
                    (f->kind == FmtKind::DepthStencil || f->srgb ? MTLTextureUsagePixelFormatView : 0);
         if (!losslessCompressionSafe(f->mtl)) td.allowGPUOptimizedContents = NO;
         rb->mtl = [ctx->dev->mtl newTextureWithDescriptor:td];
@@ -354,20 +356,36 @@ static void setAttachment(Context* ctx, Framebuffer* fb, GLenum attachment, cons
     if (fb == ctx->drawFb.get()) ctx->passDirty = true;
 }
 
+enum class FbTexCall { Texture, TextureND, TextureLayer };
+
 static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint layer,
-                               bool layered) {
+                               bool layered, FbTexCall call = FbTexCall::TextureND) {
     Attachment a;
     if (texture) {
         Texture* t = ctx->share->textures.get(texture);
-        // GL 4.6 9.2.8: FramebufferTexture (layered) reports a missing texture as INVALID_VALUE, the
-        // other attachment commands as INVALID_OPERATION
-        if (!t || !t->target) return ctx->setError(layered ? GL_INVALID_VALUE : GL_INVALID_OPERATION, "texture %u does not exist", texture);
-        if (level < 0) return ctx->setError(GL_INVALID_VALUE);
+        // Missing textures: INVALID_VALUE for (Named)FramebufferTexture, INVALID_OPERATION
+        // for the others (GL 4.6 9.2.8; Mesa does the same).
+        if (!t || !t->target)
+            return ctx->setError(call == FbTexCall::Texture ? GL_INVALID_VALUE : GL_INVALID_OPERATION, "texture %u does not exist", texture);
+        if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);
+        if (call == FbTexCall::TextureLayer) {
+            switch (t->target) {
+            case GL_TEXTURE_3D: case GL_TEXTURE_2D_ARRAY: case GL_TEXTURE_1D_ARRAY: case GL_TEXTURE_CUBE_MAP_ARRAY:
+            case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: case GL_TEXTURE_CUBE_MAP: break;
+            default: return ctx->setError(GL_INVALID_OPERATION, "texture target 0x%x is not layered", t->target);
+            }
+            int maxLayer = t->target == GL_TEXTURE_3D ? 2048 : t->target == GL_TEXTURE_CUBE_MAP ? 6 : 2048;
+            if (layer < 0 || layer >= maxLayer) return ctx->setError(GL_INVALID_VALUE, "layer %d out of range", layer);
+        }
+        int maxLevel = t->target == GL_TEXTURE_3D ? 11 : 14;
+        if (level < 0 || level > maxLevel) return ctx->setError(GL_INVALID_VALUE);
+        if ((t->target == GL_TEXTURE_RECTANGLE || t->target == GL_TEXTURE_2D_MULTISAMPLE || t->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) &&
+            level != 0)
+            return ctx->setError(GL_INVALID_VALUE);
         if (t->immutable && level >= t->immutableLevels) return ctx->setError(GL_INVALID_VALUE, "level %d beyond the texture's storage", level);
         if (textarget && textarget != t->target &&
             !(t->target == GL_TEXTURE_CUBE_MAP && textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z))
             return ctx->setError(GL_INVALID_OPERATION);
-        if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);
         a.type = GL_TEXTURE;
         a.tex = t;
         a.level = level;
@@ -405,29 +423,28 @@ API void APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment, GL
     MGL_CTX();
     Framebuffer* fb = fbTarget(ctx, target);
     if (!fb && ctx->error) return;
-    if (layer < 0) return ctx->setError(GL_INVALID_VALUE);
-    framebufferTexture(ctx, fb, attachment, 0, texture, level, layer, false);
+    framebufferTexture(ctx, fb, attachment, 0, texture, level, layer, false, FbTexCall::TextureLayer);
 }
 
 API void APIENTRY glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level) {
     MGL_CTX();
     Framebuffer* fb = fbTarget(ctx, target);
     if (!fb && ctx->error) return;
-    framebufferTexture(ctx, fb, attachment, 0, texture, level, 0, true);
+    framebufferTexture(ctx, fb, attachment, 0, texture, level, 0, true, FbTexCall::Texture);
 }
 
 API void APIENTRY glNamedFramebufferTexture(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level) {
     MGL_CTX();
     Framebuffer* fb = ctx->framebuffers.get(framebuffer);
     if (!fb) return ctx->setError(GL_INVALID_OPERATION);
-    framebufferTexture(ctx, fb, attachment, 0, texture, level, 0, true);
+    framebufferTexture(ctx, fb, attachment, 0, texture, level, 0, true, FbTexCall::Texture);
 }
 
 API void APIENTRY glNamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer) {
     MGL_CTX();
     Framebuffer* fb = ctx->framebuffers.get(framebuffer);
     if (!fb) return ctx->setError(GL_INVALID_OPERATION);
-    framebufferTexture(ctx, fb, attachment, 0, texture, level, layer, false);
+    framebufferTexture(ctx, fb, attachment, 0, texture, level, layer, false, FbTexCall::TextureLayer);
 }
 
 static void framebufferRenderbuffer(Context* ctx, Framebuffer* fb, GLenum attachment, GLenum rbtarget, GLuint rb) {
@@ -469,6 +486,10 @@ API GLenum APIENTRY glCheckFramebufferStatus(GLenum target) {
 
 API GLenum APIENTRY glCheckNamedFramebufferStatus(GLuint framebuffer, GLenum target) {
     MGL_CTX_RET(0);
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        ctx->setError(GL_INVALID_ENUM);
+        return 0;
+    }
     Framebuffer* fb = framebuffer ? ctx->framebuffers.get(framebuffer) : ctx->defaultFramebuffer();
     if (!fb) {
         ctx->setError(GL_INVALID_OPERATION);
@@ -482,10 +503,16 @@ static void fbAttachmentParam(Context* ctx, Framebuffer* fb, GLenum attachment, 
     if (fb->isDefault) {
         Surface* s = fb->surface;
         bool isColor = attachment == GL_BACK || attachment == GL_FRONT || attachment == GL_BACK_LEFT || attachment == GL_FRONT_LEFT;
+        bool isRight = attachment == GL_FRONT_RIGHT || attachment == GL_BACK_RIGHT;  // no stereo: never present
         bool isDepth = attachment == GL_DEPTH;
         bool isStencil = attachment == GL_STENCIL;
-        if (!isColor && !isDepth && !isStencil) return ctx->setError(GL_INVALID_ENUM);
+        if (!isColor && !isRight && !isDepth && !isStencil) return ctx->setError(GL_INVALID_ENUM);
         bool present = s && (isColor || (isDepth && s->hasDepth) || (isStencil && s->hasStencil));
+        if (!present && pname != GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) {
+            if (pname == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME) *params = 0;
+            else ctx->setError(GL_INVALID_OPERATION);
+            return;
+        }
         switch (pname) {
         case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE: *params = present ? GL_FRAMEBUFFER_DEFAULT : GL_NONE; return;
         case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE: case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE: case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
@@ -579,8 +606,25 @@ API void APIENTRY glNamedFramebufferParameteri(GLuint framebuffer, GLenum pname,
     fbParameter(ctx, ctx->framebuffers.get(framebuffer), pname, param);
 }
 
+static int fbSamples(Framebuffer* fb) {
+    if (fb->isDefault) return fb->surface && fb->surface->samples > 1 ? fb->surface->samples : 0;
+    for (auto& a : fb->att) {
+        if (a.type == GL_RENDERBUFFER && a.rb) return a.rb->samples > 1 ? a.rb->samples : 0;
+        if (a.type == GL_TEXTURE && a.tex) return a.tex->samples > 1 ? a.tex->samples : 0;
+    }
+    return fb->defaultSamples;
+}
+
 static void getFbParameter(Context* ctx, Framebuffer* fb, GLenum pname, GLint* params) {
     if (!fb) return ctx->setError(GL_INVALID_OPERATION);
+    switch (pname) {
+    case GL_FRAMEBUFFER_DEFAULT_WIDTH: case GL_FRAMEBUFFER_DEFAULT_HEIGHT: case GL_FRAMEBUFFER_DEFAULT_LAYERS:
+    case GL_FRAMEBUFFER_DEFAULT_SAMPLES: case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS:
+        // Only framebuffer objects have these (GL 4.6 9.2.3).
+        if (fb->isDefault) return ctx->setError(GL_INVALID_OPERATION);
+        break;
+    default: break;
+    }
     switch (pname) {
     case GL_FRAMEBUFFER_DEFAULT_WIDTH: *params = fb->defaultWidth; break;
     case GL_FRAMEBUFFER_DEFAULT_HEIGHT: *params = fb->defaultHeight; break;
@@ -589,8 +633,8 @@ static void getFbParameter(Context* ctx, Framebuffer* fb, GLenum pname, GLint* p
     case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS: *params = fb->defaultFixedSampleLocations; break;
     case GL_DOUBLEBUFFER: *params = fb->isDefault; break;
     case GL_STEREO: *params = 0; break;
-    case GL_SAMPLES: { PassDesc p; *params = 0; break; }
-    case GL_SAMPLE_BUFFERS: *params = 0; break;
+    case GL_SAMPLES: *params = fbSamples(fb); break;
+    case GL_SAMPLE_BUFFERS: *params = fbSamples(fb) > 1 ? 1 : 0; break;
     case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA; break;
     case GL_IMPLEMENTATION_COLOR_READ_TYPE: *params = GL_UNSIGNED_BYTE; break;
     default: ctx->setError(GL_INVALID_ENUM);
@@ -631,21 +675,28 @@ static bool validDefaultBuffer(GLenum b) {
            b == GL_FRONT_AND_BACK;
 }
 
+static bool isColorAttachmentEnum(GLenum b) { return b >= GL_COLOR_ATTACHMENT0 && b < GL_COLOR_ATTACHMENT0 + 32; }
+
+// glDrawBuffers / glNamedFramebufferDrawBuffers validation (GL 4.6 17.4.1, Mesa order).
 static void drawBuffers(Context* ctx, Framebuffer* fb, GLsizei n, const GLenum* bufs) {
     if (!fb) return ctx->setError(GL_INVALID_OPERATION);
     if (n < 0 || n > kMaxDrawBuffers) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) {
         GLenum b = bufs[i];
+        bool known = b == GL_NONE || b == GL_FRONT_LEFT || b == GL_FRONT_RIGHT || b == GL_BACK_LEFT || b == GL_BACK_RIGHT || b == GL_BACK ||
+                     isColorAttachmentEnum(b);
+        // FRONT, LEFT, RIGHT and FRONT_AND_BACK may name several buffers: never accepted here.
+        if (!known) return ctx->setError(GL_INVALID_ENUM, "draw buffer 0x%x", b);
+        if (b == GL_BACK && n != 1) return ctx->setError(GL_INVALID_OPERATION);
         if (fb->isDefault) {
-            if (b != GL_NONE && b != GL_BACK && b != GL_BACK_LEFT && b != GL_FRONT && b != GL_FRONT_LEFT && b != GL_LEFT)
-                return ctx->setError(n == 1 ? GL_INVALID_ENUM : GL_INVALID_OPERATION);
-            if (n > 1 && b != GL_NONE && b != GL_BACK_LEFT && b != GL_FRONT_LEFT) return ctx->setError(GL_INVALID_OPERATION);
+            if (isColorAttachmentEnum(b)) return ctx->setError(GL_INVALID_OPERATION);
+            if (b == GL_FRONT_RIGHT || b == GL_BACK_RIGHT) return ctx->setError(GL_INVALID_OPERATION);  // not stereo
         } else {
-            if (b != GL_NONE && (b < GL_COLOR_ATTACHMENT0 || b >= GL_COLOR_ATTACHMENT0 + 32)) return ctx->setError(GL_INVALID_ENUM);
+            if (b != GL_NONE && !isColorAttachmentEnum(b)) return ctx->setError(GL_INVALID_OPERATION);
             if (b != GL_NONE && b >= GL_COLOR_ATTACHMENT0 + kMaxDrawBuffers) return ctx->setError(GL_INVALID_OPERATION);
-            for (int j = 0; j < i; j++)
-                if (b != GL_NONE && bufs[j] == b) return ctx->setError(GL_INVALID_OPERATION);
         }
+        for (int j = 0; j < i; j++)
+            if (b != GL_NONE && bufs[j] == b) return ctx->setError(GL_INVALID_OPERATION);
     }
     if (fb == ctx->drawFb.get()) ctx->applyClearNow();
     for (int i = 0; i < kMaxDrawBuffers; i++) fb->drawBuffers[i] = i < n ? bufs[i] : GL_NONE;
@@ -677,7 +728,11 @@ static void drawBuffer(Context* ctx, Framebuffer* fb, GLenum buf) {
         if (fb == ctx->drawFb.get()) ctx->passDirty = true;
         return;
     }
-    if (buf == GL_BACK || buf == GL_FRONT || buf == GL_LEFT || buf == GL_FRONT_AND_BACK) return ctx->setError(GL_INVALID_OPERATION);
+    if (buf != GL_NONE && !isColorAttachmentEnum(buf)) {
+        bool known = buf == GL_FRONT_LEFT || buf == GL_FRONT_RIGHT || buf == GL_BACK_LEFT || buf == GL_BACK_RIGHT || buf == GL_BACK ||
+                     buf == GL_FRONT || buf == GL_LEFT || buf == GL_RIGHT || buf == GL_FRONT_AND_BACK;
+        return ctx->setError(known ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
+    }
     drawBuffers(ctx, fb, 1, &buf);
 }
 
@@ -817,35 +872,48 @@ id<MTLTexture> readDepthStencilTexture(Context* ctx, Framebuffer* fb, bool stenc
 // `slice` selects the layer of a multisample array; the result is a single 2D image (slice 0).
 static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src, int* slice) {
     if (src.sampleCount <= 1) return src;
+    const FormatInfo* f = formatInfoForMTL(src.pixelFormat);
     int layer = *slice;
     *slice = 0;
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
     td.storageMode = MTLStorageModePrivate;
-    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+               (f && (f->srgb || f->kind == FmtKind::DepthStencil) ? MTLTextureUsagePixelFormatView : 0);
     id<MTLTexture> dst = [ctx->dev->mtl newTextureWithDescriptor:td];
     ctx->dev->makeResident(dst);
     ctx->endEncoder();
+    if (f && (f->kind == FmtKind::UInt || f->kind == FmtKind::SInt)) {
+        // Integer samples can't be averaged: GL takes a single sample (we use sample 0).
+        id<MTLTexture> s2 = src;
+        if (src.textureType == MTLTextureType2DMultisampleArray) {
+            s2 = [src newTextureViewWithPixelFormat:src.pixelFormat textureType:MTLTextureType2DMultisample levels:NSMakeRange(0, 1)
+                                             slices:NSMakeRange(layer, 1)];
+            ctx->dev->retainUntil(s2, ctx->serial());
+        }
+        resolveSample0(ctx, s2, dst, f->kind == FmtKind::SInt);
+        ctx->dev->releaseAfter(dst, ctx->serial());
+        return dst;
+    }
     MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
-    bool depth = src.pixelFormat == MTLPixelFormatDepth32Float || src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
-                 src.pixelFormat == MTLPixelFormatDepth16Unorm;
-    bool stencil = src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || src.pixelFormat == MTLPixelFormatStencil8;
-    if (depth || stencil) {
-        if (depth) {
-            rp.depthAttachment.texture = src;
-            rp.depthAttachment.slice = layer;
-            rp.depthAttachment.loadAction = MTLLoadActionLoad;
-            rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
-            rp.depthAttachment.resolveTexture = dst;
-        }
-        // stencil resolves to sample 0 (GL takes any one sample)
-        if (stencil) {
-            rp.stencilAttachment.texture = src;
-            rp.stencilAttachment.slice = layer;
-            rp.stencilAttachment.loadAction = MTLLoadActionLoad;
-            rp.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
-            rp.stencilAttachment.resolveTexture = dst;
-        }
-    } else {
+    bool hasDepth = f && (f->kind == FmtKind::Depth || f->kind == FmtKind::DepthStencil);
+    bool hasStencil = f && (f->kind == FmtKind::Stencil || f->kind == FmtKind::DepthStencil);
+    if (hasDepth) {
+        rp.depthAttachment.texture = src;
+        rp.depthAttachment.slice = layer;
+        rp.depthAttachment.loadAction = MTLLoadActionLoad;
+        rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+        rp.depthAttachment.resolveTexture = dst;
+        rp.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+    }
+    if (hasStencil) {
+        rp.stencilAttachment.texture = src;
+        rp.stencilAttachment.slice = layer;
+        rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+        rp.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
+        rp.stencilAttachment.resolveTexture = dst;
+        rp.stencilAttachment.stencilResolveFilter = MTLMultisampleStencilResolveFilterSample0;
+    }
+    if (!hasDepth && !hasStencil) {
         rp.colorAttachments[0].texture = src;
         rp.colorAttachments[0].slice = layer;
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -1017,6 +1085,13 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
     auto blitOne = [&](id<MTLTexture> src, int slevel, int sslice, id<MTLTexture> dst, int dlevel, int dslice, BlitParams::What what, bool linear) {
         if (!src || !dst) return;
         src = resolveForRead(ctx, src, &sslice);
+        if (!ctx->framebufferSRGB && what == BlitParams::Color && (src.usage & MTLTextureUsagePixelFormatView) &&
+            (src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB || src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)) {
+            // FRAMEBUFFER_SRGB disabled: copy encoded values as they are (no sRGB decode on read).
+            src = [src newTextureViewWithPixelFormat:src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm
+                                                                                                       : MTLPixelFormatBGRA8Unorm];
+            ctx->dev->retainUntil(src, ctx->serial());
+        }
         BlitParams bp;
         bp.src = src;
         bp.srcLevel = slevel;
