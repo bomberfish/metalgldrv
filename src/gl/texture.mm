@@ -3,6 +3,7 @@
 #include "gl/internal_shaders.h"
 #include <cmath>
 #include <mutex>
+#include "mtl/compress.h"
 #include "util/log.h"
 #include "util/stats.h"
 
@@ -138,6 +139,7 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
     }
     if (fmt->srgb || t->needsFormatView || fmt->kind == FmtKind::DepthStencil) usage |= MTLTextureUsagePixelFormatView;
     td.usage = usage;
+    if (!losslessCompressionSafe(fmt->mtl)) td.allowGPUOptimizedContents = NO;
     id<MTLTexture> nt = [ctx->dev->mtl newTextureWithDescriptor:td];
     if (nt && g_statsEnabled) statAddCaller("newTexture KB", __builtin_return_address(0), nt.allocatedSize >> 10);
     if (!nt) {
@@ -583,6 +585,22 @@ void uploadTexSubImage(Context* ctx, Texture* t, int level, int face, int x, int
             copyStagingToTexture(ctx, t, sp, (size_t)w, (size_t)w * h, level, sliceBase, mx, my, mz, mw, mh, md, MTLBlitOptionStencilFromDepthStencil);
         return;
     }
+    if (f->comp == Comp::Compressed) {
+        // Compressed image from uncompressed data: decode to RGBA float, then block-encode.
+        const FormatInfo* ff = formatInfo(GL_RGBA32F);
+        size_t cRow = storageRowBytes(f, w), cImg = storageImageBytes(f, w, h);
+        std::vector<float> tmp((size_t)w * h * 4);
+        UploadAlloc up = ctx->upload(cImg * d, 16);
+        for (int i = 0; i < d; i++) {
+            convertToStorage(ff, format, type, src + i * cl.imageStride, cl.rowStride, cl.imageStride, tmp.data(), (size_t)w * 16,
+                             (size_t)w * h * 16, w, h, 1, ctx->unpack.swapBytes);
+            compressImage(f, tmp.data(), w, h, up.cpu + i * cImg);
+        }
+        // Metal copy sizes: block-aligned, clamped to the level size.
+        int lw = std::max(1, t->storageW >> level), lh = std::max(1, t->storageH >> level);
+        copyStagingToTexture(ctx, t, up, cRow, cImg, level, sliceBase, mx, my, mz, std::min(w, lw - x), std::min(h, lh - y), md);
+        return;
+    }
     UploadAlloc up = ctx->upload(imageBytes * d, 16);
     convertToStorage(f, format, type, src, cl.rowStride, cl.imageStride, up.cpu, rowBytes, imageBytes, w, h, d, ctx->unpack.swapBytes);
     if (t->target == GL_TEXTURE_1D_ARRAY)
@@ -601,11 +619,21 @@ void uploadCompressedSubImage(Context* ctx, Texture* t, int level, int face, int
         ctx->setError(GL_INVALID_VALUE, "compressed image size mismatch");
         return;
     }
+    int dims = t->target == GL_TEXTURE_1D ? 1
+             : (t->target == GL_TEXTURE_3D || t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) ? 3
+                                                                                                                           : 2;
+    CompressedLayout cl = compressedLayout(f, w, h, dims, ctx->unpack);
     bool err;
-    const uint8_t* src = (const uint8_t*)resolveUnpackSource(ctx, data, imageSize, &err);
+    const uint8_t* src = (const uint8_t*)resolveUnpackSource(ctx, data, std::max((size_t)imageSize, cl.extent(d)), &err);
     if (err || !src) return;
     UploadAlloc up = ctx->upload(imgBytes * d, 16);
-    memcpy(up.cpu, src, imgBytes * d);
+    if (cl.skipBytes == 0 && cl.rowStride == rowBytes && cl.imageStride == imgBytes) {
+        memcpy(up.cpu, src, imgBytes * d);
+    } else {
+        for (int k = 0; k < d; k++)
+            for (int r = 0; r < cl.rows; r++)
+                memcpy(up.cpu + k * imgBytes + r * rowBytes, src + cl.skipBytes + k * cl.imageStride + r * cl.rowStride, rowBytes);
+    }
     int slice = face, mz = z;
     if (t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
         slice = z;
@@ -652,6 +680,30 @@ bool readTextureRegion(Context* ctx, id<MTLTexture> tex, int level, int slice, i
 void markTextureWrite(Context* ctx, Texture* t) {
     t->lastUse = ctx->serial();
     t->lastGpuWrite = t->lastUse;
+}
+
+id<MTLTexture> attachmentWriteView(Context* ctx, const Attachment& a, id<MTLTexture> t) {
+    if (ctx->framebufferSRGB || !t || !(t.usage & MTLTextureUsagePixelFormatView)) return t;
+    MTLPixelFormat lin;
+    switch (t.pixelFormat) {
+    case MTLPixelFormatRGBA8Unorm_sRGB: lin = MTLPixelFormatRGBA8Unorm; break;
+    case MTLPixelFormatBGRA8Unorm_sRGB: lin = MTLPixelFormatBGRA8Unorm; break;
+    default: return t;
+    }
+    if (a.type == GL_RENDERBUFFER && a.rb) {
+        if (!a.rb->linearView) a.rb->linearView = [t newTextureViewWithPixelFormat:lin];
+        return a.rb->linearView;
+    }
+    if (a.type == GL_TEXTURE && a.tex) {
+        Texture* tx = a.tex.get();
+        const Texture::ViewKey key{~0ull, (uint64_t)lin};  // not produced by sampling views
+        auto it = tx->views.find(key);
+        if (it != tx->views.end()) return it->second;
+        id<MTLTexture> v = [t newTextureViewWithPixelFormat:lin];
+        tx->views[key] = v;
+        return v;
+    }
+    return t;
 }
 
 id<MTLTexture> attachmentTexture(Context* ctx, const Attachment& a, const FormatInfo** fmt, int* w, int* h) {

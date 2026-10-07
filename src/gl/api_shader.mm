@@ -564,6 +564,8 @@ API void APIENTRY glUseProgram(GLuint program) {
     if (!program) {
         releaseCurrentProgram(ctx);
         ctx->program = nullptr;
+        if (ctx->pipeline)
+            for (int st = 0; st < (int)glsl::Stage::Count; st++) resetSubroutineSelection(ctx, st, ctx->pipeline->stages[st].get());
         return;
     }
     ProgramObj* p = getProgram(ctx, program);

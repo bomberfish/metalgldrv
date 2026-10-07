@@ -4,7 +4,6 @@
 #import <UIKit/UIKit.h>
 #endif
 #include <cstdarg>
-#include <objc/runtime.h>
 #include <execinfo.h>
 #include "gl/internal_shaders.h"
 #include "gl/pipeline.h"
@@ -420,19 +419,8 @@ bool Context::resolvePass(PassDesc& p) {
         int aw, ah;
         id<MTLTexture> t = attachmentTexture(this, a, &f, &aw, &ah);
         if (!t) continue;
-        if (!framebufferSRGB && (t.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB || t.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB) &&
-            (t.usage & MTLTextureUsagePixelFormatView)) {
-            // FRAMEBUFFER_SRGB disabled: no linear->sRGB encoding on write (GL 4.6 17.3.7). Render
-            // through a cached linear view of the same storage.
-            static char kLinearViewKey;
-            id<MTLTexture> v = objc_getAssociatedObject(t, &kLinearViewKey);
-            if (!v) {
-                v = [t newTextureViewWithPixelFormat:t.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm
-                                                                                                     : MTLPixelFormatBGRA8Unorm];
-                if (v) objc_setAssociatedObject(t, &kLinearViewKey, v, OBJC_ASSOCIATION_RETAIN);
-            }
-            if (v) t = v;
-        }
+        // GL_FRAMEBUFFER_SRGB disabled: sRGB attachments are written without encoding.
+        t = attachmentWriteView(this, a, t);
         p.color[i].tex = t;
         p.color[i].level = a.type == GL_TEXTURE ? a.level : 0;
         if (t.textureType == MTLTextureType3D) p.color[i].depthPlane = a.layered ? 0 : a.layer;
