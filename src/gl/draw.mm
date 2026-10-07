@@ -424,6 +424,27 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             memcpy(&v, &rid, 8);
             break;
         }
+        case glsl::SlotKind::SamplerBorder: {
+            // {int4 border color, int4(clamp-to-border axis mask)} for integer textures.
+            int unit = std::clamp(prog->samplerUnits[i], 0, kMaxTextureUnits - 1);
+            int ti = texTargetIndex(s.textureTarget);
+            Texture* t = ti >= 0 ? ctx->textures[unit][ti].get() : nullptr;
+            SamplerState st = t ? t->sampler : SamplerState();
+            if (Sampler* so = ctx->samplers[unit].get()) st = so->state;
+            bool isInt = t && t->storageFmt && (t->storageFmt->kind == FmtKind::UInt || t->storageFmt->kind == FmtKind::SInt);
+            int mask = 0;
+            if (isInt) {
+                mask = (st.wrapS == GL_CLAMP_TO_BORDER ? 1 : 0) | (st.wrapT == GL_CLAMP_TO_BORDER ? 2 : 0) | (st.wrapR == GL_CLAMP_TO_BORDER ? 4 : 0);
+                if (t->target == GL_TEXTURE_1D || t->target == GL_TEXTURE_1D_ARRAY) mask &= 1;
+            }
+            UploadAlloc u = ctx->upload(32, 16);
+            int32_t* d = (int32_t*)u.cpu;
+            for (int k = 0; k < 4; k++) d[k] = (int32_t)(int64_t)st.borderColor[k];
+            d[4] = mask;
+            d[5] = d[6] = d[7] = 0;
+            v = u.gpu;
+            break;
+        }
         case glsl::SlotKind::Sampler: {
             int unit = std::clamp(prog->samplerUnits[i], 0, kMaxTextureUnits - 1);
             int ti = texTargetIndex(s.textureTarget);

@@ -826,6 +826,8 @@ TEXPARAMV_IMPL(iv, GLint, true, true, false)
 TEXPARAMV_IMPL(Iiv, GLint, true, false, true)
 TEXPARAMV_IMPL(Iuiv, GLuint, true, false, true)
 
+static int viewLayersOf(const Texture* t);
+
 static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int* n) {
     *n = 1;
     const SamplerState& s = t->sampler;
@@ -850,11 +852,11 @@ static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int
     case GL_DEPTH_STENCIL_TEXTURE_MODE: out[0] = t->depthStencilMode; return true;
     case GL_TEXTURE_SRGB_DECODE_EXT: out[0] = t->srgbDecode; return true;
     case GL_TEXTURE_IMMUTABLE_FORMAT: out[0] = t->immutable; return true;
-    case GL_TEXTURE_IMMUTABLE_LEVELS: out[0] = t->immutable ? (t->viewParent ? t->viewNumLevels : t->immutableLevels) : 0; return true;
+    case GL_TEXTURE_IMMUTABLE_LEVELS: out[0] = t->immutable ? (t->viewParent ? t->viewImmutableLevels : t->immutableLevels) : 0; return true;
     case GL_TEXTURE_VIEW_MIN_LEVEL: out[0] = t->viewMinLevel; return true;
-    case GL_TEXTURE_VIEW_NUM_LEVELS: out[0] = t->viewNumLevels; return true;
+    case GL_TEXTURE_VIEW_NUM_LEVELS: out[0] = t->viewParent ? t->viewNumLevels : t->immutable ? t->immutableLevels : 0; return true;
     case GL_TEXTURE_VIEW_MIN_LAYER: out[0] = t->viewMinLayer; return true;
-    case GL_TEXTURE_VIEW_NUM_LAYERS: out[0] = t->viewNumLayers; return true;
+    case GL_TEXTURE_VIEW_NUM_LAYERS: out[0] = t->viewParent ? t->viewNumLayers : t->immutable ? viewLayersOf(t) : 0; return true;
     case GL_TEXTURE_TARGET: out[0] = t->target; return true;
     case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE: out[0] = GL_IMAGE_FORMAT_COMPATIBILITY_BY_SIZE; return true;
     case GL_GENERATE_MIPMAP: out[0] = t->generateMipmapHint; return !ctx->coreProfile;
@@ -1823,68 +1825,126 @@ API void APIENTRY glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint src
 }
 
 // --- texture views ---
+// Table 8.20: view targets compatible with an original texture's target.
+static bool viewTargetCompatible(GLenum orig, GLenum view) {
+    switch (orig) {
+    case GL_TEXTURE_1D: case GL_TEXTURE_1D_ARRAY: return view == GL_TEXTURE_1D || view == GL_TEXTURE_1D_ARRAY;
+    case GL_TEXTURE_2D: return view == GL_TEXTURE_2D || view == GL_TEXTURE_2D_ARRAY;
+    case GL_TEXTURE_3D: return view == GL_TEXTURE_3D;
+    case GL_TEXTURE_RECTANGLE: return view == GL_TEXTURE_RECTANGLE;
+    case GL_TEXTURE_CUBE_MAP: case GL_TEXTURE_2D_ARRAY: case GL_TEXTURE_CUBE_MAP_ARRAY:
+        return view == GL_TEXTURE_CUBE_MAP || view == GL_TEXTURE_2D || view == GL_TEXTURE_2D_ARRAY || view == GL_TEXTURE_CUBE_MAP_ARRAY;
+    case GL_TEXTURE_2D_MULTISAMPLE: case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+        return view == GL_TEXTURE_2D_MULTISAMPLE || view == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    default: return false;
+    }
+}
+
+// Layers of an immutable texture (or view) in glTextureView terms: array layers,
+// cube faces (6 per cube), 1 otherwise.
+static int viewLayersOf(const Texture* t) {
+    if (t->viewParent) return t->viewNumLayers;
+    const TexImageLevel& L = t->levels[0][0];
+    switch (t->target) {
+    case GL_TEXTURE_1D_ARRAY: return L.height;
+    case GL_TEXTURE_2D_ARRAY: case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: case GL_TEXTURE_CUBE_MAP_ARRAY: return L.depth;
+    case GL_TEXTURE_CUBE_MAP: return 6;
+    default: return 1;
+    }
+}
+
 API void APIENTRY glTextureView(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat, GLuint minlevel, GLuint numlevels,
                                 GLuint minlayer, GLuint numlayers) {
     MGL_CTX();
-    Texture* orig = ctx->share->textures.get(origtexture);
-    if (!orig || !orig->immutable) return ctx->setError(GL_INVALID_OPERATION);
+    // §8.18 errors, in the order the spec lists them.
+    if (texture == 0) return ctx->setError(GL_INVALID_VALUE);
     Texture* t = ctx->share->textures.get(texture);
-    if (!t) {
-        if (!ctx->share->textures.isReservedOnly(texture)) return ctx->setError(GL_INVALID_VALUE);
-        t = ctx->share->textures.create(texture, newTexture(target));
-    } else if (t->target || t->immutable) {
-        return ctx->setError(GL_INVALID_OPERATION);
-    }
+    if (!t && !ctx->share->textures.isReservedOnly(texture)) return ctx->setError(GL_INVALID_OPERATION, "texture is not a generated name");
+    if (t && (t->target || t->immutable)) return ctx->setError(GL_INVALID_OPERATION, "texture already has a target");
+    Texture* orig = origtexture ? ctx->share->textures.get(origtexture) : nullptr;
+    if (!orig || !orig->target) return ctx->setError(GL_INVALID_VALUE);
+    if (!orig->immutable) return ctx->setError(GL_INVALID_OPERATION, "origtexture is mutable");
+    if (!viewTargetCompatible(orig->target, target)) return ctx->setError(GL_INVALID_OPERATION, "incompatible view target");
     const FormatInfo* f = formatInfo(internalformat);
-    if (!f) return ctx->setError(GL_INVALID_VALUE);
-    if (!orig->storageFmt && !ensureTextureStorage(ctx, orig)) return ctx->setError(GL_INVALID_OPERATION);
-    if (f->bytesPerPixel != orig->storageFmt->bytesPerPixel) return ctx->setError(GL_INVALID_OPERATION);
+    const FormatInfo* of = orig->levels[0][0].fmt;
+    if (!f || !of) return ctx->setError(GL_INVALID_OPERATION);
+    if (f->internalFormat != of->internalFormat) {
+        int vc = viewClass(of->internalFormat);
+        if (!vc || vc != viewClass(f->internalFormat)) return ctx->setError(GL_INVALID_OPERATION, "incompatible view format");
+    }
+    int origLevels = orig->viewParent ? orig->viewNumLevels : orig->immutableLevels;
+    int origLayers = viewLayersOf(orig);
+    if ((int)minlevel >= origLevels || (int)minlayer >= origLayers) return ctx->setError(GL_INVALID_VALUE);
+    switch (target) {
+    case GL_TEXTURE_CUBE_MAP: if (numlayers != 6) return ctx->setError(GL_INVALID_VALUE); break;
+    case GL_TEXTURE_CUBE_MAP_ARRAY: if (numlayers % 6) return ctx->setError(GL_INVALID_VALUE); break;
+    case GL_TEXTURE_1D: case GL_TEXTURE_2D: case GL_TEXTURE_3D: case GL_TEXTURE_RECTANGLE: case GL_TEXTURE_2D_MULTISAMPLE:
+        if (numlayers != 1) return ctx->setError(GL_INVALID_VALUE);
+        break;
+    default: break;
+    }
+    const TexImageLevel& B = orig->levels[0][minlevel];
+    if ((target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_CUBE_MAP_ARRAY) && B.width != B.height)
+        return ctx->setError(GL_INVALID_OPERATION, "cube view of non-square image");
+    int nLevels = std::min<int>(numlevels, origLevels - minlevel);
+    int nLayers = std::min<int>(numlayers, origLayers - minlayer);
+    if (nLevels < 1 || nLayers < 1) return ctx->setError(GL_INVALID_VALUE);
+    if (!ensureTextureStorage(ctx, orig)) return ctx->setError(GL_INVALID_OPERATION);
+    // Level/layer specs relative to the root texture.
+    Texture* root = orig;
+    int rootLevel = minlevel, rootLayer = minlayer;
     if (orig->viewParent) {
-        minlevel += orig->viewMinLevel;
-        minlayer += orig->viewMinLayer;
-        orig = orig->viewParent.get();
+        root = orig->viewParent.get();
+        rootLevel += orig->viewMinLevel;
+        rootLayer += orig->viewMinLayer;
     }
-    if (f->mtl != orig->storageFmt->mtl && !(orig->mtl.usage & MTLTextureUsagePixelFormatView)) {
-        orig->needsFormatView = true;
-        id<MTLTexture> old = orig->mtl;
-        orig->mtl = nil;
-        orig->storageFmt = nullptr;
-        orig->storageDirty = true;
-        ensureTextureStorage(ctx, orig);
-        if (old) {
-            id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
-            [e copyFromTexture:old toTexture:orig->mtl];
-            ctx->dev->releaseAfter(old, ctx->serial());
-        }
-    }
+    // Reinterpreting the format or the cube-ness of the storage needs a view-capable texture (Apple GPUs
+    // lay out compressed cube and array storage differently).
+    MTLTextureType vt = mtlTextureType(target, root->samples);
+    bool cubeView = vt == MTLTextureTypeCube || vt == MTLTextureTypeCubeArray;
+    bool cubeRoot = root->mtl.textureType == MTLTextureTypeCube || root->mtl.textureType == MTLTextureTypeCubeArray;
+    if ((f->mtl != root->storageFmt->mtl || (cubeView && vt != root->mtl.textureType) || (cubeRoot && vt != root->mtl.textureType)) &&
+        !ensureFormatViewable(ctx, root))
+        return ctx->setError(GL_OUT_OF_MEMORY);
+    if (!t) t = ctx->share->textures.create(texture, newTexture(target));
     t->target = target;
-    t->viewParent = orig;
-    t->viewMinLevel = minlevel;
-    t->viewNumLevels = std::min(numlevels, (GLuint)orig->storageLevels - minlevel);
-    t->viewMinLayer = minlayer;
-    t->viewNumLayers = numlayers;
+    t->viewParent = root;
+    t->viewMinLevel = rootLevel;
+    t->viewNumLevels = nLevels;
+    t->viewMinLayer = rootLayer;
+    t->viewNumLayers = nLayers;
     t->immutable = true;
-    t->immutableLevels = t->viewNumLevels;
-    for (int l = 0; l < t->viewNumLevels && l < Texture::kMaxLevels; l++)
-        for (int face = 0; face < 6; face++) {
-            TexImageLevel L = orig->levels[face][minlevel + l];
-            L.fmt = f;
-            L.internalFormat = internalformat;
-            if (target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_CUBE_MAP_ARRAY) L.depth = numlayers;
-            t->levels[face][l] = L;
+    t->immutableLevels = nLevels;
+    t->viewImmutableLevels = orig->viewParent ? orig->viewImmutableLevels : orig->immutableLevels;
+    int faces = target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
+    for (int l = 0; l < Texture::kMaxLevels; l++)
+        for (int face = 0; face < 6; face++) t->levels[face][l] = TexImageLevel();
+    for (int l = 0; l < nLevels && l < Texture::kMaxLevels; l++) {
+        TexImageLevel L = orig->levels[0][minlevel + l];
+        L.fmt = f;
+        L.internalFormat = internalformat;
+        switch (target) {
+        case GL_TEXTURE_1D: L.height = 1; L.depth = 1; break;
+        case GL_TEXTURE_1D_ARRAY: L.height = nLayers; L.depth = 1; break;
+        case GL_TEXTURE_2D_ARRAY: case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: case GL_TEXTURE_CUBE_MAP_ARRAY: L.depth = nLayers; break;
+        case GL_TEXTURE_3D: break;
+        default: L.depth = 1; break;
         }
-    MTLTextureType vt = mtlTextureType(target, orig->samples);
-    NSUInteger sliceCount = numlayers;
-    t->mtl = [orig->mtl newTextureViewWithPixelFormat:f->mtl textureType:vt levels:NSMakeRange(minlevel, t->viewNumLevels)
-                                               slices:NSMakeRange(minlayer, sliceCount)];
+        for (int face = 0; face < faces; face++) t->levels[face][l] = L;
+    }
+    t->mtl = [root->mtl newTextureViewWithPixelFormat:f->mtl textureType:vt levels:NSMakeRange(rootLevel, nLevels)
+                                               slices:NSMakeRange(rootLayer, vt == MTLTextureType3D ? 1 : nLayers)];
     t->storageFmt = f;
-    t->storageLevels = t->viewNumLevels;
-    t->storageW = std::max(1, orig->storageW >> minlevel);
-    t->storageH = std::max(1, orig->storageH >> minlevel);
-    t->storageD = orig->storageD;
-    t->storageLayers = numlayers;
+    t->storageLevels = nLevels;
+    t->storageW = std::max(1, root->storageW >> rootLevel);
+    t->storageH = std::max(1, root->storageH >> rootLevel);
+    t->storageD = target == GL_TEXTURE_3D ? std::max(1, root->storageD >> rootLevel) : 1;
+    // Same convention as allocated storage: cube maps count cubes, not faces.
+    t->storageLayers = target == GL_TEXTURE_CUBE_MAP ? 1 : target == GL_TEXTURE_CUBE_MAP_ARRAY ? nLayers / 6 : nLayers;
     t->storageDirty = false;
-    t->samples = orig->samples;
+    t->samples = root->samples;
+    t->sampler = SamplerState();
+    if (target == GL_TEXTURE_RECTANGLE) t->sampler.minFilter = GL_LINEAR, t->sampler.wrapS = t->sampler.wrapT = t->sampler.wrapR = GL_CLAMP_TO_EDGE;
 }
 
 // --- clear texture ---
@@ -2010,6 +2070,9 @@ API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, G
     }
     Texture* t = ctx->share->textures.get(texture);
     if (!t) return ctx->setError(GL_INVALID_VALUE);
+    iu.tex = t;
+    // Usage requirements apply to the storage, i.e. the root of a texture view.
+    if (t->viewParent) t = t->viewParent.get();
     // Accessing the texture through a different (size-compatible) format needs a format view.
     const FormatInfo* tf = t->storageFmt ? t->storageFmt : t->levels[0][std::clamp(t->baseLevel, 0, Texture::kMaxLevels - 1)].fmt;
     bool reinterpret = tf && t->target != GL_TEXTURE_BUFFER && formatInfo(format)->mtl != tf->mtl;
@@ -2034,7 +2097,6 @@ API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, G
             ctx->dev->releaseAfter(old, ctx->serial());
         }
     }
-    iu.tex = t;
     iu.level = level;
     iu.layered = layered;
     iu.layer = layer;

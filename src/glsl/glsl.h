@@ -92,7 +92,8 @@ const std::vector<std::string>& supportedSpirvExtensions();
 //                                            (Metal sampler states carry no bias; shaders add it)
 enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer,
                                 SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */,
-                                LodBias /* like Sampler: float (low 32 bits) GL_TEXTURE_LOD_BIAS of the unit's effective sampler */ };
+                                LodBias /* like Sampler: float (low 32 bits) GL_TEXTURE_LOD_BIAS of the unit's effective sampler */,
+                                SamplerBorder /* integer samplers: GPU address of int4[2] {border color, clamp-to-border axis mask} */ };
 
 struct Slot {
     SlotKind kind;

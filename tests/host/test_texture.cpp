@@ -330,3 +330,67 @@ TEST(compressed_from_uncompressed_data) {
     glDeleteTextures(1, &rt);
     glDeleteVertexArrays(1, &vao);
 }
+
+// A cube-map view of a 2D array texture samples the selected layers and levels.
+TEST(texture_view_cube_from_array) {
+    GLuint arr, view;
+    glGenTextures(1, &arr);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, arr);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 3, GL_RGBA8, 4, 4, 7);
+    glGenTextures(1, &view);
+    glTextureView(view, GL_TEXTURE_CUBE_MAP, arr, GL_RGBA8, 1, 2, 1, 6);
+    CHECK_GL();
+    // Parent contents written after the view exists: uploads for even layers, FBO clears for odd ones.
+    GLuint fill;
+    glGenFramebuffers(1, &fill);
+    glBindFramebuffer(GL_FRAMEBUFFER, fill);
+    for (int l = 0; l < 3; l++)
+        for (int s = 0; s < 7; s++) {
+            int w = 4 >> l;
+            if (s % 2 == 0) {
+                std::vector<uint32_t> px(w * w, 0xff000000u | (uint32_t)(s * 30) | (uint32_t)(l * 80) << 8);
+                glBindTexture(GL_TEXTURE_2D_ARRAY, arr);
+                glTexSubImage3D(GL_TEXTURE_2D_ARRAY, l, 0, 0, s, w, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            } else {
+                glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, arr, l, s);
+                glClearColor(s * 30 / 255.0f, l * 80 / 255.0f, 0, 1);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+        }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fill);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, view);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    const char* vs = "#version 430 core\nvoid main() { vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4.0 - 1.0; gl_Position = vec4(p, 0, 1); }";
+    GLuint prog = compileProgram(vs, "#version 430 core\nuniform samplerCube s; out vec4 c;\n"
+                                     "void main() { int i = int(gl_FragCoord.x); vec3 d[6] = vec3[6](vec3(1,-0.9,-0.9), vec3(-1,-0.9,-0.9), vec3(-0.9,1,-0.9),\n"
+                                     "  vec3(-0.9,-1,-0.9), vec3(-0.9,-0.9,1), vec3(-0.9,-0.9,-1)); c = textureLod(s, d[i % 6], float(i / 6)); }");
+    GLuint vao, fbo, rt;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenTextures(1, &rt);
+    glBindTexture(GL_TEXTURE_2D, rt);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 12, 1);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+    glViewport(0, 0, 12, 1);
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, view);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    uint32_t out[12] = {};
+    glReadPixels(0, 0, 12, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
+    for (int i = 0; i < 12; i++) {
+        uint32_t expect = 0xff000000u | (uint32_t)((1 + i % 6) * 30) | (uint32_t)((1 + i / 6) * 80) << 8;
+        if (out[i] != expect) testFail(__FILE__, __LINE__, "texel " + std::to_string(i) + " = " + std::to_string(out[i]) + " expected " + std::to_string(expect));
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteFramebuffers(1, &fbo);
+    GLuint ts[3] = {rt, view, arr};
+    glDeleteTextures(3, ts);
+    glDeleteVertexArrays(1, &vao);
+}

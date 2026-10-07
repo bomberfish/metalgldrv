@@ -1012,6 +1012,12 @@ void Linker::assignUniforms() {
             pushSlots(SlotKind::Sampler);
             ob.biasSlot = slot;
             pushSlots(SlotKind::LodBias);
+            // Metal border colors are limited to black/white: integer samplers that filter
+            // (not buffer / multisample) get their border color emulated in the shader.
+            if ((bt.sampled == BT::Int || bt.sampled == BT::UInt) && !bt.shadow && !bt.ms && bt.dim != Dim::Buffer && bt.dim != Dim::Cube) {
+                ob.borderSlot = slot;
+                pushSlots(SlotKind::SamplerBorder);
+            }
         } else if (bt.base == BT::Image) {
             ob.kind = SlotKind::Image;
             ob.slot = slot;

@@ -1084,6 +1084,23 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
     ctx->endEncoder();
     auto blitOne = [&](id<MTLTexture> src, int slevel, int sslice, id<MTLTexture> dst, int dlevel, int dslice, BlitParams::What what, bool linear) {
         if (!src || !dst) return;
+        if (src.sampleCount > 1 && src.sampleCount == dst.sampleCount && src.pixelFormat == dst.pixelFormat) {
+            // Multisample -> multisample with the same sample count copies samples as is (§18.3.1).
+            // A packed depth/stencil image is copied whole, so only when both aspects are blitted.
+            bool packed = src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
+            bool bothAspects = (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) == (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            bool same = sx1 - sx0 == dx1 - dx0 && sy1 - sy0 == dy1 - dy0 && sx0 == dx0 && sy0 == dy0 && sx1 > sx0 && sy1 > sy0 && sx0 >= 0 &&
+                        sy0 >= 0 && sx1 <= (int)src.width && sy1 <= (int)src.height && sx1 <= (int)dst.width && sy1 <= (int)dst.height;
+            if (same && !(ctx->scissorEnabled & 1) && (!packed || bothAspects)) {
+                if (packed && what == BlitParams::Stencil) return;  // copied with the depth aspect
+                id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+                [e copyFromTexture:src sourceSlice:sslice sourceLevel:0 sourceOrigin:MTLOriginMake(sx0, sy0, 0)
+                        sourceSize:MTLSizeMake(sx1 - sx0, sy1 - sy0, 1) toTexture:dst destinationSlice:dslice destinationLevel:0
+                 destinationOrigin:MTLOriginMake(dx0, dy0, 0)];
+                ctx->endEncoder();
+                return;
+            }
+        }
         src = resolveForRead(ctx, src, &sslice);
         if (!ctx->framebufferSRGB && what == BlitParams::Color && (src.usage & MTLTextureUsagePixelFormatView) &&
             (src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB || src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)) {

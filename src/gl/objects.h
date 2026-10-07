@@ -154,6 +154,7 @@ public:
     // Texture views (ARB_texture_view)
     Ref<Texture> viewParent;
     int viewMinLevel = 0, viewNumLevels = 0, viewMinLayer = 0, viewNumLayers = 0;
+    int viewImmutableLevels = 0;  // TEXTURE_IMMUTABLE_LEVELS inherited from the original texture
 
     // Buffer textures
     Ref<Buffer> buffer;

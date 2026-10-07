@@ -347,6 +347,7 @@ private:
     std::pair<std::string, std::string> texRef(const Expr* e);
     std::string opaqueIndex(const Expr* e, const Expr*& base);
     std::string texBias_;  // LOD bias (float) of the sampler resolved by the last texRef(), "" for images
+    std::string texBorder_;  // emulated integer border (GPU address) of the last texRef(), "" if none
     std::string withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs, const std::vector<Type>& ptypes,
                          const Type& ret, const std::function<std::string(size_t, const Expr*)>& argFn, const std::string& firstArg = "");
     std::string subroutineDispatchers();
@@ -1103,9 +1104,11 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         const OpaqueBinding& ob = it->second;
         std::string t = "A->s" + std::to_string(ob.slot), sm = ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : "";
         texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
+        texBorder_ = ob.borderSlot >= 0 ? "A->s" + std::to_string(ob.borderSlot) : "";
         if (e->kind == EK::Index) {
             std::string idx = ex(e->args[1]);
             if (!texBias_.empty()) texBias_ += "[" + idx + "]";
+            if (!texBorder_.empty()) texBorder_ += "[" + idx + "]";
             return {t + "[" + idx + "]", sm.empty() ? "" : sm + "[" + idx + "]"};
         }
         return {t, sm};
@@ -1115,12 +1118,14 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         if (v->param) {
             std::string n = varName(v);
             texBias_ = v->type.base == BT::Sampler ? n + "_b" : "";
+            texBorder_ = "";  // not emulated through function parameters
             return {n + "_t", n + "_s"};
         }
         auto it = P->opaque.find(v->name);
         if (it == P->opaque.end()) fail("internal: opaque uniform '" + v->name + "' has no binding");
         const OpaqueBinding& ob = it->second;
         texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
+        texBorder_ = ob.borderSlot >= 0 ? "A->s" + std::to_string(ob.borderSlot) : "";
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
     }
     if (e->kind == EK::Index) {
@@ -1128,6 +1133,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         std::string idx = opaqueIndex(e, base);
         auto r = texRef(base);
         texBias_ = texBias_.empty() ? "" : texBias_ + "[" + idx + "]";
+        texBorder_ = texBorder_.empty() ? "" : texBorder_ + "[" + idx + "]";
         return {r.first + "[" + idx + "]", r.second.empty() ? "" : r.second + "[" + idx + "]"};
     }
     fail("unsupported sampler/image expression");
@@ -1629,6 +1635,14 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     if (sh && dim == Dim::Cube && arr && !isGather) ref = ex(A[ai++]);
     if (isGather) {
         // textureGather(s, P [, refZ | comp]) / textureGatherOffset(s, P, [refZ,] offset [, comp])
+        // Integer textures with an emulated border color check each gathered texel.
+        const std::string border = !sh && (T.sampled == BT::Int || T.sampled == BT::UInt) && dim != Dim::Cube ? texBorder_ : "";
+        if (!border.empty()) coord = bind(coord, "float2", pre);
+        auto withBorder = [&](const std::string& g, const std::string& c, const std::string& off, int comp) {
+            if (border.empty()) return g;
+            return "mgl_int_border_gather(" + g + ", " + c + ", int2(" + tex + ".get_width(), " + tex + ".get_height()), " + off + ", " +
+                   std::to_string(comp) + ", " + border + ")";
+        };
         std::string refZ;
         if (sh) refZ = ex(A[ai++]);
         std::string offset;
@@ -1660,7 +1674,8 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
                     if (sh) args += ", " + ex(A[2]);
                     args += ", " + (direct ? o2 : std::string("int2(0)"));
                     if (!sh) args += std::string(", component::") + kSwz[compIdx2];
-                    r += (k ? ", " : "") + tex + (sh ? ".gather_compare(" : ".gather(") + args + ").w";
+                    std::string g = tex + (sh ? ".gather_compare(" : ".gather(") + args + ")";
+                    r += (k ? ", " : "") + withBorder(g, direct ? coord : shifted(o2), direct ? o2 : std::string("int2(0)"), compIdx2) + ".w";
                 }
                 return finish(r + ")");
             }
@@ -1682,7 +1697,8 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         if (sh) args += ", " + refZ;
         if (dim != Dim::Cube) args += ", " + (offset.empty() ? std::string("int2(0)") : offset);
         if (!sh) args += std::string(", component::") + kSwz[compIdx];
-        return finish(tex + (sh ? ".gather_compare(" : ".gather(") + args + ")");
+        return finish(withBorder(tex + (sh ? ".gather_compare(" : ".gather(") + args + ")", coord,
+                                 offset.empty() ? std::string("int2(0)") : offset, compIdx));
     }
     std::string options, offset, shadowBias;
     bool fragment = stage_ == Stage::Fragment;
@@ -1722,6 +1738,15 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     std::string plainArgs = args + (offset.empty() ? "" : ", " + offset);
     if (!options.empty()) args += ", " + options;
     if (!offset.empty()) args += ", " + offset;
+    if (shadowBias.empty() && !sh && (T.sampled == BT::Int || T.sampled == BT::UInt) && dim != Dim::Cube) {
+        std::string br = texBorder_;
+        if (!br.empty()) {
+            // Integer textures with GL_CLAMP_TO_BORDER: Metal can only return black/white.
+            std::string c = bind(coord, dim == Dim::D3 ? "float3" : "float2", pre);
+            args = smp + ", " + c + args.substr(smp.size() + 2 + coord.size());
+            return finish("mgl_int_border(" + tex + ".sample(" + args + "), " + c + ", " + br + ")");
+        }
+    }
     if (!shadowBias.empty())
         return finish("(" + shadowBias + " == 0.0f ? " + tex + ".sample_compare(" + plainArgs + ") : " + tex + ".sample_compare(" + args + "))");
     return finish(tex + (sh ? ".sample_compare(" : ".sample(") + args + ")");
@@ -2149,6 +2174,7 @@ void Emitter::emitArgs(std::string& o) {
             group(ob.slot, texType(ob.type, 0));
             group(ob.samplerSlot, "sampler");
             if (ob.biasSlot >= 0) group(ob.biasSlot, "float2");
+            if (ob.borderSlot >= 0) group(ob.borderSlot, "ulong");
         } else if (ob.kind == SlotKind::Image) {
             group(ob.slot, texType(ob.type, ob.memory));
         }
