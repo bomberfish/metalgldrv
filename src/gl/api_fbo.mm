@@ -821,19 +821,33 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src, int* slic
     *slice = 0;
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
     td.storageMode = MTLStorageModePrivate;
+    bool depth = src.pixelFormat == MTLPixelFormatDepth32Float || src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+                 src.pixelFormat == MTLPixelFormatDepth16Unorm;
+    bool stencil = src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || src.pixelFormat == MTLPixelFormatStencil8;
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    // Stencil reads of the resolved image go through an X32_Stencil8 view.
+    if (stencil && depth) td.usage |= MTLTextureUsagePixelFormatView;
     id<MTLTexture> dst = [ctx->dev->mtl newTextureWithDescriptor:td];
     ctx->dev->makeResident(dst);
     ctx->endEncoder();
     MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
-    bool depth = src.pixelFormat == MTLPixelFormatDepth32Float || src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
-                 src.pixelFormat == MTLPixelFormatDepth16Unorm;
-    if (depth) {
-        rp.depthAttachment.texture = src;
-        rp.depthAttachment.slice = layer;
-        rp.depthAttachment.loadAction = MTLLoadActionLoad;
-        rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
-        rp.depthAttachment.resolveTexture = dst;
+    if (depth || stencil) {
+        if (depth) {
+            rp.depthAttachment.texture = src;
+            rp.depthAttachment.slice = layer;
+            rp.depthAttachment.loadAction = MTLLoadActionLoad;
+            rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+            rp.depthAttachment.resolveTexture = dst;
+        }
+        if (stencil) {
+            // GL leaves the resolved stencil sample unspecified; take sample 0.
+            rp.stencilAttachment.texture = src;
+            rp.stencilAttachment.slice = layer;
+            rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+            rp.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
+            rp.stencilAttachment.resolveTexture = dst;
+            rp.stencilAttachment.stencilResolveFilter = MTLMultisampleStencilResolveFilterSample0;
+        }
     } else {
         rp.colorAttachments[0].texture = src;
         rp.colorAttachments[0].slice = layer;
@@ -1005,6 +1019,23 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
     ctx->endEncoder();
     auto blitOne = [&](id<MTLTexture> src, int slevel, int sslice, id<MTLTexture> dst, int dlevel, int dslice, BlitParams::What what, bool linear) {
         if (!src || !dst) return;
+        if (src.sampleCount > 1 && src.sampleCount == dst.sampleCount && src.pixelFormat == dst.pixelFormat) {
+            // Multisample -> multisample with the same sample count copies samples as is (§18.3.1).
+            // A packed depth/stencil image is copied whole, so only when both aspects are blitted.
+            bool packed = src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
+            bool bothAspects = (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) == (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            bool same = sx1 - sx0 == dx1 - dx0 && sy1 - sy0 == dy1 - dy0 && sx0 == dx0 && sy0 == dy0 && sx1 > sx0 && sy1 > sy0 && sx0 >= 0 &&
+                        sy0 >= 0 && sx1 <= (int)src.width && sy1 <= (int)src.height && sx1 <= (int)dst.width && sy1 <= (int)dst.height;
+            if (same && !(ctx->scissorEnabled & 1) && (!packed || bothAspects)) {
+                if (packed && what == BlitParams::Stencil) return;  // copied with the depth aspect
+                id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+                [e copyFromTexture:src sourceSlice:sslice sourceLevel:0 sourceOrigin:MTLOriginMake(sx0, sy0, 0)
+                        sourceSize:MTLSizeMake(sx1 - sx0, sy1 - sy0, 1) toTexture:dst destinationSlice:dslice destinationLevel:0
+                 destinationOrigin:MTLOriginMake(dx0, dy0, 0)];
+                ctx->endEncoder();
+                return;
+            }
+        }
         src = resolveForRead(ctx, src, &sslice);
         BlitParams bp;
         bp.src = src;
