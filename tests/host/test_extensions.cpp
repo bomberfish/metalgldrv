@@ -186,3 +186,30 @@ TEST(texture_filter_minmax) {
     }
     CHECK_GL();
 }
+
+// GL_RGB9_E5 is color-renderable (and blendable): HDR values survive a draw with additive blending.
+TEST(rgb9e5_renderbuffer) {
+    const char* vs = "#version 330 core\nin vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0, 1); }";
+    const char* fs = "#version 330 core\nout vec4 c;\nvoid main() { c = vec4(0.25, 0.5, 2.0, 1.0); }";
+    GLuint p = compileProgram(vs, fs);
+    GLuint rb, fbo;
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGB9_E5, 16, 16);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), (GLenum)GL_FRAMEBUFFER_COMPLETE);
+    glViewport(0, 0, 16, 16);
+    glClearColor(1, 1, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+    glUseProgram(p);
+    drawQuad(p);
+    glDisable(GL_BLEND);
+    float px[3] = {};
+    glReadPixels(8, 8, 1, 1, GL_RGB, GL_FLOAT, px);
+    CHECK(fabsf(px[0] - 1.25f) < 0.01f && fabsf(px[1] - 1.5f) < 0.01f && fabsf(px[2] - 3.0f) < 0.02f);
+    CHECK_GL();
+}
