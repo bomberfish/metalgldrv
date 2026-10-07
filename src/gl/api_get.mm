@@ -140,7 +140,8 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_NUM_EXTENSIONS: v = I(kNumExtensions); return true;
     case GL_NUM_SHADING_LANGUAGE_VERSIONS: v = I(17); return true;
     case GL_NUM_SPIR_V_EXTENSIONS: v = I(0); return true;
-    case GL_RESET_NOTIFICATION_STRATEGY: v = E(GL_NO_RESET_NOTIFICATION); return true;
+    case GL_PRIMITIVE_RESTART_FOR_PATCHES_SUPPORTED: v = B(false); return true;  // tess path ignores restart
+    case GL_RESET_NOTIFICATION_STRATEGY: v = E(ctx->loseContextOnReset ? GL_LOSE_CONTEXT_ON_RESET : GL_NO_RESET_NOTIFICATION); return true;
     case GL_CONTEXT_RELEASE_BEHAVIOR: v = E(GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH); return true;
     case GL_MAX_TEXTURE_SIZE: case GL_MAX_CUBE_MAP_TEXTURE_SIZE: case GL_MAX_RENDERBUFFER_SIZE: case GL_MAX_RECTANGLE_TEXTURE_SIZE:
         v = I(16384); return true;
@@ -290,7 +291,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
 
     // --- bindings ---
     case GL_ARRAY_BUFFER_BINDING: v = I(nameOf(ctx->arrayBuffer.get())); return true;
-    case GL_ELEMENT_ARRAY_BUFFER_BINDING: v = I(ctx->vao ? nameOf(ctx->vao->elementBuffer.get()) : 0); return true;
+    case GL_ELEMENT_ARRAY_BUFFER_BINDING: v = I(nameOf(ctx->bufferBindingRef(GL_ELEMENT_ARRAY_BUFFER)->get())); return true;
     case GL_COPY_READ_BUFFER_BINDING: v = I(nameOf(ctx->copyReadBuffer.get())); return true;
     case GL_COPY_WRITE_BUFFER_BINDING: v = I(nameOf(ctx->copyWriteBuffer.get())); return true;
     case GL_PIXEL_PACK_BUFFER_BINDING: v = I(nameOf(ctx->pixelPackBuffer.get())); return true;
@@ -342,7 +343,12 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_READ_FRAMEBUFFER_BINDING: v = I(ctx->readFb && !ctx->readFb->isDefault ? nameOf(ctx->readFb.get()) : 0); return true;
     case GL_RENDERBUFFER_BINDING: v = I(nameOf(ctx->renderbuffer.get())); return true;
     case GL_ACTIVE_TEXTURE: v = E(GL_TEXTURE0 + ctx->activeTexture); return true;
-    case GL_SAMPLER_BINDING: v = I(nameOf(ctx->samplers[ctx->activeTexture].get())); return true;
+    case GL_SAMPLER_BINDING: {  // indexed form (ARB_multi_bind) selects the texture unit
+        int unit = index >= 0 ? index : ctx->activeTexture;
+        if (unit >= kMaxTextureUnits) return false;
+        v = I(nameOf(ctx->samplers[unit].get()));
+        return true;
+    }
     case GL_TEXTURE_BINDING_1D: case GL_TEXTURE_BINDING_2D: case GL_TEXTURE_BINDING_3D: case GL_TEXTURE_BINDING_1D_ARRAY:
     case GL_TEXTURE_BINDING_2D_ARRAY: case GL_TEXTURE_BINDING_RECTANGLE: case GL_TEXTURE_BINDING_CUBE_MAP:
     case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY: case GL_TEXTURE_BINDING_BUFFER: case GL_TEXTURE_BINDING_2D_MULTISAMPLE:
@@ -389,14 +395,15 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
 
     // --- fixed function ---
     case GL_VIEWPORT: {
+        if (idx >= kMaxViewports) return false;
         Value r; r.type = VT::Float; r.n = 4;
         for (int k = 0; k < 4; k++) r.d[k] = ctx->viewport[idx][k];
         v = r;
         if (index < 0) v.type = VT::Int;  // glGetIntegerv(GL_VIEWPORT) returns ints; float getters use float
         return true;
     }
-    case GL_SCISSOR_BOX: v = I4(ctx->scissor[idx][0], ctx->scissor[idx][1], ctx->scissor[idx][2], ctx->scissor[idx][3]); return true;
-    case GL_DEPTH_RANGE: { Value r; r.type = VT::Double; r.n = 2; r.d[0] = ctx->depthRange[idx][0]; r.d[1] = ctx->depthRange[idx][1]; v = r; return true; }
+    case GL_SCISSOR_BOX: if (idx >= kMaxViewports) return false; v = I4(ctx->scissor[idx][0], ctx->scissor[idx][1], ctx->scissor[idx][2], ctx->scissor[idx][3]); return true;
+    case GL_DEPTH_RANGE: { if (idx >= kMaxViewports) return false; Value r; r.type = VT::Double; r.n = 2; r.d[0] = ctx->depthRange[idx][0]; r.d[1] = ctx->depthRange[idx][1]; v = r; return true; }
     case GL_COLOR_CLEAR_VALUE: v = F4(ctx->clearColor); return true;
     case GL_DEPTH_CLEAR_VALUE: { Value r; r.type = VT::Double; r.d[0] = ctx->clearDepth; v = r; return true; }
     case GL_STENCIL_CLEAR_VALUE: v = I(ctx->clearStencil); return true;
@@ -531,7 +538,12 @@ template <typename T>
 static void getv(GLenum pname, int index, T* data) {
     MGL_CTX();
     Value v;
-    if (!getState(ctx, pname, index, v)) return ctx->setError(index >= 0 ? GL_INVALID_ENUM : GL_INVALID_ENUM, "glGet(0x%x)", pname);
+    if (!getState(ctx, pname, index, v)) {
+        // an indexed state whose index is out of range is INVALID_VALUE, an unknown name INVALID_ENUM
+        Value probe;
+        bool indexedName = index > 0 && getState(ctx, pname, 0, probe);
+        return ctx->setError(indexedName ? GL_INVALID_VALUE : GL_INVALID_ENUM, "glGet(0x%x, %d)", pname, index);
+    }
     if constexpr (std::is_integral_v<T> && !std::is_same_v<T, GLboolean>) {
         if (isNormalizedFloatState(pname) && (v.type == VT::Float || v.type == VT::Double)) {
             // GL 4.6 table 2.x: normalized fixed-point conversion

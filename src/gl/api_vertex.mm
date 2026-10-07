@@ -31,7 +31,7 @@ API void APIENTRY glDeleteVertexArrays(GLsizei n, const GLuint* arrays) {
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) {
         VertexArray* v = ctx->vaos.get(arrays[i]);
-        if (v && ctx->vao.get() == v) ctx->vao = ctx->coreProfile ? nullptr : ctx->defaultVao;
+        if (v && ctx->vao.get() == v) ctx->vao = ctx->defaultVao;
         ctx->vaos.remove(arrays[i]);
     }
 }
@@ -44,7 +44,7 @@ API GLboolean APIENTRY glIsVertexArray(GLuint array) {
 API void APIENTRY glBindVertexArray(GLuint array) {
     MGL_CTX();
     if (!array) {
-        ctx->vao = ctx->coreProfile ? nullptr : ctx->defaultVao;
+        ctx->vao = ctx->defaultVao;
         return;
     }
     VertexArray* v = ctx->vaos.get(array);
@@ -55,8 +55,16 @@ API void APIENTRY glBindVertexArray(GLuint array) {
     ctx->vao = v;
 }
 
-static VertexArray* curVao(Context* ctx) {
-    if (!ctx->vao) ctx->setError(GL_INVALID_OPERATION, "no vertex array bound");
+// Core profiles have no usable default VAO, but (like Mesa) a hidden one is always bound so
+// enable/disable/queries and element-buffer binds work; specifying attribute data or formats
+// on it is INVALID_OPERATION (GL 4.6 §10.3.1), as are draws (validated in draw.mm).
+static VertexArray* curVao(Context* ctx) { return ctx->vao.get(); }
+
+static VertexArray* specVao(Context* ctx) {
+    if (ctx->coreProfile && ctx->vao.get() == ctx->defaultVao.get()) {
+        ctx->setError(GL_INVALID_OPERATION, "no vertex array object bound");
+        return nullptr;
+    }
     return ctx->vao.get();
 }
 
@@ -105,7 +113,7 @@ static void attribFormat(Context* ctx, VertexArray* v, GLuint index, GLint size,
 
 static void attribPointer(Context* ctx, GLuint index, GLint size, GLenum type, bool normalized, bool integer, bool isLong, GLsizei stride,
                           const void* pointer) {
-    VertexArray* v = curVao(ctx);
+    VertexArray* v = specVao(ctx);
     if (!v) return;
     if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
     if (stride < 0 || stride > 2048) return ctx->setError(GL_INVALID_VALUE);
@@ -207,7 +215,7 @@ static void bindVertexBuffer(Context* ctx, VertexArray* v, GLuint bindingindex, 
 
 API void APIENTRY glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
     MGL_CTX();
-    VertexArray* v = curVao(ctx);
+    VertexArray* v = specVao(ctx);
     if (v) bindVertexBuffer(ctx, v, bindingindex, buffer, offset, stride);
 }
 
@@ -219,7 +227,7 @@ API void APIENTRY glVertexArrayVertexBuffer(GLuint vaobj, GLuint bindingindex, G
 
 API void APIENTRY glBindVertexBuffers(GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizei* strides) {
     MGL_CTX();
-    VertexArray* v = curVao(ctx);
+    VertexArray* v = specVao(ctx);
     if (!v) return;
     if (first + count > kMaxVertexBindings) return ctx->setError(GL_INVALID_OPERATION);
     for (int i = 0; i < count; i++)
@@ -238,17 +246,17 @@ API void APIENTRY glVertexArrayVertexBuffers(GLuint vaobj, GLuint first, GLsizei
 
 API void APIENTRY glVertexAttribFormat(GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset) {
     MGL_CTX();
-    VertexArray* v = curVao(ctx);
+    VertexArray* v = specVao(ctx);
     if (v) attribFormat(ctx, v, attribindex, size, type, normalized, false, false, relativeoffset);
 }
 API void APIENTRY glVertexAttribIFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
     MGL_CTX();
-    VertexArray* v = curVao(ctx);
+    VertexArray* v = specVao(ctx);
     if (v) attribFormat(ctx, v, attribindex, size, type, false, true, false, relativeoffset);
 }
 API void APIENTRY glVertexAttribLFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
     MGL_CTX();
-    VertexArray* v = curVao(ctx);
+    VertexArray* v = specVao(ctx);
     if (v) attribFormat(ctx, v, attribindex, size, type, false, false, true, relativeoffset);
 }
 API void APIENTRY glVertexArrayAttribFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset) {
@@ -275,7 +283,7 @@ static void attribBinding(Context* ctx, VertexArray* v, GLuint attribindex, GLui
 
 API void APIENTRY glVertexAttribBinding(GLuint attribindex, GLuint bindingindex) {
     MGL_CTX();
-    VertexArray* v = curVao(ctx);
+    VertexArray* v = specVao(ctx);
     if (v) attribBinding(ctx, v, attribindex, bindingindex);
 }
 API void APIENTRY glVertexArrayAttribBinding(GLuint vaobj, GLuint attribindex, GLuint bindingindex) {
@@ -292,7 +300,7 @@ static void bindingDivisor(Context* ctx, VertexArray* v, GLuint bindingindex, GL
 
 API void APIENTRY glVertexBindingDivisor(GLuint bindingindex, GLuint divisor) {
     MGL_CTX();
-    VertexArray* v = curVao(ctx);
+    VertexArray* v = specVao(ctx);
     if (v) bindingDivisor(ctx, v, bindingindex, divisor);
 }
 API void APIENTRY glVertexArrayBindingDivisor(GLuint vaobj, GLuint bindingindex, GLuint divisor) {

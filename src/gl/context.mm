@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #endif
 #include <cstdarg>
+#include <execinfo.h>
 #include "gl/internal_shaders.h"
 #include "gl/pipeline.h"
 #include "util/log.h"
@@ -63,7 +64,7 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
         for (int i = 0; i < kNumTexTargets; i++) textures[u][i] = defaultTextures[i];
     defaultVao = new VertexArray();
     for (int i = 0; i < kMaxVertexBindings; i++) defaultVao->attribs[i].binding = i;
-    if (!coreProfile) vao = defaultVao;
+    vao = defaultVao;  // hidden in core profiles (see api_vertex.mm specVao)
     defaultXfb = new TransformFeedbackObj();
     xfb = defaultXfb;
 
@@ -89,6 +90,8 @@ Context::~Context() {
     if (uploadChunk_) dev->releaseAfter(uploadChunk_, serial_);
 }
 
+thread_local const char* t_apiName = "";
+
 void Context::setError(GLenum e, const char* fmt, ...) {
     if (error == GL_NO_ERROR) error = e;
     char buf[512];
@@ -99,7 +102,12 @@ void Context::setError(GLenum e, const char* fmt, ...) {
         vsnprintf(buf, sizeof buf, fmt, ap);
         va_end(ap);
     }
-    MGL_DBG("GL error 0x%04x: %s", e, buf);
+    MGL_DBG("GL error 0x%04x in %s: %s", e, t_apiName, buf);
+    if (::mgl::g_logLevel >= ::mgl::LOG_TRACE) {  // METALGLDRV_LOG=4: who raised it
+        void* frames[6];
+        int n = backtrace(frames, 6);
+        if (n > 1) backtrace_symbols_fd(frames + 1, n - 1, 2);
+    }
     if (debugOutput) debugMessage(GL_DEBUG_SOURCE_API, GL_DEBUG_TYPE_ERROR, e, GL_DEBUG_SEVERITY_HIGH, buf[0] ? buf : "GL error");
 }
 
@@ -143,7 +151,8 @@ Texture* Context::texForUnit(int unit, int targetIdx) { return textures[unit][ta
 Ref<Buffer>* Context::bufferBindingRef(GLenum target) {
     switch (target) {
     case GL_ARRAY_BUFFER: return &arrayBuffer;
-    case GL_ELEMENT_ARRAY_BUFFER: return vao ? &vao->elementBuffer : nullptr;
+    // core profile without a VAO: the binding lives in the (otherwise unusable) default VAO, as in Mesa
+    case GL_ELEMENT_ARRAY_BUFFER: return vao ? &vao->elementBuffer : &defaultVao->elementBuffer;
     case GL_COPY_READ_BUFFER: return &copyReadBuffer;
     case GL_COPY_WRITE_BUFFER: return &copyWriteBuffer;
     case GL_PIXEL_PACK_BUFFER: return &pixelPackBuffer;
@@ -194,6 +203,7 @@ void Context::unbindDeletedBuffer(Buffer* b) {
         if (u.buffer.get() == b) u = IndexedBufferBinding();
     for (auto& u : atomicCounterBuffers)
         if (u.buffer.get() == b) u = IndexedBufferBinding();
+    if (defaultVao && defaultVao->elementBuffer.get() == b) defaultVao->elementBuffer = nullptr;
     if (vao) {
         if (vao->elementBuffer.get() == b) vao->elementBuffer = nullptr;
         for (auto& bd : vao->bindings)

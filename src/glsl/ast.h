@@ -157,7 +157,7 @@ enum class BuiltinVar : uint16_t {
     // compute
     NumWorkGroups, WorkGroupID, LocalInvocationID, GlobalInvocationID, LocalInvocationIndex, WorkGroupSize,
     // uniforms
-    DepthRange, CompatUniform,
+    DepthRange, NumSamples, CompatUniform,
 };
 
 struct Expr;
@@ -172,6 +172,7 @@ struct Variable {
     bool param = false;
     bool used = false;           // statically used by reachable code
     bool written = false;
+    bool redeclared = false;  // builtin redeclared by the shader
     int id = 0;
     Expr* init = nullptr;
     std::shared_ptr<ConstVal> constVal;  // for const variables with constant initializers

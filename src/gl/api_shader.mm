@@ -1,3 +1,6 @@
+#include <limits>
+#include <type_traits>
+#include <cmath>
 // Shader & program objects, uniforms, program interface queries, pipelines.
 #import "gl/context.h"
 #include <cmath>
@@ -186,6 +189,7 @@ API void APIENTRY glGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
     case GL_SHADER_TYPE: *params = s->type; break;
     case GL_DELETE_STATUS: *params = s->deleted; break;
     case GL_COMPILE_STATUS: *params = s->compiled; break;
+    case GL_COMPLETION_STATUS_ARB: *params = GL_TRUE; break;  // compiles are synchronous
     case GL_INFO_LOG_LENGTH: *params = s->infoLog.empty() ? 0 : (GLint)s->infoLog.size() + 1; break;
     case GL_SHADER_SOURCE_LENGTH: {
         size_t n = 0;
@@ -270,15 +274,32 @@ API void APIENTRY glDeleteProgram(GLuint program) {
     std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
-    // A program in use stays alive via ctx->program until unbound.
-    if (ctx->program.get() != p) {
-        for (auto& a : p->attached) {
-            a->attachCount--;
-            maybeFreeShader(ctx, a.get());
-        }
-        p->attached.clear();
+    // A program in use is only flagged (its name stays valid, GL 4.6 7.3); it is freed
+    // when it stops being the current program.
+    if (ctx->program.get() == p) {
+        p->deleted = true;
+        return;
     }
+    for (auto& a : p->attached) {
+        a->attachCount--;
+        maybeFreeShader(ctx, a.get());
+    }
+    p->attached.clear();
     ctx->share->shaderPrograms.remove(program);
+}
+
+// Frees the current program's name if it was flagged for deletion while in use.
+static void releaseCurrentProgram(Context* ctx) {
+    ProgramObj* old = ctx->program.get();
+    if (!old || !old->deleted) return;
+    std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
+    if (ctx->share->shaderPrograms.get(old->name) != old) return;
+    for (auto& a : old->attached) {
+        a->attachCount--;
+        maybeFreeShader(ctx, a.get());
+    }
+    old->attached.clear();
+    ctx->share->shaderPrograms.remove(old->name);
 }
 
 API GLboolean APIENTRY glIsProgram(GLuint program) {
@@ -358,6 +379,15 @@ API void APIENTRY glTransformFeedbackVaryings(GLuint program, GLsizei count, con
     if (bufferMode == GL_SEPARATE_ATTRIBS && count > kMaxXfbBuffers) return ctx->setError(GL_INVALID_VALUE);
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
+    // gl_NextBuffer / gl_SkipComponents* are only valid with interleaved capture
+    if (bufferMode == GL_SEPARATE_ATTRIBS)
+        for (int i = 0; i < count; i++)
+            if (varyings[i] && (!strcmp(varyings[i], "gl_NextBuffer") || !strncmp(varyings[i], "gl_SkipComponents", 17)))
+                return ctx->setError(GL_INVALID_OPERATION);
+    int nextBuffers = 0;
+    for (int i = 0; i < count; i++)
+        if (varyings[i] && !strcmp(varyings[i], "gl_NextBuffer")) nextBuffers++;
+    if (nextBuffers >= kMaxXfbBuffers) return ctx->setError(GL_INVALID_OPERATION);
     p->xfbVaryings.clear();
     for (int i = 0; i < count; i++) p->xfbVaryings.push_back(varyings[i]);
     p->xfbBufferMode = bufferMode;
@@ -396,6 +426,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
     if (!allCompiled || in.shaders.empty()) {
         p->linked = false;
         p->infoLog = in.shaders.empty() ? "error: no shaders attached\n" : "error: attached shader not successfully compiled\n";
+        MGL_DBG("program %u link failed: %s", program, p->infoLog.c_str());
         return;
     }
     glsl::LinkResult r = glsl::link(in);
@@ -433,6 +464,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
             // Report backend failures through the link status so apps see them.
             p->linked = false;
             p->infoLog += "error: internal Metal shader compilation failed: " + v->error + "\n";
+            MGL_DBG("program %u: %s", program, p->infoLog.c_str());
         }
     }
 }
@@ -441,12 +473,14 @@ API void APIENTRY glUseProgram(GLuint program) {
     MGL_CTX();
     if (ctx->xfb->active && !ctx->xfb->paused) return ctx->setError(GL_INVALID_OPERATION);
     if (!program) {
+        releaseCurrentProgram(ctx);
         ctx->program = nullptr;
         return;
     }
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
     if (!p->linked) return ctx->setError(GL_INVALID_OPERATION, "program not linked");
+    if (ctx->program.get() != p) releaseCurrentProgram(ctx);
     ctx->program = p;
     // Subroutine selections are reset when the current program changes (GL 4.6 §7.10).
     for (int st = 0; st < (int)glsl::Stage::Count; st++) {
@@ -482,6 +516,7 @@ API void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
     switch (pname) {
     case GL_DELETE_STATUS: *params = p->deleted; break;
     case GL_LINK_STATUS: *params = p->linked; break;
+    case GL_COMPLETION_STATUS_ARB: *params = GL_TRUE; break;
     case GL_VALIDATE_STATUS: *params = p->validated; break;
     case GL_INFO_LOG_LENGTH: *params = p->infoLog.empty() ? 0 : (GLint)p->infoLog.size() + 1; break;
     case GL_ATTACHED_SHADERS: *params = (GLint)p->attached.size(); break;
@@ -495,15 +530,27 @@ API void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
     case GL_TRANSFORM_FEEDBACK_BUFFER_MODE: *params = p->xfbBufferMode; break;
     case GL_TRANSFORM_FEEDBACK_VARYINGS: *params = p->linked ? (GLint)r.xfbVaryings.size() : 0; break;
     case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH: *params = maxLen(r.xfbVaryings, [](auto& a) -> const std::string& { return a.name; }); break;
-    case GL_GEOMETRY_VERTICES_OUT: if (!(r.stageMask & (1 << (int)glsl::Stage::Geometry))) return ctx->setError(GL_INVALID_OPERATION); *params = r.gsMaxVertices; break;
-    case GL_GEOMETRY_INPUT_TYPE: if (!(r.stageMask & (1 << (int)glsl::Stage::Geometry))) return ctx->setError(GL_INVALID_OPERATION); *params = r.gsInputPrimitive; break;
-    case GL_GEOMETRY_OUTPUT_TYPE: if (!(r.stageMask & (1 << (int)glsl::Stage::Geometry))) return ctx->setError(GL_INVALID_OPERATION); *params = r.gsOutputPrimitive; break;
-    case GL_GEOMETRY_SHADER_INVOCATIONS: *params = r.gsInvocations; break;
-    case GL_TESS_CONTROL_OUTPUT_VERTICES: *params = r.tcsOutputVertices; break;
-    case GL_TESS_GEN_MODE: *params = r.tesPrimitiveMode; break;
-    case GL_TESS_GEN_SPACING: *params = r.tesSpacing; break;
-    case GL_TESS_GEN_VERTEX_ORDER: *params = r.tesOrder; break;
-    case GL_TESS_GEN_POINT_MODE: *params = r.tesPointMode; break;
+    // GL 4.6 7.13: stage-specific queries need a linked program containing that stage
+    case GL_GEOMETRY_VERTICES_OUT: case GL_GEOMETRY_INPUT_TYPE: case GL_GEOMETRY_OUTPUT_TYPE: case GL_GEOMETRY_SHADER_INVOCATIONS:
+    case GL_TESS_CONTROL_OUTPUT_VERTICES: case GL_TESS_GEN_MODE: case GL_TESS_GEN_SPACING: case GL_TESS_GEN_VERTEX_ORDER:
+    case GL_TESS_GEN_POINT_MODE: {
+        glsl::Stage st = pname == GL_TESS_CONTROL_OUTPUT_VERTICES ? glsl::Stage::TessControl
+                       : (pname == GL_TESS_GEN_MODE || pname == GL_TESS_GEN_SPACING || pname == GL_TESS_GEN_VERTEX_ORDER ||
+                          pname == GL_TESS_GEN_POINT_MODE) ? glsl::Stage::TessEval : glsl::Stage::Geometry;
+        if (!p->linked || !(r.stageMask & (1u << (int)st))) return ctx->setError(GL_INVALID_OPERATION);
+        switch (pname) {
+        case GL_GEOMETRY_VERTICES_OUT: *params = r.gsMaxVertices; break;
+        case GL_GEOMETRY_INPUT_TYPE: *params = r.gsInputPrimitive; break;
+        case GL_GEOMETRY_OUTPUT_TYPE: *params = r.gsOutputPrimitive; break;
+        case GL_GEOMETRY_SHADER_INVOCATIONS: *params = r.gsInvocations; break;
+        case GL_TESS_CONTROL_OUTPUT_VERTICES: *params = r.tcsOutputVertices; break;
+        case GL_TESS_GEN_MODE: *params = r.tesPrimitiveMode; break;
+        case GL_TESS_GEN_SPACING: *params = r.tesSpacing; break;
+        case GL_TESS_GEN_VERTEX_ORDER: *params = r.tesOrder; break;
+        default: *params = r.tesPointMode; break;
+        }
+        break;
+    }
     case GL_COMPUTE_WORK_GROUP_SIZE:
         if (!p->linked || !(r.stageMask & (1 << (int)glsl::Stage::Compute))) return ctx->setError(GL_INVALID_OPERATION);
         params[0] = r.localSize[0];
@@ -547,8 +594,20 @@ API GLint APIENTRY glGetAttribLocation(GLuint program, const GLchar* name) {
         ctx->setError(GL_INVALID_OPERATION);
         return -1;
     }
-    for (auto& a : p->refl.attributes)
-        if (a.name == name) return a.location;
+    // "attr", "attr[0]" or an array element "attr[N]" (N < array size; each element
+    // uses locationsUsed / arraySize consecutive locations).
+    std::string n = name;
+    for (auto& a : p->refl.attributes) {
+        if (a.name == n) return a.location;
+        if (n.size() > a.name.size() + 2 && n.compare(0, a.name.size(), a.name) == 0 && n[a.name.size()] == '[' && n.back() == ']') {
+            const char* digits = n.c_str() + a.name.size() + 1;
+            char* end = nullptr;
+            long idx = strtol(digits, &end, 10);
+            if (end == digits || *end != ']' || end + 1 != n.c_str() + n.size() || idx < 0 || idx >= a.arraySize) return -1;
+            if (idx > 0 && digits[0] == '0') return -1;  // no leading zeros
+            return a.location + (int)idx * (a.locationsUsed / std::max(1, a.arraySize));
+        }
+    }
     return -1;
 }
 
@@ -697,9 +756,10 @@ API void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei count, const GLu
         case GL_UNIFORM_SIZE: params[i] = u.arraySize; break;
         case GL_UNIFORM_NAME_LENGTH: params[i] = (GLint)u.name.size() + 1; break;
         case GL_UNIFORM_BLOCK_INDEX: params[i] = u.blockIndex; break;
-        case GL_UNIFORM_OFFSET: params[i] = u.blockIndex >= 0 ? u.offset : -1; break;
-        case GL_UNIFORM_ARRAY_STRIDE: params[i] = u.blockIndex >= 0 ? u.arrayStride : -1; break;
-        case GL_UNIFORM_MATRIX_STRIDE: params[i] = u.blockIndex >= 0 ? u.matrixStride : -1; break;
+        // Block members and atomic counters (offset within the counter buffer) have a layout.
+        case GL_UNIFORM_OFFSET: params[i] = u.blockIndex >= 0 || u.atomicCounterBufferIndex >= 0 ? u.offset : -1; break;
+        case GL_UNIFORM_ARRAY_STRIDE: params[i] = u.blockIndex >= 0 || u.atomicCounterBufferIndex >= 0 ? u.arrayStride : -1; break;
+        case GL_UNIFORM_MATRIX_STRIDE: params[i] = u.blockIndex >= 0 ? u.matrixStride : u.atomicCounterBufferIndex >= 0 ? 0 : -1; break;
         case GL_UNIFORM_IS_ROW_MAJOR: params[i] = u.rowMajor; break;
         case GL_UNIFORM_ATOMIC_COUNTER_BUFFER_INDEX: params[i] = u.atomicCounterBufferIndex; break;
         default: return ctx->setError(GL_INVALID_ENUM);
@@ -1025,8 +1085,25 @@ static void getUniform(Context* ctx, GLuint program, GLint location, GLsizei buf
             const uint8_t* e = src + c * matStride + r * elemSize;
             T v;
             switch (ts.base) {
-            case BaseType::Float: { float f; memcpy(&f, e, 4); v = (T)f; break; }
-            case BaseType::Double: { double d; memcpy(&d, e, 8); v = (T)d; break; }
+            // floating point to integer queries round to nearest (GL 4.6 §2.2.2)
+            case BaseType::Float:
+            case BaseType::Double: {
+                double d;
+                if (ts.base == BaseType::Float) {
+                    float f;
+                    memcpy(&f, e, 4);
+                    d = f;
+                } else {
+                    memcpy(&d, e, 8);
+                }
+                if (std::is_integral<T>::value) {
+                    d = std::nearbyint(d);
+                    if (std::is_unsigned<T>::value) d = std::max(d, 0.0);  // negative -> 0 for unsigned queries
+                    d = std::clamp(d, (double)std::numeric_limits<T>::lowest(), (double)std::numeric_limits<T>::max());
+                }
+                v = (T)d;
+                break;
+            }
             case BaseType::Int: { int32_t i; memcpy(&i, e, 4); v = (T)i; break; }
             case BaseType::UInt: case BaseType::Bool: { uint32_t i; memcpy(&i, e, 4); v = (T)i; break; }
             default: v = 0;
