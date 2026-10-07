@@ -132,6 +132,16 @@ int runPipeline(const PipelineArgs& pa) {
             info.xfbStride[b] = r.multipass.xfbStride[b];
             info.xfbCapacity[b] = pa.xfbCapacity;
         }
+        // varying spill buffer (mesh producers past Metal's mesh output budget)
+        id<MTLBuffer> spillBuf = [dev newBufferWithLength:16 << 20 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> spillCnt = [dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        memset(spillCnt.contents, 0, 16);
+        for (auto& ep : mo.entryPoints)
+            if (ep.kind == EntryPoint::Mesh && ep.spillRecordBytes) {
+                info.spillBuffer = spillBuf.gpuAddress;
+                info.spillCounter = spillCnt.gpuAddress;
+                info.spillCapacity = (uint32_t)((16u << 20) / ep.spillRecordBytes);
+            }
         id<MTLBuffer> infoBuf = [dev newBufferWithBytes:&info length:sizeof info options:MTLResourceStorageModeShared];
         id<MTLBuffer> args = [dev newBufferWithLength:std::max<size_t>(8, r.slots.size() * 8) options:MTLResourceStorageModeShared];
         id<MTLBuffer> defaults = [dev newBufferWithLength:std::max<uint32_t>(16, r.defaultUniformSize) options:MTLResourceStorageModeShared];
@@ -147,7 +157,7 @@ int runPipeline(const PipelineArgs& pa) {
         for (int i = 0; i < 4; i++) sys.tessDefaultOuter[i] = pa.defaultOuter[i];
         for (int i = 0; i < 2; i++) sys.tessDefaultInner[i] = pa.defaultInner[i];
         id<MTLBuffer> sysBuf = [dev newBufferWithBytes:&sys length:sizeof sys options:MTLResourceStorageModeShared];
-        NSArray* resources = @[ vb, ib, vout, pout, counters, xfbBuf[0], xfbBuf[1], xfbBuf[2], xfbBuf[3], defaults ];
+        NSArray* resources = @[ vb, ib, vout, pout, counters, xfbBuf[0], xfbBuf[1], xfbBuf[2], xfbBuf[3], defaults, spillBuf, spillCnt ];
         id<MTLCommandQueue> q = [dev newCommandQueue];
         id<MTLCommandBuffer> cb = [q commandBuffer];
         auto computePass = [&](const EntryPoint* k, MTLSize grid, bool threads) -> bool {

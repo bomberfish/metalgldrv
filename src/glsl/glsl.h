@@ -301,6 +301,7 @@ struct EntryPoint {
     int threadsPerThreadgroup[3] = {1, 1, 1};
     uint32_t payloadBytes = 0;   // object -> mesh
     uint32_t maxMeshVertices = 0, maxMeshPrimitives = 0;
+    uint32_t spillRecordBytes = 0;  // Mesh: bytes per primitive of spilled varyings (0 = none)
     uint32_t scratchWordsPerItem = 0;  // mgl_gs_copy: size of each item's MGLDrawInfo::gsRecord area
 };
 
@@ -394,6 +395,12 @@ struct alignas(16) MGLDrawInfo {
     uint32_t xfbBufferStream[4];  // stream feeding each buffer
     uint64_t gsRecord;            // optional: mgl_gs_count stores each item's captured primitives here
                                   // (EntryPoint::scratchWordsPerItem uint32 per item); mgl_gs_copy places them
+    // Varying spill (mesh producers whose fragment inputs exceed Metal's 124 mesh output scalars):
+    // spillBuffer holds EntryPoint::spillRecordBytes per rasterized primitive, slots from *spillCounter.
+    uint64_t spillBuffer;
+    uint64_t spillCounter;        // device atomic_uint
+    uint32_t spillCapacity;       // records that fit in spillBuffer
+    uint32_t pad1;
 };
 
 

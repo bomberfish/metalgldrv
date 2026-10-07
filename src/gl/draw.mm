@@ -1158,6 +1158,9 @@ struct MPState {
     uint32_t xfbPrimLimit[4] = {0, 0, 0, 0};
     uint32_t xfbStreamBase[4] = {0, 0, 0, 0};
     bool xfb = false;
+    // varying spill of the mesh pass (EntryPoint::spillRecordBytes)
+    uint64_t spillBuffer = 0, spillCounter = 0;
+    uint32_t spillCapacity = 0;
     // per phase (upload memory is retired by every CPU wait)
     uint64_t infoAddr = 0, argAddr = 0, sysAddr = 0;
 };
@@ -1223,6 +1226,9 @@ void mpUpload(MPState& s) {
     info->itemCount = s.itemCount;
     info->gsRecord = s.gsRec ? s.gsRec.gpuAddress : 0;
     info->tesPrimCount = s.tesPrimCount;
+    info->spillBuffer = s.spillBuffer;
+    info->spillCounter = s.spillCounter;
+    info->spillCapacity = s.spillCapacity;
     if (!s.offsets.empty()) {
         UploadAlloc off = ctx->upload(s.offsets.size() * 4, 16);
         memcpy(off.cpu, s.offsets.data(), s.offsets.size() * 4);
@@ -1497,6 +1503,24 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         return true;
     }
     // --- tessellation pass 1: VS+TCS compute ---
+    // Fragment inputs past Metal's mesh output budget travel through a spill buffer (one record per
+    // emitted vertex). Sized for the worst case of the grid, capped; overflowing vertices read zeros.
+    if (const glsl::EntryPoint* sm = var->entry(glsl::EntryPoint::Mesh); sm && sm->spillRecordBytes) {
+        const uint64_t kCap = 64ull << 20;
+        uint64_t worst = (vk.kind == glsl::PipelineKind::Tessellation)
+                             ? kCap
+                             : (uint64_t)s.prims * d.instances * std::max(1, refl.gsInvocations) * std::max<uint32_t>(1, sm->maxMeshVertices) *
+                                   sm->spillRecordBytes;
+        uint64_t bytes = std::max<uint64_t>(sm->spillRecordBytes, std::min(worst, kCap));
+        id<MTLBuffer> sb = ctx->dev->newBuffer((size_t)bytes);
+        ctx->dev->releaseAfter(sb, ctx->serial());
+        id<MTLBuffer> sc = ctx->dev->newBuffer(16);
+        memset(sc.contents, 0, 16);
+        ctx->dev->releaseAfter(sc, ctx->serial());
+        s.spillBuffer = sb.gpuAddress;
+        s.spillCounter = sc.gpuAddress;
+        s.spillCapacity = (uint32_t)(bytes / sm->spillRecordBytes);
+    }
     if (vk.kind == glsl::PipelineKind::Tessellation) {
         if (!mpTessControl(s)) { retire(); return false; }
         if (hasGS && !mpTessRecords(s)) { retire(); return false; }
@@ -1525,6 +1549,10 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
     [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
     [table setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
+    if (ctx->enc.fsTableSplit) {
+        [e setArgumentTable:table atStages:MTLRenderStageFragment];
+        ctx->enc.fsTableSplit = false;
+    }
     mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts come from counted passes
     MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
     if (os) {

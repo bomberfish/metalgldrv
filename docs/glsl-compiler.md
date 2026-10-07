@@ -100,6 +100,16 @@ Vertex ids come from the uint32 list `indexBuffer` (+ `baseVertex`).
 * Fragment shaders paired with mesh pipelines read gl_PrimitiveID from the per-primitive `[[user(mgl_primid)]]`; gl_Layer /
   gl_ViewportIndex are per-primitive outputs. `Reflection::usesFlatShading` tells the classic path when index rotation for
   GL_LAST_VERTEX_CONVENTION is needed; `writesLayer`/`writesViewportIndex` describe the last pre-raster stage.
+* **Varying spill** (mesh producers: GS, TES): Metal caps a mesh vertex + primitive at 124 unique scalars (position
+  included) and a whole mesh at 32 KB. When the fragment inputs do not fit, the trailing varyings are spilled: each
+  emitted vertex takes a record slot from `MGLDrawInfo::spillCounter` and writes them (one uint4 per leaf,
+  `EntryPoint::spillRecordBytes` per vertex) to `spillBuffer`; every primitive carries its vertices' slots in the flat
+  per-primitive `uint3 mgl_spill` (index order: vertex 0 = provoking vertex); the fragment shader reads the records
+  (also bound at buffer 22) and interpolates with `[[barycentric_coord, <center|centroid|sample>_<perspective|
+  no_perspective>]]` (flat/integer/double inputs take vertex 0). The runtime allocates `spillBuffer` for the worst
+  case of the grid (capped at 64 MB; vertices past `spillCapacity` read zeros). Programs within the budgets emit no
+  spill code. This is what lets GL_MAX_FRAGMENT_INPUT_COMPONENTS be 128 (VS outputs stay at 124, so classic
+  VS→FS pipelines never spill). interpolateAt*() on a spilled input is not supported.
 * The tessellator chunk sets `#pragma METAL fp math_mode(safe)` / `fp contract(off)` (shared vertices must be bit-identical); this
   applies to the rest of the generated source.
 

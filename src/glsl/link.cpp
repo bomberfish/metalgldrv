@@ -1108,7 +1108,6 @@ void Linker::checkVaryings() {
             continue;
         }
         Type a = it->second->type, b = v->type;
-        if (pre != Stage::Vertex && !a.dims.empty()) a = a.elem();
         if (a.str() != b.str() && !(a.base == BT::Struct && b.base == BT::Struct && a.sdef->name == b.sdef->name))
             error("type mismatch for varying '" + v->name + "' ('" + a.str() + "' vs '" + b.str() + "')");
     }
