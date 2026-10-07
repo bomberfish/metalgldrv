@@ -77,7 +77,8 @@ namespace {
 
 struct Line {
     std::string text;
-    int file, line;
+    int file = 0, line = 1;
+    std::vector<int> lines;  // source line of each character of text
 };
 
 struct Macro {
@@ -96,7 +97,7 @@ bool isDigit(char c) { return c >= '0' && c <= '9'; }
 const char* kPuncts3[] = {"<<=", ">>=", "...", nullptr};
 const char* kPuncts2[] = {"++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "^^", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "##", nullptr};
 
-void lexLine(const std::string& s, int file, int line, std::vector<PPToken>& out) {
+void lexLine(const std::string& s, int file, int line, std::vector<PPToken>& out, const std::vector<int>* lines = nullptr) {
     size_t i = 0, n = s.size();
     bool space = true;
     while (i < n) {
@@ -104,7 +105,7 @@ void lexLine(const std::string& s, int file, int line, std::vector<PPToken>& out
         if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') { space = true; i++; continue; }
         PPToken t;
         t.file = file;
-        t.line = line;
+        t.line = lines && i < lines->size() ? (*lines)[i] : line;
         t.space = space;
         space = false;
         if (isIdStart(c)) {
@@ -191,54 +192,75 @@ private:
 };
 
 void Preprocessor::splitLines(const std::vector<std::string>& sources, std::vector<Line>& lines) {
-    // Remove comments and line continuations; keep line numbering.
+    // The source strings are concatenated into one string (GLSL 4.60 3.2), but line numbers count per string.
+    // Phase 1: splice lines ('\\' + newline), normalizing CRLF to LF.  Phase 2: comments -> one space each
+    // (a block comment spanning lines does not end the logical line, so a directive continues after it);
+    // newlines end logical lines.  Every character keeps its (string, line) origin for token positions.
+    std::string all;
+    std::vector<int> cfile, cline;
     for (size_t f = 0; f < sources.size(); f++) {
         const std::string& s = sources[f];
-        std::string cur;
-        int line = 1, startLine = 1;
-        size_t i = 0, n = s.size();
-        bool inBlock = false;
-        while (i < n) {
+        int line = 1;
+        for (size_t i = 0; i < s.size(); i++) {
             char c = s[i];
-            if (inBlock) {
-                if (c == '*' && i + 1 < n && s[i + 1] == '/') { inBlock = false; i += 2; cur += ' '; continue; }
-                if (c == '\n') {
-                    // a block comment spanning lines: end current logical line here
-                    lines.push_back({cur, (int)f, startLine});
-                    cur.clear();
-                    line++;
-                    startLine = line;
-                }
-                i++;
-                continue;
-            }
-            if (c == '\\' && i + 1 < n && (s[i + 1] == '\n' || (s[i + 1] == '\r' && i + 2 < n && s[i + 2] == '\n'))) {
-                i += (s[i + 1] == '\r') ? 3 : 2;
-                line++;
-                continue;
-            }
-            if (c == '/' && i + 1 < n && s[i + 1] == '/') {
-                while (i < n && s[i] != '\n') {
-                    // line continuation inside // comment continues the comment
-                    if (s[i] == '\\' && i + 1 < n && s[i + 1] == '\n') { i += 2; line++; continue; }
-                    i++;
-                }
-                continue;
-            }
-            if (c == '/' && i + 1 < n && s[i + 1] == '*') { inBlock = true; i += 2; continue; }
-            if (c == '\n') {
-                lines.push_back({cur, (int)f, startLine});
-                cur.clear();
-                line++;
-                startLine = line;
-                i++;
-                continue;
-            }
-            cur += c;
-            i++;
+            if (c == '\r' && i + 1 < s.size() && s[i + 1] == '\n') continue;
+            all += c;
+            cfile.push_back((int)f);
+            cline.push_back(line);
+            if (c == '\n') line++;
         }
-        lines.push_back({cur, (int)f, startLine});
     }
+    {
+        std::string o;
+        std::vector<int> of, ol;
+        for (size_t i = 0; i < all.size(); i++) {
+            if (all[i] == '\\' && i + 1 < all.size() && all[i + 1] == '\n') { i++; continue; }
+            o += all[i];
+            of.push_back(cfile[i]);
+            ol.push_back(cline[i]);
+        }
+        all.swap(o);
+        cfile.swap(of);
+        cline.swap(ol);
+    }
+    Line cur;
+    bool started = false;
+    auto put = [&](char c, size_t i) {
+        if (!started) { cur.file = cfile[i]; cur.line = cline[i]; started = true; }
+        cur.text += c;
+        cur.lines.push_back(cline[i]);
+    };
+    auto endLine = [&](size_t i) {
+        if (!started) { cur.file = i < cfile.size() ? cfile[i] : 0; cur.line = i < cline.size() ? cline[i] : 1; }
+        lines.push_back(std::move(cur));
+        cur = Line();
+        started = false;
+    };
+    size_t i = 0, n = all.size();
+    while (i < n) {
+        char c = all[i];
+        if (c == '/' && i + 1 < n && all[i + 1] == '/') {
+            while (i < n && all[i] != '\n') i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && all[i + 1] == '*') {
+            size_t start = i;
+            i += 2;
+            while (i < n && !(all[i] == '*' && i + 1 < n && all[i + 1] == '/')) i++;
+            if (i >= n) {
+                curFile_ = cfile[start];
+                error(cline[start], "unterminated comment");
+                break;
+            }
+            put(' ', start);
+            i += 2;
+            continue;
+        }
+        if (c == '\n') { endLine(i); i++; continue; }
+        put(c, i);
+        i++;
+    }
+    endLine(n ? n - 1 : 0);
 }
 
 bool Preprocessor::collectArgs(std::vector<PPToken>& stack, std::vector<std::vector<PPToken>>& args, PPToken& rparen) {
@@ -355,8 +377,20 @@ void Preprocessor::expand(std::vector<PPToken> input, std::vector<PPToken>& out,
         stack.pop_back();
         if (t.kind != PK::Ident) { out.push_back(std::move(t)); continue; }
         if (inIf && t.text == "defined") {
-            // handled before expansion; but if produced by expansion, evaluate here
-            out.push_back(std::move(t));
+            // 'defined' produced by macro expansion: evaluate here without expanding the operand
+            bool paren = !stack.empty() && stack.back().kind == PK::Punct && stack.back().text == "(";
+            if (paren) stack.pop_back();
+            if (stack.empty() || stack.back().kind != PK::Ident) { error(t.line, "invalid 'defined' expression"); return; }
+            const std::string id = stack.back().text;
+            stack.pop_back();
+            if (paren) {
+                if (stack.empty() || stack.back().text != ")") { error(t.line, "missing ')' after defined"); return; }
+                stack.pop_back();
+            }
+            PPToken n = t;
+            n.kind = PK::Number;
+            n.text = (macros_.count(id) || id == "__LINE__" || id == "__FILE__") ? "1" : "0";
+            out.push_back(n);
             continue;
         }
         if (t.text == "__LINE__") {
@@ -546,6 +580,7 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
             if (d == "if") v = evalIf(rest, line) != 0;
             else {
                 if (rest.empty() || rest[0].kind != PK::Ident) { error(line, "#" + d + " requires an identifier"); }
+                else if (rest.size() > 1) { error(line, "unexpected tokens following #" + d + " directive"); }
                 else {
                     bool def = macros_.count(rest[0].text) || rest[0].text == "__LINE__" || rest[0].text == "__FILE__";
                     v = (d == "ifdef") ? def : !def;
@@ -571,6 +606,7 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
     }
     if (d == "else") {
         if (condStack.empty()) { error(line, "#else without #if"); return; }
+        if (!rest.empty()) { error(line, "unexpected tokens following #else directive"); return; }
         if (condElse.back()) { error(line, "#else after #else"); return; }
         condElse.back() = true;
         bool pa = parentActive();
@@ -582,6 +618,7 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
     }
     if (d == "endif") {
         if (condStack.empty()) { error(line, "#endif without #if"); return; }
+        if (!rest.empty()) { error(line, "unexpected tokens following #endif directive"); return; }
         condStack.pop_back();
         condTaken.pop_back();
         condElse.pop_back();
@@ -594,32 +631,64 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
     if (d == "define") {
         if (rest.empty() || rest[0].kind != PK::Ident) { error(line, "#define requires a macro name"); return; }
         const std::string name = rest[0].text;
-        if (name.compare(0, 3, "GL_") == 0 && macros_.count(name)) {
-            warn(line, "redefinition of reserved macro '" + name + "'");
+        if (name.compare(0, 3, "GL_") == 0) { error(line, "macro names beginning with 'GL_' are reserved: '" + name + "'"); return; }
+        if (name == "defined" || name == "__LINE__" || name == "__FILE__" || name == "__VERSION__") {
+            error(line, "cannot redefine predefined macro '" + name + "'");
+            return;
         }
         Macro m;
         size_t i = 1;
         if (rest.size() > 1 && rest[1].kind == PK::Punct && rest[1].text == "(" && !rest[1].space) {
             m.function = true;
             i = 2;
-            while (i < rest.size() && !(rest[i].kind == PK::Punct && rest[i].text == ")")) {
-                if (rest[i].kind == PK::Ident) m.params.push_back(rest[i].text);
-                else if (rest[i].text == "...") m.variadic = true;
-                else if (rest[i].text != ",") { error(line, "invalid macro parameter list"); return; }
+            if (i < rest.size() && rest[i].text == ")") {
                 i++;
+            } else {
+                for (;;) {
+                    if (i >= rest.size()) { error(line, "unterminated macro parameter list"); return; }
+                    if (rest[i].kind == PK::Ident) {
+                        if (std::find(m.params.begin(), m.params.end(), rest[i].text) != m.params.end()) {
+                            error(line, "duplicate macro parameter '" + rest[i].text + "'");
+                            return;
+                        }
+                        m.params.push_back(rest[i].text);
+                    } else {
+                        error(line, "invalid macro parameter list");
+                        return;
+                    }
+                    i++;
+                    if (i >= rest.size()) { error(line, "unterminated macro parameter list"); return; }
+                    if (rest[i].text == ")") { i++; break; }
+                    if (rest[i].text != ",") { error(line, "invalid macro parameter list"); return; }
+                    i++;
+                }
             }
-            if (i >= rest.size()) { error(line, "unterminated macro parameter list"); return; }
-            i++;
         }
         m.body.assign(rest.begin() + i, rest.end());
+        for (auto& t : m.body) {
+            if (t.kind == PK::Punct && t.text == "#") { error(line, "'#' (stringification) is not supported in GLSL"); return; }
+        }
+        if (!m.body.empty()) m.body[0].space = false;
         auto it = macros_.find(name);
-        if (it != macros_.end()) m.id = it->second.id;
-        else { m.id = (int)macroNames_.size(); macroNames_.push_back(name); }
+        if (it != macros_.end()) {
+            // a redefinition must be identical (same parameters, same tokens, same whitespace separation)
+            const Macro& o = it->second;
+            bool same = o.function == m.function && o.params == m.params && o.body.size() == m.body.size();
+            for (size_t k = 0; same && k < m.body.size(); k++)
+                same = o.body[k].text == m.body[k].text && (k == 0 || o.body[k].space == m.body[k].space);
+            if (!same) { error(line, "macro '" + name + "' redefined differently"); return; }
+            m.id = o.id;
+        } else {
+            m.id = (int)macroNames_.size();
+            macroNames_.push_back(name);
+        }
         macros_[name] = std::move(m);
         return;
     }
     if (d == "undef") {
         if (rest.empty() || rest[0].kind != PK::Ident) { error(line, "#undef requires a macro name"); return; }
+        if (rest.size() > 1) { error(line, "unexpected tokens following #undef directive"); return; }
+        if (rest[0].text.compare(0, 3, "GL_") == 0) { error(line, "cannot undefine reserved macro '" + rest[0].text + "'"); return; }
         macros_.erase(rest[0].text);
         return;
     }
@@ -629,9 +698,21 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
             else error(line, "#version must occur before anything else");
             return;
         }
-        if (rest.empty() || rest[0].kind != PK::Number) { error(line, "#version requires a number"); return; }
+        if (rest.empty() || rest[0].kind != PK::Number ||
+            rest[0].text.find_first_not_of("0123456789") != std::string::npos) {
+            error(line, "#version requires an integer version number");
+            return;
+        }
         res_.version = std::atoi(rest[0].text.c_str());
         res_.versionSpecified = true;
+        {
+            static const int kVersions[] = {100, 110, 120, 130, 140, 150, 300, 310, 320, 330, 400, 410, 420, 430, 440, 450, 460};
+            if (std::find(std::begin(kVersions), std::end(kVersions), res_.version) == std::end(kVersions)) {
+                error(line, "version '" + rest[0].text + "' is not supported");
+                return;
+            }
+        }
+        if (rest.size() > 2) { error(line, "unexpected tokens following #version directive"); return; }
         if (rest.size() > 1) {
             const std::string& prof = rest[1].text;
             if (prof == "es") res_.es = true;
@@ -655,6 +736,10 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
             error(line, "unknown extension behavior '" + beh + "'");
             return;
         }
+        if (name == "all" && beh != "warn" && beh != "disable") {
+            error(line, "behavior '" + beh + "' is not allowed with '#extension all'");
+            return;
+        }
         if (name != "all") {
             auto& exts = supportedExtensions();
             bool known = std::find(exts.begin(), exts.end(), name) != exts.end();
@@ -674,7 +759,7 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
         if (ex.empty() || ex[0].kind != PK::Number) { error(line, "#line requires a line number"); return; }
         int n = std::atoi(ex[0].text.c_str());
         // the line after the directive gets number n
-        lineOffset_ = n - (line + 1);
+        lineOffset_ = n - ((ln.lines.empty() ? line : ln.lines.back()) + 1);
         if (ex.size() > 1 && ex[1].kind == PK::Number) fileOverride_ = std::atoi(ex[1].text.c_str());
         return;
     }
@@ -740,7 +825,7 @@ PPResult Preprocessor::run(const std::vector<std::string>& sources) {
         curFile_ = ln.file;
         curLine_ = ln.line;
         std::vector<PPToken> toks;
-        lexLine(ln.text, ln.file, ln.line, toks);
+        lexLine(ln.text, ln.file, ln.line, toks, &ln.lines);
         if (toks.empty()) continue;
         if (toks[0].kind == PK::Punct && toks[0].text == "#") {
             if (toks.size() > 1 && toks[1].text == "version") {
@@ -753,6 +838,7 @@ PPResult Preprocessor::run(const std::vector<std::string>& sources) {
             setupPredefined();
             flush();
             directive(ln, toks, condStack, condTaken, condElse, active);
+            sawNonDirective_ = true;  // only comments and white space may precede #version
             continue;
         }
         if (!active) continue;

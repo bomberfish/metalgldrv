@@ -234,6 +234,7 @@ private:
     std::shared_ptr<LinkedProgram> prog_;
     LinkResult res_;
     bool ok_ = true;
+    std::map<std::string, int> explicitLoc_;  // uniform leaf path -> location derived from layout(location)
 
     void error(const std::string& m) {
         ok_ = false;
@@ -247,6 +248,7 @@ private:
                            bool topLevelSsbo, int topArraySize, uint32_t topArrayStride, int& location,
                            std::set<int>& usedLocs, const Qualifiers* q);
     void checkVaryings();
+    void checkBlockInterfaces();
     void writeInit(const Type& t, const TL& L, const ConstVal& cv, size_t& ci, uint8_t* dst);
     void stageMetadata();
 };
@@ -305,9 +307,11 @@ void Linker::collectStage(Stage s) {
         merge(sc.inLayout, sh->inLayout);
         merge(sc.outLayout, sh->outLayout);
     }
-    // reachability
+    // reachability (and the static call graph, which must not be recursive)
     std::vector<const Function*> work{sc.main};
     sc.reachable.insert(sc.main);
+    const Function* curFn = nullptr;
+    std::map<const Function*, std::set<const Function*>> calls;
     Walker w;
     w.onStmt = [&](const Stmt* st) {
         if (st->kind == SK::Discard) sc.usesDiscard = true;
@@ -318,6 +322,7 @@ void Linker::collectStage(Stage s) {
             sc.used.insert(e->var);
             for (auto& [mangled, f] : sc.defs) {
                 if (std::find(f->subroutineTypes.begin(), f->subroutineTypes.end(), e->fn->name) == f->subroutineTypes.end()) continue;
+                if (curFn) calls[curFn].insert(f);
                 if (!sc.reachable.count(f)) {
                     sc.reachable.insert(f);
                     work.push_back(f);
@@ -330,6 +335,7 @@ void Linker::collectStage(Stage s) {
                 error("function '" + e->fn->name + "' is used but not defined");
                 return;
             }
+            if (curFn) calls[curFn].insert(it->second);
             if (!sc.reachable.count(it->second)) {
                 sc.reachable.insert(it->second);
                 work.push_back(it->second);
@@ -350,11 +356,46 @@ void Linker::collectStage(Stage s) {
                 seen.insert(g.var->name);
                 sc.globals.push_back(g.var);
                 if (g.var->init) w.expr(g.var->init);
+                // Uniform/storage blocks with a shared/std140/std430 layout are active even when not referenced.
+                if (g.var->block && (g.var->q.storage == Storage::Uniform || g.var->q.storage == Storage::Buffer) &&
+                    g.var->block->blockQ.layout.packing != Packing::Packed)
+                    sc.activeBlocks.insert(g.var);
             }
     while (!work.empty()) {
         const Function* f = work.back();
         work.pop_back();
+        curFn = f;
         w.stmt(f->body);
+    }
+    curFn = nullptr;
+    {
+        // GLSL forbids recursion, including through subroutine uniforms
+        std::map<const Function*, int> state;  // 1 = on stack, 2 = done
+        std::function<bool(const Function*)> dfs = [&](const Function* f) {
+            state[f] = 1;
+            for (auto* g : calls[f]) {
+                int st = state[g];
+                if (st == 1) { error("recursive call to function '" + g->name + "'"); return true; }
+                if (st == 0 && dfs(g)) return true;
+            }
+            state[f] = 2;
+            return false;
+        };
+        dfs(sc.main);
+    }
+    // subroutine functions must be defined, and subroutine uniforms need a compatible subroutine
+    for (auto& sh : sc.shaders) {
+        for (auto* f : sh->functions)
+            if (!f->subroutineTypes.empty() && !sc.defs.count(f->mangled))
+                error("subroutine function '" + f->name + "' is declared but not defined");
+        for (auto& g : sh->globals) {
+            if (g.kind != GlobalDecl::Var || g.var->type.base != BT::Subroutine || g.var->q.storage != Storage::Uniform) continue;
+            bool any = false;
+            for (auto& [mangled, f] : sc.defs)
+                if (std::find(f->subroutineTypes.begin(), f->subroutineTypes.end(), g.var->type.subr->name) != f->subroutineTypes.end())
+                    any = true;
+            if (!any) error("subroutine uniform '" + g.var->name + "' has no compatible subroutine function");
+        }
     }
     for (auto* v : sc.used) {
         sc.usedNames.insert(v->name);
@@ -374,11 +415,11 @@ static bool isCompatAttrib(BuiltinVar b) {
            b == BuiltinVar::MultiTexCoord || b == BuiltinVar::FogCoord;
 }
 
+// Vertex shader inputs: one location per scalar/vector (dvec3/dvec4 included, GLSL 4.60 4.4.1)
+// and per matrix column.
 static int locationsFor(const Type& t) {
-    int per = 1;
     Type b = t.stripArrays();
-    if (b.cols) per = b.cols * ((b.base == BT::Double && b.vec > 2) ? 2 : 1);
-    else if (b.base == BT::Double && b.vec > 2) per = 2;
+    int per = b.cols ? b.cols : 1;
     return per * t.totalArrayElements();
 }
 
@@ -508,6 +549,22 @@ void Linker::assignFragOutputs() {
     }
 }
 
+static const int kMaxUniformLocations = 16384;  // GL_MAX_UNIFORM_LOCATIONS
+
+// Leaves of a uniform in GL location order: (path, number of locations).
+static void uniformLeaves(const Type& t, const std::string& path, std::vector<std::pair<std::string, int>>& out) {
+    if (t.base == BT::Struct && t.dims.empty()) {
+        for (auto& m : t.sdef->members) uniformLeaves(m.type, path + "." + m.name, out);
+        return;
+    }
+    Type et = t.elem();
+    if (!t.dims.empty() && (et.base == BT::Struct || !et.dims.empty())) {
+        for (int i = 0; i < t.dims[0]; i++) uniformLeaves(et, path + "[" + std::to_string(i) + "]", out);
+        return;
+    }
+    out.push_back({path, t.dims.empty() ? 1 : std::max(1, t.dims[0])});
+}
+
 void Linker::addUniformEntries(const std::string& name, const Type& t, TL L, uint32_t off, int blockIndex,
                                uint32_t stageMask, bool ssbo, int topArraySize, uint32_t topArrayStride, int& location,
                                std::set<int>& usedLocs, const Qualifiers* q) {
@@ -565,8 +622,10 @@ void Linker::addUniformEntries(const std::string& name, const Type& t, TL L, uin
             u.location = -1;
         } else {
             int n = u.arraySize;
-            if (q && q->layout.location >= 0) {
-                u.location = q->layout.location;
+            auto ex = explicitLoc_.find(name);
+            (void)q;
+            if (ex != explicitLoc_.end()) {
+                u.location = ex->second;
             } else {
                 int loc = location;
                 for (;;) {
@@ -627,6 +686,7 @@ void Linker::assignUniforms() {
     std::map<std::string, Entry> blockVars;  // key -> first variable
     std::vector<std::string> blockOrder;
     std::map<std::string, size_t> defIdx, opIdx;
+    std::map<std::string, int> declBinding;  // uniform name -> layout(binding) from any stage that declares one
     for (int s = 0; s < (int)Stage::Count; s++) {
         StageCode& sc = prog_->stages[s];
         if (!sc.main) continue;
@@ -635,6 +695,15 @@ void Linker::assignUniforms() {
         }
         std::vector<const Variable*> used(sc.used.begin(), sc.used.end());
         std::sort(used.begin(), used.end(), [](const Variable* a, const Variable* b) { return a->id < b->id; });
+        // declared-but-unreferenced shared/std140/std430 blocks are active without being referenced by this stage
+        std::vector<const Variable*> act(sc.activeBlocks.begin(), sc.activeBlocks.end());
+        std::sort(act.begin(), act.end(), [](const Variable* a, const Variable* b) { return a->id < b->id; });
+        for (auto* v : act) {
+            if (sc.used.count(v)) continue;
+            std::string key = std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name;
+            if (!blockVars.count(key)) { blockVars[key] = {v, 0u}; blockOrder.push_back(key); }
+            if (v->block->blockQ.layout.binding >= 0) declBinding[key] = v->block->blockQ.layout.binding;
+        }
         for (auto* v : used) {
             if (v->block && (v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer)) {
                 std::string key = std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name;
@@ -652,6 +721,7 @@ void Linker::assignUniforms() {
                                m0[i].type.dims == m1[i].type.dims;
                     if (!same) error("block '" + v->block->name + "' is declared with different members in different stages");
                 }
+                if (v->block->blockQ.layout.binding >= 0) declBinding[key] = v->block->blockQ.layout.binding;
                 blockVars[key].mask |= 1u << s;
                 continue;
             }
@@ -660,6 +730,7 @@ void Linker::assignUniforms() {
             if (v->type.base == BT::Subroutine) continue;         // subroutine uniforms have their own interface
             bool opq = v->type.containsOpaque();
             bool aggregate = v->type.stripArrays().base == BT::Struct;
+            if (v->q.layout.binding >= 0) declBinding[v->name] = v->q.layout.binding;
             auto addTo = [&](std::map<std::string, size_t>& idx, std::vector<Entry>& vec) {
                 auto it = idx.find(v->name);
                 if (it == idx.end()) {
@@ -669,8 +740,16 @@ void Linker::assignUniforms() {
                     Entry& e = vec[it->second];
                     if (e.v->type != v->type && e.v->type.str() != v->type.str())
                         error("uniform '" + v->name + "' declared with different types in different stages");
-                    else if (v->type.stripArrays().base == BT::Image && e.v->q.layout.format != v->q.layout.format)
+                    if (v->type.stripArrays().base == BT::Image && e.v->q.layout.format != v->q.layout.format)
                         error("image uniform '" + v->name + "' declared with different format qualifiers in different stages");
+                    if (v->q.layout.binding >= 0 && e.v->q.layout.binding >= 0 && v->q.layout.binding != e.v->q.layout.binding)
+                        error("uniform '" + v->name + "' declared with different bindings in different stages");
+                    if (v->q.layout.location >= 0) {
+                        if (e.v->q.layout.location >= 0 && e.v->q.layout.location != v->q.layout.location)
+                            error("uniform '" + v->name + "' declared with different locations in different stages");
+                        else if (e.v->q.layout.location < 0)
+                            e.v = v;  // the explicit location applies to the whole program
+                    }
                     e.mask |= 1u << s;
                 }
             };
@@ -681,13 +760,51 @@ void Linker::assignUniforms() {
     }
     int slot = 0;
     std::set<int> usedLocs;
-    // explicit locations reserve first
-    for (auto& e : defaults)
-        if (e.v->q.layout.location >= 0)
-            for (int i = 0; i < std::max(1, e.v->type.totalArrayElements()); i++) usedLocs.insert(e.v->q.layout.location + i);
-    for (auto& e : opaques)
-        if (e.v->q.layout.location >= 0)
-            for (int i = 0; i < std::max(1, e.v->type.totalArrayElements()); i++) usedLocs.insert(e.v->q.layout.location + i);
+    // Explicit locations reserve first. An aggregate with layout(location = L) assigns consecutive locations to its
+    // leaves (struct members / array elements in declaration order), each leaf array taking one location per element.
+    {
+        std::set<std::string> seenVar;
+        std::vector<const Variable*> vars;
+        for (auto& e : defaults) if (seenVar.insert(e.v->name).second) vars.push_back(e.v);
+        for (auto& e : opaques) if (seenVar.insert(e.v->name).second) vars.push_back(e.v);
+        // An explicit location given in any shader applies to the program-wide uniform, and inactive uniforms
+        // with explicit locations still reserve them.
+        std::map<std::string, int> declLoc;
+        for (int st = 0; st < (int)Stage::Count; st++)
+            for (auto& sh : prog_->stages[st].shaders)
+                for (auto& g : sh->globals) {
+                    const Variable* gv = g.var;
+                    if (g.kind != GlobalDecl::Var || gv->q.storage != Storage::Uniform || gv->block ||
+                        gv->type.base == BT::Subroutine || gv->q.layout.location < 0)
+                        continue;
+                    auto it = declLoc.find(gv->name);
+                    if (it != declLoc.end() && it->second != gv->q.layout.location)
+                        error("uniform '" + gv->name + "' declared with different locations in different shaders");
+                    declLoc[gv->name] = gv->q.layout.location;
+                    if (seenVar.insert(gv->name).second) vars.push_back(gv);
+                }
+        for (auto* v : vars) {
+            auto dl = declLoc.find(v->name);
+            if (dl == declLoc.end()) continue;
+            std::vector<std::pair<std::string, int>> leaves;
+            uniformLeaves(v->type, v->name, leaves);
+            int loc = dl->second;
+            for (auto& [path, n] : leaves) {
+                explicitLoc_[path] = loc;
+                for (int i = 0; i < n; i++) {
+                    if (loc + i >= kMaxUniformLocations) {
+                        error("uniform '" + v->name + "' location exceeds GL_MAX_UNIFORM_LOCATIONS");
+                        return;
+                    }
+                    if (!usedLocs.insert(loc + i).second) {
+                        error("location " + std::to_string(loc + i) + " is assigned to more than one uniform");
+                        return;
+                    }
+                }
+                loc += n;
+            }
+        }
+    }
     int location = 0;
 
     // --- default block ---------------------------------------------------
@@ -738,7 +855,7 @@ void Linker::assignUniforms() {
             for (int i = 0; i < n; i++) {
                 Block b;
                 b.name = v->type.isArray() ? sd.name + "[" + std::to_string(i) + "]" : sd.name;
-                b.binding = std::max(0, sd.blockQ.layout.binding) + i;
+                b.binding = (declBinding.count(key) ? declBinding[key] : 0) + i;
                 b.dataSize = bb.layout->size;
                 b.slot = bb.slot + i;
                 b.stageMask = mask;
@@ -830,6 +947,7 @@ void Linker::assignUniforms() {
         OpaqueBinding ob;
         ob.type = bt;
         ob.count = n;
+        ob.isArray = lf.type.isArray();
         ob.memory = v->q.memory;
         int firstUidx = (int)refl.uniforms.size();
         ob.uniformIndex = firstUidx;
@@ -847,10 +965,10 @@ void Linker::assignUniforms() {
             u.type = glTypeEnum(bt);
             u.arraySize = lf.type.isArray() ? inner : 1;
             u.stageMask = lf.mask;
-            u.binding = lf.explicitLoc ? std::max(0, v->q.layout.binding) + gi * inner : 0;
+            u.binding = lf.explicitLoc && declBinding.count(v->name) ? declBinding[v->name] + gi * inner : 0;
             // Atomic counters have no uniform location (GL 4.6 §7.6.1).
             if (bt.base == BT::AtomicUint) u.location = -1;
-            else if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location + gi * inner;
+            else if (explicitLoc_.count(lf.path)) u.location = explicitLoc_[lf.path] + gi * inner;
             else {
                 int loc = location;
                 for (;;) {
@@ -885,7 +1003,7 @@ void Linker::assignUniforms() {
             pushSlots(SlotKind::Image);
         } else {  // atomic_uint
             ob.kind = SlotKind::AtomicCounter;
-            int binding = std::max(0, v->q.layout.binding);
+            int binding = declBinding.count(v->name) ? declBinding[v->name] : 0;
             uint32_t aoff = v->q.layout.offset >= 0 ? (uint32_t)v->q.layout.offset : acNextOffset[binding];
             acNextOffset[binding] = aoff + 4 * n;
             // Distinct counters may not share storage (GLSL 4.60 §4.4.6.3).
@@ -947,6 +1065,11 @@ void Linker::assignUniforms() {
         if (combined > k_gl_MaxCombinedImageUniforms)
             error("too many image uniforms in the program (" + std::to_string(combined) + " > " + std::to_string(k_gl_MaxCombinedImageUniforms) + ")");
     }
+    for (auto& u : refl.uniforms)
+        if (u.location >= 0 && u.location + u.arraySize > kMaxUniformLocations) {
+            error("the program uses more than GL_MAX_UNIFORM_LOCATIONS uniform locations");
+            return;
+        }
     // subroutines (per stage)
     for (int s = 0; s < (int)Stage::Count; s++) {
         StageCode& sc = prog_->stages[s];
@@ -974,8 +1097,29 @@ void Linker::assignUniforms() {
             }
         int maxIdx = 0;
         for (int i : index) maxIdx = std::max(maxIdx, i);
+        if (maxIdx >= 256) error("subroutine index exceeds GL_MAX_SUBROUTINES");
         ss.functions.assign(maxIdx + 1, "");
         for (size_t i = 0; i < fns.size(); i++) ss.functions[index[i]] = fns[i]->name;
+        {
+            // every declared subroutine uniform (active or not) must fit GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS
+            std::set<std::string> seenU;
+            int explicitEnd = 0, implicitCount = 0;
+            std::set<int> explicitLocs;
+            for (auto& sh : sc.shaders)
+                for (auto& g : sh->globals)
+                    if (g.kind == GlobalDecl::Var && g.var->type.base == BT::Subroutine && g.var->q.storage == Storage::Uniform &&
+                        seenU.insert(g.var->name).second) {
+                        int n = std::max(1, g.var->type.totalArrayElements());
+                        if (g.var->q.layout.location >= 0) {
+                            explicitEnd = std::max(explicitEnd, g.var->q.layout.location + n);
+                            for (int i = 0; i < n; i++) explicitLocs.insert(g.var->q.layout.location + i);
+                        } else {
+                            implicitCount += n;
+                        }
+                    }
+            if (explicitEnd > 1024 || (int)explicitLocs.size() + implicitCount > 1024)
+                error("subroutine uniforms exceed GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS");
+        }
         std::vector<const Variable*> unis;
         for (auto* v : sc.used)
             if (v->type.base == BT::Subroutine && v->q.storage == Storage::Uniform) unis.push_back(v);
@@ -983,12 +1127,15 @@ void Linker::assignUniforms() {
         std::set<int> takenLoc;
         for (auto* v : unis)
             if (v->q.layout.location >= 0)
-                for (int i = 0; i < v->type.arraySize(); i++) takenLoc.insert(v->q.layout.location + i);
+                for (int i = 0; i < std::max(1, v->type.totalArrayElements()); i++)
+                    if (!takenLoc.insert(v->q.layout.location + i).second)
+                        error("subroutine uniform location " + std::to_string(v->q.layout.location + i) + " is used more than once");
         int nextLoc = 0;
         for (auto* v : unis) {
             SubroutineUniform su;
             su.name = v->name;
-            su.arraySize = v->type.isArray() ? v->type.dims[0] : 1;
+            su.arraySize = v->type.isArray() ? std::max(1, v->type.totalArrayElements()) : 1;
+            su.dims = v->type.dims;
             if (v->q.layout.location >= 0) su.location = v->q.layout.location;
             else {
                 for (;;) {
@@ -1005,6 +1152,7 @@ void Linker::assignUniforms() {
                 if (std::find(fns[i]->subroutineTypes.begin(), fns[i]->subroutineTypes.end(), v->type.subr->name) != fns[i]->subroutineTypes.end())
                     su.compatible.push_back(index[i]);
             ss.numLocations = std::max(ss.numLocations, su.location + su.arraySize);
+            if (ss.numLocations > 1024) error("subroutine uniform locations exceed GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS");
             ss.uniforms.push_back(su);
             prog_->subroutineLocation[{s, v->name}] = su.location;
         }
@@ -1281,6 +1429,62 @@ void Linker::stageMetadata() {
     }
 }
 
+// Uniform/storage blocks with the same block name must match across the program (GLSL 4.60 4.3.9), and the
+// global names exposed by anonymous uniform blocks must not collide with other uniforms.
+void Linker::checkBlockInterfaces() {
+    struct BlockInfo { const Variable* v; };
+    std::map<std::string, BlockInfo> blocks;                 // "U:Name" / "B:Name"
+    std::map<std::string, std::string> uniformNames;         // global uniform name -> owner ("" = plain uniform)
+    for (int s = 0; s < (int)Stage::Count; s++) {
+        for (auto& sh : prog_->stages[s].shaders) {
+            for (auto& g : sh->globals) {
+                if (g.kind != GlobalDecl::Var) continue;
+                const Variable* v = g.var;
+                if (v->q.storage != Storage::Uniform && v->q.storage != Storage::Buffer) continue;
+                bool ubo = v->q.storage == Storage::Uniform;
+                if (v->block) {
+                    const StructDef& sd = *v->block;
+                    std::string key = std::string(ubo ? "U:" : "B:") + sd.name;
+                    auto it = blocks.find(key);
+                    if (it == blocks.end()) {
+                        blocks[key] = {v};
+                    } else {
+                        const Variable* o = it->second.v;
+                        const StructDef& od = *o->block;
+                        bool same = o->anonBlock == v->anonBlock && o->type.dims == v->type.dims &&
+                                    od.members.size() == sd.members.size() &&
+                                    od.blockQ.layout.packing == sd.blockQ.layout.packing &&
+                                    od.blockQ.layout.matrix == sd.blockQ.layout.matrix &&
+                                    !(od.blockQ.layout.binding >= 0 && sd.blockQ.layout.binding >= 0 &&
+                                      od.blockQ.layout.binding != sd.blockQ.layout.binding);
+                        for (size_t i = 0; same && i < sd.members.size(); i++) {
+                            const Member& a = od.members[i];
+                            const Member& b = sd.members[i];
+                            same = a.name == b.name && a.type.str() == b.type.str() && a.q.layout.matrix == b.q.layout.matrix &&
+                                   a.q.layout.offset == b.q.layout.offset && a.q.layout.align == b.q.layout.align;
+                        }
+                        if (!same) error(std::string(ubo ? "uniform" : "shader storage") + " block '" + sd.name +
+                                         "' is declared differently in different shaders");
+                    }
+                    if (ubo && v->anonBlock) {
+                        for (auto& m : sd.members) {
+                            auto u = uniformNames.find(m.name);
+                            if (u == uniformNames.end()) uniformNames[m.name] = sd.name;
+                            else if (u->second != sd.name)
+                                error("uniform name '" + m.name + "' is used by different uniform declarations");
+                        }
+                    }
+                    continue;
+                }
+                if (!ubo) continue;
+                auto u = uniformNames.find(v->name);
+                if (u == uniformNames.end()) uniformNames[v->name] = "";
+                else if (!u->second.empty()) error("uniform name '" + v->name + "' is also a member of uniform block '" + u->second + "'");
+            }
+        }
+    }
+}
+
 LinkResult Linker::run() {
     prog_ = std::make_shared<LinkedProgram>();
     prog_->separable = in_.separable;
@@ -1302,7 +1506,8 @@ LinkResult Linker::run() {
     if (ok_) {
         assignAttributes();
         assignFragOutputs();
-        assignUniforms();
+        checkBlockInterfaces();
+        if (ok_) assignUniforms();
         checkVaryings();
         stageMetadata();
     }

@@ -49,6 +49,7 @@ struct StageCode {
     std::set<const Function*> reachable;              // function definitions reachable from main
     std::map<std::string, Function*> defs;            // mangled -> definition
     std::set<const Variable*> used;                   // global variables referenced by reachable code
+    std::set<const Variable*> activeBlocks;           // shared/std140/std430 blocks declared here (active even if unused)
     std::set<std::string> usedNames;                  // names of used globals
     Layout inLayout, outLayout;
     bool writesFragDepth = false, usesDiscard = false;
@@ -60,6 +61,7 @@ struct OpaqueBinding {
     int slot = -1;   // first texture/image slot
     int samplerSlot = -1;
     int count = 1;   // array elements
+    bool isArray = false;  // declared as an array (also when count == 1)
     int uniformIndex = -1;
     int acbIndex = -1;
     uint32_t acOffset = 0;

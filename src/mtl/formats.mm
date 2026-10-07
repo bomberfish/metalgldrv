@@ -890,25 +890,25 @@ void convertToStorage(const FormatInfo* f, GLenum format, GLenum type, const voi
 }
 
 void convertFromStorage(const FormatInfo* f, GLenum format, GLenum type, const void* src, size_t srcRowStride,
-                        void* dst, size_t dstRowStride, int width, int height, bool swapBytes, bool depthPlane) {
+                        void* dst, size_t dstRowStride, int width, int height, bool swapBytes, bool depthPlane,
+                        bool clampColor) {
     const uint8_t* s = (const uint8_t*)src;
     uint8_t* d = (uint8_t*)dst;
-    if (directUploadCompatible(f, format, type) && !swapBytes && f->baseFormat != GL_LUMINANCE &&
+    bool needClamp = clampColor && f->kind != FmtKind::Unorm;  // unorm values are already in [0,1]
+    if (!needClamp && directUploadCompatible(f, format, type) && !swapBytes && f->baseFormat != GL_LUMINANCE &&
         f->baseFormat != GL_LUMINANCE_ALPHA && f->baseFormat != GL_INTENSITY && f->baseFormat != GL_ALPHA) {
         size_t row = (size_t)width * f->bytesPerPixel;
         for (int y = 0; y < height; y++) memcpy(d + y * dstRowStride, s + y * srcRowStride, row);
         return;
     }
     int ps = clientPixelSize(format, type);
-    bool clampColor = f->kind == FmtKind::Unorm && type != GL_FLOAT && type != GL_HALF_FLOAT;
-    (void)clampColor;
     for (int y = 0; y < height; y++) {
         const uint8_t* sr = s + y * srcRowStride;
         uint8_t* dr = d + y * dstRowStride;
         for (int x = 0; x < width; x++) {
             Px px;
             decodeStorage(f, sr + x * f->bytesPerPixel, px);
-            encodeClient(format, type, px, dr + x * ps, swapBytes, false);
+            encodeClient(format, type, px, dr + x * ps, swapBytes, needClamp);
         }
     }
 }

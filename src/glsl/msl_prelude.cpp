@@ -427,6 +427,7 @@ struct MGLSys {
     float tessDefaultInner[2];
     uint pad2[2];
     float4 currentAttrib[32];
+    uint4 currentAttribD[32];
 };
 )";
 

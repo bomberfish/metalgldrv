@@ -135,7 +135,8 @@ public:
     Ref<ShareGroup> share;
     int majorVersion, minorVersion;
     bool coreProfile, debugContext, forwardCompatible, robustAccess, noErrorMode;
-    bool loseContextOnReset = false;  // RESET_NOTIFICATION_STRATEGY requested at creation
+    bool loseContextOnReset = false;
+    GLenum clampReadColor = GL_FIXED_ONLY;  // glClampColor(GL_CLAMP_READ_COLOR)  // RESET_NOTIFICATION_STRATEGY requested at creation
     bool everCurrent = false;
 
     // ---- errors / debug ----
@@ -232,6 +233,7 @@ public:
     PixelStore pack, unpack;
     GLenum hints[8] = {GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE};
     float currentAttrib[kMaxVertexAttribs][4];
+    double currentAttribD[kMaxVertexAttribs][4];  // double view of the current values (glVertexAttribL*)
     uint32_t currentAttribType[kMaxVertexAttribs];  // GL_FLOAT / GL_INT / GL_UNSIGNED_INT
     Ref<Query> activeQueries[8][4];  // [query target index][index]
     GLenum conditionalRenderMode = 0;

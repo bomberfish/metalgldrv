@@ -60,7 +60,7 @@ struct RenderPipelineKey {
     const ProgramVariant* fsVariant = nullptr;  // not hashed
     uint32_t colorFormats[8] = {};
     BlendKey blend[8];
-    VertexAttribKey attribs[16];
+    VertexAttribKey attribs[32];  // GL location L; 16 + L = second half of a dvec3/dvec4 at L
     VertexBufferKey buffers[32];
     uint8_t sampleCount = 1, alphaToCoverage = 0, alphaToOne = 0, rasterEnabled = 1;
     uint8_t topologyClass = 0, logicOp = 0, pad[2] = {};
