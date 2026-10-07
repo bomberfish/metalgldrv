@@ -13,8 +13,11 @@
 #   -x, --exclude P  exclude fnmatch pattern (repeatable)
 #   -o, --out DIR    output dir (default tests/cts/results/<timestamp>)
 #   -s, --surface T  pbuffer (default) | window | fbo
-#   -c, --config N   --deqp-gl-config-name (default rgba8888d24s8ms0)
+#   -c, --config N   --deqp-gl-config-name (default rgba8888d24s8ms0), or an EGL config id if numeric
 #   -t, --timeout S  per-case inactivity timeout in seconds (default 60)
+#   --width W, --height H  surface size (default 64x64; -1 leaves glcts' default, as the
+#                    mustpass FBO configs do)
+#   --seed N         --deqp-base-seed (default 1)
 #   -j, --jobs N     parallel glcts processes (default: number of P-cores)
 #   --no-build       don't rebuild the driver first
 #   --log-images     keep images in the QPA log
@@ -41,7 +44,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 
 caselists=() filters=() excludes=() extra=()
 jobs=$(( $(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo 4) ))
-out="" surface=pbuffer config=rgba8888d24s8ms0 timeout=60 build=1 images=disable ios=0
+out="" surface=pbuffer config=rgba8888d24s8ms0 width=64 height=64 seed=1 timeout=60 build=1 images=disable ios=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -l|--caselist) caselists+=("$2"); shift 2 ;;
@@ -50,6 +53,9 @@ while [[ $# -gt 0 ]]; do
         -s|--surface)  surface="$2"; shift 2 ;;
         -c|--config)   config="$2"; shift 2 ;;
         -t|--timeout)  timeout="$2"; shift 2 ;;
+        --width)       width="$2"; shift 2 ;;
+        --height)      height="$2"; shift 2 ;;
+        --seed)        seed="$2"; shift 2 ;;
         -j|--jobs)     jobs="$2"; shift 2 ;;
         --no-build)    build=0; shift ;;
         --log-images)  images=enable; shift ;;
@@ -61,6 +67,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ ${#caselists[@]} -eq 0 ]] && caselists=(gl46)
+size=()
+# a numeric -c selects an EGL config by id (as the Khronos runner does for its other-config runs)
+if [[ $config =~ ^[0-9]+$ ]]; then cfgarg=(--deqp-gl-config-id="$config"); else cfgarg=(--deqp-gl-config-name="$config"); fi
+[[ $width != -1 ]] && size+=(--deqp-surface-width="$width")
+[[ $height != -1 ]] && size+=(--deqp-surface-height="$height")
 resolved=()
 for c in "${caselists[@]}"; do
     if [[ -f "$c" ]]; then resolved+=("$(cd "$(dirname "$c")" && pwd)/$(basename "$c")")
@@ -81,8 +92,8 @@ if [[ $ios == 1 ]]; then
     for f in ${filters[@]+"${filters[@]}"}; do args+=(--filter "$f"); done
     for x in ${excludes[@]+"${excludes[@]}"}; do args+=(--exclude "$x"); done
     exec python3 "$HERE/run_cts.py" "${args[@]}" -- \
-        --deqp-gl-context-type=egl --deqp-surface-type="$surface" --deqp-gl-config-name="$config" \
-        --deqp-surface-width=64 --deqp-surface-height=64 --deqp-base-seed=1 \
+        --deqp-gl-context-type=egl --deqp-surface-type="$surface" "${cfgarg[@]}" \
+        ${size[@]+"${size[@]}"} --deqp-base-seed="$seed" \
         --deqp-screen-rotation=unspecified --deqp-watchdog=disable --deqp-log-images="$images" \
         --deqp-log-shader-sources=disable --deqp-log-flush=enable ${extra[@]+"${extra[@]}"}
 fi
@@ -111,9 +122,9 @@ for x in ${excludes[@]+"${excludes[@]}"}; do args+=(--exclude "$x"); done
 exec python3 "$HERE/run_cts.py" "${args[@]}" -- \
     --deqp-gl-context-type=egl \
     --deqp-surface-type="$surface" \
-    --deqp-gl-config-name="$config" \
-    --deqp-surface-width=64 --deqp-surface-height=64 \
-    --deqp-base-seed=1 \
+    "${cfgarg[@]}" \
+    ${size[@]+"${size[@]}"} \
+    --deqp-base-seed="$seed" \
     --deqp-screen-rotation=unspecified \
     --deqp-watchdog=disable \
     --deqp-log-images="$images" \
