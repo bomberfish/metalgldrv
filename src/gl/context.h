@@ -279,6 +279,7 @@ public:
     // render pass tracking
     PassDesc curPass;
     bool passOpen = false;
+    uint64_t passCounter = 0;  // render passes begun (feedback-loop snapshots are per pass)
     Framebuffer* passFb_ = nullptr;  // framebuffer the open pass was started for (stats only)
     bool passDirty = true;           // framebuffer binding/attachments changed
     PendingClear pendingClear;       // clears not yet applied (folded into next pass load action)

@@ -182,6 +182,12 @@ public:
         size_t operator()(const ViewKey& k) const { return std::hash<uint64_t>()(k.a * 31 + k.b); }
     };
     std::unordered_map<ViewKey, id<MTLTexture>, ViewKeyHash> views;
+    // Feedback loops (sampled while attached to the draw framebuffer): sampling reads a copy taken
+    // before the render pass, see feedbackSnapshot() in draw.mm.
+    id<MTLTexture> fbSnapshot = nil;
+    id<MTLTexture> fbSnapshotSrc = nil;
+    uint64_t fbSnapshotPass = 0;
+    std::unordered_map<ViewKey, id<MTLTexture>, ViewKeyHash> fbSnapshotViews;
 
     // Drops cached views, keeping them alive until in-flight GPU work that may
     // reference them (by MTLResourceID) has completed.
