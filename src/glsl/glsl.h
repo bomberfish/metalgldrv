@@ -163,7 +163,18 @@ struct XfbVarying {
     int buffer, offset;
 };
 
-struct SubroutineInfo;  // TODO: ARB_shader_subroutine
+// GL_PROGRAM_INPUT / GL_PROGRAM_OUTPUT resources: active inputs of the first stage and active
+// outputs of the last stage, built-ins included (gl_VertexID, gl_PerVertex.gl_Position, ...).
+struct InterfaceVar {
+    std::string name;      // arrays end in "[0]"; block members are "Block.member"
+    uint32_t type = 0;
+    int arraySize = 1;
+    int location = -1;     // -1 for built-ins and variables without a location
+    int locationIndex = -1;  // fragment outputs: dual-source index; -1 otherwise
+    int component = 0;
+    bool perPatch = false;
+    uint32_t stageMask = 0;
+};
 
 struct LinkInput {
     std::vector<std::shared_ptr<const Shader>> shaders;
@@ -212,7 +223,8 @@ struct Reflection {
     std::vector<Block> storageBlocks;
     std::vector<BufferVariable> bufferVariables;
     std::vector<AtomicCounterBuffer> atomicCounterBuffers;
-    std::vector<XfbVarying> xfbVaryings;
+    std::vector<XfbVarying> xfbVaryings;  // gl_NextBuffer / gl_SkipComponentsN entries have type 0
+    std::vector<InterfaceVar> programInputs, programOutputs;
     std::vector<Slot> slots;              // argument buffer layout (slot i at byte offset 8*i)
     uint32_t defaultUniformSize = 0;      // bytes of the default uniform block (MSL layout)
     int localSize[3] = {1, 1, 1};         // compute
@@ -329,7 +341,8 @@ struct alignas(16) MGLSys {
     uint32_t clipDistanceMask;             // glEnable(GL_CLIP_DISTANCEi)
     float viewport[4];                     // x, y, w, h of viewport 0
     float pointSize;                       // glPointSize (when program doesn't write gl_PointSize)
-    uint32_t flags;                        // bit0: program point size, bit1: point sprite origin lower-left, bit2: upper-left clip origin, bit3: invert sample coverage
+    uint32_t flags;                        // bit0: program point size, bit1: point sprite origin lower-left, bit2: upper-left clip origin, bit3: invert sample coverage,
+                                           // bit4: non-indexed draw (gl_BaseVertex = 0)
     int32_t baseVertex, baseInstance;      // gl_BaseVertex / gl_BaseInstance / gl_DrawID support
     int32_t drawID, firstVertex;
     uint32_t sampleMask;
@@ -387,6 +400,7 @@ struct alignas(16) MGLDrawInfo {
     uint32_t xfbBufferStream[4];  // stream feeding each buffer
     uint64_t gsRecord;            // optional: mgl_gs_count stores each item's captured primitives here
                                   // (EntryPoint::scratchWordsPerItem uint32 per item); mgl_gs_copy places them
+    uint64_t stats;               // pipeline statistics: uint[3] {GS primitives, TES invocations, tess primitives}, or 0
 };
 
 

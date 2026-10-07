@@ -1623,6 +1623,12 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         std::string refZ;
         if (sh) refZ = ex(A[ai++]);
         std::string offset;
+        // Metal's gather offsets are limited to [-8, 7] (GL allows MIN/MAX_PROGRAM_TEXTURE_GATHER_OFFSET
+        // = [-32, 31]): other offsets shift the coordinate by whole texels instead.
+        auto inMetalRange = [](int64_t v) { return v >= -8 && v <= 7; };
+        auto shifted = [&](const std::string& off) {
+            return "(" + coord + " + float2(" + off + ") / float2(" + tex + ".get_width(), " + tex + ".get_height()))";
+        };
         if (isOffset) {
             if (name == "textureGatherOffsets") {
                 // each result texel k is texel i0j0 (.w) of the footprint selected by offsets[k]
@@ -1637,17 +1643,25 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
                 if (T.sampled == BT::Int) r = "int4(";
                 if (T.sampled == BT::UInt) r = "uint4(";
                 for (int k = 0; k < 4; k++) {
-                    std::string o2 = "int2(" + std::to_string((int)offs->cv->c[2 * k].i) + ", " + std::to_string((int)offs->cv->c[2 * k + 1].i) + ")";
-                    std::string args = smp + ", " + coord;
+                    int64_t offX = offs->cv->c[2 * k].i, offY = offs->cv->c[2 * k + 1].i;
+                    std::string o2 = "int2(" + std::to_string((int)offX) + ", " + std::to_string((int)offY) + ")";
+                    bool direct = inMetalRange(offX) && inMetalRange(offY);
+                    std::string args = smp + ", " + (direct ? coord : shifted(o2));
                     if (!layer.empty()) args += ", " + layer;
                     if (sh) args += ", " + ex(A[2]);
-                    args += ", " + o2;
+                    args += ", " + (direct ? o2 : std::string("int2(0)"));
                     if (!sh) args += std::string(", component::") + kSwz[compIdx2];
                     r += (k ? ", " : "") + tex + (sh ? ".gather_compare(" : ".gather(") + args + ").w";
                 }
                 return finish(r + ")");
             }
-            offset = ex(A[ai++]);
+            const Expr* oe = A[ai++];
+            offset = ex(oe);
+            bool direct = oe->cv && oe->cv->c.size() >= 2 && inMetalRange(oe->cv->c[0].i) && inMetalRange(oe->cv->c[1].i);
+            if (!direct && dim != Dim::Cube) {
+                coord = shifted(bind(offset, "int2", pre));
+                offset.clear();
+            }
         }
         int compIdx = 0;
         if (!sh && ai < A.size()) {
@@ -1938,6 +1952,36 @@ std::string Emitter::fnSignature(const Function* f) {
     return r + ")";
 }
 
+// GLSL `precise`: functions computing a precise value are compiled without FP contraction
+// (no fused multiply-add), so the result is invariant to operand order (GLSL 4.60 §4.7).
+static bool usesPrecise(const Function* f) {
+    for (auto* p : f->params)
+        if (p->q.precise) return true;
+    bool found = false;
+    std::function<void(const Expr*)> ex = [&](const Expr* e) {
+        if (!e || found) return;
+        if (e->kind == EK::Var && e->var && e->var->q.precise) found = true;
+        for (auto* a : e->args) ex(a);
+        ex(e->aux);
+    };
+    std::function<void(const Stmt*)> st = [&](const Stmt* s) {
+        if (!s || found) return;
+        for (auto* v : s->vars)
+            if (v->q.precise) found = true;
+        for (auto* b : s->body) st(b);
+        ex(s->expr);
+        st(s->init);
+        ex(s->cond);
+        st(s->condDecl);
+        ex(s->incr);
+        st(s->then);
+        st(s->els);
+        for (auto* v : s->vars) ex(v->init);
+    };
+    st(f->body);
+    return found;
+}
+
 std::string Emitter::emitFunction(const Function* f) {
     temps_.clear();
     // out/inout parameters are local copies (copy-in for inout) written back on return, so that a
@@ -1954,6 +1998,7 @@ std::string Emitter::emitFunction(const Function* f) {
     std::string bodyText;
     for (auto* s : f->body->body) stmt(s, bodyText, 2);
     std::string r = "    " + fnSignature(f) + " {\n";
+    if (usesPrecise(f)) r += "#pragma METAL fp contract(off)\n";
     r += prologue;
     for (auto& t : temps_) r += "        " + t + "\n";
     r += bodyText;
@@ -2670,7 +2715,7 @@ void Emitter::emitClassicVS(std::string& o) {
     for (auto* v : si.builtins) {
         if (v->builtin == BuiltinVar::VertexID) e += "    g.bi_" + v->name + " = int(mgl_vid);\n";
         if (v->builtin == BuiltinVar::InstanceID) e += "    g.bi_" + v->name + " = int(mgl_iid - mgl_bi);\n";
-        if (v->builtin == BuiltinVar::BaseVertex) e += "    g.bi_" + v->name + " = int(mgl_bv);\n";
+        if (v->builtin == BuiltinVar::BaseVertex) e += "    g.bi_" + v->name + " = (sys.flags & 16u) ? 0 : int(mgl_bv);\n";
         if (v->builtin == BuiltinVar::BaseInstance) e += "    g.bi_" + v->name + " = int(mgl_bi);\n";
         if (v->builtin == BuiltinVar::DrawID) e += "    g.bi_" + v->name + " = sys.drawID;\n";
         if (v->builtin == BuiltinVar::PointSize) e += "    g.bi_" + v->name + " = sys.pointSize;\n";
@@ -3093,7 +3138,9 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
         if (v->builtin == BuiltinVar::InvocationID) e += "        g.bi_" + v->name + " = int(mgl_tg.z);\n";
         if (v->builtin == BuiltinVar::PrimitiveID && v->q.storage == Storage::Out) e += "        g.bi_" + v->name + " = int(mgl_prim);\n";
     }
-    e += "        g.mgl_init();\n        g." + gsi.mainName + "();\n        mgl_mo.set_primitive_count(g.mgl_np);\n    }\n}\n\n";
+    e += "        g.mgl_init();\n        g." + gsi.mainName + "();\n        mgl_mo.set_primitive_count(g.mgl_np);\n";
+    e += "        if (D.stats != nullptr) atomic_fetch_add_explicit(D.stats, g.mgl_np, memory_order_relaxed);  // pipeline statistics\n";
+    e += "    }\n}\n\n";
     entries_ += e;
     EntryPoint ep{"mgl_gs", Stage::Geometry, EntryPoint::Mesh};
     ep.threadsPerThreadgroup[0] = NV;
@@ -3298,7 +3345,10 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     e += "    for (uint k = mgl_tid; k < np * " + std::to_string(ipp) + "u; k += " + std::to_string(NT) + "u) mgl_mo.set_index(k, mgl_idx[k]);\n";
     e += "    for (uint k = mgl_tid; k < np; k += " + std::to_string(NT) + "u) {\n        tes::MP p;\n" + indentBy(ro.primCopy, 8) +
          "        mgl_mo.set_primitive(k, p);\n    }\n";
-    e += "    if (mgl_tid == 0u) mgl_mo.set_primitive_count(np);\n}\n\n";
+    e += "    if (mgl_tid == 0u) {\n        mgl_mo.set_primitive_count(np);\n"
+         "        if (D.stats != nullptr) {  // pipeline statistics: TES invocations, tessellated primitives\n"
+         "            atomic_fetch_add_explicit(D.stats + 1, nv, memory_order_relaxed);\n"
+         "            atomic_fetch_add_explicit(D.stats + 2, np, memory_order_relaxed);\n        }\n    }\n}\n\n";
     entries_ += e;
     EntryPoint obj{"mgl_tes_obj", Stage::TessEval, EntryPoint::Object};
     obj.payloadBytes = 128;
@@ -3400,6 +3450,7 @@ void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tupl
     useStage(st);
     StageInfo& si = si_[(int)st];
     for (auto& x : R.xfbVaryings) {
+        if (!x.type) continue;  // gl_NextBuffer / gl_SkipComponents
         const std::string& name = x.name;
         size_t p = 0;
         while (p < name.size() && name[p] != '.' && name[p] != '[') p++;

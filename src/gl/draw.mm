@@ -434,7 +434,8 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
     return args.gpu;
 }
 
-static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseVertex, GLuint baseInstance, GLint first) {
+static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseVertex, GLuint baseInstance, GLint first,
+                         bool indexed = true) {
     UploadAlloc sa = ctx->upload(sizeof(glsl::MGLSys), 16);
     glsl::MGLSys* s = (glsl::MGLSys*)sa.cpu;
     s->depthRangeNear = ctx->depthRange[0][0];
@@ -444,7 +445,8 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     for (int k = 0; k < 4; k++) s->viewport[k] = ctx->viewport[0][k];
     s->pointSize = ctx->pointSize;
     s->flags = (ctx->programPointSize ? 1u : 0u) | (ctx->pointSpriteOrigin == GL_LOWER_LEFT ? 2u : 0u) | (ctx->clipOrigin == GL_UPPER_LEFT ? 4u : 0u) |
-               (ctx->sampleCoverage && ctx->sampleCoverageInvert ? 8u : 0u);
+               (ctx->sampleCoverage && ctx->sampleCoverageInvert ? 8u : 0u) |
+               (indexed ? 0u : 16u);  // gl_BaseVertex is 0 for commands without a baseVertex parameter
     s->sampleCoverage = ctx->sampleCoverage ? ctx->sampleCoverageValue : 1.0f;
     s->baseVertex = baseVertex;
     s->baseInstance = baseInstance;
@@ -705,7 +707,25 @@ struct IndexInfo {
 
 namespace {
 void decomposeToList(Context* ctx, const DrawParams& d, const uint8_t* src, std::vector<uint32_t>& out);
+GLenum listModeFor(GLenum mode);
 }  // namespace
+
+// Without a geometry shader the adjacency vertices of a primitive are processed but not
+// rasterized: [a0 v0 v1 a1] -> [v0 v1], [v0 a0 v1 a1 v2 a2] -> [v0 v1 v2] (decomposeToList order).
+static GLenum dropAdjacency(GLenum listMode, std::vector<uint32_t>& ids) {
+    std::vector<uint32_t> out;
+    if (listMode == GL_LINES_ADJACENCY) {
+        for (size_t i = 0; i + 3 < ids.size(); i += 4) out.insert(out.end(), {ids[i + 1], ids[i + 2]});
+        ids.swap(out);
+        return GL_LINES;
+    }
+    if (listMode == GL_TRIANGLES_ADJACENCY) {
+        for (size_t i = 0; i + 5 < ids.size(); i += 6) out.insert(out.end(), {ids[i], ids[i + 2], ids[i + 4]});
+        ids.swap(out);
+        return GL_TRIANGLES;
+    }
+    return listMode;
+}
 
 // Expands primitives Metal lacks and converts u8 / custom restart indices.
 static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, uint32_t* minIdx, uint32_t* maxIdx) {
@@ -1215,6 +1235,8 @@ void mpUpload(MPState& s) {
     UploadAlloc counters = ctx->upload(64, 16);
     memset(counters.cpu, 0, 64);
     info->counters = counters.gpu;
+    if (ctx->statsQueriesActive)
+        info->stats = mglStatsGpuSlot(ctx, refl.stageMask & (1u << (int)glsl::Stage::Geometry), refl.stageMask & (1u << (int)glsl::Stage::TessEval));
     info->tcsVertexOut = s.tcsV ? s.tcsV.gpuAddress : 0;
     info->tcsPatchOut = s.tcsP ? s.tcsP.gpuAddress : 0;
     info->itemCounts = s.counts ? s.counts.gpuAddress : 0;
@@ -1629,7 +1651,7 @@ static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& 
     }
     std::vector<uint32_t> ids;
     decomposeToList(ctx, d, src, ids);
-    GLenum lm = listModeFor(d.mode);
+    GLenum lm = dropAdjacency(listModeFor(d.mode), ids);
     int vpp = listVerts(lm, ctx->patchVertices);
     size_t prims = ids.size() / vpp;
     ids.resize(prims * vpp);
@@ -1676,6 +1698,132 @@ static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& 
         out.addr = u.gpu;
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// pipeline statistics & CPU-resolved indirect draws
+// ---------------------------------------------------------------------------
+// Primitives assembled from n vertices of one restart-delimited run.
+static uint64_t primitivesOf(GLenum mode, uint64_t n, int patchVertices) {
+    switch (mode) {
+    case GL_POINTS: return n;
+    case GL_LINES: return n / 2;
+    case GL_LINE_STRIP: return n > 1 ? n - 1 : 0;
+    case GL_LINE_LOOP: return n > 2 ? n : n == 2 ? 1 : 0;
+    case GL_TRIANGLES: return n / 3;
+    case GL_TRIANGLE_STRIP: case GL_TRIANGLE_FAN: return n > 2 ? n - 2 : 0;
+    case GL_QUADS: return n / 4;
+    case GL_QUAD_STRIP: return n >= 4 ? (n - 2) / 2 : 0;
+    case GL_POLYGON: return n >= 3 ? 1 : 0;
+    case GL_LINES_ADJACENCY: return n / 4;
+    case GL_LINE_STRIP_ADJACENCY: return n > 3 ? n - 3 : 0;
+    case GL_TRIANGLES_ADJACENCY: return n / 6;
+    case GL_TRIANGLE_STRIP_ADJACENCY: return n >= 6 ? (n - 4) / 2 : 0;
+    case GL_PATCHES: return patchVertices > 0 ? n / (uint64_t)patchVertices : 0;
+    default: return 0;
+    }
+}
+
+// Vertices (restart indices excluded) and primitives of one instance of a direct draw.
+static void countDrawPrimitives(Context* ctx, const DrawParams& d, uint64_t* verts, uint64_t* prims) {
+    bool restart = d.indexed && (ctx->primitiveRestart || ctx->primitiveRestartFixed);
+    const uint8_t* src = nullptr;
+    if (restart) {
+        Buffer* ib = ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
+        if (ib) {
+            if ((size_t)d.indices + (size_t)d.count * indexSize(d.indexType) <= (size_t)ib->size && ib->cpu) {
+                if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+                src = ib->cpu + (size_t)d.indices;
+            }
+        } else {
+            src = (const uint8_t*)d.indices;
+        }
+    }
+    if (!src) {
+        *verts = (uint64_t)d.count;
+        *prims = primitivesOf(d.mode, (uint64_t)d.count, ctx->patchVertices);
+        return;
+    }
+    uint32_t restartIdx = ctx->primitiveRestartFixed ? (d.indexType == GL_UNSIGNED_BYTE ? 0xff : d.indexType == GL_UNSIGNED_SHORT ? 0xffff : 0xffffffffu)
+                                                      : ctx->primitiveRestartIndex;
+    uint64_t v = 0, p = 0, run = 0;
+    for (GLsizei i = 0; i < d.count; i++) {
+        if (readIndex(src, d.indexType, i) == restartIdx) {
+            p += primitivesOf(d.mode, run, ctx->patchVertices);
+            run = 0;
+            continue;
+        }
+        v++;
+        run++;
+    }
+    p += primitivesOf(d.mode, run, ctx->patchVertices);
+    *verts = v;
+    *prims = p;
+}
+
+static void countDrawStatistics(Context* ctx, const DrawParams& d, const glsl::Reflection& refl) {
+    uint64_t v, p;
+    countDrawPrimitives(ctx, d, &v, &p);
+    uint64_t inst = (uint64_t)std::max(0, d.instances);
+    bool hasGS = refl.stageMask & (1u << (int)glsl::Stage::Geometry);
+    bool hasTess = refl.stageMask & (1u << (int)glsl::Stage::TessEval);
+    DrawStats st;
+    st.vertices = v * inst;
+    st.primitives = p * inst;
+    st.vsInvocations = v * inst;
+    if (hasTess) st.patches = p * inst;  // TES invocations / tessellated primitives are counted on the GPU
+    if (hasGS) st.gsInvocations = p * inst * (uint64_t)std::max(1, refl.gsInvocations);  // emitted primitives: GPU
+    if (!hasGS && !hasTess) st.clipPrimitives = p * inst;
+    st.fsEstimate = ctx->rasterizerDiscard ? 0 : p * inst;
+    mglStatsCountDraw(ctx, st);
+}
+
+// Reads an indirect draw command on the CPU (waiting for GPU writes to the buffer) and
+// turns it into the equivalent direct draw.
+static bool resolveIndirectDraw(Context* ctx, const DrawParams& d, DrawParams& out) {
+    Buffer* b = d.indirect;
+    size_t size = d.indexed ? 20 : 16;
+    if (!b || !b->cpu || (size_t)d.indirectOffset + size > (size_t)b->size) return false;
+    if (b->lastGpuWrite && !ctx->dev->isComplete(b->lastGpuWrite)) ctx->waitForResource(b->lastGpuWrite);
+    uint32_t c[5] = {};
+    memcpy(c, b->cpu + d.indirectOffset, size);
+    out = d;
+    out.indirect = nullptr;
+    out.indirectOffset = 0;
+    out.count = (GLsizei)c[0];
+    out.instances = (GLsizei)c[1];
+    if (d.indexed) {
+        out.indices = (const void*)((uintptr_t)c[2] * indexSize(d.indexType));
+        out.baseVertex = (GLint)c[3];
+        out.baseInstance = c[4];
+    } else {
+        out.first = (GLint)c[2];
+        out.baseInstance = c[3];
+    }
+    return true;
+}
+
+// Indirect draws Metal's indirect commands can't express (or that need CPU-side work) are
+// executed as direct draws after reading the command on the CPU.
+static bool indirectNeedsCpu(Context* ctx, const DrawParams& d, ProgramObj* prog) {
+    switch (d.mode) {
+    case GL_POINTS: case GL_LINES: case GL_LINE_STRIP: case GL_TRIANGLES: case GL_TRIANGLE_STRIP: break;
+    default: return true;  // fans, loops, quads, adjacency, patches
+    }
+    if (ctx->statsQueriesActive) return true;
+    const glsl::Reflection& r = prog->refl;
+    if (r.stageMask & ((1u << (int)glsl::Stage::Geometry) | (1u << (int)glsl::Stage::TessEval))) return true;
+    if (ctx->xfb && ctx->xfb->active && !ctx->xfb->paused) return true;
+    if (d.indexed) {
+        if (d.indexType == GL_UNSIGNED_BYTE) return true;
+        uint32_t allOnes = d.indexType == GL_UNSIGNED_SHORT ? 0xffffu : 0xffffffffu;
+        if (ctx->primitiveRestart && !ctx->primitiveRestartFixed && ctx->primitiveRestartIndex != allOnes) return true;
+    }
+    // flat shading with GL's last-vertex provoking convention needs rotated primitives
+    ProgramObj* f = ctx->activeProgramForStage(glsl::Stage::Fragment);
+    const glsl::Reflection& fr = f ? f->refl : r;
+    if (fr.usesFlatShading && ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION && d.mode != GL_POINTS) return true;
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1808,9 +1956,15 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     if (!prog->program) return;  // last successfully linked executable
     if (!mglCheckDrawConditional(ctx)) return;
     mgl::debugCaptureBeforeDraw(ctx, prog);
+    if (d.indirect && indirectNeedsCpu(ctx, d, prog)) {
+        DrawParams direct;
+        if (resolveIndirectDraw(ctx, d, direct)) executeDraw(ctx, direct);
+        return;
+    }
     if (d.count <= 0 && !d.indirect) return;
     if (d.instances <= 0 && !d.indirect) return;
     const glsl::Reflection& refl = prog->refl;
+    if (ctx->statsQueriesActive && !d.indirect) countDrawStatistics(ctx, d, refl);
     bool hasGS = refl.stageMask & (1u << (int)glsl::Stage::Geometry);
     bool hasTess = refl.stageMask & (1u << (int)glsl::Stage::TessEval);
     glsl::VariantKey vk;
@@ -2009,7 +2163,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     }
     applyDynamicState(ctx, e, d.mode, refl.writesViewportIndex);
     [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
-    uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
+    uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first, d.indexed);
     [table setAddress:sysAddr atIndex:glsl::kBufSys];
     if (mixedFs) {
         // The fragment stage reads its own program's arguments.
@@ -2018,7 +2172,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
             ctx->enc.fsTableSplit = true;
         }
         [ctx->renderArgTableFS setAddress:fsArgAddr ? fsArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
-        [ctx->renderArgTableFS setAddress:fsProg ? buildSys(ctx, fsProg, d.drawID, d.baseVertex, d.baseInstance, d.first) : sysAddr
+        [ctx->renderArgTableFS setAddress:fsProg ? buildSys(ctx, fsProg, d.drawID, d.baseVertex, d.baseInstance, d.first, d.indexed) : sysAddr
                                   atIndex:glsl::kBufSys];
     } else if (ctx->enc.fsTableSplit) {
         [e setArgumentTable:table atStages:MTLRenderStageFragment];
@@ -2316,6 +2470,16 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
     if (!var || !var->ok) return;
     id<MTLComputePipelineState> pso = ctx->pipelines_->computePipeline(var);
     if (!pso) return;
+    if (ctx->statsQueriesActive) {
+        uint32_t g[3] = {gx, gy, gz};
+        if (indirect && indirect->cpu) {
+            if (indirect->lastGpuWrite && !ctx->dev->isComplete(indirect->lastGpuWrite)) ctx->waitForResource(indirect->lastGpuWrite);
+            memcpy(g, indirect->cpu + indirectOffset, 12);
+        }
+        DrawStats st;
+        st.csInvocations = (uint64_t)g[0] * g[1] * g[2] * prog->refl.localSize[0] * prog->refl.localSize[1] * prog->refl.localSize[2];
+        mglStatsCountDraw(ctx, st);
+    }
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
     [e setComputePipelineState:pso];
     uint64_t argAddr = buildArguments(ctx, prog, true);

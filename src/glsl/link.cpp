@@ -11,6 +11,8 @@
 namespace glsl {
 
 std::string fillMultipassRecords(const LinkedProgram& prog, MultiPassInfo& mp);  // msl.cpp
+void reflectProgramInterface(const LinkedProgram& prog, Reflection& r);              // reflect_io.cpp
+std::vector<bool> usedArrayElements(const StageCode& sc, const Variable* v, int n);   // reflect_io.cpp
 
 // ---------------------------------------------------------------------------
 // Layout engine
@@ -684,6 +686,7 @@ void Linker::assignUniforms() {
     struct Entry { const Variable* v; uint32_t mask; };
     std::vector<Entry> defaults, opaques;
     std::map<std::string, Entry> blockVars;  // key -> first variable
+    std::map<std::string, std::vector<uint32_t>> blockElemMask;  // key -> per-element REFERENCED_BY stage mask
     std::vector<std::string> blockOrder;
     std::map<std::string, size_t> defIdx, opIdx;
     std::map<std::string, int> declBinding;  // uniform name -> layout(binding) from any stage that declares one
@@ -723,6 +726,13 @@ void Linker::assignUniforms() {
                 }
                 if (v->block->blockQ.layout.binding >= 0) declBinding[key] = v->block->blockQ.layout.binding;
                 blockVars[key].mask |= 1u << s;
+                if (v->type.isArray()) {  // arrays of blocks: which elements this stage references
+                    std::vector<bool> els = usedArrayElements(sc, v, std::max(1, v->type.dims[0]));
+                    auto& em = blockElemMask[key];
+                    em.resize(std::max(em.size(), els.size()), 0u);
+                    for (size_t i = 0; i < els.size(); i++)
+                        if (els[i]) em[i] |= 1u << s;
+                }
                 continue;
             }
             if (v->q.storage != Storage::Uniform) continue;
@@ -859,6 +869,7 @@ void Linker::assignUniforms() {
                 b.dataSize = bb.layout->size;
                 b.slot = bb.slot + i;
                 b.stageMask = mask;
+                if (auto em = blockElemMask.find(key); em != blockElemMask.end() && (size_t)i < em->second.size()) b.stageMask = em->second[i];
                 list.push_back(b);
                 refl.slots.push_back({storage ? SlotKind::Ssbo : SlotKind::Ubo, (uint32_t)(bb.firstBlock + i)});
             }
@@ -866,8 +877,11 @@ void Linker::assignUniforms() {
             std::string prefix = sd.instanceName.empty() ? "" : sd.name + ".";
             for (size_t m = 0; m < sd.members.size(); m++) {
                 const Member& mem = sd.members[m];
-                int top = mem.type.isArray() ? mem.type.dims[0] : -1;
-                uint32_t topStride = mem.type.isArray() ? bb.layout->members[m]->arrayStride : 0;
+                // TOP_LEVEL_ARRAY_SIZE/STRIDE describe arrays of aggregates; a member that is a plain
+                // array is itself the active variable (size 1, stride 0), as in Mesa.
+                bool topAggregate = mem.type.isArray() && (mem.type.elem().isArray() || mem.type.elem().base == BT::Struct);
+                int top = topAggregate ? mem.type.dims[0] : -1;
+                uint32_t topStride = topAggregate ? bb.layout->members[m]->arrayStride : 0;
                 if (storage) {
                     addUniformEntries(prefix + mem.name, mem.type, bb.layout->members[m], bb.layout->offsets[m], bb.firstBlock, mask,
                                       true, top < 0 ? 1 : top, topStride, location, usedLocs, nullptr);
@@ -1381,9 +1395,15 @@ void Linker::stageMetadata() {
                     buffer++;
                     offset = 0;
                     if (buffer > 3) { error("too many transform feedback buffers"); break; }
+                    r.xfbVaryings.push_back({name, 0, 0, buffer, -1});  // reported with type NONE, size 0
                     continue;
                 }
-                if (name.compare(0, 17, "gl_SkipComponents") == 0) { offset += 4 * std::atoi(name.c_str() + 17); continue; }
+                if (name.compare(0, 17, "gl_SkipComponents") == 0) {
+                    int n = std::atoi(name.c_str() + 17);
+                    r.xfbVaryings.push_back({name, 0, n, buffer, offset});  // type NONE, size = skipped components
+                    offset += 4 * n;
+                    continue;
+                }
                 std::string base = name;
                 int elem = -1;
                 if (auto lb = name.find('['); lb != std::string::npos) {
@@ -1543,6 +1563,7 @@ LinkResult Linker::run() {
         if (ok_) assignUniforms();
         checkVaryings();
         stageMetadata();
+        if (ok_) reflectProgramInterface(*prog_, prog_->refl);
     }
     // names produced by the stage feeding the rasterizer (used by the FS emitter to drop unmatched inputs)
     if (ok_) {
