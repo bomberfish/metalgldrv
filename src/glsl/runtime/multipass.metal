@@ -336,11 +336,14 @@ inline float3 mgl_tess_rowpt(thread const mgl_tess& T, uint r, uint s, uint j, t
     if (r == 0u) {
         float p = mgl_tess_pos(T.xo[s], T.no[s], j);
         tparam = p;
+        // edges walked from 1 to 0 use the mirrored point index (not 1 - p) so every edge's
+        // coordinates come from the same set of values (GL 4.6 11.2.2 invariance rule 4)
+        float q = mgl_tess_pos(T.xo[s], T.no[s], T.no[s] - j);
         switch (s) {
-            case 0u: return float3(0.0f, 1.0f - p, 0.0f);
+            case 0u: return float3(0.0f, q, 0.0f);
             case 1u: return float3(p, 0.0f, 0.0f);
             case 2u: return float3(1.0f, p, 0.0f);
-            default: return float3(1.0f - p, 1.0f, 0.0f);
+            default: return float3(q, 1.0f, 0.0f);
         }
     }
     uint du = nu - 2u * r, dv = nv - 2u * r;
