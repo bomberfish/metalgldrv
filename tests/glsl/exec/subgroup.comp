@@ -1,0 +1,92 @@
+#version 450 core
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_vote : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+#extension GL_KHR_shader_subgroup_shuffle : enable
+#extension GL_KHR_shader_subgroup_shuffle_relative : enable
+#extension GL_KHR_shader_subgroup_clustered : enable
+#extension GL_KHR_shader_subgroup_quad : enable
+#extension GL_NV_shader_subgroup_partitioned : enable
+// One check per invocation and test: res[1 + 64 * test + invocation].
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+const uint NT = 13u;
+uint inv;
+void check(uint t, bool c) { res[1u + 64u * t + inv] = c ? 1u : 0u; }
+float val(uint i) { return fract(float(seq[i] * 7919u) * 0.001234); }
+bool isOn(uvec4 m, uint i) { return subgroupBallotBitExtract(m, i); }
+
+void main() {
+    inv = gl_LocalInvocationIndex;
+    if (inv == 0u) res[0] = 64u * NT;
+    uint L = gl_SubgroupInvocationID;
+    uint base = gl_SubgroupID * gl_SubgroupSize;
+    float v = val(base + L);
+    check(0u, gl_SubgroupSize == 32u && gl_NumSubgroups == 2u && L == inv % 32u && gl_SubgroupEqMask.x == (1u << L));
+    // reductions over all lanes, then (the same calls) over the odd lanes only
+    uvec4 m = subgroupBallot(true);
+    float mx = -1.0, sum = 0.0;
+    for (uint i = 0u; i < 32u; i++) if (isOn(m, i)) { mx = max(mx, val(base + i)); sum += val(base + i); }
+    bool ok = subgroupMax(v) == mx && abs(subgroupAdd(v) - sum) < 1e-4;
+    if ((L & 1u) == 1u) {
+        m = subgroupBallot(true);
+        mx = -1.0;
+        sum = 0.0;
+        for (uint i = 0u; i < 32u; i++) if (isOn(m, i)) { mx = max(mx, val(base + i)); sum += val(base + i); }
+        ok = ok && subgroupMax(v) == mx && abs(subgroupAdd(v) - sum) < 1e-4 && subgroupBallotBitCount(m) == 16u;
+        ok = ok && subgroupAll(true) && !subgroupAny(L == 0u) && subgroupElect() == (L == 1u);
+    }
+    check(1u, ok);
+    // scans (native and emulated), with a hole in the active lanes
+    if (L != 5u) {
+        uint s = 0u, mn = 0xffffffffu;
+        for (uint i = 0u; i < L; i++) if (i != 5u) { s += i; mn = min(mn, 100u - i); }
+        check(2u, subgroupExclusiveAdd(L) == s && subgroupExclusiveMin(100u - L) == mn &&
+                      subgroupInclusiveMax(L) == L && subgroupBallotExclusiveBitCount(subgroupBallot(true)) == (L > 5u ? L - 1u : L));
+    } else {
+        check(2u, true);
+    }
+    // clustered
+    uint c4 = 0u, c8 = 0u;
+    for (uint i = L & ~3u; i < (L & ~3u) + 4u; i++) c4 += i;
+    for (uint i = L & ~7u; i < (L & ~7u) + 8u; i++) c8 |= 1u << i;
+    check(3u, subgroupClusteredAdd(L, 4u) == c4 && subgroupClusteredOr(1u << L, 8u) == c8 && subgroupClusteredMin(L, 1u) == L);
+    // shuffles, broadcasts, quads
+    check(4u, subgroupShuffle(L * 3u, 31u - L) == (31u - L) * 3u && subgroupShuffleXor(L, 5u) == (L ^ 5u) &&
+                  subgroupBroadcast(L + 7u, 9u) == 16u && subgroupBroadcastFirst(L + 1u) == 1u);
+    check(5u, (L < 1u || subgroupShuffleUp(L, 1u) == L - 1u) && (L > 30u || subgroupShuffleDown(L, 1u) == L + 1u));
+    check(6u, subgroupQuadBroadcast(L, 2u) == (L & ~3u) + 2u && subgroupQuadSwapHorizontal(L) == (L ^ 1u) &&
+                  subgroupQuadSwapVertical(L) == (L ^ 2u) && subgroupQuadSwapDiagonal(L) == (L ^ 3u));
+    // bool, vector and double operands
+    check(7u, subgroupAnd(L < 40u) && subgroupOr(bvec2(L == 3u, false)) == bvec2(true, false) &&
+                  subgroupShuffle(bvec3(L == 4u), 4u) == bvec3(true) && subgroupAllEqual(uvec2(7u)) && !subgroupAllEqual(L));
+    dvec2 d = dvec2(double(L), -double(L));
+    check(8u, subgroupAdd(d) == dvec2(496.0, -496.0) && subgroupInclusiveMax(d.x) == double(L) && subgroupMin(d.y) == -31.0 &&
+                  subgroupShuffleXor(d, 1u) == dvec2(double(L ^ 1u), -double(L ^ 1u)));
+    // first invocation and ballot first/last in a divergent branch
+    if (L >= 7u && L < 20u) {
+        uvec4 b = subgroupBallot(true);
+        check(9u, subgroupBroadcastFirst(L) == 7u && subgroupBallotFindLSB(b) == 7u && subgroupBallotFindMSB(b) == 19u &&
+                      subgroupInverseBallot(b) && subgroupElect() == (L == 7u));
+    } else {
+        check(9u, !subgroupInverseBallot(uvec4(0x000FFF80u, 0u, 0u, 0u)));
+    }
+    // masks
+    check(10u, gl_SubgroupLtMask.x == (1u << L) - 1u && gl_SubgroupLeMask.x == ((1u << L) | ((1u << L) - 1u)) &&
+                   gl_SubgroupGtMask.x == ~((2u << L) - 1u) + (L == 31u ? 0u : 0u) && gl_SubgroupGeMask.x == ~((1u << L) - 1u) &&
+                   gl_SubgroupGeMask.y == 0u);
+    // exclusive product / inclusive mul (native) under divergence
+    if (L < 4u) check(11u, subgroupExclusiveMul(float(L + 1u)) == float(L == 0u ? 1u : L == 1u ? 1u : L == 2u ? 2u : 6u) &&
+                               subgroupMul(L + 1u) == 24u);
+    else check(11u, subgroupInclusiveMul(1u) == 1u);
+    // partitions (NV_shader_subgroup_partitioned)
+    uvec4 p = subgroupPartitionNV(L % 3u);
+    uint want = 0u, ps = 0u, pe = 0u;
+    for (uint i = 0u; i < 32u; i++)
+        if (i % 3u == L % 3u) { want |= 1u << i; ps += i; if (i < L) pe += i; }
+    check(12u, p == uvec4(want, 0u, 0u, 0u) && subgroupPartitionedAddNV(L, p) == ps && subgroupPartitionedExclusiveAddNV(L, p) == pe &&
+                   subgroupPartitionedInclusiveMaxNV(double(L), p) == double(L) && subgroupPartitionNV(dvec2(1.0)).x == 0xffffffffu &&
+                   subgroupPartitionedOrNV(L == 0u, p) == (L % 3u == 0u));
+}

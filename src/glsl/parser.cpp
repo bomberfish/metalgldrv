@@ -155,7 +155,7 @@ private:
         static const std::unordered_set<std::string> keywords = {
             "struct", "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "discard",
             "true", "false", "void", "in", "out", "inout", "const", "uniform"};
-        if (keywords.count(n) || typeKeyword(n)) return true;
+        if (keywords.count(n) || kwType(n)) return true;
         if (sh_.es) return false;
         // keywords / reserved words added by later versions (applied from GLSL 4.00 on so older shaders keep working)
         static const std::unordered_set<std::string> v400 = {
@@ -223,7 +223,13 @@ private:
         }
         return nullptr;
     }
-    bool isTypeName(const std::string& n) { return typeKeyword(n) || lookupType(n); }
+    bool isTypeName(const std::string& n) { return kwType(n) || lookupType(n); }
+    // type keyword; the 64-bit integer types only with GL_ARB_gpu_shader_int64
+    const Type* kwType(const std::string& n) const {
+        const Type* t = typeKeyword(n);
+        if (t && (t->base == BT::Int64 || t->base == BT::UInt64) && !preamble_ && !extEnabled("GL_ARB_gpu_shader_int64")) return nullptr;
+        return t;
+    }
     void declareVar(Variable* v) {
         auto& sc = scopes_.back();
         auto it = sc.find(v->name);
@@ -241,7 +247,11 @@ private:
         switch (to) {
             case BT::UInt: return from == BT::Int ? 1 : -1;
             case BT::Float: return (from == BT::Int || from == BT::UInt) ? 2 : -1;
-            case BT::Double: return from == BT::Float ? 3 : (from == BT::Int || from == BT::UInt) ? 4 : -1;
+            case BT::Double:
+                return from == BT::Float ? 3 : (from == BT::Int || from == BT::UInt || from == BT::Int64 || from == BT::UInt64) ? 4 : -1;
+            // ARB_gpu_shader_int64
+            case BT::Int64: return from == BT::Int ? 1 : -1;
+            case BT::UInt64: return from == BT::UInt || from == BT::Int64 ? 1 : from == BT::Int ? 2 : -1;
             default: return -1;
         }
     }
@@ -291,7 +301,7 @@ private:
     int64_t constInt(Expr* e, const char* what) {
         if (!e->cv || !e->type.isScalar() || !(e->type.isIntLike() || e->type.base == BT::Bool))
             fail(std::string(what) + " must be a constant integer expression", e->line);
-        return e->type.base == BT::UInt ? (int64_t)e->cv->c[0].u : e->cv->c[0].i;
+        return e->type.base == BT::UInt || e->type.base == BT::UInt64 ? (int64_t)e->cv->c[0].u : e->cv->c[0].i;
     }
 
     // ---- top level ---------------------------------------------------------------
@@ -350,6 +360,7 @@ private:
     void checkImageDecl(const std::string& name, const Type& t, const Qualifiers& q);
     Expr* mkCtor(Type t, std::vector<Expr*> args, int ln);
     Expr* mkVarRef(const std::string& name, int ln);
+    Variable* lazyBuiltin(const std::string& name);
     Expr* mkLiteral(const PPToken& t);
     void markWritten(Expr* e);
     Function* builtinFn(const Builtin* b);
@@ -427,7 +438,7 @@ void Parser::finalize() {
                                (st == Stage::TessEval && sto == Storage::In && !v.q.patch);
                 if (arrayed && t.isArray()) t = t.elem();
                 Type b = t.stripArrays();
-                bool dbl = b.base == BT::Double;
+                bool dbl = b.is64();
                 int comps = b.vec * (dbl ? 2 : 1);
                 int locsPer = (b.cols ? b.cols : 1) * (comps > 4 ? 2 : 1);
                 int n = locsPer * t.totalArrayElements();
@@ -443,8 +454,8 @@ void Parser::finalize() {
         if (st == Stage::Fragment)
             for (auto& v : sh_.vars) {
                 if (!v.global || v.builtin != BuiltinVar::None || v.param) continue;
-                if (v.q.storage == Storage::Out && v.type.stripArrays().base == BT::Double)
-                    fail("fragment shader output '" + v.name + "' cannot be double-precision", v.line);
+                if (v.q.storage == Storage::Out && v.type.stripArrays().is64())
+                    fail("fragment shader output '" + v.name + "' cannot be a 64-bit type", v.line);
                 if (v.q.storage != Storage::In) continue;
                 if (v.block) {
                     for (auto& m : v.block->members)
@@ -898,7 +909,7 @@ Type Parser::parseTypeSpecifier(bool allowStructDef) {
     } else {
         const auto& tk = peek();
         if (tk.kind != PK::Ident) fail("syntax error: expected type but found '" + tk.text + "'");
-        if (const Type* kw = typeKeyword(tk.text)) {
+        if (const Type* kw = kwType(tk.text)) {
             t = *kw;
         } else if (StructDef* sd = lookupType(tk.text)) {
             t.base = BT::Struct;
@@ -1130,7 +1141,7 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
                 }
                 if (off >= 0) {
                     Type b = m.type.stripArrays();
-                    cur = off + b.components() * (b.base == BT::Double ? 8 : 4) * std::max(1, m.type.totalArrayElements());
+                    cur = off + b.components() * (b.is64() ? 8 : 4) * std::max(1, m.type.totalArrayElements());
                 }
             }
         }
@@ -1272,8 +1283,8 @@ void Parser::checkInterfaceLocations() {
                 return loc;
             }
             int cols = t.cols ? t.cols : 1;
-            bool dbl = t.base == BT::Double;
-            int cls = dbl ? 2 : (t.base == BT::Float ? 0 : 1);
+            bool dbl = t.is64();
+            int cls = t.base == BT::Double ? 2 : dbl ? 3 : (t.base == BT::Float ? 0 : 1);
             int aux = (q.centroid ? 1 : 0) | (q.sample ? 2 : 0) | (q.patch ? 4 : 0);
             for (int c = 0; c < cols; c++) {
                 int comps = t.vec * (dbl ? 2 : 1);
@@ -1339,8 +1350,8 @@ void Parser::checkComponent(const Type& type, int comp, bool hasLocation, int ln
     Type t = type.stripArrays();
     if (t.base == BT::Struct || t.cols) fail("'component' : cannot be applied to a matrix, structure or block", ln);
     int size = t.vec;
-    if (t.base == BT::Double) {
-        if (t.vec > 2) fail("'component' : cannot be applied to dvec3 or dvec4", ln);
+    if (t.is64()) {
+        if (t.vec > 2) fail("'component' : cannot be applied to 64-bit 3- or 4-component vectors", ln);
         if (comp & 1) fail("'component' : doubles must start at component 0 or 2", ln);
         size *= 2;
     }
@@ -1470,6 +1481,7 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             Type bt = t.stripArrays();
             if (bt.base == BT::Bool || bt.isOpaque() || bt.base == BT::Struct)
                 fail("'" + name + "' : vertex shader inputs cannot be booleans, opaque types or structures");
+            if (bt.base == BT::Int64 || bt.base == BT::UInt64) fail("'" + name + "' : vertex shader inputs cannot be 64-bit integers");
         }
         if (q.hasLayout && q.layout.binding >= 0 && !preamble_) {
             if (!t.stripArrays().isOpaque()) fail("'" + name + "' : the binding layout qualifier only applies to opaque types and blocks");
@@ -2119,25 +2131,68 @@ Expr* Parser::mkLiteral(const PPToken& t) {
         sc.f = dbl ? v : (double)(float)v;
         e = E(EK::Const, Type::scalar(dbl ? BT::Double : BT::Float), ln);
     } else {
-        bool u = lsuf == "u";
-        if (!lsuf.empty() && !u) fail("invalid integer suffix '" + suf + "'", ln);
+        bool u = lsuf == "u" || lsuf == "ul";
+        bool wide = (lsuf == "l" || lsuf == "ul") && extEnabled("GL_ARB_gpu_shader_int64");  // 64-bit literals
+        if (!lsuf.empty() && lsuf != "u" && !wide) fail("invalid integer suffix '" + suf + "'", ln);
         unsigned long long v = 0;
         errno = 0;
         if (isHex) v = std::strtoull(s.c_str() + 2, nullptr, 16);
         else if (s.size() > 1 && s[0] == '0') v = std::strtoull(s.c_str(), nullptr, 8);
         else v = std::strtoull(s.c_str(), nullptr, 10);
-        if (v > 0xffffffffull) fail("integer constant overflow", ln);
-        if (u) sc.u = (uint32_t)v;
+        if (errno == ERANGE || (!wide && v > 0xffffffffull)) fail("integer constant overflow", ln);
+        if (wide) sc.u = v;
+        else if (u) sc.u = (uint32_t)v;
         else sc.i = (int32_t)(uint32_t)v;
-        e = E(EK::Const, Type::scalar(u ? BT::UInt : BT::Int), ln);
+        e = E(EK::Const, Type::scalar(wide ? (u ? BT::UInt64 : BT::Int64) : u ? BT::UInt : BT::Int), ln);
     }
     cv->c.push_back(sc);
     e->cv = cv;
     return e;
 }
 
+// Builtin inputs declared on first use rather than by the preamble (variable ids, and with them
+// the generated MSL, of shaders that don't use them stay the same).
+Variable* Parser::lazyBuiltin(const std::string& name) {
+    if (name.compare(0, 3, "gl_") != 0) return nullptr;
+    const Type U = Type::scalar(BT::UInt), U4 = Type::vector(BT::UInt, 4), U64 = Type::scalar(BT::UInt64);
+    static const struct { const char* name; BuiltinVar b; int type /*0 uint, 1 uvec4, 2 uint64_t*/; bool computeOnly; } kVars[] = {
+        {"gl_SubgroupSize", BuiltinVar::SubgroupSize, false, false},
+        {"gl_SubgroupInvocationID", BuiltinVar::SubgroupInvocationID, false, false},
+        {"gl_SubgroupEqMask", BuiltinVar::SubgroupEqMask, 1, false},
+        {"gl_SubgroupGeMask", BuiltinVar::SubgroupGeMask, 1, false},
+        {"gl_SubgroupGtMask", BuiltinVar::SubgroupGtMask, 1, false},
+        {"gl_SubgroupLeMask", BuiltinVar::SubgroupLeMask, 1, false},
+        {"gl_SubgroupLtMask", BuiltinVar::SubgroupLtMask, 1, false},
+        {"gl_NumSubgroups", BuiltinVar::NumSubgroups, false, true},
+        {"gl_SubgroupID", BuiltinVar::SubgroupID, false, true},
+        // ARB_shader_ballot
+        {"gl_SubGroupSizeARB", BuiltinVar::SubgroupSize, 0, false},
+        {"gl_SubGroupInvocationARB", BuiltinVar::SubgroupInvocationID, 0, false},
+        {"gl_SubGroupEqMaskARB", BuiltinVar::SubgroupEqMask, 2, false},
+        {"gl_SubGroupGeMaskARB", BuiltinVar::SubgroupGeMask, 2, false},
+        {"gl_SubGroupGtMaskARB", BuiltinVar::SubgroupGtMask, 2, false},
+        {"gl_SubGroupLeMaskARB", BuiltinVar::SubgroupLeMask, 2, false},
+        {"gl_SubGroupLtMaskARB", BuiltinVar::SubgroupLtMask, 2, false},
+    };
+    for (auto& k : kVars) {
+        if (name != k.name) continue;
+        if (k.computeOnly && sh_.stage != Stage::Compute) return nullptr;
+        Qualifiers q;
+        q.storage = Storage::In;
+        Variable* v = newVar(name, k.type == 1 ? U4 : k.type == 2 ? U64 : U, q);
+        v->global = true;
+        v->builtin = k.b;
+        Sym& sym = scopes_.front()[name];
+        sym.var = v;
+        sym.member = -1;
+        return v;
+    }
+    return nullptr;
+}
+
 Expr* Parser::mkVarRef(const std::string& name, int ln) {
     Sym* s = lookup(name);
+    if (!s && lazyBuiltin(name)) s = lookup(name);
     if (!s || !s->var) {
         if (s && !s->funcs.empty()) fail("'" + name + "' : function name used as a variable", ln);
         fail("'" + name + "' : undeclared identifier", ln);
@@ -2194,7 +2249,7 @@ Expr* Parser::mkIndex(Expr* b, Expr* i, int ln) {
     Expr* e = E(EK::Index, rt, ln);
     e->args = {b, i};
     if (i->cv) {
-        int64_t idx = i->type.base == BT::UInt ? (int64_t)i->cv->c[0].u : i->cv->c[0].i;
+        int64_t idx = i->type.base == BT::UInt || i->type.base == BT::UInt64 ? (int64_t)i->cv->c[0].u : i->cv->c[0].i;
         if (idx < 0 || (limit > 0 && idx >= limit)) fail("array index out of range", ln);
         if (limit == 0 && b->kind == EK::Var) {
             int& m = maxIndex_[b->var];

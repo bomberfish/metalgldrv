@@ -4,7 +4,7 @@
 
 namespace mgl {
 
-enum class BaseType : uint8_t { Float, Int, UInt, Bool, Double, Sampler, Image, AtomicCounter, Unknown };
+enum class BaseType : uint8_t { Float, Int, UInt, Bool, Double, Int64, UInt64, Sampler, Image, AtomicCounter, Unknown };
 
 struct TypeShape {
     BaseType base;
@@ -54,6 +54,14 @@ inline TypeShape typeShape(GLenum t) {
     case GL_DOUBLE_MAT4x2: return {BaseType::Double, 4, 2};
     case GL_DOUBLE_MAT4x3: return {BaseType::Double, 4, 3};
     case GL_UNSIGNED_INT_ATOMIC_COUNTER: return {BaseType::AtomicCounter, 1, 1};
+    case GL_INT64_ARB: return {BaseType::Int64, 1, 1};
+    case GL_INT64_VEC2_ARB: return {BaseType::Int64, 1, 2};
+    case GL_INT64_VEC3_ARB: return {BaseType::Int64, 1, 3};
+    case GL_INT64_VEC4_ARB: return {BaseType::Int64, 1, 4};
+    case GL_UNSIGNED_INT64_ARB: return {BaseType::UInt64, 1, 1};
+    case GL_UNSIGNED_INT64_VEC2_ARB: return {BaseType::UInt64, 1, 2};
+    case GL_UNSIGNED_INT64_VEC3_ARB: return {BaseType::UInt64, 1, 3};
+    case GL_UNSIGNED_INT64_VEC4_ARB: return {BaseType::UInt64, 1, 4};
     default: break;
     }
     if ((t >= GL_SAMPLER_1D && t <= GL_SAMPLER_2D_SHADOW) || t == GL_SAMPLER_1D_ARRAY || t == GL_SAMPLER_2D_ARRAY ||

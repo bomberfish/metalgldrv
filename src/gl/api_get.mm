@@ -19,7 +19,7 @@ const char* kExtensions[] = {
     "GL_ARB_enhanced_layouts", "GL_ARB_explicit_attrib_location", "GL_ARB_explicit_uniform_location",
     "GL_ARB_fragment_coord_conventions", "GL_ARB_fragment_layer_viewport", "GL_ARB_fragment_shader",
     "GL_ARB_framebuffer_no_attachments", "GL_ARB_framebuffer_object", "GL_ARB_framebuffer_sRGB", "GL_ARB_geometry_shader4",
-    "GL_ARB_get_program_binary", "GL_ARB_get_texture_sub_image", "GL_ARB_gl_spirv", "GL_ARB_gpu_shader5", "GL_ARB_gpu_shader_fp64",
+    "GL_ARB_get_program_binary", "GL_ARB_get_texture_sub_image", "GL_ARB_gl_spirv", "GL_ARB_gpu_shader5", "GL_ARB_gpu_shader_fp64", "GL_ARB_gpu_shader_int64",
     "GL_ARB_half_float_pixel", "GL_ARB_half_float_vertex", "GL_ARB_indirect_parameters", "GL_ARB_instanced_arrays",
     "GL_ARB_internalformat_query", "GL_ARB_internalformat_query2", "GL_ARB_invalidate_subdata", "GL_ARB_map_buffer_alignment",
     "GL_ARB_map_buffer_range", "GL_ARB_multi_bind", "GL_ARB_multi_draw_indirect", "GL_ARB_multisample",
@@ -27,7 +27,7 @@ const char* kExtensions[] = {
     "GL_ARB_point_parameters", "GL_ARB_point_sprite", "GL_ARB_polygon_offset_clamp", "GL_ARB_program_interface_query",
     "GL_ARB_provoking_vertex", "GL_ARB_query_buffer_object", "GL_ARB_robust_buffer_access_behavior", "GL_ARB_robustness",
     "GL_ARB_sample_shading", "GL_ARB_sampler_objects", "GL_ARB_seamless_cube_map", "GL_ARB_seamless_cubemap_per_texture",
-    "GL_ARB_separate_shader_objects", "GL_ARB_shader_atomic_counter_ops", "GL_ARB_shader_atomic_counters",
+    "GL_ARB_separate_shader_objects", "GL_ARB_shader_atomic_counter_ops", "GL_ARB_shader_ballot", "GL_ARB_shader_atomic_counters",
     "GL_ARB_shader_bit_encoding", "GL_ARB_shader_draw_parameters", "GL_ARB_shader_group_vote",
     "GL_ARB_shader_image_load_store", "GL_ARB_shader_image_size", "GL_ARB_shader_objects", "GL_ARB_shader_precision",
     "GL_ARB_shader_storage_buffer_object", "GL_ARB_shader_subroutine", "GL_ARB_shader_texture_image_samples",
@@ -60,8 +60,8 @@ const char* kExtensions[] = {
     "GL_EXT_texture_shared_exponent", "GL_EXT_texture_snorm", "GL_EXT_texture_swizzle", "GL_EXT_timer_query",
     "GL_EXT_transform_feedback", "GL_EXT_vertex_array_bgra", "GL_IBM_texture_mirrored_repeat", "GL_KHR_context_flush_control",
     "GL_KHR_debug", "GL_KHR_no_error", "GL_KHR_parallel_shader_compile", "GL_KHR_robust_buffer_access_behavior",
-    "GL_KHR_robustness", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
-    "GL_NV_depth_clamp", "GL_NV_texture_barrier",
+    "GL_KHR_robustness", "GL_KHR_shader_subgroup", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
+    "GL_NV_depth_clamp", "GL_NV_shader_subgroup_partitioned", "GL_NV_texture_barrier",
 };
 const int kNumExtensions = sizeof(kExtensions) / sizeof(kExtensions[0]);
 
@@ -236,6 +236,18 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_MAX_COMPUTE_WORK_GROUP_COUNT: v = I(index < 0 ? 65535 : 65535); return true;
     case GL_MAX_COMPUTE_WORK_GROUP_SIZE: { int64_t s[3] = {1024, 1024, 64}; v = I(s[std::min(idx, 2)]); return true; }
     case GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS: v = I(1024); return true;
+    // KHR_shader_subgroup: SIMD-groups (32 threads on every Apple GPU)
+    case GL_SUBGROUP_SIZE_KHR: v = I(32); return true;
+    case GL_SUBGROUP_SUPPORTED_STAGES_KHR:
+        v = I(GL_VERTEX_SHADER_BIT | GL_TESS_CONTROL_SHADER_BIT | GL_TESS_EVALUATION_SHADER_BIT | GL_GEOMETRY_SHADER_BIT |
+              GL_FRAGMENT_SHADER_BIT | GL_COMPUTE_SHADER_BIT);
+        return true;
+    case GL_SUBGROUP_SUPPORTED_FEATURES_KHR:
+        v = I(GL_SUBGROUP_FEATURE_BASIC_BIT_KHR | GL_SUBGROUP_FEATURE_VOTE_BIT_KHR | GL_SUBGROUP_FEATURE_ARITHMETIC_BIT_KHR |
+              GL_SUBGROUP_FEATURE_BALLOT_BIT_KHR | GL_SUBGROUP_FEATURE_SHUFFLE_BIT_KHR | GL_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT_KHR |
+              GL_SUBGROUP_FEATURE_CLUSTERED_BIT_KHR | GL_SUBGROUP_FEATURE_QUAD_BIT_KHR | GL_SUBGROUP_FEATURE_PARTITIONED_BIT_NV);
+        return true;
+    case GL_SUBGROUP_QUAD_ALL_STAGES_KHR: v = B(true); return true;
     case GL_MAX_COMPUTE_SHARED_MEMORY_SIZE: v = I(32768); return true;
     case GL_MAX_CLIP_DISTANCES: case GL_MAX_CULL_DISTANCES: case GL_MAX_COMBINED_CLIP_AND_CULL_DISTANCES: v = I(8); return true;
     case GL_MAX_SUBROUTINES: v = I(256); return true;

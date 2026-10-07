@@ -21,6 +21,8 @@ double cvF(const Scalar& s, BT b) {
         case BT::Float: case BT::Double: return s.f;
         case BT::Int: return (double)(int32_t)s.i;
         case BT::UInt: return (double)(uint32_t)s.u;
+        case BT::Int64: return (double)s.i;
+        case BT::UInt64: return (double)s.u;
         case BT::Bool: return s.b ? 1.0 : 0.0;
         default: return 0;
     }
@@ -30,6 +32,7 @@ int64_t cvI(const Scalar& s, BT b) {
         case BT::Float: case BT::Double: return (int64_t)(int32_t)(int64_t)s.f;
         case BT::Int: return (int32_t)s.i;
         case BT::UInt: return (int32_t)(uint32_t)s.u;
+        case BT::Int64: case BT::UInt64: return (int32_t)(uint32_t)s.u;
         case BT::Bool: return s.b;
         default: return 0;
     }
@@ -39,6 +42,18 @@ uint64_t cvU(const Scalar& s, BT b) {
         case BT::Float: case BT::Double: return s.f < 0 ? (uint32_t)(int32_t)(int64_t)s.f : (uint32_t)(uint64_t)s.f;
         case BT::Int: return (uint32_t)(int32_t)s.i;
         case BT::UInt: return (uint32_t)s.u;
+        case BT::Int64: case BT::UInt64: return (uint32_t)s.u;
+        case BT::Bool: return s.b;
+        default: return 0;
+    }
+}
+// 64-bit integer value of any scalar (ARB_gpu_shader_int64 conversions)
+uint64_t cvU64(const Scalar& s, BT b) {
+    switch (b) {
+        case BT::Float: case BT::Double: return s.f < 0 ? (uint64_t)(int64_t)s.f : (uint64_t)s.f;
+        case BT::Int: return (uint64_t)(int64_t)(int32_t)s.i;
+        case BT::UInt: return (uint32_t)s.u;
+        case BT::Int64: case BT::UInt64: return s.u;
         case BT::Bool: return s.b;
         default: return 0;
     }
@@ -48,6 +63,7 @@ bool cvB(const Scalar& s, BT b) {
         case BT::Float: case BT::Double: return s.f != 0;
         case BT::Int: return (int32_t)s.i != 0;
         case BT::UInt: return (uint32_t)s.u != 0;
+        case BT::Int64: case BT::UInt64: return s.u != 0;
         case BT::Bool: return s.b;
         default: return false;
     }
@@ -61,6 +77,7 @@ Scalar convertScalar(const Scalar& s, BT from, BT to) {
         case BT::Int: r.i = cvI(s, from); break;
         case BT::UInt: r.u = cvU(s, from); break;
         case BT::Bool: r.b = cvB(s, from); break;
+        case BT::Int64: case BT::UInt64: r.u = cvU64(s, from); break;
         default: break;
     }
     return r;
@@ -173,6 +190,31 @@ CV foldBinary(Op op, const Type& res, const Expr* a, const Expr* b) {
                 default: return nullptr;
             }
             out->c.push_back(fromU(R));
+        } else if (ob == BT::Int64 || ob == BT::UInt64) {
+            bool sg = ob == BT::Int64;
+            uint64_t X = cvU64(x, ba), Y = cvU64(y, bb), R = 0;
+            int64_t SX = (int64_t)X, SY = (int64_t)Y;
+            uint32_t sh = (uint32_t)Y & 63;
+            switch (op) {
+                case Op::Add: R = X + Y; break;
+                case Op::Sub: R = X - Y; break;
+                case Op::Mul: R = X * Y; break;
+                case Op::Div: R = !Y ? 0 : sg ? (uint64_t)(SY == -1 ? -SX : SX / SY) : X / Y; break;
+                case Op::Mod: R = !Y ? 0 : sg ? (uint64_t)(SY == -1 ? 0 : SX % SY) : X % Y; break;
+                case Op::Shl: R = X << sh; break;
+                case Op::Shr: R = sg ? (uint64_t)(SX >> sh) : X >> sh; break;
+                case Op::BitAnd: R = X & Y; break;
+                case Op::BitOr: R = X | Y; break;
+                case Op::BitXor: R = X ^ Y; break;
+                case Op::Lt: out->c.push_back(fromB(sg ? SX < SY : X < Y)); continue;
+                case Op::Gt: out->c.push_back(fromB(sg ? SX > SY : X > Y)); continue;
+                case Op::Le: out->c.push_back(fromB(sg ? SX <= SY : X <= Y)); continue;
+                case Op::Ge: out->c.push_back(fromB(sg ? SX >= SY : X >= Y)); continue;
+                default: return nullptr;
+            }
+            Scalar r;
+            r.u = R;
+            out->c.push_back(r);
         } else {
             return nullptr;
         }
@@ -191,11 +233,13 @@ CV foldUnary(Op op, const Type& res, const Expr* a) {
                 if (b == BT::Float || b == BT::Double) out->c.push_back(fromF(b, -s.f));
                 else if (b == BT::Int) out->c.push_back(fromI(-(int64_t)(int32_t)s.i));
                 else if (b == BT::UInt) out->c.push_back(fromU((uint32_t)(-(int64_t)s.u)));
+                else if (b == BT::Int64 || b == BT::UInt64) { Scalar r; r.u = 0 - s.u; out->c.push_back(r); }
                 else return nullptr;
                 break;
             case Op::Not: out->c.push_back(fromB(!s.b)); break;
             case Op::BitNot:
                 if (b == BT::Int) out->c.push_back(fromI(~(int32_t)s.i));
+                else if (b == BT::Int64 || b == BT::UInt64) { Scalar r; r.u = ~s.u; out->c.push_back(r); }
                 else out->c.push_back(fromU(~(uint32_t)s.u));
                 break;
             default: return nullptr;
@@ -281,6 +325,10 @@ CV foldField(const Expr* base, int field, const Type& res) {
 
 CV foldBuiltin(const std::string& name, const Type& ret, const std::vector<Expr*>& args) {
     if (!allConst(args)) return nullptr;
+    // 64-bit integer builtins are not folded
+    if (ret.base == BT::Int64 || ret.base == BT::UInt64) return nullptr;
+    for (auto* a : args)
+        if (a->type.base == BT::Int64 || a->type.base == BT::UInt64) return nullptr;
     // Component-wise float functions
     using F1 = double (*)(double);
     static const std::pair<const char*, F1> unary[] = {
