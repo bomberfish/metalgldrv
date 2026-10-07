@@ -419,6 +419,8 @@ bool Context::resolvePass(PassDesc& p) {
         int aw, ah;
         id<MTLTexture> t = attachmentTexture(this, a, &f, &aw, &ah);
         if (!t) continue;
+        // GL_FRAMEBUFFER_SRGB disabled: sRGB attachments are written without encoding.
+        t = attachmentWriteView(this, a, t);
         p.color[i].tex = t;
         p.color[i].level = a.type == GL_TEXTURE ? a.level : 0;
         if (t.textureType == MTLTextureType3D) p.color[i].depthPlane = a.layered ? 0 : a.layer;

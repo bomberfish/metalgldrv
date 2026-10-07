@@ -169,6 +169,10 @@ TEST(copy_tex_and_copy_image) {
     CHECK_EQ(out[0], 0xff0000ffu);          // (4,4) red
     CHECK_EQ(out[4 * 16 + 4], 0xff00ff00u); // (8,8) green
     GLuint t2 = makeTex2D(GL_RGBA8, 16, 16, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    // §18.3.3: both textures must be complete under their own sampler state.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glCopyImageSubData(t, GL_TEXTURE_2D, 0, 0, 0, 0, t2, GL_TEXTURE_2D, 0, 8, 8, 0, 4, 4, 1);
     glBindTexture(GL_TEXTURE_2D, t2);
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, out);

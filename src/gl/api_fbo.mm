@@ -161,7 +161,9 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
     int s = samples == 0 ? 0 : samples <= 1 ? 1 : samples <= 2 ? 2 : 4;
     if (s == 1) s = 0;
     if (rb->mtl) ctx->dev->releaseAfter(rb->mtl, rb->lastUse);
+    if (rb->linearView) ctx->dev->retainUntil(rb->linearView, rb->lastUse);
     rb->mtl = nil;
+    rb->linearView = nil;
     rb->internalFormat = internalformat;
     rb->fmt = f;
     rb->width = w;
@@ -175,7 +177,9 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
         }
         td.storageMode = MTLStorageModePrivate;
         td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
-        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | (f->kind == FmtKind::DepthStencil ? MTLTextureUsagePixelFormatView : 0);
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+                   (f->kind == FmtKind::DepthStencil || f->srgb ? MTLTextureUsagePixelFormatView : 0);
+        if (!losslessCompressionSafe(f->mtl)) td.allowGPUOptimizedContents = NO;
         rb->mtl = [ctx->dev->mtl newTextureWithDescriptor:td];
         if (!rb->mtl) return ctx->setError(GL_OUT_OF_MEMORY);
         ctx->dev->makeResident(rb->mtl);
@@ -852,7 +856,9 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
         ctx->setError(GL_INVALID_OPERATION, "no readable buffer");
         return false;
     }
-    if (isDS && f->baseFormat != GL_DEPTH_STENCIL) {  // needs a packed depth+stencil buffer
+    // DEPTH_STENCIL needs a packed depth+stencil buffer attached as both depth and stencil.
+    if (isDS && (f->baseFormat != GL_DEPTH_STENCIL ||
+                 (!fb->isDefault && (fb->att[kAttDepth].type == GL_NONE || fb->att[kAttStencil].type == GL_NONE)))) {
         ctx->setError(GL_INVALID_OPERATION, "DEPTH_STENCIL read without depth+stencil buffer");
         return false;
     }
@@ -926,10 +932,16 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
     return true;
 }
 
+// §18.2.2: ReadPixels with DEPTH_STENCIL takes the packed depth/stencil types only (INVALID_ENUM).
+static GLenum readPixelsFormatTypeError(GLenum format, GLenum type) {
+    if (format == GL_DEPTH_STENCIL && type != GL_UNSIGNED_INT_24_8 && type != GL_FLOAT_32_UNSIGNED_INT_24_8_REV) return GL_INVALID_ENUM;
+    return pixelFormatTypeError(format, type);
+}
+
 API void APIENTRY glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void* pixels) {
     MGL_CTX();
     if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
-    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e, "glReadPixels format/type");
+    if (GLenum e = readPixelsFormatTypeError(format, type)) return ctx->setError(e, "glReadPixels format/type");
     Framebuffer* fb = ctx->readFb.get();
     if (!fb) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
     GLenum status;
@@ -948,7 +960,7 @@ API void APIENTRY glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fo
 API void APIENTRY glReadnPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, GLsizei bufSize, void* data) {
     MGL_CTX();
     if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
-    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
+    if (GLenum e = readPixelsFormatTypeError(format, type)) return ctx->setError(e);
     Framebuffer* fb = ctx->readFb.get();
     if (!fb) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
     GLenum status;

@@ -2261,6 +2261,8 @@ Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
             !extEnabled("GL_EXT_shader_integer_mix"))
             fail("mix() with integer or boolean operands requires GLSL 4.50 or GL_EXT_shader_integer_mix", ln);
         if (name == "ftransform" && sh_.stage != Stage::Vertex) fail("ftransform() is only available in vertex shaders", ln);
+        if (name == "imageSize" && sh_.version < 430 && !sh_.extensions.count("GL_ARB_shader_image_size"))
+            fail("imageSize() requires GLSL 4.30 or GL_ARB_shader_image_size", ln);
         if (name.compare(0, 6, "atomic") == 0 && name.compare(0, 13, "atomicCounter") != 0) {
             Expr* b = args[0];
             while (b->kind == EK::Index || b->kind == EK::Field || b->kind == EK::Swizzle) b = b->args[0];
