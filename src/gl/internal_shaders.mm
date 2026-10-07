@@ -100,13 +100,18 @@ struct MSUintArgs { texture2d_ms<uint> src; };
 fragment int4 resolve_fs_int(QuadOut in [[stage_in]], constant MSIntArgs& a [[buffer(1)]]) { return a.src.read(uint2(in.uv), 0); }
 fragment uint4 resolve_fs_uint(QuadOut in [[stage_in]], constant MSUintArgs& a [[buffer(1)]]) { return a.src.read(uint2(in.uv), 0); }
 // Multisample images (METALGLDRV_STRICT, draw.mm): per-sample 2D-array shadows of multisample
-// textures, slice = layer * samples + sample. p = {samples, arrayed}.
+// textures, slice = layer * samples + sample.
 #define MS_SHADOW(T, sfx)                                                                                              \
-struct MSShadowArgs_##sfx { texture2d_ms<T> ms; texture2d_ms_array<T> msa; texture2d_array<T, access::write> shadow; }; \
-kernel void ms_to_shadow_##sfx(constant MSShadowArgs_##sfx& a [[buffer(0)]], constant uint2& p [[buffer(1)]],          \
-                               uint3 g [[thread_position_in_grid]]) {                                                 \
+struct MSShadowArgs_##sfx { texture2d_ms<T> ms; texture2d_array<T, access::write> shadow; };                          \
+kernel void ms_to_shadow_##sfx(constant MSShadowArgs_##sfx& a [[buffer(0)]], uint3 g [[thread_position_in_grid]]) {   \
     if (g.x >= a.shadow.get_width() || g.y >= a.shadow.get_height() || g.z >= a.shadow.get_array_size()) return;    \
-    a.shadow.write(p.y ? a.msa.read(g.xy, g.z / p.x, g.z % p.x) : a.ms.read(g.xy, g.z), g.xy, g.z);                 \
+    a.shadow.write(a.ms.read(g.xy, g.z), g.xy, g.z);                                                                  \
+}                                                                                                                     \
+struct MSArrayShadowArgs_##sfx { texture2d_ms_array<T> ms; texture2d_array<T, access::write> shadow; };               \
+kernel void msa_to_shadow_##sfx(constant MSArrayShadowArgs_##sfx& a [[buffer(0)]], uint3 g [[thread_position_in_grid]]) { \
+    if (g.x >= a.shadow.get_width() || g.y >= a.shadow.get_height() || g.z >= a.shadow.get_array_size()) return;    \
+    uint n = a.ms.get_num_samples();                                                                                  \
+    a.shadow.write(a.ms.read(g.xy, g.z / n, g.z % n), g.xy, g.z);                                                     \
 }                                                                                                                     \
 struct ShadowArgs_##sfx { texture2d_array<T> shadow; };                                                              \
 fragment vec<T, 4> shadow_to_ms_##sfx(QuadOut in [[stage_in]], uint s [[sample_id]], constant ShadowArgs_##sfx& a [[buffer(1)]], \
@@ -443,32 +448,30 @@ static const char* const kShadowSuffix[3] = {"f", "i", "u"};
 
 void msImageToShadow(Context* ctx, id<MTLTexture> ms, id<MTLTexture> shadow, int kind) {
     static std::mutex m;
-    static id<MTLComputePipelineState> psos[3];
+    static id<MTLComputePipelineState> psos[2][3];
+    bool arrayed = ms.textureType == MTLTextureType2DMultisampleArray;
     id<MTLComputePipelineState> pso;
     {
         std::lock_guard<std::mutex> g(m);
-        if (!psos[kind]) {
+        __strong id<MTLComputePipelineState>& p = psos[arrayed][kind];
+        if (!p) {
             MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
-            d.computeFunctionDescriptor = fnDesc(internalLibrary(), [NSString stringWithFormat:@"ms_to_shadow_%s", kShadowSuffix[kind]]);
+            d.computeFunctionDescriptor =
+                fnDesc(internalLibrary(), [NSString stringWithFormat:@"%s_to_shadow_%s", arrayed ? "msa" : "ms", kShadowSuffix[kind]]);
             NSError* err = nil;
-            psos[kind] = [Device::get()->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
-            if (!psos[kind]) MGL_ERR("ms_to_shadow pipeline failed: %s", err.localizedDescription.UTF8String);
+            p = [Device::get()->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
+            if (!p) MGL_ERR("ms_to_shadow pipeline failed: %s", err.localizedDescription.UTF8String);
         }
-        pso = psos[kind];
+        pso = p;
     }
     if (!pso) return;
-    bool arrayed = ms.textureType == MTLTextureType2DMultisampleArray;
-    UploadAlloc aa = ctx->upload(24, 8);
-    MTLResourceID rids[3] = {arrayed ? MTLResourceID{0} : ms.gpuResourceID, arrayed ? ms.gpuResourceID : MTLResourceID{0}, shadow.gpuResourceID};
+    UploadAlloc aa = ctx->upload(16, 8);
+    MTLResourceID rids[2] = {ms.gpuResourceID, shadow.gpuResourceID};
     memcpy(aa.cpu, rids, sizeof rids);
-    UploadAlloc pa = ctx->upload(8);
-    uint32_t p[2] = {(uint32_t)ms.sampleCount, arrayed ? 1u : 0u};
-    memcpy(pa.cpu, p, 8);
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
     [e barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
     [e setComputePipelineState:pso];
     [ctx->computeArgTable setAddress:aa.gpu atIndex:0];
-    [ctx->computeArgTable setAddress:pa.gpu atIndex:1];
     [e dispatchThreads:MTLSizeMake(shadow.width, shadow.height, shadow.arrayLength) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
     [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
 }
