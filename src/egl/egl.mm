@@ -176,6 +176,7 @@ Surface* newSurface(const Config* c) {
     s->samples = c->samples;
     s->hasDepth = c->depth > 0;
     s->hasStencil = c->stencil > 0;
+    s->hasAlpha = c->a > 0;
     s->colorFormat = MTLPixelFormatRGBA8Unorm;
     Framebuffer* fb = new Framebuffer();
     fb->isDefault = true;

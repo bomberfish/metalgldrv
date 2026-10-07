@@ -342,6 +342,7 @@ void clearWithQuad(Context* ctx, const QuadClear& q) {
     std::string key = "clear_" + sig + "_s" + std::to_string(p.samples) + (layered ? "_L" : "");
     for (int i = 0; i < kMaxDrawBuffers; i++) {
         masks[i] = (q.drawBufferMask & (1u << i)) ? q.colorWriteMask[i] : 0;
+        if (p.color[i].noAlpha) masks[i] &= ~8u;  // alpha-less default framebuffer keeps alpha at 1
         key += "_" + std::to_string(colors[i]) + ":" + std::to_string(masks[i]);
     }
     id<MTLRenderPipelineState> pso = internalPipeline(key, lib, layered ? @"quad_vs_layered" : @"quad_vs", @"clear_fs", colors, masks, p.samples);

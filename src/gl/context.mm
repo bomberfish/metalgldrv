@@ -398,8 +398,10 @@ bool Context::resolvePass(PassDesc& p) {
         if (!s || !s->color) return false;
         for (int i = 0; i < kMaxDrawBuffers; i++) {
             GLenum db = fb->drawBuffers[i];
-            if (db == GL_BACK || db == GL_BACK_LEFT || db == GL_FRONT || db == GL_FRONT_LEFT || db == GL_FRONT_AND_BACK || db == GL_LEFT)
+            if (db == GL_BACK || db == GL_BACK_LEFT || db == GL_FRONT || db == GL_FRONT_LEFT || db == GL_FRONT_AND_BACK || db == GL_LEFT) {
                 p.color[i].tex = s->msColor ? s->msColor : s->color;
+                p.color[i].noAlpha = !s->hasAlpha;
+            }
         }
         if (s->depthStencil) {
             if (s->hasDepth) p.depth.tex = s->depthStencil;
@@ -500,7 +502,7 @@ void Context::beginPass() {
                                                  (double)(int32_t)pendingClear.colorInt[i][2], (double)(int32_t)pendingClear.colorInt[i][3]);
             else
                 c.clearColor = MTLClearColorMake(pendingClear.color[i][0], pendingClear.color[i][1], pendingClear.color[i][2],
-                                                 pendingClear.color[i][3]);
+                                                 p.color[i].noAlpha ? 1.0 : pendingClear.color[i][3]);
             if (f && f->kind == FmtKind::UInt)
                 c.clearColor = MTLClearColorMake((double)pendingClear.colorInt[i][0], (double)pendingClear.colorInt[i][1],
                                                  (double)pendingClear.colorInt[i][2], (double)pendingClear.colorInt[i][3]);
