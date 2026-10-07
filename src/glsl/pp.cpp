@@ -744,6 +744,10 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
         if (name != "all") {
             auto& exts = supportedExtensions();
             bool known = std::find(exts.begin(), exts.end(), name) != exts.end();
+            if (!known && opts_.deviceExtensions) {
+                auto& dev = *opts_.deviceExtensions;
+                known = std::find(dev.begin(), dev.end(), name) != dev.end();
+            }
             if (!known && res_.es) {
                 auto& es = supportedESExtensions();
                 known = std::find(es.begin(), es.end(), name) != es.end();
@@ -805,6 +809,8 @@ PPResult Preprocessor::run(const std::vector<std::string>& sources) {
             // still accept compat if asked: nothing
         }
         for (auto& e : supportedExtensions()) define(e, "1");
+        if (opts_.deviceExtensions)
+            for (auto& e : *opts_.deviceExtensions) define(e, "1");
         if (res_.es)
             for (auto& e : supportedESExtensions()) define(e, "1");
         (void)stage_;
@@ -854,7 +860,6 @@ PPResult Preprocessor::run(const std::vector<std::string>& sources) {
     end.kind = PK::End;
     end.line = curLine_;
     res_.tokens.push_back(end);
-    (void)opts_;
     return std::move(res_);
 }
 

@@ -187,6 +187,57 @@ TEST(texture_filter_minmax) {
     CHECK_GL();
 }
 
+// KHR_blend_equation_advanced: GL_MULTIPLY_KHR and GL_SCREEN_KHR into a single-sample and a 4x
+// multisample framebuffer (the shader reads the destination per sample), then resolved.
+TEST(blend_equation_advanced_msaa) {
+    if (!hasExtension("GL_KHR_blend_equation_advanced")) return;
+    const char* vs = "#version 430 core\nin vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0, 1); }";
+    const char* fs = "#version 430 core\n#extension GL_KHR_blend_equation_advanced : require\n"
+                     "layout(blend_support_multiply, blend_support_screen) out;\nlayout(location = 0) out vec4 c;\n"
+                     "uniform vec4 col;\nvoid main() { c = col; }";
+    GLuint p = compileProgram(vs, fs);
+    glUseProgram(p);
+    GLuint rbs[2], fbos[2];
+    glGenRenderbuffers(2, rbs);
+    glGenFramebuffers(2, fbos);
+    for (int i = 0; i < 2; i++) {
+        glBindRenderbuffer(GL_RENDERBUFFER, rbs[i]);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, i ? 4 : 0, GL_RGBA8, 16, 16);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbos[i]);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbs[i]);
+    }
+    for (int ms = 1; ms >= 0; ms--) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbos[ms]);
+        glViewport(0, 0, 16, 16);
+        glDisable(GL_BLEND);
+        glClearColor(0.5f, 1.0f, 0.25f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_MULTIPLY_KHR);
+        glUniform4f(glGetUniformLocation(p, "col"), 0.5f, 0.5f, 1.0f, 1.0f);
+        drawQuad(p);  // (0.25, 0.5, 0.25)
+        glBlendEquation(GL_SCREEN_KHR);
+        glUniform4f(glGetUniformLocation(p, "col"), 0.5f, 0.0f, 0.0f, 1.0f);
+        drawQuad(p);  // (0.625, 0.5, 0.25)
+        glDisable(GL_BLEND);
+        if (ms) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbos[1]);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbos[0]);
+            glBlitFramebuffer(0, 0, 16, 16, 0, 0, 16, 16, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, fbos[0]);
+        CHECK_PIXEL(8, 8, 159, 128, 64, 255);
+    }
+    // An advanced equation needs a matching blend_support qualifier.
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_DARKEN_KHR);
+    drawQuad(p);
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);
+    glBlendEquation(GL_FUNC_ADD);
+    glDisable(GL_BLEND);
+    CHECK_GL();
+}
+
 // GL_RGB9_E5 is color-renderable (and blendable): HDR values survive a draw with additive blending.
 TEST(rgb9e5_renderbuffer) {
     const char* vs = "#version 330 core\nin vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0, 1); }";

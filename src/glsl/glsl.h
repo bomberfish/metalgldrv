@@ -54,7 +54,19 @@ constexpr int kMaxAtomicCounterBufferBindings = limits_detail::gl_MaxAtomicCount
 struct CompileOptions {
     bool compatibilityProfile = true;  // accept GL compatibility builtins (gl_Vertex, ftransform, ...)
     int maxVersion = 460;
+    // Extensions this device supports beyond supportedExtensions() (#extension and predefined macros).
+    const std::vector<std::string>* deviceExtensions = nullptr;
 };
+
+// KHR_blend_equation_advanced equations (GL enums), in the bit order of Layout::blendSupport /
+// Reflection::blendSupport and the index order of VariantKey::advancedBlend.
+constexpr uint32_t kAdvancedBlendEquations[15] = {
+    0x9294 /* MULTIPLY */,  0x9295 /* SCREEN */,     0x9296 /* OVERLAY */,    0x9297 /* DARKEN */,
+    0x9298 /* LIGHTEN */,   0x9299 /* COLORDODGE */, 0x929A /* COLORBURN */,  0x929B /* HARDLIGHT */,
+    0x929C /* SOFTLIGHT */, 0x929E /* DIFFERENCE */, 0x92A0 /* EXCLUSION */,  0x92AD /* HSL_HUE */,
+    0x92AE /* HSL_SATURATION */, 0x92AF /* HSL_COLOR */, 0x92B0 /* HSL_LUMINOSITY */};
+// VariantKey::advancedBlend flags above the equation number.
+enum : uint8_t { kAdvancedBlendEquationMask = 0x1f, kAdvancedBlendNoDstAlpha = 0x20, kAdvancedBlendClamp = 0x40 };
 
 CompileResult compile(Stage stage, const std::vector<std::string>& sources, const CompileOptions& opts = {});
 
@@ -247,6 +259,7 @@ struct Reflection {
     uint32_t tesPrimitiveMode = 0, tesSpacing = 0, tesOrder = 0;
     bool tesPointMode = false;
     bool usesFragDepth = false, earlyFragmentTests = false, usesDiscard = false;
+    uint16_t blendSupport = 0;              // fragment shader blend_support_* qualifiers (KHR_blend_equation_advanced)
     bool usesFp64 = false;
     bool usesFlatShading = false;           // any flat-qualified input reaching the fragment shader
     bool writesLayer = false, writesViewportIndex = false;  // by the last pre-rasterization stage
@@ -311,6 +324,10 @@ struct VariantKey {
     // Fragment: AND the coverage with MGLSys::sampleMask (GL_SAMPLE_MASK) and the
     // GL_SAMPLE_COVERAGE mask derived from MGLSys::sampleCoverage.
     bool sampleMask = false;
+    // Fragment: KHR_blend_equation_advanced on color output 0: 1 + index into kAdvancedBlendEquations
+    // (0 = none), plus kAdvancedBlendNoDstAlpha / kAdvancedBlendClamp. The shader reads the destination
+    // with framebuffer fetch and blends; fixed-function blending is off for that attachment.
+    uint8_t advancedBlend = 0;
 };
 
 struct EntryPoint {

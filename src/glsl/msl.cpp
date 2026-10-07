@@ -3157,6 +3157,16 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     std::string alpha;
     if (color0Float && sc_->primary->compat)
         alpha = "    if (sys.alphaFunc != 0x0207u && !mgl_alpha_pass(" + color0 + ".a, sys.alphaFunc, sys.alphaRef)) discard_fragment();\n";
+    std::string advBlend;
+    if (color0Float && (K.advancedBlend & kAdvancedBlendEquationMask)) {
+        // KHR_blend_equation_advanced: blend color output 0 with the destination read by framebuffer fetch
+        // (fixed-function blending is off for the attachment).
+        params += ", float4 mgl_dst [[color(0)]]";
+        advBlend = "    " + color0 + " = mgl_blend_advanced(" + color0 + ", mgl_dst, " +
+                 std::to_string((K.advancedBlend & kAdvancedBlendEquationMask) - 1) + "u, " +
+                 ((K.advancedBlend & kAdvancedBlendNoDstAlpha) ? "true" : "false") + ", " +
+                 ((K.advancedBlend & kAdvancedBlendClamp) ? "true" : "false") + ");\n";
+    }
     bool useInterp = !interpLeaf_.empty();
     emitBody(Stage::Fragment, o, inS, useInterp ? "    thread In* mgl_in;\n" : "");
     if (useInterp) copyIn += "    g.mgl_in = &in;\n";
@@ -3168,7 +3178,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
     e += "    fs::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Fragment) + ";\n    g.sys = &sys;\n" + copyIn;
     e += "    g.mgl_init();\n    g." + si.mainName + "();\n";
-    if (anyOut) e += "    fs::Out o;\n" + copyOut + alpha + "    return o;\n";
+    if (anyOut) e += "    fs::Out o;\n" + copyOut + alpha + advBlend + "    return o;\n";
     e += "}\n\n";
     entries_ += e;
     out_.entryPoints.push_back({"mgl_fs", Stage::Fragment, EntryPoint::Fragment});

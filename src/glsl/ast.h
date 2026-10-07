@@ -82,7 +82,7 @@ struct Layout {
     bool originUpperLeft = false, pixelCenterInteger = false, earlyFragmentTests = false;
     uint32_t depthLayout = 0;  // 0 none, 1 any, 2 greater, 3 less, 4 unchanged
     std::string format;        // image format qualifier
-    bool blendSupportAll = false;
+    uint16_t blendSupport = 0;  // KHR_blend_equation_advanced blend_support_* (bit order of kAdvancedBlendEquations)
 };
 
 enum class Storage : uint8_t { Temp, Const, In, Out, InOut, Uniform, Buffer, Shared, Attribute, Varying };

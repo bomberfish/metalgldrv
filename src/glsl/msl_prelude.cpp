@@ -410,6 +410,51 @@ template <typename Tex, typename C, typename T> inline T mgl_img_cas_a(Tex t, C 
     return inv ? ~m : m;
 }
 )"});
+    // KHR_blend_equation_advanced: premultiplied source s and destination d; `mode` indexes
+    // glsl::kAdvancedBlendEquations (a literal, so the switch folds away).
+    c.push_back({{"mgl_blend_advanced"}, R"(inline float mgl_ba_lum(float3 c) { return dot(c, float3(0.30f, 0.59f, 0.11f)); }
+inline float3 mgl_ba_setlum(float3 cbase, float3 clum) {
+    float llum = mgl_ba_lum(clum);
+    float3 c = cbase + (llum - mgl_ba_lum(cbase));
+    float mn = min3(c.r, c.g, c.b), mx = max3(c.r, c.g, c.b);
+    if (mn < 0.0f) return llum + (c - llum) * llum / (llum - mn);
+    if (mx > 1.0f) return llum + (c - llum) * (1.0f - llum) / (mx - llum);
+    return c;
+}
+inline float3 mgl_ba_setlumsat(float3 cbase, float3 csat, float3 clum) {
+    float mnb = min3(cbase.r, cbase.g, cbase.b), sbase = max3(cbase.r, cbase.g, cbase.b) - mnb;
+    float ssat = max3(csat.r, csat.g, csat.b) - min3(csat.r, csat.g, csat.b);
+    float3 c = sbase > 0.0f ? (cbase - mnb) * ssat / sbase : float3(0.0f);
+    return mgl_ba_setlum(c, clum);
+}
+inline float4 mgl_blend_advanced(float4 s, float4 d, uint mode, bool noDstAlpha, bool clampSrc) {
+    if (clampSrc) s = saturate(s);
+    if (noDstAlpha) d.a = 1.0f;
+    float3 cs = s.a == 0.0f ? float3(0.0f) : s.rgb / s.a;
+    float3 cd = d.a == 0.0f ? float3(0.0f) : d.rgb / d.a;
+    float3 f;
+    switch (mode) {
+        case 0u: f = cs * cd; break;
+        case 1u: f = cs + cd - cs * cd; break;
+        case 2u: f = select(1.0f - 2.0f * (1.0f - cs) * (1.0f - cd), 2.0f * cs * cd, cd <= 0.5f); break;
+        case 3u: f = min(cs, cd); break;
+        case 4u: f = max(cs, cd); break;
+        case 5u: f = select(select(float3(1.0f), min(1.0f, cd / (1.0f - cs)), cs < 1.0f), float3(0.0f), cd <= 0.0f); break;
+        case 6u: f = select(select(float3(0.0f), 1.0f - min(1.0f, (1.0f - cd) / cs), cs > 0.0f), float3(1.0f), cd >= 1.0f); break;
+        case 7u: f = select(1.0f - 2.0f * (1.0f - cs) * (1.0f - cd), 2.0f * cs * cd, cs <= 0.5f); break;
+        case 8u: f = select(select(cd + (2.0f * cs - 1.0f) * (sqrt(cd) - cd), cd + (2.0f * cs - 1.0f) * cd * ((16.0f * cd - 12.0f) * cd + 3.0f), cd <= 0.25f),
+                            cd - (1.0f - 2.0f * cs) * cd * (1.0f - cd), cs <= 0.5f); break;
+        case 9u: f = abs(cd - cs); break;
+        case 10u: f = cs + cd - 2.0f * cs * cd; break;
+        case 11u: f = mgl_ba_setlumsat(cs, cd, cd); break;
+        case 12u: f = mgl_ba_setlumsat(cd, cs, cd); break;
+        case 13u: f = mgl_ba_setlum(cs, cd); break;
+        default: f = mgl_ba_setlum(cd, cs); break;
+    }
+    float p0 = s.a * d.a, p1 = s.a * (1.0f - d.a), p2 = d.a * (1.0f - s.a);
+    return float4(f * p0 + cs * p1 + cd * p2, p0 + p1 + p2);
+}
+)"});
     c.push_back({{"mgl_alpha_pass"}, R"(inline bool mgl_alpha_pass(float a, uint func, float ref) {
     switch (func) {
         case 0x0200u: return false;

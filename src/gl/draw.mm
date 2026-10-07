@@ -800,6 +800,61 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
     return true;
 }
 
+// KHR_blend_equation_advanced: index into glsl::kAdvancedBlendEquations, or -1.
+static int advancedBlendIndex(GLenum eq) {
+    if (eq < glsl::kAdvancedBlendEquations[0]) return -1;  // the classic equations are all below
+    for (int i = 0; i < 15; i++)
+        if (eq == glsl::kAdvancedBlendEquations[i]) return i;
+    return -1;
+}
+
+// VariantKey::advancedBlend for the current state (0 = none): draw buffer 0 blends with an advanced
+// equation, which the fragment shader computes from the destination it reads with framebuffer fetch.
+static uint8_t advancedBlendKey(Context* ctx) {
+    const BlendState& b = ctx->blend[0];
+    if (!b.enabled || !ctx->advancedBlendUsed) return 0;
+    int mode = advancedBlendIndex(b.eqRGB);
+    if (mode < 0) return 0;
+    Framebuffer* fb = ctx->drawFb.get();
+    const FormatInfo* f = nullptr;
+    bool noAlpha = false;
+    if (fb->isDefault) {
+        if (fb->drawBuffers[0] != GL_NONE && fb->surface && fb->surface->color) {
+            f = formatInfoForMTL(fb->surface->color.pixelFormat);
+            noAlpha = !fb->surface->hasAlpha;
+        }
+    } else if (fb->drawBuffers[0] >= GL_COLOR_ATTACHMENT0 && fb->drawBuffers[0] < GL_COLOR_ATTACHMENT0 + kMaxDrawBuffers) {
+        const Attachment& a = fb->att[fb->drawBuffers[0] - GL_COLOR_ATTACHMENT0];
+        if (a.type == GL_RENDERBUFFER && a.rb) f = a.rb->fmt;
+        else if (a.type == GL_TEXTURE && a.tex) f = a.tex->storageFmt;
+    }
+    // No color buffer 0, or an integer one (never blended): plain output.
+    if (!f || f->kind == FmtKind::UInt || f->kind == FmtKind::SInt) return 0;
+    uint8_t k = (uint8_t)(mode + 1);
+    if (noAlpha || f->aBits == 0) k |= glsl::kAdvancedBlendNoDstAlpha;
+    if (f->kind == FmtKind::Unorm || f->kind == FmtKind::Snorm) k |= glsl::kAdvancedBlendClamp;
+    return k;
+}
+
+// KHR_blend_equation_advanced draw-time errors (INVALID_OPERATION), or null.
+static const char* advancedBlendError(Context* ctx, ProgramObj* prog) {
+    Framebuffer* fb = ctx->drawFb.get();
+    int mode = -1;
+    bool otherBuffers = false;
+    for (int i = 0; i < kMaxDrawBuffers; i++) {
+        if (fb->drawBuffers[i] == GL_NONE) continue;
+        if (i > 0) otherBuffers = true;
+        if (ctx->blend[i].enabled && advancedBlendIndex(ctx->blend[i].eqRGB) >= 0) mode = advancedBlendIndex(ctx->blend[i].eqRGB);
+    }
+    if (mode < 0) return nullptr;
+    if (otherBuffers) return "advanced blending with more than one draw buffer";
+    if (fb->drawBuffers[0] == GL_FRONT_AND_BACK) return "advanced blending into FRONT_AND_BACK";
+    ProgramObj* fs = ctx->pipeline && !ctx->program ? ctx->pipeline->stages[(int)glsl::Stage::Fragment].get() : prog;
+    if (!fs || !(fs->refl.blendSupport & (1u << mode)))
+        return "the fragment shader does not declare the blend_support qualifier of the advanced blend equation";
+    return nullptr;
+}
+
 static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Reflection& refl) {
     const PassDesc& p = ctx->curPass;
     for (int i = 0; i < kMaxDrawBuffers; i++) {
@@ -816,7 +871,8 @@ static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Refle
         BlendKey& bk = key.blend[i];
         const FormatInfo* f = formatInfoForMTL(pf);
         bool intFmt = f && (f->kind == FmtKind::UInt || f->kind == FmtKind::SInt);
-        bk.enabled = b.enabled && !intFmt;
+        // Advanced equations (draw buffer 0 only) blend in the fragment shader (advancedBlendKey).
+        bk.enabled = b.enabled && !intFmt && !(i == 0 && advancedBlendIndex(b.eqRGB) >= 0);
         if (bk.enabled) {
             bk.srcRGB = blendFactor(b.srcRGB);
             bk.dstRGB = blendFactor(b.dstRGB);
@@ -1267,6 +1323,7 @@ ProgramObj* mglPipelineDrawProgram(Context* ctx) {
     r.fragOutputs = fs ? fs->refl.fragOutputs : std::vector<glsl::FragOutput>();
     r.usesFragDepth = fs && fs->refl.usesFragDepth;
     r.earlyFragmentTests = fs && fs->refl.earlyFragmentTests;
+    r.blendSupport = fs ? fs->refl.blendSupport : 0;
     r.usesDiscard = fs && fs->refl.usesDiscard;
     r.usesFlatShading = fs && fs->refl.usesFlatShading;
     r.multipass = glsl::multipassInfo(lp);
@@ -2026,6 +2083,11 @@ static bool validateDraw(Context* ctx, GLenum mode) {
         if (!pp->stages[(int)glsl::Stage::Vertex]) return false;  // missing stages: undefined rendering, no error
     }
     ProgramObj* prog = mglPipelineDrawProgram(ctx);
+    if (ctx->advancedBlendUsed)
+        if (const char* err = advancedBlendError(ctx, prog)) {
+            ctx->setError(GL_INVALID_OPERATION, "%s", err);
+            return false;
+        }
     if (!prog && ctx->coreProfile) return false;  // no program/pipeline: undefined rendering, not an error
     bool hasTess = prog && (prog->refl.stageMask & (1u << (int)glsl::Stage::TessEval));
     if (mode == GL_PATCHES && !hasTess) {
@@ -2145,6 +2207,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     vk.rasterDiscard = ctx->rasterizerDiscard;
     vk.sampleShading = ctx->sampleShading && ctx->minSampleShading > 0;
     vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
+    vk.advancedBlend = advancedBlendKey(ctx);
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     bool primQueries = mglQueryPrimitivesActive(ctx);
     if (vk.kind != glsl::PipelineKind::Classic) {
@@ -2220,6 +2283,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
                 fk.kind = glsl::PipelineKind::Classic;
                 fk.primitive = vk.primitive;
                 fk.flatshadeLastVertex = vk.flatshadeLastVertex;
+                fk.advancedBlend = vk.advancedBlend;
                 fsVar = ctx->pipelines_->variant(f, fk);
                 if (!fsVar || !fsVar->ok) return;
             }

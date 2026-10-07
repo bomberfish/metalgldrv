@@ -173,6 +173,7 @@ API void APIENTRY glCompileShader(GLuint shader) {
     glsl::Stage st = stageForType(s->type, &ok);
     glsl::CompileOptions opts;
     opts.compatibilityProfile = !ctx->coreProfile;
+    opts.deviceExtensions = &mglDeviceGlslExtensions(ctx->dev->caps);
     glsl::CompileResult r = glsl::compile(st, s->sources, opts);
     s->shader = r.shader;
     s->compiled = r.shader != nullptr;

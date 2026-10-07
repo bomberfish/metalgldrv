@@ -645,6 +645,17 @@ bool Parser::parseQualifiers(Qualifiers& q) {
     return any;
 }
 
+// blend_support_<name> (KHR_blend_equation_advanced): Layout::blendSupport bits, 0 if unknown.
+static uint16_t blendSupportBits(const std::string& name) {
+    static const char* const kNames[15] = {"multiply",  "screen",    "overlay",        "darken",    "lighten",
+                                           "colordodge", "colorburn", "hardlight",      "softlight", "difference",
+                                           "exclusion", "hsl_hue",   "hsl_saturation", "hsl_color", "hsl_luminosity"};
+    if (name == "all_equations") return 0x7fff;
+    for (int i = 0; i < 15; i++)
+        if (name == kNames[i]) return (uint16_t)(1u << i);
+    return 0;
+}
+
 void Parser::parseLayout(Qualifiers& q) {
     q.hasLayout = true;
     Layout& L = q.layout;
@@ -717,8 +728,11 @@ void Parser::parseLayout(Qualifiers& q) {
         else if (lid == "depth_greater") L.depthLayout = 2;
         else if (lid == "depth_less") L.depthLayout = 3;
         else if (lid == "depth_unchanged") L.depthLayout = 4;
-        else if (lid == "blend_support_all_equations") L.blendSupportAll = true;
-        else {
+        else if (lid.compare(0, 14, "blend_support_") == 0 && blendSupportBits(lid.substr(14))) {
+            if (!extEnabled("GL_KHR_blend_equation_advanced"))
+                fail("layout qualifier '" + id + "' requires the GL_KHR_blend_equation_advanced extension");
+            L.blendSupport |= blendSupportBits(lid.substr(14));
+        } else {
             static const std::unordered_set<std::string> formats = {
                 "rgba32f", "rgba16f", "rg32f", "rg16f", "r11f_g11f_b10f", "r32f", "r16f", "rgba16", "rgb10_a2", "rgba8",
                 "rg16", "rg8", "r16", "r8", "rgba16_snorm", "rgba8_snorm", "rg16_snorm", "rg8_snorm", "r16_snorm", "r8_snorm",
@@ -777,6 +791,11 @@ void Parser::applyStageLayout(const Qualifiers& q) {
     if (L.order) T.order = L.order;
     if (L.pointMode) T.pointMode = true;
     if (L.earlyFragmentTests) T.earlyFragmentTests = true;
+    if (L.blendSupport) {
+        if (sh_.stage != Stage::Fragment || q.storage != Storage::Out)
+            fail("blend_support qualifiers are only allowed on fragment shader outputs ('layout(...) out;')");
+        T.blendSupport |= L.blendSupport;
+    }
     if (L.stream >= 0) T.stream = L.stream;
     if (L.xfbBuffer >= 0) T.xfbBuffer = L.xfbBuffer;
     if (L.xfbStride >= 0) T.xfbStride = L.xfbStride;

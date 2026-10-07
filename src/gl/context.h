@@ -226,6 +226,8 @@ public:
     bool colorLogicOp = false;
     GLenum logicOp = GL_COPY;
     bool dither = true, framebufferSRGB = false;
+    bool blendAdvancedCoherent = true;  // GL_BLEND_ADVANCED_COHERENT_KHR (framebuffer fetch is always coherent)
+    bool advancedBlendUsed = false;     // an advanced blend equation was ever set: draws validate it
     uint32_t clipDistanceMask = 0;
     GLenum clipOrigin = GL_LOWER_LEFT, clipDepthMode = GL_NEGATIVE_ONE_TO_ONE;
     GLenum provokingVertex = GL_LAST_VERTEX_CONVENTION;

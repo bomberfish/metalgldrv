@@ -70,6 +70,8 @@ struct DeviceExtension {
 };
 const DeviceExtension kDeviceExtensions[] = {
     {"GL_ARB_texture_filter_minmax", false, [](const DeviceCaps& c) { return c.samplerReduction; }},
+    {"GL_KHR_blend_equation_advanced", true, [](const DeviceCaps& c) { return c.programmableBlending; }},
+    {"GL_KHR_blend_equation_advanced_coherent", false, [](const DeviceCaps& c) { return c.programmableBlending; }},
 };
 
 // kExtensions plus the ones that depend on the GPU (mglDeviceExtensions), sorted.

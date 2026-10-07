@@ -22,6 +22,7 @@ struct DeviceCaps {
     bool hasFamilyApple9 = false;
     bool bcCompression = false;
     bool samplerReduction = false;  // MTLSamplerDescriptor.reductionMode honored (ARB_texture_filter_minmax)
+    bool programmableBlending = false;  // fragment functions read color attachments (KHR_blend_equation_advanced)
 };
 
 class Device {

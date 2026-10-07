@@ -296,6 +296,7 @@ void Linker::collectStage(Stage s) {
             if (l.order) d.order = l.order;
             if (l.pointMode) d.pointMode = true;
             if (l.earlyFragmentTests) d.earlyFragmentTests = true;
+            d.blendSupport |= l.blendSupport;
         };
         const Layout& l = sh->inLayout;
         bool has = l.localSize[0] >= 0 || l.localSize[1] >= 0 || l.localSize[2] >= 0;
@@ -1324,6 +1325,7 @@ void Linker::stageMetadata() {
         }
         r.usesFragDepth = fs.writesFragDepth;
         r.earlyFragmentTests = fs.inLayout.earlyFragmentTests;
+        r.blendSupport = fs.outLayout.blendSupport;
         r.usesDiscard = fs.usesDiscard;
     }
     // fp64 usage
