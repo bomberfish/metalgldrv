@@ -39,6 +39,7 @@ static const char* slotKindName(SlotKind k) {
         case SlotKind::BufferSize: return "BufferSize";
         case SlotKind::XfbBuffer: return "XfbBuffer";
         case SlotKind::SubroutineIndices: return "SubroutineIndices";
+        case SlotKind::LodBias: return "LodBias";
     }
     return "?";
 }
@@ -109,7 +110,7 @@ int main(int argc, char** argv) {
     bool xfbSeparate = false;
     std::string entry = "main";
     std::string mslOut;
-    bool validate = true, quiet = false, compileOnly = false, timing = false, xfb = false, capture = false;
+    bool validate = true, quiet = false, compileOnly = false, timing = false, xfb = false, capture = false, separable = false;
     auto now = [] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     double t0 = 0, tc = 0;
     for (int i = 1; i < argc; i++) {
@@ -137,12 +138,14 @@ int main(int argc, char** argv) {
                 p = q + 1;
             }
         } else if (a == "--xfb-separate") xfbSeparate = true;
+        else if (a == "--separable") separable = true;
         else if (a == "--capture") capture = true;  // emit the XfbCapture variant even for GS/tess programs
         else { fprintf(stderr, "usage: glslc -S <stage> <file> ... [--msl out] [--no-validate] [-q]\n"); return 2; }
     }
     LinkInput li;
     li.xfbVaryings = xfbNames;
     li.xfbInterleaved = !xfbSeparate;
+    li.separable = separable;
     for (auto& [st, path] : inputs) {
         std::ifstream f(path, std::ios::binary);
         if (!f) { fprintf(stderr, "cannot read %s\n", path.c_str()); return 2; }

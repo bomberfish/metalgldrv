@@ -90,13 +90,23 @@ Vertex ids come from the uint32 list `indexBuffer` (+ `baseVertex`).
   grid (patches, instances, 1); the object stage sizes the mesh grid itself. Tessellation follows GL 4.6 11.2.2
   (clamping/rounding per spacing, culling on outer <= 0 or NaN, all domains, point_mode, cw/ccw), verified watertight by `glslrun --tesscheck`.
 * **XfbCapture** (`mgl_xfb`, Kernel, 64 threads): dispatchThreads(count * instances). Writes captured varyings at
-  (xfbVertexBase + t) * `multipass.xfbStride[b]` + offset into `xfbBuffer[b]` for buffers in `multipass.xfbBufferMask`, whole primitives
-  only (checked against `xfbCapacity[b]` bytes); counters[0] += primitives written, counters[1] += primitives generated.
+  (xfbVertexBase + t) * `multipass.xfbStride[b]` + offset into `xfbBuffer[b]`, primitives `t / vpp < xfbPrimLimit[0]` only.
   Captured layout comes from `Reflection::xfbVaryings` (glTransformFeedbackVaryings incl. gl_NextBuffer / gl_SkipComponentsN, or
-  xfb_buffer/xfb_offset/xfb_stride qualifiers, which take precedence).
-  With a geometry shader, XfbCapture yields `mgl_gs_xfb` (Kernel, dispatch exactly 1 thread): it walks instances x primitives x
-  invocations in order, runs VS + GS and records the GS output decomposed into lists in GL order (whole primitives only, same
-  counters). Dispatch it before the MeshGeometry draw that rasterizes; advance xfbVertexBase by the written primitive count.
+  xfb_buffer/xfb_offset/xfb_stride qualifiers, which take precedence); `multipass.xfbBufferStream[b]` is the vertex stream of buffer b.
+  GS and tessellation output sizes are only known on the GPU, so capture is counted (the runtime reads the counts back):
+  * GS: `mgl_gs_count` (one thread per work item = input primitive x invocation, `itemCount`) runs VS+GS and writes the
+    primitives emitted per stream to `itemCounts[t]`; with `gsRecord` set it also stores the item's captured primitives there
+    (`scratchWordsPerItem` uint32 per item, see the `mgl_gs_copy` entry point). The runtime writes per-stream prefix sums to
+    `itemOffsets` and `xfbPrimLimit[s]` (primitives that fit), then runs `mgl_gs_copy` (places the records, no shader re-run) or
+    `mgl_gs_write` (runs the GS again and writes at the offsets).
+  * Tessellation: `mgl_tcs`, then `mgl_tes_count` (one thread per patch: itemCounts = primitives, vertices, units), CPU prefix
+    sums into itemOffsets (first primitive, first vertex), then `mgl_tes_gen` (threadgroup per (patch, unit)) writes TES output
+    records (`tesVertexOutBytes` each) to `tesVertexOut` and the GL-ordered primitive list (vertex indices) to `tesPrimOut`.
+    Without a GS, `mgl_tes_xfb` (one thread per primitive) captures from the records; with a GS, the GS kernels and the GS mesh
+    pipeline (`PipelineKind::Tessellation` with a GS) read their inputs from the records (grid = tesPrimCount x invocations).
+  Primitive queries (PRIMITIVES_GENERATED / TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN per stream, overflow) are counted on the CPU.
+* Program pipelines with stages from different separable programs: `generateMSL(stages[])` emits one `MGLArgs` per stage
+  namespace; buffer 0 then holds a table of 6 argument buffer addresses indexed by Stage.
 * Fragment shaders paired with mesh pipelines read gl_PrimitiveID from the per-primitive `[[user(mgl_primid)]]`; gl_Layer /
   gl_ViewportIndex are per-primitive outputs. `Reflection::usesFlatShading` tells the classic path when index rotation for
   GL_LAST_VERTEX_CONVENTION is needed; `writesLayer`/`writesViewportIndex` describe the last pre-raster stage.
@@ -130,6 +140,7 @@ alias them (explicit locations), as on NVIDIA.
 Stores and atomics on read-write images are followed by `texture.fence()` so an invocation observes its own writes.
 
 ## Not yet supported
-Transform feedback of tessellation output, geometry streams other than 0, tessellation + geometry together, gl_CullDistance culling (values are passed through,
-no primitives are culled), float image atomics (Metal has none), whole-value use of structs containing opaque types, dynamic indexing of
+Mesh pipelines (GS / tessellation rasterization) carry at most 124 output scalars per vertex (including gl_Position and
+point size), below GL's 128 MAX_GEOMETRY_OUTPUT_COMPONENTS. gl_CullDistance is emulated with extra clip distances (-1 when
+negative, 1e20 otherwise). Float image atomics (Metal has none), whole-value use of structs containing opaque types, dynamic indexing of
 uniform struct arrays containing opaque members, interpolateAtSample on multisample-less targets uses the sample position Metal reports.

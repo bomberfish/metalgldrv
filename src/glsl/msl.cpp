@@ -347,6 +347,8 @@ private:
     bool addressable(const Expr* e);
     bool isBufferRooted(const Expr* e);
     std::pair<std::string, std::string> texRef(const Expr* e);
+    std::string opaqueIndex(const Expr* e, const Expr*& base);
+    std::string texBias_;  // LOD bias (float) of the sampler resolved by the last texRef(), "" for images
     std::string withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs, const std::vector<Type>& ptypes,
                          const Type& ret, const std::function<std::string(size_t, const Expr*)>& argFn, const std::string& firstArg = "");
     std::string subroutineDispatchers();
@@ -435,6 +437,10 @@ private:
     std::string tesLoadPatch();
     std::string tesRun(const std::string& coord, const std::string& patch, const std::string& cps);
     void emitTessEvalMesh(std::string& o);
+    bool fsReadsPrimitiveId() const {
+        const StageCode& f = SC(Stage::Fragment);
+        return f.main && f.usedNames.count("gl_PrimitiveID");
+    }
     void emitTessEvalRecords(std::string& o);
     void emitTesXfb(std::string& o);
     void emitXfb(std::string& o);
@@ -687,6 +693,10 @@ bool Emitter::addressable(const Expr* e) {
 // ===========================================================================
 std::string Emitter::binaryF64(Op op, std::string a, const Type& ta, std::string b, const Type& tb) {
     bool ma = ta.isMatrix(), mb = tb.isMatrix();
+    if ((op == Op::Eq || op == Op::Ne) && (ta.isArray() || tb.isArray())) {  // arrays of doubles compare element-wise
+        needEq_ = true;
+        return op == Op::Eq ? "mgl_eq(" + a + ", " + b + ")" : "(!mgl_eq(" + a + ", " + b + "))";
+    }
     if (ma || mb) {
         switch (op) {
             case Op::Add: return (ma && mb ? "mgl_dmat_add(" : "mgl_dmat_adds(") + a + ", " + b + ")";
@@ -1107,8 +1117,10 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         if (it == P->opaque.end()) fail("internal: opaque uniform '" + p + "' has no binding");
         const OpaqueBinding& ob = it->second;
         std::string t = "A->s" + std::to_string(ob.slot), sm = ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : "";
+        texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         if (e->kind == EK::Index) {
             std::string idx = ex(e->args[1]);
+            if (!texBias_.empty()) texBias_ += "[" + idx + "]";
             return {t + "[" + idx + "]", sm.empty() ? "" : sm + "[" + idx + "]"};
         }
         return {t, sm};
@@ -1117,19 +1129,47 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         const Variable* v = e->var;
         if (v->param) {
             std::string n = varName(v);
+            texBias_ = v->type.base == BT::Sampler ? n + "_b" : "";
             return {n + "_t", n + "_s"};
         }
         auto it = P->opaque.find(v->name);
         if (it == P->opaque.end()) fail("internal: opaque uniform '" + v->name + "' has no binding");
         const OpaqueBinding& ob = it->second;
+        texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
     }
-    if (e->kind == EK::Index && e->args[0]->kind == EK::Var) {
-        auto r = texRef(e->args[0]);
-        std::string idx = ex(e->args[1]);
+    if (e->kind == EK::Index) {
+        const Expr* base = nullptr;
+        std::string idx = opaqueIndex(e, base);
+        auto r = texRef(base);
+        texBias_ = texBias_.empty() ? "" : texBias_ + "[" + idx + "]";
         return {r.first + "[" + idx + "]", r.second.empty() ? "" : r.second + "[" + idx + "]"};
     }
     fail("unsupported sampler/image expression");
+}
+
+// Flattened (row-major) element index of an indexed opaque array variable, incl. arrays of arrays,
+// whose bindings occupy one run of slots. `base` receives the indexed variable reference.
+std::string Emitter::opaqueIndex(const Expr* e, const Expr*& base) {
+    std::vector<const Expr*> idx;
+    const Expr* b = e;
+    while (b->kind == EK::Index) {
+        idx.insert(idx.begin(), b->args[1]);
+        b = b->args[0];
+    }
+    if (b->kind != EK::Var) fail("unsupported sampler/image expression");
+    const std::vector<int>& dims = b->var->type.dims;
+    if (idx.size() != dims.size()) fail("arrays of opaque types must be indexed down to a single element");
+    base = b;
+    std::string r;
+    for (size_t i = 0; i < idx.size(); i++) {
+        int stride = 1;
+        for (size_t k = i + 1; k < dims.size(); k++) stride *= std::max(1, dims[k]);
+        std::string term = idx.size() == 1 ? ex(idx[i]) : "int(" + ex(idx[i]) + ")";
+        if (stride != 1) term += " * " + std::to_string(stride);
+        r += (r.empty() ? "" : " + ") + term;
+    }
+    return r;
 }
 
 std::string Emitter::callUser(const Expr* e) {
@@ -1145,7 +1185,7 @@ std::string Emitter::callUser(const Expr* e) {
     return withOuts(fnNames_.at(f), e, outs, ptypes, f->ret, [&](size_t i, const Expr* a) -> std::string {
         if (a->type.base == BT::Sampler) {
             auto r = texRef(a);
-            return r.first + ", " + r.second;
+            return r.first + ", " + r.second + ", " + texBias_;
         }
         if (a->type.base == BT::Image) return texRef(a).first;
         if (a->type.base == BT::AtomicUint) {
@@ -1160,7 +1200,7 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
     if (a->type.base == BT::AtomicUint) {
         const Expr* base = a;
         std::string idx;
-        if (a->kind == EK::Index) { base = a->args[0]; idx = "uint(" + ex(a->args[1]) + ")"; }
+        if (a->kind == EK::Index) idx = "uint(" + opaqueIndex(a, base) + ")";
         if (base->kind != EK::Var) fail("unsupported atomic counter expression");
         const Variable* v = base->var;
         if (v->param) return varName(v);
@@ -1468,6 +1508,9 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     const auto& A = e->args;
     const Type T = A[0]->type.stripArrays();
     auto [tex, smp] = texRef(A[0]);
+    // GL_TEXTURE_LOD_BIAS of the bound sampler: Metal sampler states carry no bias (combining a
+    // sampler lodBias with bias() loses LOD precision on Apple GPUs), so lookups add it here.
+    const std::string texBias = texBias_.empty() ? std::string("0.0f") : texBias_ + ".x";
     std::string pre;
     const bool sh = T.shadow, arr = T.arrayed, rect = T.dim == Dim::Rect;
     const Dim dim = T.dim;
@@ -1604,6 +1647,12 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         std::string refZ;
         if (sh) refZ = ex(A[ai++]);
         std::string offset;
+        // Metal's gather offsets are limited to [-8, 7] (GL allows MIN/MAX_PROGRAM_TEXTURE_GATHER_OFFSET
+        // = [-32, 31]): other offsets shift the coordinate by whole texels instead.
+        auto inMetalRange = [](int64_t v) { return v >= -8 && v <= 7; };
+        auto shifted = [&](const std::string& off) {
+            return "(" + coord + " + float2(" + off + ") / float2(" + tex + ".get_width(), " + tex + ".get_height()))";
+        };
         if (isOffset) {
             if (name == "textureGatherOffsets") {
                 // each result texel k is texel i0j0 (.w) of the footprint selected by offsets[k]
@@ -1618,17 +1667,25 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
                 if (T.sampled == BT::Int) r = "int4(";
                 if (T.sampled == BT::UInt) r = "uint4(";
                 for (int k = 0; k < 4; k++) {
-                    std::string o2 = "int2(" + std::to_string((int)offs->cv->c[2 * k].i) + ", " + std::to_string((int)offs->cv->c[2 * k + 1].i) + ")";
-                    std::string args = smp + ", " + coord;
+                    int64_t offX = offs->cv->c[2 * k].i, offY = offs->cv->c[2 * k + 1].i;
+                    std::string o2 = "int2(" + std::to_string((int)offX) + ", " + std::to_string((int)offY) + ")";
+                    bool direct = inMetalRange(offX) && inMetalRange(offY);
+                    std::string args = smp + ", " + (direct ? coord : shifted(o2));
                     if (!layer.empty()) args += ", " + layer;
                     if (sh) args += ", " + ex(A[2]);
-                    args += ", " + o2;
+                    args += ", " + (direct ? o2 : std::string("int2(0)"));
                     if (!sh) args += std::string(", component::") + kSwz[compIdx2];
                     r += (k ? ", " : "") + tex + (sh ? ".gather_compare(" : ".gather(") + args + ").w";
                 }
                 return finish(r + ")");
             }
-            offset = ex(A[ai++]);
+            const Expr* oe = A[ai++];
+            offset = ex(oe);
+            bool direct = oe->cv && oe->cv->c.size() >= 2 && inMetalRange(oe->cv->c[0].i) && inMetalRange(oe->cv->c[1].i);
+            if (!direct && dim != Dim::Cube) {
+                coord = shifted(bind(offset, "int2", pre));
+                offset.clear();
+            }
         }
         int compIdx = 0;
         if (!sh && ai < A.size()) {
@@ -1642,10 +1699,15 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         if (!sh) args += std::string(", component::") + kSwz[compIdx];
         return finish(tex + (sh ? ".gather_compare(" : ".gather(") + args + ")");
     }
-    std::string options, offset;
-    if (isLod) options = "level(" + ex(A[ai++]) + ")";
+    std::string options, offset, shadowBias;
+    bool fragment = stage_ == Stage::Fragment;
+    std::string ct = (dim == Dim::D3 || dim == Dim::Cube) ? "float3" : "float2";
+    std::string gradFn = dim == Dim::D3 ? "gradient3d" : dim == Dim::Cube ? "gradientcube" : "gradient2d";
+    if (isLod) options = "level(" + ex(A[ai++]) + " + " + texBias + ")";
     else if (isGrad) {
-        std::string dx = ex(A[ai++]), dy = ex(A[ai++]);
+        // scaling the gradients by 2^bias raises the LOD by exactly bias
+        std::string sc = bind("exp2(" + texBias + ")", "float", pre);
+        std::string dx = "(" + ex(A[ai++]) + ") * " + sc, dy = "(" + ex(A[ai++]) + ") * " + sc;
         if (dim == Dim::D1) options = "gradient2d(float2(" + dx + ", 0.0f), float2(" + dy + ", 0.0f))";
         else if (dim == Dim::D3) options = "gradient3d(" + dx + ", " + dy + ")";
         else if (dim == Dim::Cube) options = "gradientcube(" + dx + ", " + dy + ")";
@@ -1655,15 +1717,28 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         std::string o = ex(A[ai++]);
         offset = dim == Dim::D1 ? "int2(" + o + ", 0)" : o;
     }
-    if (ai < A.size() && !isLod && !isGrad) options = "bias(" + ex(A[ai++]) + ")";
+    if (!isLod && !isGrad) {
+        std::string b = texBias;
+        if (ai < A.size()) b = "(" + ex(A[ai++]) + ") + " + texBias;
+        if (!fragment) options = "level(" + b + ")";  // implicit LOD is 0 outside fragment shaders
+        else if (!sh) options = "bias(" + b + ")";
+        else {
+            // sample_compare has no bias(): with a nonzero bias, scale the implicit derivatives.
+            // The bias is uniform for the draw, so the branch is coherent and bias 0 (nearly every
+            // app) pays nothing.
+            coord = bind(coord, ct, pre);
+            shadowBias = bind(b, "float", pre);
+            options = gradFn + "(dfdx(" + coord + ") * exp2(" + shadowBias + "), dfdy(" + coord + ") * exp2(" + shadowBias + "))";
+        }
+    }
     std::string args = smp + ", " + coord;
     if (!layer.empty()) args += ", " + layer;
-    if (sh) {
-        args += ", " + ref;
-        if (options.compare(0, 4, "bias") == 0) options.clear();
-    }
+    if (sh) args += ", " + ref;
+    std::string plainArgs = args + (offset.empty() ? "" : ", " + offset);
     if (!options.empty()) args += ", " + options;
     if (!offset.empty()) args += ", " + offset;
+    if (!shadowBias.empty())
+        return finish("(" + shadowBias + " == 0.0f ? " + tex + ".sample_compare(" + plainArgs + ") : " + tex + ".sample_compare(" + args + "))");
     return finish(tex + (sh ? ".sample_compare(" : ".sample(") + args + ")");
 }
 
@@ -1894,9 +1969,10 @@ std::string Emitter::fnSignature(const Function* f) {
             if (t.dims.size() > 1) fail("arrays of arrays of samplers as function parameters are not supported");
             if (t.isArray()) {
                 std::string N = std::to_string(t.dims[0]);
-                r += "constant array<" + texType(t.stripArrays(), 0) + ", " + N + ">& " + n + "_t, constant array<sampler, " + N + ">& " + n + "_s";
+                r += "constant array<" + texType(t.stripArrays(), 0) + ", " + N + ">& " + n + "_t, constant array<sampler, " + N + ">& " + n +
+                     "_s, constant array<float2, " + N + ">& " + n + "_b";
             } else {
-                r += texType(t, 0) + " " + n + "_t, sampler " + n + "_s";
+                r += texType(t, 0) + " " + n + "_t, sampler " + n + "_s, float2 " + n + "_b";
             }
             continue;
         }
@@ -1919,6 +1995,36 @@ std::string Emitter::fnSignature(const Function* f) {
     return r + ")";
 }
 
+// GLSL `precise`: functions computing a precise value are compiled without FP contraction
+// (no fused multiply-add), so the result is invariant to operand order (GLSL 4.60 §4.7).
+static bool usesPrecise(const Function* f) {
+    for (auto* p : f->params)
+        if (p->q.precise) return true;
+    bool found = false;
+    std::function<void(const Expr*)> ex = [&](const Expr* e) {
+        if (!e || found) return;
+        if (e->kind == EK::Var && e->var && e->var->q.precise) found = true;
+        for (auto* a : e->args) ex(a);
+        ex(e->aux);
+    };
+    std::function<void(const Stmt*)> st = [&](const Stmt* s) {
+        if (!s || found) return;
+        for (auto* v : s->vars)
+            if (v->q.precise) found = true;
+        for (auto* b : s->body) st(b);
+        ex(s->expr);
+        st(s->init);
+        ex(s->cond);
+        st(s->condDecl);
+        ex(s->incr);
+        st(s->then);
+        st(s->els);
+        for (auto* v : s->vars) ex(v->init);
+    };
+    st(f->body);
+    return found;
+}
+
 std::string Emitter::emitFunction(const Function* f) {
     temps_.clear();
     // out/inout parameters are local copies (copy-in for inout) written back on return, so that a
@@ -1935,6 +2041,7 @@ std::string Emitter::emitFunction(const Function* f) {
     std::string bodyText;
     for (auto* s : f->body->body) stmt(s, bodyText, 2);
     std::string r = "    " + fnSignature(f) + " {\n";
+    if (usesPrecise(f)) r += "#pragma METAL fp contract(off)\n";
     r += prologue;
     for (auto& t : temps_) r += "        " + t + "\n";
     r += bodyText;
@@ -2056,6 +2163,7 @@ void Emitter::emitArgs(std::string& o) {
         if (ob.kind == SlotKind::Texture) {
             group(ob.slot, texType(ob.type, 0));
             group(ob.samplerSlot, "sampler");
+            if (ob.biasSlot >= 0) group(ob.biasSlot, "float2");
         } else if (ob.kind == SlotKind::Image) {
             group(ob.slot, texType(ob.type, ob.memory));
         }
@@ -2347,26 +2455,60 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
     useStage(Stage::Vertex);
     std::string code;
     anyIn = false;
-    std::map<int, Type> declaredLoc;  // compatibility attributes may alias generic ones
+    std::map<int, Type> declaredLoc;  // compatibility attributes and component-packed inputs may alias
     std::vector<const Variable*> attrs(sc_->used.begin(), sc_->used.end());
     std::sort(attrs.begin(), attrs.end(), [](const Variable* a, const Variable* b) { return a->id < b->id; });
+    auto isInput = [](const Variable* v) {
+        return v->q.storage == Storage::In && (v->builtin == BuiltinVar::None || v->builtin == BuiltinVar::Vertex ||
+                                               v->builtin == BuiltinVar::Normal || v->builtin == BuiltinVar::Color ||
+                                               v->builtin == BuiltinVar::SecondaryColor || v->builtin == BuiltinVar::MultiTexCoord ||
+                                               v->builtin == BuiltinVar::FogCoord);
+    };
+    // layout(component = c) inputs share a location: the attribute is declared wide enough for all of them
+    std::map<int, int> declWidth;
     for (auto* v : attrs) {
-        if (v->q.storage != Storage::In || !(v->builtin == BuiltinVar::None || v->builtin == BuiltinVar::Vertex ||
-                                              v->builtin == BuiltinVar::Normal || v->builtin == BuiltinVar::Color ||
-                                              v->builtin == BuiltinVar::SecondaryColor || v->builtin == BuiltinVar::MultiTexCoord ||
-                                              v->builtin == BuiltinVar::FogCoord))
-            continue;
+        if (!isInput(v)) continue;
+        auto it = P->attribLocations.find(v->name);
+        if (it == P->attribLocations.end()) continue;
+        int loc = it->second, comp = std::max(0, v->q.layout.component);
+        std::vector<std::pair<Type, std::string>> leaves;
+        flatten(v->type, "", leaves);
+        for (auto& [lt, a] : leaves) {
+            if (lt.base == BT::Double) {
+                if (lt.vec <= 2) declWidth[loc] = std::max(declWidth[loc], comp + 2 * lt.vec);
+                loc += lt.vec > 2 ? 2 : 1;
+                continue;
+            }
+            declWidth[loc] = std::max(declWidth[loc], comp + lt.vec);
+            loc++;
+        }
+    }
+    for (auto* v : attrs) {
+        if (!isInput(v)) continue;
         auto it = P->attribLocations.find(v->name);
         if (it == P->attribLocations.end()) continue;
         int loc = it->second;
+        int comp = std::max(0, v->q.layout.component);
         std::vector<std::pair<Type, std::string>> leaves;
         flatten(v->type, g + varName(v), leaves);
         for (auto& [lt, a] : leaves) {
             std::string L0 = std::to_string(loc);
             if (lt.base == BT::Bool) fail("boolean vertex attributes are not allowed");
             int n = lt.vec;
-            std::string sw = n == 1 ? ".x" : n == 4 ? "" : "." + std::string(kSwz, n);
+            int sc = lt.base == BT::Double ? comp / 2 : comp;  // first component in units of the leaf's scalar type
+            std::string sw = (n == 4 && sc == 0) ? "" : "." + std::string(kSwz + sc, n);
             if (stageIn) {
+                if (lt.base == BT::Double && n <= 2 && declWidth[loc] > 2 * n) {
+                    // packed with other components: uint4 attribute, this double at 32-bit component `comp`
+                    if (!declaredLoc.count(loc)) {
+                        inS += "    uint4 a" + L0 + " [[attribute(" + L0 + ")]];\n";
+                        declaredLoc[loc] = Type::vector(BT::UInt, 4);
+                    }
+                    code += "    " + a + " = as_type<" + vecName(BT::Double, n) + ">(in.a" + L0 + "." + std::string(kSwz + comp, 2 * n) + ");\n";
+                    loc++;
+                    anyIn = true;
+                    continue;
+                }
                 if (lt.base == BT::Double) {
                     std::string L1 = std::to_string(16 + loc);  // second half: Metal attribute 16 + L
                     if (n <= 2) {
@@ -2387,17 +2529,22 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                 if (dl != declaredLoc.end()) {
                     std::string src = "in.a" + L0;
                     int dn = dl->second.vec;
-                    if (dn > n) src += "." + std::string(kSwz, n);
+                    if (dn > n || comp) src += "." + std::string(kSwz + comp, n);
                     code += "    " + a + " = " + mt(lt) + "(" + src + ");\n";
                     loc++;
                     continue;
                 }
-                declaredLoc[loc] = lt;
+                int w = std::max(n, std::min(4, declWidth[loc]));
+                Type dt = lt;
+                dt.vec = (uint8_t)w;
+                declaredLoc[loc] = dt;
                 BT declBase = lt.base;
                 if (loc < 32 && (K.attribSignFlip >> loc & 1) && (lt.base == BT::Int || lt.base == BT::UInt))
                     declBase = lt.base == BT::Int ? BT::UInt : BT::Int;
-                inS += "    " + vecName(declBase, n) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
-                code += "    " + a + " = " + mt(lt) + "(in.a" + L0 + ");\n";
+                inS += "    " + vecName(declBase, w) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
+                std::string src = "in.a" + L0;
+                if (w > n || comp) src += "." + std::string(kSwz + comp, n);
+                code += "    " + a + " = " + mt(lt) + "(" + src + ");\n";
                 loc++;
                 anyIn = true;
                 continue;
@@ -2564,7 +2711,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
         // Programs within the budgets are unaffected.
         auto scalars = [](const Type& t) { return (t.base == BT::Double ? 2 : 1) * t.components(); };
         int vbase = 4 + ((!mesh || points) ? 1 : 0) + nclip + ncull;
-        int pbase = 1 /* mgl_primid */ + (r.hasPrim ? (int)std::count(r.primStruct.begin(), r.primStruct.end(), ';') : 0);
+        int pbase = (fsReadsPrimitiveId() ? 1 : 0) /* mgl_primid */ + (r.hasPrim ? (int)std::count(r.primStruct.begin(), r.primStruct.end(), ';') : 0);
         int total = 0;
         for (auto& f : passed) total += scalars(f.type);
         auto vertexBudget = [&](int pscalars) {
@@ -2669,7 +2816,7 @@ void Emitter::emitClassicVS(std::string& o) {
     for (auto* v : si.builtins) {
         if (v->builtin == BuiltinVar::VertexID) e += "    g.bi_" + v->name + " = int(mgl_vid);\n";
         if (v->builtin == BuiltinVar::InstanceID) e += "    g.bi_" + v->name + " = int(mgl_iid - mgl_bi);\n";
-        if (v->builtin == BuiltinVar::BaseVertex) e += "    g.bi_" + v->name + " = int(mgl_bv);\n";
+        if (v->builtin == BuiltinVar::BaseVertex) e += "    g.bi_" + v->name + " = (sys.flags & 16u) ? 0 : int(mgl_bv);\n";
         if (v->builtin == BuiltinVar::BaseInstance) e += "    g.bi_" + v->name + " = int(mgl_bi);\n";
         if (v->builtin == BuiltinVar::DrawID) e += "    g.bi_" + v->name + " = sys.drawID;\n";
         if (v->builtin == BuiltinVar::PointSize) e += "    g.bi_" + v->name + " = sys.pointSize;\n";
@@ -3078,8 +3225,10 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
     StageInfo& gsi = si_[(int)Stage::Geometry];
     bool writesPrimId = gsi.bi.count(BuiltinVar::PrimitiveID) && gsi.bi[BuiltinVar::PrimitiveID]->q.storage == Storage::Out;
     RasterOut ro = rasterOutput(Stage::Geometry, "", true, points, maxV, maxP, points ? 1 : lines ? 2 : 3);
-    ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
-    ro.primCopy += std::string("p.mgl_primid = ") + (writesPrimId ? "bi_gl_PrimitiveID" : "mgl_primIn") + ";\n";
+    if (fsReadsPrimitiveId()) {  // per-primitive outputs count against the 124-scalar interface limit
+        ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
+        ro.primCopy += std::string("p.mgl_primid = ") + (writesPrimId ? "bi_gl_PrimitiveID" : "mgl_primIn") + ";\n";
+    }
     std::string preG = "struct MV {\n" + ro.vertexStruct + "};\nstruct MP {\n" + ro.primStruct + "};\n";
     preG += "using MeshT = mesh<MV, MP, " + std::to_string(maxV) + ", " + std::to_string(maxP) + ", topology::" + topo + ">;\n";
     std::string members = "    thread MeshT* mgl_mo;\n    uint mgl_nv, mgl_np, mgl_strip;\n    int mgl_primIn;\n";
@@ -3141,7 +3290,9 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
         if (v->builtin == BuiltinVar::InvocationID) e += "        g.bi_" + v->name + " = int(mgl_tg.z);\n";
         if (v->builtin == BuiltinVar::PrimitiveID && v->q.storage == Storage::Out) e += "        g.bi_" + v->name + " = int(mgl_prim);\n";
     }
-    e += "        g.mgl_init();\n        g." + gsi.mainName + "();\n        mgl_mo.set_primitive_count(g.mgl_np);\n    }\n}\n\n";
+    e += "        g.mgl_init();\n        g." + gsi.mainName + "();\n        mgl_mo.set_primitive_count(g.mgl_np);\n";
+    e += "        if (D.stats != nullptr) atomic_fetch_add_explicit(D.stats, g.mgl_np, memory_order_relaxed);  // pipeline statistics\n";
+    e += "    }\n}\n\n";
     entries_ += e;
     EntryPoint ep{"mgl_gs", Stage::Geometry, EntryPoint::Mesh};
     ep.threadsPerThreadgroup[0] = NV;
@@ -3312,8 +3463,10 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     prepareStage(Stage::TessEval);
     StageInfo& esi = si_[(int)Stage::TessEval];
     RasterOut ro = rasterOutput(Stage::TessEval, "g.", true, points, MAXV, MAXP, ipp);
-    ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
-    ro.primCopy += "p.mgl_primid = int(pl.patch);\n";
+    if (fsReadsPrimitiveId()) {
+        ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
+        ro.primCopy += "p.mgl_primid = int(pl.patch);\n";
+    }
     std::string preG = "struct MV {\n" + ro.vertexStruct + "};\nstruct MP {\n" + ro.primStruct + "};\n";
     preG += "using MeshT = mesh<MV, MP, " + std::to_string(MAXV) + ", " + std::to_string(MAXP) + ", topology::" + topo + ">;\n";
     emitBody(Stage::TessEval, o, preG);
@@ -3352,7 +3505,10 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     });
     e += "    for (uint k = mgl_tid; k < np; k += " + std::to_string(NT) + "u) {\n        tes::MP p;\n" + indentBy(ro.primCopy, 8) +
          indentBy(sp, 8) + "        mgl_mo.set_primitive(k, p);\n    }\n";
-    e += "    if (mgl_tid == 0u) mgl_mo.set_primitive_count(np);\n}\n\n";
+    e += "    if (mgl_tid == 0u) {\n        mgl_mo.set_primitive_count(np);\n"
+         "        if (D.stats != nullptr) {  // pipeline statistics: TES invocations, tessellated primitives\n"
+         "            atomic_fetch_add_explicit(D.stats + 1, nv, memory_order_relaxed);\n"
+         "            atomic_fetch_add_explicit(D.stats + 2, np, memory_order_relaxed);\n        }\n    }\n}\n\n";
     entries_ += e;
     EntryPoint obj{"mgl_tes_obj", Stage::TessEval, EntryPoint::Object};
     obj.payloadBytes = 128;
@@ -3456,6 +3612,7 @@ void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tupl
     useStage(st);
     StageInfo& si = si_[(int)st];
     for (auto& x : R.xfbVaryings) {
+        if (!x.type) continue;  // gl_NextBuffer / gl_SkipComponents
         const std::string& name = x.name;
         size_t p = 0;
         while (p < name.size() && name[p] != '.' && name[p] != '[') p++;

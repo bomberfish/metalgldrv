@@ -451,9 +451,12 @@ void collectIdents(const std::string& s, std::set<std::string>& out) {
 std::string buildMSLPrelude(const std::string& body) {
     static const std::vector<Chunk> chunks = buildChunks();
     std::set<std::string> idents;
+    auto addFp64Lib = [&]() {
+        for (auto& id : std::set<std::string>(idents))
+            if (id.compare(0, 8, "mgl_f64_") == 0 || id.compare(0, 8, "mgl_dmat") == 0) idents.insert("mgl_f64_lib");
+    };
     collectIdents(body, idents);
-    for (auto& id : std::set<std::string>(idents))
-        if (id.compare(0, 8, "mgl_f64_") == 0 || id.compare(0, 8, "mgl_dmat") == 0) idents.insert("mgl_f64_lib");
+    addFp64Lib();
     std::vector<bool> use(chunks.size(), false);
     // fixpoint: chunks can reference other chunks' symbols
     bool changed = true;
@@ -466,6 +469,7 @@ std::string buildMSLPrelude(const std::string& body) {
                     use[i] = true;
                     changed = true;
                     collectIdents(chunks[i].code, idents);
+                    addFp64Lib();  // e.g. the mgl_eq double overloads call mgl_f64_eq
                     break;
                 }
         }
