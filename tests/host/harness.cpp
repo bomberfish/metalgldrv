@@ -70,8 +70,10 @@ int mglRunTests(int argc, char** argv) {
         }
         EGLint pb[] = {EGL_WIDTH, t.width, EGL_HEIGHT, t.height, EGL_NONE};
         EGLSurface s = eglCreatePbufferSurface(dpy, cfg, pb);
+        // MGLTEST_CORE=1 runs the tests in a core profile context (as glcts does).
+        static const bool core = getenv("MGLTEST_CORE") && atoi(getenv("MGLTEST_CORE"));
         EGLint ctxAttr[] = {EGL_CONTEXT_MAJOR_VERSION, 4, EGL_CONTEXT_MINOR_VERSION, 6, EGL_CONTEXT_OPENGL_PROFILE_MASK,
-                            EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT, EGL_NONE};
+                            core ? EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT : EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT, EGL_NONE};
         EGLContext c = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttr);
         eglMakeCurrent(dpy, s, s, c);
         g_currentTest = t.name;

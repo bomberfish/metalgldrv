@@ -361,6 +361,7 @@ static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment,
         Texture* t = ctx->share->textures.get(texture);
         if (!t) return ctx->setError(GL_INVALID_OPERATION, "texture %u does not exist", texture);
         if (level < 0) return ctx->setError(GL_INVALID_VALUE);
+        if (t->immutable && level >= t->immutableLevels) return ctx->setError(GL_INVALID_VALUE, "level %d beyond the texture's storage", level);
         if (textarget && textarget != t->target &&
             !(t->target == GL_TEXTURE_CUBE_MAP && textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z))
             return ctx->setError(GL_INVALID_OPERATION);
@@ -602,6 +603,24 @@ API void APIENTRY glGetFramebufferParameteriv(GLenum target, GLenum pname, GLint
 API void APIENTRY glGetNamedFramebufferParameteriv(GLuint framebuffer, GLenum pname, GLint* params) {
     MGL_CTX();
     getFbParameter(ctx, framebuffer ? ctx->framebuffers.get(framebuffer) : ctx->defaultFramebuffer(), pname, params);
+}
+
+API void APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat* val) {
+    MGL_CTX();
+    if (pname != GL_SAMPLE_POSITION) return ctx->setError(GL_INVALID_ENUM);
+    PassDesc p;
+    int samples = ctx->resolvePass(p) ? p.samples : 1;
+    if (index >= (GLuint)std::max(1, samples)) return ctx->setError(GL_INVALID_VALUE);
+    if (samples <= 1) {
+        val[0] = val[1] = 0.5f;
+        return;
+    }
+    // Metal's standard sample locations. Rendering keeps GL's row order (window y up =
+    // texture row up), so the within-pixel offsets carry over unchanged.
+    MTLSamplePosition pos[16];
+    [ctx->dev->mtl getDefaultSamplePositions:pos count:(NSUInteger)samples];
+    val[0] = pos[index].x;
+    val[1] = pos[index].y;
 }
 
 // --- draw / read buffers ---

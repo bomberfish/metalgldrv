@@ -42,14 +42,50 @@ bool isSimpleIdent(const std::string& s) {
 }
 
 const char* kSwz = "xyzw";
+static const char* const kStageNs[] = {"vs", "tcs", "tes", "gs", "fs", "cs"};
 
 class Emitter {
 public:
-    Emitter(const LinkedProgram& p, const VariantKey& k) : P(p), K(k) {}
+    Emitter(const LinkedProgram& p, const VariantKey& k) : P(&p), P0(&p), K(k) {
+        for (auto& x : SP) x = &p;
+        stageMask_ = p.stageMask;
+        usesFp64_ = p.refl.usesFp64;
+    }
+    // Program pipeline: each stage from its own (separable) program, each with its own
+    // argument buffer (MGLArgs at buffer 0 then holds one pointer per stage).
+    Emitter(const LinkedProgram* const stages[(int)Stage::Count], const VariantKey& k) : K(k) {
+        multi_ = true;
+        for (int i = 0; i < (int)Stage::Count; i++) {
+            SP[i] = stages[i];
+            if (stages[i] && (stages[i]->stageMask & (1u << i))) {
+                stageMask_ |= 1u << i;
+                if (!P0) P0 = stages[i];
+                usesFp64_ |= stages[i]->refl.usesFp64;
+            }
+        }
+        for (auto& x : SP) if (!x) x = P0;
+        P = P0;
+    }
     MSLOutput run();
+    std::string recordSizes(MultiPassInfo& mp);
 
 private:
-    const LinkedProgram& P;
+    const LinkedProgram* P = nullptr;   // program of the current stage
+    const LinkedProgram* P0 = nullptr;
+    const LinkedProgram* SP[(int)Stage::Count] = {};
+    bool multi_ = false;
+    bool argsEmitted_[(int)Stage::Count] = {};
+    uint32_t stageMask_ = 0;
+    bool usesFp64_ = false;
+    const StageCode& SC(Stage s) const { return SP[(int)s]->stages[(int)s]; }
+    const Reflection& RF(Stage s) const { return SP[(int)s]->refl; }
+    Stage lastPreRaster() const {
+        for (Stage st : {Stage::Geometry, Stage::TessEval, Stage::Vertex})
+            if (stageMask_ & (1u << (int)st)) return st;
+        return Stage::Vertex;
+    }
+    // Expression giving a stage's argument buffer pointer inside entry points.
+    std::string argsOf(Stage s) const { return multi_ ? std::string("A.") + kStageNs[(int)s] : "&A"; }
     int discardCount_ = 0;  // METALGLDRV_DEBUG_NODISCARD bisecting
     const VariantKey& K;
     MSLOutput out_;
@@ -248,11 +284,16 @@ private:
         if (v->q.storage == Storage::Shared) return true;
         bool perThread = v->builtin == BuiltinVar::InvocationID || v->builtin == BuiltinVar::PrimitiveID ||
                          v->builtin == BuiltinVar::PatchVerticesIn || v->builtin == BuiltinVar::TessCoord ||
-                         v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange;
+                         v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange ||
+                         v->builtin == BuiltinVar::NumSamples;
         if (perThread) return false;
         if (stage_ == Stage::TessControl) return v->q.storage == Storage::In || v->q.storage == Storage::Out;
         if (stage_ == Stage::TessEval) return v->q.storage == Storage::In;
         return false;
+    }
+    bool rootInThreadgroup(const Expr* e) const {
+        while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
+        return e->kind == EK::Var && inThreadgroup(e->var);
     }
     std::string varName(const Variable* v) {
         if (v->builtin != BuiltinVar::None) return (inThreadgroup(v) ? "S->bi_" : "bi_") + v->name;
@@ -266,12 +307,12 @@ private:
     bool isDefaultUniform(const Variable* v) {
         return v->global && v->q.storage == Storage::Uniform && !v->block &&
                (!v->type.containsOpaque() || v->type.stripArrays().base == BT::Struct) && v->type.base != BT::Subroutine &&
-               v->builtin != BuiltinVar::DepthRange;
+               v->builtin != BuiltinVar::DepthRange && v->builtin != BuiltinVar::NumSamples;
     }
     const BlockBinding* blockOf(const Variable* v) {
         if (!v->block || !(v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer)) return nullptr;
-        auto it = P.blocks.find(std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name);
-        if (it == P.blocks.end()) fail("internal: block '" + v->block->name + "' has no binding");
+        auto it = P->blocks.find(std::string(v->q.storage == Storage::Buffer ? "B:" : "U:") + v->block->name);
+        if (it == P->blocks.end()) fail("internal: block '" + v->block->name + "' has no binding");
         return &it->second;
     }
 
@@ -328,7 +369,8 @@ private:
     };
     void useStage(Stage s) {
         stage_ = s;
-        sc_ = &P.stages[(int)s];
+        P = SP[(int)s] ? SP[(int)s] : P0;
+        sc_ = &P->stages[(int)s];
     }
     void prepareStage(Stage s);
     void emitBody(Stage s, std::string& o, const std::string& preG = "", const std::string& extraMembers = "",
@@ -349,17 +391,36 @@ private:
     RasterOut rasterOutput(Stage producer, const std::string& g, bool mesh, bool points);
     void emitClassicVS(std::string& o);
     void emitFS(std::string& o, bool meshInput);
+    // Mesh render pipelines need a fragment function; programs without a fragment shader
+    // (GL leaves color undefined, depth/stencil still update) get an empty one.
+    void emitNullFS() {
+        entries_ += "fragment void mgl_fs() {}\n\n";
+        out_.entryPoints.push_back({"mgl_fs", Stage::Fragment, EntryPoint::Fragment});
+    }
     void emitCS(std::string& o);
-    void emitGeometry(std::string& o);
-    void emitTessellation(std::string& o);
+    void emitGeometry(std::string& o, bool fromTes);
+    std::string gsUnpack(const std::vector<Field>& src, const std::string& rec, const std::string& gp);
+    struct TessState {
+        bool hasTCS = false;
+        int OUTV = 0;
+        size_t VB = 16, PB = 32;
+        std::map<std::string, size_t> vslot, pslot;
+        std::string cps, setup;
+    } ts_;
+    std::vector<Field> tesRec_;  // TES output record layout (tessellation feeding GS / xfb)
+    int tesRB_ = 16, tesIpp_ = 3;
+    void emitTessControlPass(std::string& o);
+    std::string tesLoadControlPoints(const std::string& gp, const std::string& cps, int NT);
+    std::string tesLoadPatch();
+    std::string tesRun(const std::string& coord, const std::string& patch, const std::string& cps);
+    void emitTessEvalMesh(std::string& o);
+    void emitTessEvalRecords(std::string& o);
+    void emitTesXfb(std::string& o);
     void emitXfb(std::string& o);
-    void emitGeometryXfb(std::string& o);
+    void emitGeometryXfb(std::string& o, bool fromTes);
+    std::string xfbVertexStores();
     void captureWords(Stage st, const std::string& g, std::vector<std::tuple<int, uint32_t, std::string>>& out);
 
-public:
-    std::string recordSizes(MultiPassInfo& mp);
-
-private:
     void collectStructs(std::vector<const StructDef*>& order);
     void emitArgs(std::string& o);
     void flatten(const Type& t, const std::string& acc, std::vector<std::pair<Type, std::string>>& leaves);
@@ -385,9 +446,9 @@ bool Emitter::bufAccess(const Expr* e, Acc& a) {
         case EK::Var: {
             const Variable* v = e->var;
             if (isDefaultUniform(v)) {
-                auto it = P.defaultOffsets.find(v->name);
-                if (it == P.defaultOffsets.end()) fail("internal: uniform '" + v->name + "' has no offset");
-                a.ptr = "A->s" + std::to_string(P.defaultSlot);
+                auto it = P->defaultOffsets.find(v->name);
+                if (it == P->defaultOffsets.end()) fail("internal: uniform '" + v->name + "' has no offset");
+                a.ptr = "A->s" + std::to_string(P->defaultSlot);
                 a.off = std::to_string(it->second) + "u";
                 a.type = v->type;
                 a.layout = computeLayout(v->type, Packing::Std430, v->q.layout.matrix == 2);
@@ -774,8 +835,9 @@ std::string Emitter::ex(const Expr* e) {
                 const Variable* v = e->var;
                 if (v->builtin == BuiltinVar::DepthRange)
                     return "S_gl_DepthRangeParameters{sys->depthRangeNear, sys->depthRangeFar, sys->depthRangeFar - sys->depthRangeNear}";
+                if (v->builtin == BuiltinVar::NumSamples) return "int(get_num_samples())";
                 if (v->builtin == BuiltinVar::WorkGroupSize) {
-                    const auto& r = P.refl;
+                    const auto& r = P->refl;
                     return "uint3(" + std::to_string(r.localSize[0]) + "u, " + std::to_string(r.localSize[1]) + "u, " +
                            std::to_string(r.localSize[2]) + "u)";
                 }
@@ -790,6 +852,11 @@ std::string Emitter::ex(const Expr* e) {
             const Expr* b = e->args[0];
             std::string idx = ex(e->args[1]);
             if (b->type.isOpaque() || b->type.stripArrays().isOpaque()) fail("opaque array used as a value");
+            if (b->type.isVector() && !b->type.isArray() && rootInThreadgroup(b)) {
+                // Address the component as a scalar so concurrent invocations writing different
+                // components of one shared vector don't race through a whole-vector store.
+                return "((threadgroup " + scalarName(b->type.base) + "*)&(" + ex(b) + "))[" + idx + "]";
+            }
             return ex(b) + "[" + idx + "]";
         }
         case EK::Swizzle: {
@@ -826,9 +893,9 @@ std::string Emitter::ex(const Expr* e) {
         case EK::Call: return callUser(e);
         case EK::Builtin: return callBuiltin(e);
         case EK::SubroutineCall: {
-            const auto& ss = P.refl.subroutines[(int)stage_];
-            auto it = P.subroutineLocation.find({(int)stage_, e->var->name});
-            if (ss.slot < 0 || it == P.subroutineLocation.end()) fail("internal: subroutine uniform without location");
+            const auto& ss = P->refl.subroutines[(int)stage_];
+            auto it = P->subroutineLocation.find({(int)stage_, e->var->name});
+            if (ss.slot < 0 || it == P->subroutineLocation.end()) fail("internal: subroutine uniform without location");
             std::string sel = "A->s" + std::to_string(ss.slot) + "[" + std::to_string(it->second) + "u" +
                               (e->aux ? " + uint(" + ex(e->aux) + ")" : "") + "]";
             std::vector<uint8_t> outs;
@@ -1014,8 +1081,8 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         };
         std::string p;
         if (!path(leaf, p)) fail("unsupported opaque member expression");
-        auto it = P.opaque.find(p);
-        if (it == P.opaque.end()) fail("internal: opaque uniform '" + p + "' has no binding");
+        auto it = P->opaque.find(p);
+        if (it == P->opaque.end()) fail("internal: opaque uniform '" + p + "' has no binding");
         const OpaqueBinding& ob = it->second;
         std::string t = "A->s" + std::to_string(ob.slot), sm = ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : "";
         if (e->kind == EK::Index) {
@@ -1030,8 +1097,8 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
             std::string n = varName(v);
             return {n + "_t", n + "_s"};
         }
-        auto it = P.opaque.find(v->name);
-        if (it == P.opaque.end()) fail("internal: opaque uniform '" + v->name + "' has no binding");
+        auto it = P->opaque.find(v->name);
+        if (it == P->opaque.end()) fail("internal: opaque uniform '" + v->name + "' has no binding");
         const OpaqueBinding& ob = it->second;
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
     }
@@ -1075,7 +1142,7 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
         if (base->kind != EK::Var) fail("unsupported atomic counter expression");
         const Variable* v = base->var;
         if (v->param) return varName(v);
-        const OpaqueBinding& ob = P.opaque.at(v->name);
+        const OpaqueBinding& ob = P->opaque.at(v->name);
         std::string off = std::to_string(ob.acOffset) + "u";
         if (!idx.empty()) off = "(" + off + " + " + idx + " * 4u)";
         return "((device atomic_uint*)(A->s" + std::to_string(ob.slot) + " + " + off + "))";
@@ -1278,16 +1345,16 @@ std::string Emitter::callBuiltin(const Expr* e) {
         return ops.at(n) + "(" + p + ", " + a(1) + ", memory_order_relaxed)";
     }
     if (n == "ftransform") {
-        auto it = P.defaultOffsets.find("gl_ModelViewProjectionMatrix");
-        if (it == P.defaultOffsets.end()) fail("internal: ftransform without gl_ModelViewProjectionMatrix");
+        auto it = P->defaultOffsets.find("gl_ModelViewProjectionMatrix");
+        if (it == P->defaultOffsets.end()) fail("internal: ftransform without gl_ModelViewProjectionMatrix");
         Type m4 = Type::matrix(BT::Float, 4, 4);
-        return "(" + loaderFor(m4, computeLayout(m4, Packing::Std430, false)) + "(A->s" + std::to_string(P.defaultSlot) + ", " +
+        return "(" + loaderFor(m4, computeLayout(m4, Packing::Std430, false)) + "(A->s" + std::to_string(P->defaultSlot) + ", " +
                std::to_string(it->second) + "u) * bi_gl_Vertex)";
     }
-    if (n == "EmitVertex") return "mgl_EmitVertex()";
-    if (n == "EndPrimitive") return "mgl_EndPrimitive()";
-    if (n == "EmitStreamVertex") return "(" + a(0) + " == 0 ? mgl_EmitVertex() : (void)0)";
-    if (n == "EndStreamPrimitive") return "(" + a(0) + " == 0 ? mgl_EndPrimitive() : (void)0)";
+    if (n == "EmitVertex") return "mgl_EmitVertex(0)";
+    if (n == "EndPrimitive") return "mgl_EndPrimitive(0)";
+    if (n == "EmitStreamVertex") return "mgl_EmitVertex(int(" + a(0) + "))";
+    if (n == "EndStreamPrimitive") return "mgl_EndPrimitive(int(" + a(0) + "))";
     fail("builtin function '" + n + "' is not supported yet");
 }
 
@@ -1401,9 +1468,17 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         std::string P = ex(A[1]);
         bool off = name == "texelFetchOffset";
         if (off) {
-            // The offset has no layer component for array textures.
+            // Arrayed textures: the offset applies to the coordinates, not the layer.
+            const Type& Pt = A[1]->type;
+            int pn = Pt.isScalar() ? 1 : Pt.vec;
+            const Type& Ot = A.back()->type;
+            int on = Ot.isScalar() ? 1 : Ot.vec;
             std::string o = ex(A.back());
-            if (arr) o = (dim == Dim::D1 ? "int2(" : "int3(") + o + ", 0)";
+            if (on < pn) {
+                o = vecName(BT::Int, pn) + "(" + o;
+                for (int i = on; i < pn; i++) o += ", 0";
+                o += ")";
+            }
             P = "(" + P + " + " + o + ")";
         }
         std::string r;
@@ -1413,20 +1488,42 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
             else r = tex + ".read(uint2(" + P + "), " + s + ")";
             return finish(r);
         }
-        if (dim == Dim::Buffer) return finish(tex + ".read(uint(" + P + "))");
-        std::string lod = (dim == Dim::Rect || A.size() < 3 || (off && A.size() < 4)) ? "" : ", " + lodArg(2);
+        // Out-of-range texel coordinates or levels read as zero (as robust GL implementations
+        // do; Metal's read() is undefined there). Casting to uint folds the < 0 test in.
+        if (dim == Dim::Buffer) {
+            P = bind(P, "int", pre);
+            r = tex + ".read(uint(" + P + "))";
+            return finish("(uint(" + P + ") < " + tex + ".get_width() ? " + r + " : decltype(" + r + ")(0))");
+        }
+        bool hasLod = !(dim == Dim::Rect || A.size() < 3 || (off && A.size() < 4));
+        std::string L = hasLod ? bind("uint(" + ex(A[2]) + ")", "uint", pre) : "0u";
+        std::string lod = hasLod ? ", " + L : "";
+        std::string inb;
         if (dim == Dim::D1) {
-            if (arr) { P = bind(P, "int2", pre); r = tex + ".read(uint2(uint(" + P + ".x), 0u), uint(" + P + ".y)" + lod + ")"; }
-            else r = tex + ".read(uint2(uint(" + P + "), 0u)" + lod + ")";
+            if (arr) {
+                P = bind(P, "int2", pre);
+                r = tex + ".read(uint2(uint(" + P + ".x), 0u), uint(" + P + ".y)" + lod + ")";
+                inb = "uint(" + P + ".x) < " + tex + ".get_width(" + L + ") && uint(" + P + ".y) < " + tex + ".get_array_size()";
+            } else {
+                P = bind(P, "int", pre);
+                r = tex + ".read(uint2(uint(" + P + "), 0u)" + lod + ")";
+                inb = "uint(" + P + ") < " + tex + ".get_width(" + L + ")";
+            }
         } else if (dim == Dim::D3) {
+            P = bind(P, "int3", pre);
             r = tex + ".read(uint3(" + P + ")" + lod + ")";
+            inb = "all(uint3(" + P + ") < uint3(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + "), " + tex + ".get_depth(" + L + ")))";
         } else if (arr) {
             P = bind(P, "int3", pre);
             r = tex + ".read(uint2(" + P + ".xy), uint(" + P + ".z)" + lod + ")";
+            inb = "all(uint3(" + P + ") < uint3(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + "), " + tex + ".get_array_size()))";
         } else {
+            P = bind(P, "int2", pre);
             r = tex + ".read(uint2(" + P + ")" + lod + ")";
+            inb = "all(uint2(" + P + ") < uint2(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + ")))";
         }
-        return finish(r);
+        if (hasLod) inb = L + " < " + tex + ".get_num_mip_levels() && " + inb;
+        return finish("(" + inb + " ? " + r + " : decltype(" + r + ")(0))");
     }
     // --- sampling functions ---
     bool proj = name.find("Proj") != std::string::npos;
@@ -1734,8 +1831,8 @@ std::string Emitter::subroutineDispatchers() {
         out += "    " + mt(proto->ret) + " mgl_sub_" + v->name + "(" + params + ") {\n        switch (mgl_sel) {\n";
         for (auto& [mangled, f] : sc_->defs) {
             if (std::find(f->subroutineTypes.begin(), f->subroutineTypes.end(), proto->name) == f->subroutineTypes.end()) continue;
-            auto it = P.subroutineIndex.find({(int)stage_, f->name});
-            if (it == P.subroutineIndex.end() || !fnNames_.count(f)) continue;
+            auto it = P->subroutineIndex.find({(int)stage_, f->name});
+            if (it == P->subroutineIndex.end() || !fnNames_.count(f)) continue;
             std::string call = fnNames_.at(f) + "(" + args + ")";
             out += "            case " + std::to_string(it->second) + "u: " + (proto->ret.isVoid() ? call + "; return;" : "return " + call + ";") + "\n";
         }
@@ -1883,11 +1980,11 @@ void Emitter::collectStructs(std::vector<const StructDef*>& order) {
 }
 
 void Emitter::emitArgs(std::string& o) {
-    const auto& slots = P.refl.slots;
+    const auto& slots = P->refl.slots;
     std::vector<std::string> decl(slots.size());
     std::vector<bool> skip(slots.size(), false);
-    if (P.defaultSlot >= 0) decl[P.defaultSlot] = "constant uchar* s" + std::to_string(P.defaultSlot) + ";";
-    for (auto& [key, bb] : P.blocks) {
+    if (P->defaultSlot >= 0) decl[P->defaultSlot] = "constant uchar* s" + std::to_string(P->defaultSlot) + ";";
+    for (auto& [key, bb] : P->blocks) {
         std::string arr = bb.isArray ? "[" + std::to_string(bb.count) + "]" : "";
         decl[bb.slot] = std::string(bb.storage ? "device uchar* s" : "constant uchar* s") + std::to_string(bb.slot) + arr + ";";
         for (int i = 1; i < bb.count; i++) skip[bb.slot + i] = true;
@@ -1896,7 +1993,7 @@ void Emitter::emitArgs(std::string& o) {
             for (int i = 1; i < bb.count; i++) skip[bb.sizeSlot + i] = true;
         }
     }
-    for (auto& [name, ob] : P.opaque) {
+    for (auto& [name, ob] : P->opaque) {
         auto group = [&](int slot, const std::string& type) {
             if (ob.count > 1) decl[slot] = "array<" + type + ", " + std::to_string(ob.count) + "> s" + std::to_string(slot) + ";";
             else decl[slot] = type + " s" + std::to_string(slot) + ";";
@@ -1909,8 +2006,8 @@ void Emitter::emitArgs(std::string& o) {
             group(ob.slot, texType(ob.type, ob.memory));
         }
     }
-    for (auto& acb : P.refl.atomicCounterBuffers) decl[acb.slot] = "device uchar* s" + std::to_string(acb.slot) + ";";
-    for (auto& ss : P.refl.subroutines)
+    for (auto& acb : P->refl.atomicCounterBuffers) decl[acb.slot] = "device uchar* s" + std::to_string(acb.slot) + ";";
+    for (auto& ss : P->refl.subroutines)
         if (ss.slot >= 0) decl[ss.slot] = "device const uint* s" + std::to_string(ss.slot) + ";";
     o += "struct MGLArgs {\n";
     bool any = false;
@@ -1954,7 +2051,7 @@ void Emitter::prepareStage(Stage s) {
     std::vector<const Variable*> cand;
     for (auto* v : sc_->used) {
         if (v->builtin == BuiltinVar::None || v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange ||
-            v->builtin == BuiltinVar::WorkGroupSize || v->q.storage == Storage::Const || v->q.storage == Storage::Uniform)
+            v->builtin == BuiltinVar::NumSamples || v->builtin == BuiltinVar::WorkGroupSize || v->q.storage == Storage::Const || v->q.storage == Storage::Uniform)
             continue;
         cand.push_back(v);
     }
@@ -2074,8 +2171,12 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     init += "    void mgl_zero() {\n" + zero + "    }\n";
 
     o += "namespace " + ns_ + " {\n";
+    if (multi_) {
+        emitArgs(o);
+        argsEmitted_[(int)s] = true;
+    }
     if (needEq_) o += "using ::mgl_eq;\n";
-    if (needEq_ && P.refl.usesFp64) o += "// mgl_eq_f64_overloads\n";
+    if (needEq_ && usesFp64_) o += "// mgl_eq_f64_overloads\n";
     o += structs;
     for (auto* sd : needEq_ ? order : std::vector<const StructDef*>{}) {
         std::string n = structName(sd);
@@ -2201,8 +2302,8 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                                               v->builtin == BuiltinVar::SecondaryColor || v->builtin == BuiltinVar::MultiTexCoord ||
                                               v->builtin == BuiltinVar::FogCoord))
             continue;
-        auto it = P.attribLocations.find(v->name);
-        if (it == P.attribLocations.end()) continue;
+        auto it = P->attribLocations.find(v->name);
+        if (it == P->attribLocations.end()) continue;
         int loc = it->second;
         std::vector<std::pair<Type, std::string>> leaves;
         flatten(v->type, g + varName(v), leaves);
@@ -2280,7 +2381,7 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
 std::string Emitter::runVS(const std::string& gv, const std::string& vid, const std::string& inst) {
     useStage(Stage::Vertex);
     StageInfo& si = si_[(int)Stage::Vertex];
-    std::string c = "vs::G " + gv + " = {};\n" + gv + ".A = &A;\n" + gv + ".sys = &sys;\n";
+    std::string c = "vs::G " + gv + " = {};\n" + gv + ".A = " + argsOf(Stage::Vertex) + ";\n" + gv + ".sys = &sys;\n";
     c += "{\n    uint mgl_vid = " + vid + ", mgl_vinst = " + inst + ";\n";
     std::string dummy;
     bool any;
@@ -2324,16 +2425,26 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
     }
     bool hasClipD = si.bi.count(BuiltinVar::ClipDistance) && si.bi[BuiltinVar::ClipDistance]->q.storage == Storage::Out;
     bool hasClipV = si.bi.count(BuiltinVar::ClipVertex);
-    if (hasClipD || hasClipV) {
-        int nclip = hasClipD ? si.bi[BuiltinVar::ClipDistance]->type.dims[0] : 8;
-        r.vertexStruct += "    float mgl_clip [[clip_distance]] [" + std::to_string(nclip) + "];\n";
+    bool hasCullD = si.bi.count(BuiltinVar::CullDistance) && si.bi[BuiltinVar::CullDistance]->q.storage == Storage::Out;
+    int nclip = (hasClipD || hasClipV) ? (hasClipD ? si.bi[BuiltinVar::ClipDistance]->type.dims[0] : 8) : 0;
+    int ncull = hasCullD ? si.bi[BuiltinVar::CullDistance]->type.dims[0] : 0;
+    if (nclip + ncull > 0)
+        r.vertexStruct += "    float mgl_clip [[clip_distance]] [" + std::to_string(nclip + ncull) + "];\n";
+    // Cull distances (Metal has none) ride on extra clip distances: a vertex with a negative
+    // cull distance outputs -1, others a huge positive value. A primitive whose vertices are all
+    // negative is clipped away entirely (= culled); otherwise the clipped sliver next to the
+    // negative vertices is ~1e-20 of the primitive, i.e. it is drawn whole as GL requires.
+    for (int i = 0; i < ncull; i++)
+        r.vertexCopy += "v.mgl_clip[" + std::to_string(nclip + i) + "] = " + g + varName(si.bi[BuiltinVar::CullDistance]) + "[" +
+                        std::to_string(i) + "] < 0.0f ? -1.0f : 1e20f;\n";
+    if (nclip > 0) {
         for (int i = 0; i < nclip; i++) {
             std::string val;
             if (hasClipD) val = g + varName(si.bi[BuiltinVar::ClipDistance]) + "[" + std::to_string(i) + "]";
             else {
-                auto it = P.defaultOffsets.find("gl_ClipPlane");
-                if (it == P.defaultOffsets.end()) fail("internal: gl_ClipVertex without gl_ClipPlane");
-                val = "dot(" + g + "bi_gl_ClipVertex, mgl_ld_float4(" + g + "A->s" + std::to_string(P.defaultSlot) + ", " +
+                auto it = P->defaultOffsets.find("gl_ClipPlane");
+                if (it == P->defaultOffsets.end()) fail("internal: gl_ClipVertex without gl_ClipPlane");
+                val = "dot(" + g + "bi_gl_ClipVertex, mgl_ld_float4(" + g + "A->s" + std::to_string(P->defaultSlot) + ", " +
                       std::to_string(it->second + 16 * i) + "u))";
             }
             r.vertexCopy += "v.mgl_clip[" + std::to_string(i) + "] = ((" + sys + "clipDistanceMask >> " + std::to_string(i) +
@@ -2354,11 +2465,36 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
         perPrim("uint", "mgl_layer", "render_target_array_index", "uint(" + g + "bi_gl_Layer)");
     if (si.bi.count(BuiltinVar::ViewportIndex) && si.bi[BuiltinVar::ViewportIndex]->q.storage == Storage::Out)
         perPrim("uint", "mgl_vp", "viewport_array_index", "uint(" + g + "bi_gl_ViewportIndex)");
-    const StageCode& fsc = P.stages[(int)Stage::Fragment];
+    const StageCode& fsc = SC(Stage::Fragment);
     bool fsClip = fsc.main && fsc.usedNames.count("gl_ClipDistance");
     bool fsCull = fsc.main && fsc.usedNames.count("gl_CullDistance");
+    // Mesh vertex outputs are limited (124 scalars): only pass varyings the fragment shader reads.
+    std::set<std::string> fsNames;
+    bool filter = mesh && fsc.main;
+    if (filter) {
+        Stage keep = stage_;
+        useStage(Stage::Fragment);
+        prepareStage(Stage::Fragment);
+        for (auto* v : sc_->globals) {
+            if (v->q.storage != Storage::In || v->builtin != BuiltinVar::None) continue;
+            std::vector<std::pair<Type, std::string>> leaves;
+            flatten(v->type, "", leaves);
+            splitDoubleLeaves(leaves);
+            std::string key = varyingKey(v, Stage::Fragment);
+            for (size_t i = 0; i < leaves.size(); i++) fsNames.insert(key + "_" + std::to_string(i));
+        }
+        for (auto& [k, v] : si_[(int)Stage::Fragment].bi)
+            if (k == BuiltinVar::FragColorIn || k == BuiltinVar::SecondaryColorIn || k == BuiltinVar::TexCoord || k == BuiltinVar::FogFragCoord) {
+                std::vector<std::pair<Type, std::string>> leaves;
+                flatten(v->type, "", leaves);
+                std::string key = builtinKey(k);
+                for (size_t i = 0; i < leaves.size(); i++) fsNames.insert(key + "_" + std::to_string(i));
+            }
+        useStage(keep);
+    }
     for (auto& f : fields) {
         if (f.key == "pos" || f.key == "psize" || f.key == "clipv") continue;
+        if (filter && f.key != "clipd" && f.key != "culld" && !fsNames.count(f.name)) continue;
         if (f.key == "clipd" && !fsClip) continue;
         if (f.key == "culld" && !fsCull) continue;
         if (f.type.base == BT::Bool) fail("boolean varyings are not allowed");
@@ -2393,6 +2529,22 @@ void Emitter::emitClassicVS(std::string& o) {
     }
     RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, true);
     o += "struct In {\n" + inS + "};\nstruct Out {\n" + ro.vertexStruct + "};\n}  // namespace vs\n\n";
+    if (K.xfbInVertex) {
+        // Transform feedback with vertex shader side effects: the vertex shader runs once per
+        // vertex of the decomposed primitive list (non-indexed draw) and captures its outputs
+        // itself, so its side effects happen exactly once.
+        std::string e = "vertex vs::Out mgl_vs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], "
+                        "constant MGLDrawInfo& D [[buffer(22)]], uint mgl_lv [[vertex_id]], uint mgl_li [[instance_id]]) {\n";
+        e += "    uint mgl_t = mgl_li * D.count + mgl_lv;\n";
+        e += indentBy(runVS("g", "D.indexBuffer[mgl_lv] + uint(D.baseVertex)", "mgl_li"), 4);
+        e += xfbVertexStores();
+        e += "    vs::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
+        entries_ += e;
+        fragInputsAvailable_ = ro.names;
+        haveVsOutputs_ = true;
+        out_.entryPoints.push_back({"mgl_vs", Stage::Vertex, EntryPoint::Vertex});
+        return;
+    }
     // Rasterizer discard: Metal needs a void vertex function when rasterization is disabled.
     std::string e = K.rasterDiscard ? "vertex void mgl_vs(" : "vertex vs::Out mgl_vs(";
     if (anyIn) e += "vs::In in [[stage_in]], ";
@@ -2400,7 +2552,7 @@ void Emitter::emitClassicVS(std::string& o) {
     e += ", uint mgl_bi [[base_instance]]";
     if (K.manualFetch) e += ", constant MGLDrawInfo& D [[buffer(22)]]";
     if (si.bi.count(BuiltinVar::BaseVertex)) e += ", uint mgl_bv [[base_vertex]]";
-    e += ") {\n    vs::G g;\n    g.mgl_zero();\n    g.A = &A;\n    g.sys = &sys;\n";
+    e += ") {\n    vs::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Vertex) + ";\n    g.sys = &sys;\n";
     e += copyIn;
     for (auto* v : si.builtins) {
         if (v->builtin == BuiltinVar::VertexID) e += "    g.bi_" + v->name + " = int(mgl_vid);\n";
@@ -2453,6 +2605,15 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     auto& biByKind = si.bi;
     std::string inS = "struct In {\n", outS = "struct Out {\n", copyIn, copyOut, params;
     bool anyIn = false, anyOut = false;
+    // Per-sample shading: forced by the state (GL_SAMPLE_SHADING), by gl_SampleID /
+    // gl_SamplePosition, or by sample-qualified inputs. Metal runs a fragment function at
+    // sample rate when it takes [[sample_id]].
+    bool perSample = K.sampleShading || biByKind.count(BuiltinVar::SampleID) || biByKind.count(BuiltinVar::SamplePosition);
+    bool haveSid = false;
+    auto needSid = [&]() {
+        if (!haveSid) params += ", uint mgl_sid [[sample_id]]";
+        haveSid = true;
+    };
     std::vector<const Variable*> ins;
     for (auto* v : sc_->globals)
         if (v->q.storage == Storage::In && v->builtin == BuiltinVar::None) ins.push_back(v);
@@ -2492,10 +2653,17 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 anyIn = true;
                 continue;
             }
+            // Sample shading evaluates every interpolated input at the invocation's sample.
+            if (K.sampleShading && lq.interp != Interp::Flat) lq.sample = true, lq.centroid = false;
+            if (lq.sample && lq.interp != Interp::Flat) perSample = true;
             if (interpVars.count(v) && lt.base == BT::Float && lq.interp != Interp::Flat) {
                 std::string mode = lq.interp == Interp::NoPerspective ? "no_perspective" : "perspective";
                 inS += "    interpolant<" + mt(lt) + ", interpolation::" + mode + "> " + nm + " [[user(" + nm + ")]];\n";
                 std::string at = lq.centroid ? "interpolate_at_centroid()" : "interpolate_at_center()";
+                if (lq.sample) {
+                    needSid();
+                    at = "interpolate_at_sample(mgl_sid)";
+                }
                 copyIn += "    " + leaves[i].second + " = in." + nm + "." + at + ";\n";
                 interpLeaf_[leaves[i].second.substr(2)] = nm;  // strip "g."
                 anyIn = true;
@@ -2525,17 +2693,22 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 copyIn += "    g.bi_" + v->name + " = float2(mgl_pc.x, (sys.flags & 2u) != 0u ? mgl_pc.y : 1.0f - mgl_pc.y);\n";
                 break;
             case BuiltinVar::SampleID:
-                params += ", uint mgl_sid [[sample_id]]";
+                needSid();
                 copyIn += "    g.bi_" + v->name + " = int(mgl_sid);\n";
                 break;
             case BuiltinVar::SamplePosition:
-                if (!biByKind.count(BuiltinVar::SampleID)) params += ", uint mgl_sid [[sample_id]]";
-                params += ", float4 mgl_fc2 [[position]]";
-                copyIn += "    g.bi_" + v->name + " = fract(mgl_fc2.xy);\n";
+                needSid();
+                copyIn += "    g.bi_" + v->name + " = get_sample_position(mgl_sid);\n";
                 break;
             case BuiltinVar::SampleMaskIn:
                 params += ", uint mgl_smi [[sample_mask]]";
-                copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi);\n";
+                // With per-sample shading each invocation covers only its own sample.
+                if (perSample) {
+                    needSid();
+                    copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi & (1u << mgl_sid));\n";
+                } else {
+                    copyIn += "    g.bi_" + v->name + "[0] = int(mgl_smi);\n";
+                }
                 break;
             case BuiltinVar::PrimitiveID:
                 if (meshInput) {
@@ -2577,6 +2750,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             default: break;
         }
     }
+    if (K.sampleShading) needSid();
     bool fragDepth = biByKind.count(BuiltinVar::FragDepth) && sc_->writesFragDepth;
     if (fragDepth && !biByKind.count(BuiltinVar::FragCoord)) params += ", float4 mgl_fc [[position]]";
     if (fragDepth) copyIn += "    g.bi_gl_FragDepth = mgl_fc.z;\n";
@@ -2585,8 +2759,8 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     std::string color0;
     for (auto* v : sc_->globals) {
         if (v->q.storage != Storage::Out || v->builtin != BuiltinVar::None) continue;
-        auto it = P.fragOutputs.find(v->name);
-        if (it == P.fragOutputs.end()) continue;
+        auto it = P->fragOutputs.find(v->name);
+        if (it == P->fragOutputs.end()) continue;
         auto [loc, idx] = it->second;
         int n = v->type.isArray() ? v->type.dims[0] : 1;
         Type et = v->type.stripArrays();
@@ -2629,9 +2803,12 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
         copyOut += "    o.mgl_depth = g.bi_gl_FragDepth;\n";
         anyOut = true;
     }
-    if (biByKind.count(BuiltinVar::SampleMask)) {
+    if (biByKind.count(BuiltinVar::SampleMask) || K.sampleMask) {
+        // gl_SampleMask and GL_SAMPLE_MASK only apply to multisample framebuffers.
+        std::string m = biByKind.count(BuiltinVar::SampleMask) ? "uint(g.bi_gl_SampleMask[0])" : "0xffffffffu";
+        if (K.sampleMask) m = "(" + m + " & sys.sampleMask & mgl_coverage_mask(sys.sampleCoverage, (sys.flags & 8u) != 0u))";
         outS += "    uint mgl_mask [[sample_mask]];\n";
-        copyOut += "    o.mgl_mask = uint(g.bi_gl_SampleMask[0]);\n";
+        copyOut += "    o.mgl_mask = get_num_samples() > 1u ? " + m + " : 0xffffffffu;\n";
         anyOut = true;
     }
     outS += "};\n";
@@ -2648,7 +2825,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     e += std::string("fragment ") + (anyOut ? "fs::Out" : "void") + " mgl_fs(";
     if (anyIn) e += "fs::In in [[stage_in]], ";
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
-    e += "    fs::G g;\n    g.mgl_zero();\n    g.A = &A;\n    g.sys = &sys;\n" + copyIn;
+    e += "    fs::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Fragment) + ";\n    g.sys = &sys;\n" + copyIn;
     e += "    g.mgl_init();\n    g." + si.mainName + "();\n";
     if (anyOut) e += "    fs::Out o;\n" + copyOut + alpha + "    return o;\n";
     e += "}\n\n";
@@ -2660,7 +2837,7 @@ void Emitter::emitCS(std::string& o) {
     emitBody(Stage::Compute, o);
     StageInfo& si = si_[(int)Stage::Compute];
     o += "}  // namespace cs\n\n";
-    const auto& r = P.refl;
+    const auto& r = P->refl;
     std::string e = "kernel void mgl_cs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint3 mgl_gid [[thread_position_in_grid]], "
                     "uint3 mgl_lid [[thread_position_in_threadgroup]], uint3 mgl_wid [[threadgroup_position_in_grid]], uint mgl_lidx [[thread_index_in_threadgroup]], "
                     "uint3 mgl_nwg [[threadgroups_per_grid]]) {\n";
@@ -2673,7 +2850,11 @@ void Emitter::emitCS(std::string& o) {
             case BuiltinVar::WorkGroupID: e += "    g.bi_" + v->name + " = mgl_wid;\n"; break;
             case BuiltinVar::LocalInvocationID: e += "    g.bi_" + v->name + " = mgl_lid;\n"; break;
             case BuiltinVar::GlobalInvocationID: e += "    g.bi_" + v->name + " = mgl_gid;\n"; break;
-            case BuiltinVar::LocalInvocationIndex: e += "    g.bi_" + v->name + " = mgl_lidx;\n"; break;
+            case BuiltinVar::LocalInvocationIndex:
+                // GL's linearization of the local id (z * X * Y + y * X + x).
+                e += "    g.bi_" + v->name + " = (mgl_lid.z * " + std::to_string(r.localSize[1]) + "u + mgl_lid.y) * " +
+                     std::to_string(r.localSize[0]) + "u + mgl_lid.x;\n";
+                break;
             default: break;
         }
     }
@@ -2700,8 +2881,29 @@ static int primVerts(uint32_t prim) {
     }
 }
 
-void Emitter::emitGeometry(std::string& o) {
-    const Reflection& R = P.refl;
+// Unpacks the per-vertex inputs of the geometry shader (accessor prefix `gp`) for vertex j from
+// varying records laid out like `src` (one 16-byte slot per field); `rec` is the expression of
+// slot $I of vertex j.
+std::string Emitter::gsUnpack(const std::vector<Field>& src, const std::string& rec, const std::string& gp) {
+    std::map<std::string, size_t> slot;
+    for (size_t i = 0; i < src.size(); i++) slot[src[i].name] = i;
+    auto gin = arrayedFields(Stage::Geometry, Storage::In);
+    useStage(Stage::Geometry);
+    std::string c;
+    for (auto& f : gin) {
+        auto it = slot.find(f.name);
+        if (it == slot.end()) continue;
+        std::string r = rec;
+        for (size_t p; (p = r.find("$I")) != std::string::npos;) r.replace(p, 2, std::to_string(it->second));
+        c += acc(f, gp, "j") + " = mgl_upk_" + mt(f.type) + "(" + r + ");\n";
+    }
+    return c;
+}
+
+// Geometry shader rasterized through a mesh shader. Inputs come from the vertex shader (run per
+// input vertex) or, after tessellation, from the TES output records.
+void Emitter::emitGeometry(std::string& o, bool fromTes) {
+    const Reflection& R = RF(Stage::Geometry);
     int NV = primVerts(R.gsInputPrimitive);
     if (!NV) fail("unsupported geometry shader input primitive");
     uint32_t outPrim = R.gsOutputPrimitive;
@@ -2710,10 +2912,14 @@ void Emitter::emitGeometry(std::string& o) {
     int maxP = points ? maxV : lines ? std::max(1, maxV - 1) : std::max(1, maxV - 2);
     maxP = std::min(maxP, 512);
     std::string topo = points ? "point" : lines ? "line" : "triangle";
-    // vertex stage feeding the geometry shader through threadgroup records
-    emitBody(Stage::Vertex, o);
-    auto vf = producerFields(Stage::Vertex);
-    o += "struct Rec { uint4 s[" + std::to_string(std::max<size_t>(1, vf.size())) + "]; };\n}  // namespace vs\n\n";
+    std::vector<Field> vf;
+    if (!fromTes) {
+        emitBody(Stage::Vertex, o);
+        vf = producerFields(Stage::Vertex);
+        o += "struct Rec { uint4 s[" + std::to_string(std::max<size_t>(1, vf.size())) + "]; };\n}  // namespace vs\n\n";
+    } else {
+        vf = tesRec_;
+    }
     // geometry stage
     prepareStage(Stage::Geometry);
     StageInfo& gsi = si_[(int)Stage::Geometry];
@@ -2725,8 +2931,9 @@ void Emitter::emitGeometry(std::string& o) {
     preG += "using MeshT = mesh<MV, MP, " + std::to_string(maxV) + ", " + std::to_string(maxP) + ", topology::" + topo + ">;\n";
     std::string members = "    thread MeshT* mgl_mo;\n    uint mgl_nv, mgl_np, mgl_strip;\n    int mgl_primIn;\n";
     std::string MV = std::to_string(maxV), MP = std::to_string(maxP);
-    std::string m = "    void mgl_EmitVertex() {\n        if (mgl_nv >= " + MV + "u) return;\n        MV v;\n" + indentBy(ro.vertexCopy, 8) +
-                    "        mgl_mo->set_vertex(mgl_nv, v);\n        uint c = mgl_nv++;\n        mgl_strip++;\n";
+    // only vertex stream 0 is rasterized
+    std::string m = "    void mgl_EmitVertex(int s) {\n        if (s != 0 || mgl_nv >= " + MV + "u) return;\n        MV v;\n" +
+                    indentBy(ro.vertexCopy, 8) + "        mgl_mo->set_vertex(mgl_nv, v);\n        uint c = mgl_nv++;\n        mgl_strip++;\n";
     std::string prim = "            MP p;\n" + indentBy(ro.primCopy, 12) + "            mgl_mo->set_primitive(mgl_np, p);\n            mgl_np++;\n";
     if (points)
         m += "        if (mgl_np < " + MP + "u) {\n            mgl_mo->set_index(mgl_np, c);\n" + prim + "        }\n";
@@ -2738,32 +2945,34 @@ void Emitter::emitGeometry(std::string& o) {
              "            if (((mgl_strip - 3u) & 1u) != 0u) { uint t = a; a = b; b = t; }\n"
              "            mgl_mo->set_index(3u * mgl_np, c);\n            mgl_mo->set_index(3u * mgl_np + 1u, a);\n"
              "            mgl_mo->set_index(3u * mgl_np + 2u, b);\n" + prim + "        }\n";
-    m += "    }\n    void mgl_EndPrimitive() { mgl_strip = 0u; }\n";
+    m += "    }\n    void mgl_EndPrimitive(int s) { if (s == 0) mgl_strip = 0u; }\n";
     emitBody(Stage::Geometry, o, preG, members, m);
     o += "}  // namespace gs\n\n";
-    // inputs from the vertex records
-    std::map<std::string, size_t> slot;
-    for (size_t i = 0; i < vf.size(); i++) slot[vf[i].name] = i;
-    auto gin = arrayedFields(Stage::Geometry, Storage::In);
     std::string e = "[[mesh]] void mgl_gs(gs::MeshT mgl_mo, constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], "
                     "constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
     std::string N = std::to_string(NV);
-    e += "    threadgroup vs::Rec mgl_vin[" + N + "];\n    uint mgl_prim = mgl_tg.x, mgl_inst = mgl_tg.y;\n";
-    e += "    if (mgl_tid < " + N + "u) {\n";
-    e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_tid] + uint(D.baseVertex)", "mgl_inst"), 8);
-    useStage(Stage::Vertex);
-    for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_tid].s[" + std::to_string(i) + "] = mgl_pk(" + acc(vf[i], "vg.") + ");\n";
-    e += "    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (mgl_tid == 0u) {\n";
-    e += "        gs::G g = {};\n        g.A = &A;\n        g.sys = &sys;\n        g.mgl_mo = &mgl_mo;\n        g.mgl_nv = 0u;\n"
-         "        g.mgl_np = 0u;\n        g.mgl_strip = 0u;\n        g.mgl_primIn = int(mgl_prim);\n";
-    useStage(Stage::Geometry);
-    e += "        for (uint j = 0; j < " + N + "u; j++) {\n";
-    for (auto& f : gin) {
-        auto it = slot.find(f.name);
-        if (it == slot.end()) continue;
-        e += "            " + acc(f, "g.", "j") + " = mgl_upk_" + mt(f.type) + "(mgl_vin[j].s[" + std::to_string(it->second) + "]);\n";
+    std::string loop = "        for (uint j = 0; j < " + N + "u; j++) {\n";
+    if (!fromTes) {
+        e += "    threadgroup vs::Rec mgl_vin[" + N + "];\n    uint mgl_prim = mgl_tg.x, mgl_inst = mgl_tg.y;\n";
+        e += "    if (mgl_tid < " + N + "u) {\n";
+        e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_tid] + uint(D.baseVertex)", "mgl_inst"), 8);
+        useStage(Stage::Vertex);
+        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_tid].s[" + std::to_string(i) + "] = mgl_pk(" + acc(vf[i], "vg.") + ");\n";
+        e += "    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+        loop += indentBy(gsUnpack(vf, "mgl_vin[j].s[$I]", "g."), 12);
+    } else {
+        e += "    uint mgl_prim = mgl_tg.x;\n";
+        loop = "        for (uint j = 0; j < " + std::to_string(std::min(NV, tesIpp_)) + "u; j++) {\n";
+        loop += "            device const uint4* r = (device const uint4*)(D.tesVertexOut + D.tesPrimOut[mgl_prim * " + std::to_string(tesIpp_) +
+                "u + j] * " + std::to_string(tesRB_) + "u);\n";
+        loop += indentBy(gsUnpack(vf, "r[$I]", "g."), 12);
     }
-    e += "        }\n";
+    loop += "        }\n";
+    e += "    if (mgl_tid == 0u) {\n";
+    e += "        gs::G g = {};\n        g.A = " + argsOf(Stage::Geometry) + ";\n        g.sys = &sys;\n        g.mgl_mo = &mgl_mo;\n        g.mgl_nv = 0u;\n"
+         "        g.mgl_np = 0u;\n        g.mgl_strip = 0u;\n        g.mgl_primIn = int(mgl_prim);\n";
+    e += loop;
+    useStage(Stage::Geometry);
     for (auto* v : gsi.builtins) {
         if (v->builtin == BuiltinVar::PrimitiveIDIn) e += "        g.bi_" + v->name + " = int(mgl_prim);\n";
         if (v->builtin == BuiltinVar::InvocationID) e += "        g.bi_" + v->name + " = int(mgl_tg.z);\n";
@@ -2781,21 +2990,22 @@ void Emitter::emitGeometry(std::string& o) {
 }
 
 // ---------------------------------------------------------------------------
-// Tessellation: pass 1 = VS + TCS kernel, pass 2 = object (patch) + mesh (TES)
+// Tessellation: pass 1 = VS + TCS kernel, pass 2 = object (patch) + mesh (TES), or
+// TES records (mgl_tes_count / mgl_tes_gen) feeding a geometry shader or transform feedback.
 // ---------------------------------------------------------------------------
-void Emitter::emitTessellation(std::string& o) {
-    const Reflection& R = P.refl;
-    if (P.stages[(int)Stage::Geometry].main) fail("tessellation together with a geometry shader is not supported yet");
-    bool hasTCS = P.stages[(int)Stage::TessControl].main != nullptr;
-    int OUTV = hasTCS ? R.tcsOutputVertices : 0;
-    if (hasTCS && (OUTV < 1 || OUTV > 32)) fail("invalid tessellation control output vertex count");
+void Emitter::emitTessControlPass(std::string& o) {
+    const Reflection& R = RF(Stage::TessEval);
+    ts_.hasTCS = SC(Stage::TessControl).main != nullptr;
+    int OUTV = ts_.hasTCS ? RF(Stage::TessControl).tcsOutputVertices : 0;
+    ts_.OUTV = OUTV;
+    if (ts_.hasTCS && (OUTV < 1 || OUTV > 32)) fail("invalid tessellation control output vertex count");
     // VS
     emitBody(Stage::Vertex, o);
     auto vf = producerFields(Stage::Vertex);
     o += "}  // namespace vs\n\n";
     // TCS
     std::vector<Field> recV, recP;
-    if (hasTCS) {
+    if (ts_.hasTCS) {
         emitBody(Stage::TessControl, o);
         o += "}  // namespace tcs\n\n";
         recV = arrayedFields(Stage::TessControl, Storage::Out);
@@ -2803,20 +3013,22 @@ void Emitter::emitTessellation(std::string& o) {
     } else {
         recV = vf;
     }
-    size_t VB = 16 * std::max<size_t>(1, recV.size()), PB = 32 + 16 * recP.size();
-    std::string sVB = std::to_string(VB) + "u", sPB = std::to_string(PB) + "u";
-    std::map<std::string, size_t> vslot, pslot;
-    for (size_t i = 0; i < recV.size(); i++) vslot[recV[i].name] = i;
-    for (size_t i = 0; i < recP.size(); i++) pslot[recP[i].name] = i;
+    ts_.VB = 16 * std::max<size_t>(1, recV.size());
+    ts_.PB = 32 + 16 * recP.size();
+    std::string sVB = std::to_string(ts_.VB) + "u", sPB = std::to_string(ts_.PB) + "u";
+    ts_.vslot.clear();
+    ts_.pslot.clear();
+    for (size_t i = 0; i < recV.size(); i++) ts_.vslot[recV[i].name] = i;
+    for (size_t i = 0; i < recP.size(); i++) ts_.pslot[recP[i].name] = i;
+    ts_.cps = ts_.hasTCS ? std::to_string(OUTV) + "u" : "D.patchVertices";
 
-    // ---- pass 1 kernel ----
     std::string e = "kernel void mgl_tcs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
                     "uint3 mgl_tg [[threadgroup_position_in_grid]], uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
     e += "    uint mgl_patch = mgl_tg.x, mgl_inst = mgl_tg.y, mgl_gp = mgl_inst * D.primitiveCount + mgl_patch, mgl_pv = D.patchVertices;\n";
     e += "    device uchar* mgl_pout = D.tcsPatchOut + mgl_gp * " + sPB + ";\n";
     std::string vsRun = runVS("vg", "D.indexBuffer[mgl_patch * mgl_pv + mgl_cp] + uint(D.baseVertex)", "mgl_inst");
     int threads1;
-    if (hasTCS) {
+    if (ts_.hasTCS) {
         StageInfo& tsi = si_[(int)Stage::TessControl];
         threads1 = OUTV;
         if (tsi.hasShared) e += "    threadgroup tcs::MGLShared mgl_sh;\n    threadgroup tcs::MGLShared* S = &mgl_sh;\n";
@@ -2834,7 +3046,7 @@ void Emitter::emitTessellation(std::string& o) {
             e += "        " + acc(f, "", "mgl_cp") + " = " + src + ";\n";
         }
         e += "    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
-        e += "    tcs::G g = {};\n    g.A = &A;\n    g.sys = &sys;\n";
+        e += "    tcs::G g = {};\n    g.A = " + argsOf(Stage::TessControl) + ";\n    g.sys = &sys;\n";
         if (tsi.hasShared) e += "    g.S = S;\n";
         for (auto* v : tsi.builtins) {
             if (v->builtin == BuiltinVar::InvocationID) e += "    g.bi_" + v->name + " = int(mgl_tid);\n";
@@ -2864,19 +3076,74 @@ void Emitter::emitTessellation(std::string& o) {
         e += "        for (int i = 0; i < 4; i++) lv[i] = sys.tessDefaultOuter[i];\n        lv[4] = sys.tessDefaultInner[0];\n"
              "        lv[5] = sys.tessDefaultInner[1];\n    }\n}\n\n";
     }
+    entries_ += e;
     EntryPoint k1{"mgl_tcs", Stage::TessControl, EntryPoint::Kernel};
     k1.threadsPerThreadgroup[0] = threads1;
     out_.entryPoints.push_back(k1);
-
-    // ---- pass 2: TES on mesh ----
+    // tessellator configuration shared by the TES passes
     uint32_t pm = R.tesPrimitiveMode;
     uint32_t domain = pm == gl::TRIANGLES ? 0 : pm == gl::QUADS ? 1 : 2;
     uint32_t spacing = R.tesSpacing == gl::FRACTIONAL_EVEN ? 1 : R.tesSpacing == gl::FRACTIONAL_ODD ? 2 : 0;
+    ts_.setup = "mgl_tess_setup(" + std::to_string(domain) + "u, " + std::to_string(spacing) + "u, " + (R.tesPointMode ? "1u" : "0u") + ", " +
+                (R.tesOrder == gl::CW ? "0u" : "1u") + ", float4(lv[0], lv[1], lv[2], lv[3]), float2(lv[4], lv[5]))";
+    tesIpp_ = R.tesPointMode ? 1 : domain == 2 ? 2 : 3;
+}
+
+// TES input loading. Control points: loop over j (threads of the threadgroup); patch data and
+// levels: statements for one thread (expects `lv` = the patch record).
+std::string Emitter::tesLoadControlPoints(const std::string& gp, const std::string& cps, int NT) {
+    useStage(Stage::TessEval);
+    auto ein = arrayedFields(Stage::TessEval, Storage::In);
+    std::string e = "for (uint j = mgl_tid; j < " + cps + "; j += " + std::to_string(NT) + "u) {\n";
+    e += "    device const uint4* r = (device const uint4*)(D.tcsVertexOut + (" + gp + " * " + cps + " + j) * " + std::to_string(ts_.VB) + "u);\n";
+    for (auto& f : ein) {
+        auto it = ts_.vslot.find(f.name);
+        if (it == ts_.vslot.end()) continue;
+        e += "    " + acc(f, "", "j") + " = mgl_upk_" + mt(f.type) + "(r[" + std::to_string(it->second) + "]);\n";
+    }
+    return e + "}\n";
+}
+
+std::string Emitter::tesLoadPatch() {
+    useStage(Stage::TessEval);
+    StageInfo& esi = si_[(int)Stage::TessEval];
+    std::string e;
+    if (esi.bi.count(BuiltinVar::TessLevelOuter))
+        for (int i = 0; i < 4; i++) e += varName(esi.bi[BuiltinVar::TessLevelOuter]) + "[" + std::to_string(i) + "] = lv[" + std::to_string(i) + "];\n";
+    if (esi.bi.count(BuiltinVar::TessLevelInner))
+        for (int i = 0; i < 2; i++) e += varName(esi.bi[BuiltinVar::TessLevelInner]) + "[" + std::to_string(i) + "] = lv[" + std::to_string(4 + i) + "];\n";
+    auto epin = patchFields(Stage::TessEval, Storage::In);
+    e += "device const uint4* pr = (device const uint4*)((device const uchar*)lv + 32u);\n";
+    for (auto& f : epin) {
+        auto it = ts_.pslot.find(f.name);
+        if (it == ts_.pslot.end()) continue;
+        e += acc(f, "") + " = mgl_upk_" + mt(f.type) + "(pr[" + std::to_string(it->second) + "]);\n";
+    }
+    return e;
+}
+
+// Runs the TES for one domain point into `tes::G g`.
+std::string Emitter::tesRun(const std::string& coord, const std::string& patch, const std::string& cps) {
+    useStage(Stage::TessEval);
+    StageInfo& esi = si_[(int)Stage::TessEval];
+    std::string e = "tes::G g = {};\ng.A = " + argsOf(Stage::TessEval) + ";\ng.sys = &sys;\n";
+    if (esi.hasShared) e += "g.S = S;\n";
+    for (auto* v : esi.builtins) {
+        if (v->builtin == BuiltinVar::TessCoord) e += "g.bi_" + v->name + " = " + coord + ";\n";
+        if (v->builtin == BuiltinVar::PrimitiveID) e += "g.bi_" + v->name + " = int(" + patch + ");\n";
+        if (v->builtin == BuiltinVar::PatchVerticesIn) e += "g.bi_" + v->name + " = int(" + cps + ");\n";
+    }
+    return e + "g.mgl_init();\ng." + esi.mainName + "();\n";
+}
+
+void Emitter::emitTessEvalMesh(std::string& o) {
+    const Reflection& R = RF(Stage::TessEval);
     bool points = R.tesPointMode;
-    bool isolines = domain == 2;
+    bool isolines = R.tesPrimitiveMode != gl::TRIANGLES && R.tesPrimitiveMode != gl::QUADS;
     std::string topo = points ? "point" : isolines ? "line" : "triangle";
-    int ipp = points ? 1 : isolines ? 2 : 3;
+    int ipp = tesIpp_;
     const int MAXV = 130, MAXP = 128, NT = 64;
+    std::string sPB = std::to_string(ts_.PB) + "u";
     prepareStage(Stage::TessEval);
     StageInfo& esi = si_[(int)Stage::TessEval];
     RasterOut ro = rasterOutput(Stage::TessEval, "g.", true, points);
@@ -2887,15 +3154,13 @@ void Emitter::emitTessellation(std::string& o) {
     emitBody(Stage::TessEval, o, preG);
     o += "}  // namespace tes\n\n";
     o += "struct mgl_TPayload {\n    uint gp, patch, inst, cps;\n    mgl_tess T;\n};\n\n";
-    std::string cps = hasTCS ? std::to_string(OUTV) + "u" : "D.patchVertices";
-    e += "[[object]] void mgl_tes_obj(object_data mgl_TPayload& pl [[payload]], mesh_grid_properties mgp, constant MGLSys& sys [[buffer(1)]], "
-         "constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
+    std::string e = "[[object]] void mgl_tes_obj(object_data mgl_TPayload& pl [[payload]], mesh_grid_properties mgp, constant MGLSys& sys [[buffer(1)]], "
+                    "constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
     e += "    if (mgl_tid != 0u) return;\n";
     e += "    uint gp = mgl_tg.y * D.primitiveCount + mgl_tg.x;\n";
     e += "    device const float* lv = (device const float*)(D.tcsPatchOut + gp * " + sPB + ");\n";
-    e += "    pl.gp = gp;\n    pl.patch = mgl_tg.x;\n    pl.inst = mgl_tg.y;\n    pl.cps = " + cps + ";\n";
-    e += "    pl.T = mgl_tess_setup(" + std::to_string(domain) + "u, " + std::to_string(spacing) + "u, " + (points ? "1u" : "0u") + ", " +
-         (R.tesOrder == gl::CW ? "0u" : "1u") + ", float4(lv[0], lv[1], lv[2], lv[3]), float2(lv[4], lv[5]));\n";
+    e += "    pl.gp = gp;\n    pl.patch = mgl_tg.x;\n    pl.inst = mgl_tg.y;\n    pl.cps = " + ts_.cps + ";\n";
+    e += "    pl.T = " + ts_.setup + ";\n";
     e += "    mgp.set_threadgroups_per_grid(uint3(pl.T.units, 1u, 1u));\n}\n\n";
     e += "[[mesh]] void mgl_tes(tes::MeshT mgl_mo, const object_data mgl_TPayload& pl [[payload]], constant MGLArgs& A [[buffer(0)]], "
          "constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], "
@@ -2904,39 +3169,14 @@ void Emitter::emitTessellation(std::string& o) {
     e += "    threadgroup float3 mgl_co[" + std::to_string(MAXV) + "];\n    threadgroup float mgl_tp[" + std::to_string(MAXV) + "];\n";
     e += "    threadgroup ushort mgl_idx[" + std::to_string(MAXP * 3) + "];\n    threadgroup uint mgl_cnt[2];\n";
     e += "    device const float* lv = (device const float*)(D.tcsPatchOut + pl.gp * " + sPB + ");\n";
-    useStage(Stage::TessEval);
-    auto ein = arrayedFields(Stage::TessEval, Storage::In);
-    auto epin = patchFields(Stage::TessEval, Storage::In);
-    e += "    for (uint j = mgl_tid; j < pl.cps; j += " + std::to_string(NT) + "u) {\n";
-    e += "        device const uint4* r = (device const uint4*)(D.tcsVertexOut + (pl.gp * pl.cps + j) * " + sVB + ");\n";
-    for (auto& f : ein) {
-        auto it = vslot.find(f.name);
-        if (it == vslot.end()) continue;
-        e += "        " + acc(f, "", "j") + " = mgl_upk_" + mt(f.type) + "(r[" + std::to_string(it->second) + "]);\n";
-    }
-    e += "    }\n    if (mgl_tid == 0u) {\n";
-    if (esi.bi.count(BuiltinVar::TessLevelOuter))
-        for (int i = 0; i < 4; i++) e += "        " + varName(esi.bi[BuiltinVar::TessLevelOuter]) + "[" + std::to_string(i) + "] = lv[" + std::to_string(i) + "];\n";
-    if (esi.bi.count(BuiltinVar::TessLevelInner))
-        for (int i = 0; i < 2; i++) e += "        " + varName(esi.bi[BuiltinVar::TessLevelInner]) + "[" + std::to_string(i) + "] = lv[" + std::to_string(4 + i) + "];\n";
-    e += "        device const uint4* pr = (device const uint4*)((device const uchar*)lv + 32u);\n";
-    for (auto& f : epin) {
-        auto it = pslot.find(f.name);
-        if (it == pslot.end()) continue;
-        e += "        " + acc(f, "") + " = mgl_upk_" + mt(f.type) + "(pr[" + std::to_string(it->second) + "]);\n";
-    }
+    e += indentBy(tesLoadControlPoints("pl.gp", "pl.cps", NT), 4);
+    e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch(), 8);
     e += "        mgl_tess T = pl.T;\n        uint nv, np;\n        mgl_tess_unit(T, mgl_tg.x, mgl_co, mgl_tp, mgl_idx, nv, np);\n";
     e += "        mgl_cnt[0] = nv;\n        mgl_cnt[1] = np;\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
     e += "    uint nv = mgl_cnt[0], np = mgl_cnt[1];\n";
-    e += "    for (uint k = mgl_tid; k < nv; k += " + std::to_string(NT) + "u) {\n        tes::G g = {};\n        g.A = &A;\n        g.sys = &sys;\n";
-    if (esi.hasShared) e += "        g.S = S;\n";
-    for (auto* v : esi.builtins) {
-        if (v->builtin == BuiltinVar::TessCoord) e += "        g.bi_" + v->name + " = mgl_co[k];\n";
-        if (v->builtin == BuiltinVar::PrimitiveID) e += "        g.bi_" + v->name + " = int(pl.patch);\n";
-        if (v->builtin == BuiltinVar::PatchVerticesIn) e += "        g.bi_" + v->name + " = int(pl.cps);\n";
-    }
-    std::string vcopy = ro.vertexCopy;
-    e += "        g.mgl_init();\n        g." + esi.mainName + "();\n        tes::MV v;\n" + indentBy(vcopy, 8);
+    e += "    for (uint k = mgl_tid; k < nv; k += " + std::to_string(NT) + "u) {\n";
+    e += indentBy(tesRun("mgl_co[k]", "pl.patch", "pl.cps"), 8);
+    e += "        tes::MV v;\n" + indentBy(ro.vertexCopy, 8);
     e += "        mgl_mo.set_vertex(k, v);\n    }\n";
     e += "    for (uint k = mgl_tid; k < np * " + std::to_string(ipp) + "u; k += " + std::to_string(NT) + "u) mgl_mo.set_index(k, mgl_idx[k]);\n";
     e += "    for (uint k = mgl_tid; k < np; k += " + std::to_string(NT) + "u) {\n        tes::MP p;\n" + indentBy(ro.primCopy, 8) +
@@ -2955,11 +3195,90 @@ void Emitter::emitTessellation(std::string& o) {
     haveVsOutputs_ = true;
 }
 
+// TES output written to records (one per generated domain point of each unit) plus a primitive
+// list in GL order: mgl_tes_count sizes each patch (itemCounts = primitives, vertices, units),
+// the runtime computes prefix sums (itemOffsets = first primitive, first vertex) and the largest
+// unit count, then mgl_tes_gen runs one threadgroup per (patch, unit).
+void Emitter::emitTessEvalRecords(std::string& o) {
+    const int MAXV = 130, MAXP = 128, NT = 64;
+    std::string sPB = std::to_string(ts_.PB) + "u";
+    prepareStage(Stage::TessEval);
+    StageInfo& esi = si_[(int)Stage::TessEval];
+    emitBody(Stage::TessEval, o);
+    o += "}  // namespace tes\n\n";
+    tesRec_ = producerFields(Stage::TessEval);
+    tesRB_ = 16 * std::max<int>(1, (int)tesRec_.size());
+    std::string ipp = std::to_string(tesIpp_) + "u";
+    std::string e = "kernel void mgl_tes_count(constant MGLDrawInfo& D [[buffer(22)]], uint mgl_t [[thread_position_in_grid]]) {\n";
+    e += "    if (mgl_t >= D.itemCount) return;\n";
+    e += "    device const float* lv = (device const float*)(D.tcsPatchOut + mgl_t * " + sPB + ");\n";
+    e += "    mgl_tess T = " + ts_.setup + ";\n";
+    e += "    uint nv = 0u, np = 0u;\n    for (uint u = 0; u < T.units; u++) {\n        uint2 sz = mgl_tess_unit_size(T, u);\n"
+         "        nv += sz.x;\n        np += sz.y;\n    }\n";
+    e += "    D.itemCounts[mgl_t] = uint4(np, nv, T.units, 0u);\n}\n\n";
+    e += "kernel void mgl_tes_gen(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
+         "uint3 mgl_tg [[threadgroup_position_in_grid]], uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
+    if (esi.hasShared) e += "    threadgroup tes::MGLShared mgl_sh;\n    threadgroup tes::MGLShared* S = &mgl_sh;\n";
+    e += "    threadgroup float3 mgl_co[" + std::to_string(MAXV) + "];\n    threadgroup float mgl_tp[" + std::to_string(MAXV) + "];\n";
+    e += "    threadgroup ushort mgl_idx[" + std::to_string(MAXP * 3) + "];\n    threadgroup uint mgl_cnt[4];\n";
+    e += "    uint gp = mgl_tg.x, unit = mgl_tg.y;\n    if (gp >= D.itemCount) return;\n";
+    e += "    device const float* lv = (device const float*)(D.tcsPatchOut + gp * " + sPB + ");\n";
+    e += "    mgl_tess T = " + ts_.setup + ";\n    if (unit >= T.units) return;\n";
+    e += "    uint cps = " + ts_.cps + ", patch = gp % D.primitiveCount;\n";
+    e += indentBy(tesLoadControlPoints("gp", "cps", NT), 4);
+    e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch(), 8);
+    e += "        uint4 off = D.itemOffsets[gp];\n        uint vo = off.y, po = off.x;\n";
+    e += "        for (uint u = 0; u < unit; u++) {\n            uint2 sz = mgl_tess_unit_size(T, u);\n            vo += sz.x;\n            po += sz.y;\n        }\n";
+    e += "        uint nv, np;\n        mgl_tess_unit(T, unit, mgl_co, mgl_tp, mgl_idx, nv, np);\n";
+    e += "        mgl_cnt[0] = nv;\n        mgl_cnt[1] = np;\n        mgl_cnt[2] = vo;\n        mgl_cnt[3] = po;\n    }\n";
+    e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    uint nv = mgl_cnt[0], np = mgl_cnt[1], vo = mgl_cnt[2], po = mgl_cnt[3];\n";
+    e += "    for (uint k = mgl_tid; k < nv; k += " + std::to_string(NT) + "u) {\n";
+    e += indentBy(tesRun("mgl_co[k]", "patch", "cps"), 8);
+    e += "        device uint4* rec = (device uint4*)(D.tesVertexOut + (vo + k) * " + std::to_string(tesRB_) + "u);\n";
+    useStage(Stage::TessEval);
+    for (size_t i = 0; i < tesRec_.size(); i++) e += "        rec[" + std::to_string(i) + "] = mgl_pk(" + acc(tesRec_[i], "g.") + ");\n";
+    e += "    }\n";
+    e += "    for (uint k = mgl_tid; k < np * " + ipp + "; k += " + std::to_string(NT) + "u) D.tesPrimOut[po * " + ipp + " + k] = vo + uint(mgl_idx[k]);\n}\n\n";
+    entries_ += e;
+    EntryPoint c{"mgl_tes_count", Stage::TessEval, EntryPoint::Kernel};
+    c.threadsPerThreadgroup[0] = 64;
+    out_.entryPoints.push_back(c);
+    EntryPoint gk{"mgl_tes_gen", Stage::TessEval, EntryPoint::Kernel};
+    gk.threadsPerThreadgroup[0] = NT;
+    out_.entryPoints.push_back(gk);
+}
+
+// Transform feedback of TES output (no geometry shader): one thread per TES primitive.
+void Emitter::emitTesXfb(std::string& o) {
+    (void)o;
+    const MultiPassInfo& mp = RF(lastPreRaster()).multipass;
+    std::string ipp = std::to_string(tesIpp_) + "u";
+    std::string e = "kernel void mgl_tes_xfb(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
+                    "uint mgl_p [[thread_position_in_grid]]) {\n";
+    e += "    if (mgl_p >= D.tesPrimCount || mgl_p >= D.xfbPrimLimit[0]) return;\n";
+    e += "    for (uint k = 0; k < " + ipp + "; k++) {\n";
+    e += "        device const uint4* r = (device const uint4*)(D.tesVertexOut + D.tesPrimOut[mgl_p * " + ipp + " + k] * " + std::to_string(tesRB_) + "u);\n";
+    e += "        tes::G g = {};\n";
+    useStage(Stage::TessEval);
+    for (size_t i = 0; i < tesRec_.size(); i++) e += "        " + acc(tesRec_[i], "g.") + " = mgl_upk_" + mt(tesRec_[i].type) + "(r[" + std::to_string(i) + "]);\n";
+    e += "        uint vtx = D.xfbStreamBase[0] + mgl_p * " + ipp + " + k;\n";
+    std::vector<std::tuple<int, uint32_t, std::string>> words;
+    captureWords(Stage::TessEval, "g.", words);
+    for (auto& [b, off, w] : words)
+        e += "        mgl_st_uint(D.xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " + std::to_string(off) + "u, " + w + ");\n";
+    e += "    }\n}\n\n";
+    entries_ += e;
+    EntryPoint k{"mgl_tes_xfb", Stage::TessEval, EntryPoint::Kernel};
+    k.threadsPerThreadgroup[0] = 64;
+    out_.entryPoints.push_back(k);
+}
+
 // ---------------------------------------------------------------------------
 // Transform feedback capture: vertex shader as a kernel
 // ---------------------------------------------------------------------------
 void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tuple<int, uint32_t, std::string>>& out) {
-    const Reflection& R = P.refl;
+    const Reflection& R = P->refl;
     prepareStage(st);
     useStage(st);
     StageInfo& si = si_[(int)st];
@@ -3024,11 +3343,33 @@ void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tupl
     }
 }
 
+// Transform feedback capture of the vertex shader outputs in `g` for list position mgl_t
+// (instance-major) of the decomposed primitive list described by D. Primitives past
+// D.xfbPrimLimit[0] (the CPU-computed buffer capacity) are not recorded.
+std::string Emitter::xfbVertexStores() {
+    const MultiPassInfo& mp = RF(lastPreRaster()).multipass;
+    std::string e = "    uint vpp = max(D.verticesPerPrimitive, 1u);\n    if (mgl_t / vpp < D.xfbPrimLimit[0]) {\n";
+    e += "        uint vtx = D.xfbVertexBase + mgl_t;\n";
+    std::vector<std::tuple<int, uint32_t, std::string>> words;
+    captureWords(Stage::Vertex, "g.", words);
+    for (auto& [b, off, w] : words)
+        e += "        mgl_st_uint(D.xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " + std::to_string(off) + "u, " + w + ");\n";
+    e += "    }\n";
+    return e;
+}
+
 void Emitter::emitXfb(std::string& o) {
-    const Reflection& R = P.refl;
-    if (P.stages[(int)Stage::TessEval].main) fail("transform feedback with tessellation shaders is not supported yet");
-    if (P.stages[(int)Stage::Geometry].main) {
-        emitGeometryXfb(o);
+    const Reflection& R = RF(lastPreRaster());
+    bool gs = SC(Stage::Geometry).main != nullptr;
+    if (SC(Stage::TessEval).main) {
+        emitTessControlPass(o);
+        emitTessEvalRecords(o);
+        if (gs) emitGeometryXfb(o, true);
+        else emitTesXfb(o);
+        return;
+    }
+    if (gs) {
+        emitGeometryXfb(o, false);
         return;
     }
     emitBody(Stage::Vertex, o);
@@ -3039,18 +3380,7 @@ void Emitter::emitXfb(std::string& o) {
     e += "    uint mgl_total = D.count * D.instanceCount;\n    if (mgl_t >= mgl_total) return;\n";
     e += "    uint mgl_pos = mgl_t % D.count, mgl_ii = mgl_t / D.count;\n";
     e += indentBy(runVS("g", "D.indexBuffer[mgl_pos] + uint(D.baseVertex)", "mgl_ii"), 4);
-    e += "    uint vpp = max(D.verticesPerPrimitive, 1u);\n    uint first = D.xfbVertexBase + (mgl_t / vpp) * vpp;\n    bool fits = true;\n";
-    const MultiPassInfo& mp = R.multipass;
-    for (int b = 0; b < 4; b++)
-        if (mp.xfbBufferMask & (1u << b))
-            e += "    fits = fits && (first + vpp) * " + std::to_string(mp.xfbStride[b]) + "u <= D.xfbCapacity[" + std::to_string(b) + "];\n";
-    e += "    if (mgl_t % vpp == 0u) {\n        atomic_fetch_add_explicit(D.counters + 1, 1u, memory_order_relaxed);\n"
-         "        if (fits) atomic_fetch_add_explicit(D.counters, 1u, memory_order_relaxed);\n    }\n    if (!fits) return;\n";
-    e += "    uint vtx = D.xfbVertexBase + mgl_t;\n";
-    std::vector<std::tuple<int, uint32_t, std::string>> words;
-    captureWords(Stage::Vertex, "g.", words);
-    for (auto& [b, off, w] : words)
-        e += "    mgl_st_uint(D.xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " + std::to_string(off) + "u, " + w + ");\n";
+    e += xfbVertexStores();
     e += "}\n\n";
     entries_ += e;
     EntryPoint k{"mgl_xfb", Stage::Vertex, EntryPoint::Kernel};
@@ -3058,112 +3388,213 @@ void Emitter::emitXfb(std::string& o) {
     out_.entryPoints.push_back(k);
 }
 
-// Geometry shader output captured in GL order: one thread walks all input primitives
-// (GL requires primitives to be recorded in order); strips are decomposed into lists.
-void Emitter::emitGeometryXfb(std::string& o) {
-    const Reflection& R = P.refl;
-    const MultiPassInfo& mp = R.multipass;
+// Geometry shader output captured in GL order, in two passes over the work items (input
+// primitive x GS invocation): mgl_gs_count runs the GS counting the primitives it emits per
+// vertex stream (itemCounts), the runtime computes per-stream prefix sums (itemOffsets) and how
+// many primitives fit (xfbPrimLimit), and mgl_gs_write runs it again writing the captured
+// vertices of each completed primitive (strips decomposed into lists) at its final position.
+void Emitter::emitGeometryXfb(std::string& o, bool fromTes) {
+    const Reflection& R = RF(Stage::Geometry);
+    const MultiPassInfo& mp = RF(lastPreRaster()).multipass;
     int NV = primVerts(R.gsInputPrimitive);
+    if (!NV) fail("unsupported geometry shader input primitive");
     uint32_t outPrim = R.gsOutputPrimitive;
     int vpp = outPrim == gl::POINTS ? 1 : outPrim == gl::LINE_STRIP ? 2 : 3;
-    emitBody(Stage::Vertex, o);
-    auto vf = producerFields(Stage::Vertex);
-    o += "struct Rec { uint4 s[" + std::to_string(std::max<size_t>(1, vf.size())) + "]; };\n}  // namespace vs\n\n";
+    std::string VPP = std::to_string(vpp) + "u";
+    std::vector<Field> vf;
+    if (!fromTes) {
+        emitBody(Stage::Vertex, o);
+        vf = producerFields(Stage::Vertex);
+        o += "struct Rec { uint4 s[" + std::to_string(std::max<size_t>(1, vf.size())) + "]; };\n}  // namespace vs\n\n";
+    } else {
+        vf = tesRec_;
+    }
     prepareStage(Stage::Geometry);
     useStage(Stage::Geometry);
     std::vector<std::tuple<int, uint32_t, std::string>> words;
     captureWords(Stage::Geometry, "", words);
-    size_t W = std::max<size_t>(1, words.size());
-    std::string members = "    constant MGLDrawInfo* mgl_D;\n    uint mgl_vtx, mgl_strip, mgl_emitted;\n    int mgl_primIn;\n    uint mgl_ring[3][" +
-                          std::to_string(W) + "];\n";
-    std::string m = "    void mgl_EmitVertex() {\n        uint slot = mgl_emitted % 3u;\n";
-    for (size_t i = 0; i < words.size(); i++) m += "        mgl_ring[slot][" + std::to_string(i) + "] = " + std::get<2>(words[i]) + ";\n";
-    m += "        mgl_emitted++;\n        mgl_strip++;\n        if (mgl_strip < " + std::to_string(vpp) + "u) return;\n";
-    // GL order of the completed primitive
-    if (vpp == 1) m += "        uint order[1] = {slot};\n";
-    else if (vpp == 2) m += "        uint order[2] = {(mgl_emitted - 2u) % 3u, slot};\n";
-    else
-        m += "        uint a = (mgl_emitted - 3u) % 3u, b = (mgl_emitted - 2u) % 3u;\n"
-             "        if (((mgl_strip - 3u) & 1u) != 0u) { uint t = a; a = b; b = t; }\n        uint order[3] = {a, b, slot};\n";
-    m += "        bool fits = true;\n";
-    for (int b = 0; b < 4; b++)
-        if (mp.xfbBufferMask & (1u << b))
-            m += "        fits = fits && (mgl_vtx + " + std::to_string(vpp) + "u) * " + std::to_string(mp.xfbStride[b]) + "u <= mgl_D->xfbCapacity[" +
-                 std::to_string(b) + "];\n";
-    m += "        atomic_fetch_add_explicit(mgl_D->counters + 1, 1u, memory_order_relaxed);\n        if (!fits) return;\n"
-         "        atomic_fetch_add_explicit(mgl_D->counters, 1u, memory_order_relaxed);\n";
-    m += "        for (uint k = 0; k < " + std::to_string(vpp) + "u; k++, mgl_vtx++) {\n";
-    for (size_t i = 0; i < words.size(); i++) {
-        auto& [b, off, w] = words[i];
-        m += "            mgl_st_uint(mgl_D->xfbBuffer[" + std::to_string(b) + "], mgl_vtx * " + std::to_string(mp.xfbStride[b]) + "u + " +
-             std::to_string(off) + "u, mgl_ring[order[k]][" + std::to_string(i) + "]);\n";
+    // captured words per vertex stream
+    std::vector<size_t> sw[4];
+    for (size_t i = 0; i < words.size(); i++) sw[mp.xfbBufferStream[std::get<0>(words[i]) & 3] & 3].push_back(i);
+    std::string members = "    constant MGLDrawInfo* mgl_D;\n    uint mgl_mode, mgl_t;\n    uint mgl_cnt[4], mgl_strip[4], mgl_np[4];\n    uint4 mgl_off;\n"
+                          "    int mgl_primIn;\n";
+    // GL order of the vertices of the primitive completed by the last emitted vertex (strips decomposed)
+    auto orderCode = [](int vpp, const std::string& pad) -> std::string {
+        if (vpp == 1) return pad + "uint order[1] = {(e - 1u) % 3u};\n";
+        if (vpp == 2) return pad + "uint order[2] = {(e - 2u) % 3u, (e - 1u) % 3u};\n";
+        return pad + "uint a = (e - 3u) % 3u, b = (e - 2u) % 3u;\n" + pad + "if (((st - 3u) & 1u) != 0u) { uint t = a; a = b; b = t; }\n" + pad +
+               "uint order[3] = {a, b, (e - 1u) % 3u};\n";
+    };
+    // primitives one item can emit per stream (max_vertices bounds them)
+    const int maxPrimsRec = std::clamp(R.gsMaxVertices, 1, 256);
+    for (int s = 0; s < 4; s++)
+        if (!sw[s].empty()) members += "    uint mgl_ring" + std::to_string(s) + "[3][" + std::to_string(sw[s].size()) + "];\n";
+    std::string m = "    void mgl_EmitVertex(int s) {\n        if (s < 0 || s > 3) return;\n        uint su = uint(s);\n";
+    for (int s = 0; s < 4; s++) {
+        if (sw[s].empty()) continue;
+        std::string S = std::to_string(s);
+        m += "        if (su == " + S + "u && (mgl_mode != 0u || mgl_D->gsRecord != nullptr)) {\n            uint slot = mgl_cnt[" + S + "] % 3u;\n";
+        for (size_t i = 0; i < sw[s].size(); i++)
+            m += "            mgl_ring" + S + "[slot][" + std::to_string(i) + "] = " + std::get<2>(words[sw[s][i]]) + ";\n";
+        m += "        }\n";
     }
-    m += "        }\n    }\n    void mgl_EndPrimitive() { mgl_strip = 0u; }\n";
+    m += "        mgl_cnt[su]++;\n        mgl_strip[su]++;\n        if (mgl_strip[su] < " + VPP + ") return;\n";
+    // record layout per item: stream s area at recBase[s], local primitive p, vertex k, word i
+    uint32_t recBase[4], recWords = 0;
+    for (int s = 0; s < 4; s++) {
+        recBase[s] = recWords;
+        recWords += (uint32_t)(maxPrimsRec * vpp * sw[s].size());
+    }
+    m += "        uint pi = mgl_np[su]++;\n";
+    m += "        if (mgl_mode == 0u) {\n            if (mgl_D->gsRecord == nullptr) return;\n";
+    for (int s = 0; s < 4; s++) {
+        if (sw[s].empty()) continue;
+        std::string S = std::to_string(s);
+        m += "            if (su == " + S + "u && pi < " + std::to_string(maxPrimsRec) + "u) {\n";
+        m += "                uint e = mgl_cnt[" + S + "], st = mgl_strip[" + S + "];\n";
+        m += orderCode(vpp, "                ");
+        m += "                device uint* r = mgl_D->gsRecord + mgl_t * " + std::to_string(recWords) + "u + " + std::to_string(recBase[s]) +
+             "u + pi * " + std::to_string(vpp * sw[s].size()) + "u;\n";
+        m += "                for (uint k = 0; k < " + VPP + "; k++) {\n";
+        for (size_t i = 0; i < sw[s].size(); i++)
+            m += "                    r[k * " + std::to_string(sw[s].size()) + "u + " + std::to_string(i) + "u] = mgl_ring" + S + "[order[k]][" + std::to_string(i) + "];\n";
+        m += "                }\n            }\n";
+    }
+    m += "            return;\n        }\n        pi += mgl_off[su];\n"
+         "        if (pi >= mgl_D->xfbPrimLimit[su]) return;\n";
+    for (int s = 0; s < 4; s++) {
+        if (sw[s].empty()) continue;
+        std::string S = std::to_string(s);
+        m += "        if (su == " + S + "u) {\n            uint e = mgl_cnt[" + S + "], st = mgl_strip[" + S + "];\n";
+        m += orderCode(vpp, "            ");
+        m += "            for (uint k = 0; k < " + VPP + "; k++) {\n                uint vtx = mgl_D->xfbStreamBase[" + S + "] + pi * " + VPP + " + k;\n";
+        for (size_t i = 0; i < sw[s].size(); i++) {
+            auto& [b, off, w] = words[sw[s][i]];
+            (void)w;
+            m += "                mgl_st_uint(mgl_D->xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " +
+                 std::to_string(off) + "u, mgl_ring" + S + "[order[k]][" + std::to_string(i) + "]);\n";
+        }
+        m += "            }\n        }\n";
+    }
+    m += "    }\n    void mgl_EndPrimitive(int s) { if (s >= 0 && s < 4) mgl_strip[uint(s)] = 0u; }\n";
     emitBody(Stage::Geometry, o, "", members, m);
     o += "}  // namespace gs\n\n";
     StageInfo& gsi = si_[(int)Stage::Geometry];
-    std::map<std::string, size_t> slot;
-    for (size_t i = 0; i < vf.size(); i++) slot[vf[i].name] = i;
-    auto gin = arrayedFields(Stage::Geometry, Storage::In);
     std::string N = std::to_string(NV);
-    std::string e = "kernel void mgl_gs_xfb(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
-                    "uint mgl_t [[thread_position_in_grid]]) {\n    if (mgl_t != 0u) return;\n    uint mgl_vtx = D.xfbVertexBase;\n";
-    e += "    for (uint mgl_inst = 0; mgl_inst < D.instanceCount; mgl_inst++)\n    for (uint mgl_prim = 0; mgl_prim < D.primitiveCount; mgl_prim++)\n"
-         "    for (int mgl_invoc = 0; mgl_invoc < " + std::to_string(std::max(1, R.gsInvocations)) + "; mgl_invoc++) {\n";
-    e += "        vs::Rec mgl_vin[" + N + "];\n        for (uint mgl_j = 0; mgl_j < " + N + "u; mgl_j++) {\n";
-    e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_j] + uint(D.baseVertex)", "mgl_inst"), 12);
-    useStage(Stage::Vertex);
-    for (size_t i = 0; i < vf.size(); i++) e += "            mgl_vin[mgl_j].s[" + std::to_string(i) + "] = mgl_pk(" + acc(vf[i], "vg.") + ");\n";
-    e += "        }\n        gs::G g = {};\n        g.A = &A;\n        g.sys = &sys;\n        g.mgl_D = &D;\n        g.mgl_vtx = mgl_vtx;\n"
-         "        g.mgl_strip = 0u;\n        g.mgl_emitted = 0u;\n        g.mgl_primIn = int(mgl_prim);\n";
+    int INV = std::max(1, R.gsInvocations);
+    std::string e = "static inline void mgl_gs_xfb_run(uint mgl_mode, uint mgl_t, constant MGLArgs& A, constant MGLSys& sys, constant MGLDrawInfo& D) {\n";
+    e += "    uint mgl_invoc = mgl_t % " + std::to_string(INV) + "u, mgl_pi = mgl_t / " + std::to_string(INV) + "u;\n";
+    std::string loop;
+    if (!fromTes) {
+        e += "    uint mgl_prim = mgl_pi % D.primitiveCount, mgl_inst = mgl_pi / D.primitiveCount;\n";
+        e += "    vs::Rec mgl_vin[" + N + "];\n    for (uint mgl_j = 0; mgl_j < " + N + "u; mgl_j++) {\n";
+        e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_j] + uint(D.baseVertex)", "mgl_inst"), 8);
+        useStage(Stage::Vertex);
+        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_j].s[" + std::to_string(i) + "] = mgl_pk(" + acc(vf[i], "vg.") + ");\n";
+        e += "    }\n";
+        loop = "    for (uint j = 0; j < " + N + "u; j++) {\n" + indentBy(gsUnpack(vf, "mgl_vin[j].s[$I]", "g."), 8) + "    }\n";
+    } else {
+        e += "    uint mgl_prim = mgl_pi;\n";
+        loop = "    for (uint j = 0; j < " + std::to_string(std::min(NV, tesIpp_)) + "u; j++) {\n";
+        loop += "        device const uint4* r = (device const uint4*)(D.tesVertexOut + D.tesPrimOut[mgl_prim * " + std::to_string(tesIpp_) +
+                "u + j] * " + std::to_string(tesRB_) + "u);\n";
+        loop += indentBy(gsUnpack(vf, "r[$I]", "g."), 8) + "    }\n";
+    }
+    e += "    gs::G g = {};\n    g.A = " + argsOf(Stage::Geometry) + ";\n    g.sys = &sys;\n    g.mgl_D = &D;\n    g.mgl_mode = mgl_mode;\n    g.mgl_t = mgl_t;\n"
+         "    for (int k = 0; k < 4; k++) { g.mgl_cnt[k] = 0u; g.mgl_strip[k] = 0u; g.mgl_np[k] = 0u; }\n"
+         "    g.mgl_off = mgl_mode != 0u ? D.itemOffsets[mgl_t] : uint4(0u);\n    g.mgl_primIn = int(mgl_prim);\n";
+    e += loop;
     useStage(Stage::Geometry);
-    e += "        for (uint j = 0; j < " + N + "u; j++) {\n";
-    for (auto& f : gin) {
-        auto it = slot.find(f.name);
-        if (it == slot.end()) continue;
-        e += "            " + acc(f, "g.", "j") + " = mgl_upk_" + mt(f.type) + "(mgl_vin[j].s[" + std::to_string(it->second) + "]);\n";
-    }
-    e += "        }\n";
     for (auto* v : gsi.builtins) {
-        if (v->builtin == BuiltinVar::PrimitiveIDIn) e += "        g.bi_" + v->name + " = int(mgl_prim);\n";
-        if (v->builtin == BuiltinVar::InvocationID) e += "        g.bi_" + v->name + " = mgl_invoc;\n";
+        if (v->builtin == BuiltinVar::PrimitiveIDIn) e += "    g.bi_" + v->name + " = int(mgl_prim);\n";
+        if (v->builtin == BuiltinVar::InvocationID) e += "    g.bi_" + v->name + " = int(mgl_invoc);\n";
     }
-    e += "        g.mgl_init();\n        g." + gsi.mainName + "();\n        mgl_vtx = g.mgl_vtx;\n    }\n}\n\n";
+    e += "    g.mgl_init();\n    g." + gsi.mainName + "();\n";
+    e += "    if (mgl_mode == 0u) D.itemCounts[mgl_t] = uint4(g.mgl_np[0], g.mgl_np[1], g.mgl_np[2], g.mgl_np[3]);\n}\n\n";
+    // mgl_gs_copy: places the primitives recorded by mgl_gs_count (one GS execution in total, so
+    // side effects such as atomic counters happen exactly once per invocation)
+    {
+        e += "kernel void mgl_gs_copy(constant MGLDrawInfo& D [[buffer(22)]], uint mgl_t [[thread_position_in_grid]]) {\n"
+             "    if (mgl_t >= D.itemCount) return;\n    uint4 n = D.itemCounts[mgl_t], off = D.itemOffsets[mgl_t];\n";
+        for (int s = 0; s < 4; s++) {
+            if (sw[s].empty()) continue;
+            std::string S = std::to_string(s), WS = std::to_string(sw[s].size());
+            e += "    for (uint p = 0; p < min(n[" + S + "], " + std::to_string(maxPrimsRec) + "u); p++) {\n";
+            e += "        uint pi = off[" + S + "] + p;\n        if (pi >= D.xfbPrimLimit[" + S + "]) break;\n";
+            e += "        device const uint* r = D.gsRecord + mgl_t * " + std::to_string(recWords) + "u + " + std::to_string(recBase[s]) +
+                 "u + p * " + std::to_string(vpp * sw[s].size()) + "u;\n";
+            e += "        for (uint k = 0; k < " + VPP + "; k++) {\n            uint vtx = D.xfbStreamBase[" + S + "] + pi * " + VPP + " + k;\n";
+            for (size_t i = 0; i < sw[s].size(); i++) {
+                auto& [b, off, w] = words[sw[s][i]];
+                (void)w;
+                e += "            mgl_st_uint(D.xfbBuffer[" + std::to_string(b) + "], vtx * " + std::to_string(mp.xfbStride[b]) + "u + " +
+                     std::to_string(off) + "u, r[k * " + WS + "u + " + std::to_string(i) + "u]);\n";
+            }
+            e += "        }\n    }\n";
+        }
+        e += "}\n\n";
+        EntryPoint k{"mgl_gs_copy", Stage::Geometry, EntryPoint::Kernel};
+        k.threadsPerThreadgroup[0] = 64;
+        k.scratchWordsPerItem = recWords;
+        out_.entryPoints.push_back(k);
+    }
+    for (const char* nm : {"mgl_gs_count", "mgl_gs_write"}) {
+        e += std::string("kernel void ") + nm + "(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
+             "uint mgl_t [[thread_position_in_grid]]) {\n    if (mgl_t < D.itemCount) mgl_gs_xfb_run(" + (std::string(nm) == "mgl_gs_count" ? "0u" : "1u") +
+             ", mgl_t, A, sys, D);\n}\n\n";
+        EntryPoint k{nm, Stage::Geometry, EntryPoint::Kernel};
+        k.threadsPerThreadgroup[0] = 64;
+        out_.entryPoints.push_back(k);
+    }
     entries_ += e;
-    EntryPoint k{"mgl_gs_xfb", Stage::Geometry, EntryPoint::Kernel};
-    k.threadsPerThreadgroup[0] = 1;
-    out_.entryPoints.push_back(k);
 }
 
 MSLOutput Emitter::run() {
     try {
-        uint32_t m = P.stageMask;
+        uint32_t m = stageMask_;
         bool gs = m & (1u << (int)Stage::Geometry), tess = m & (1u << (int)Stage::TessEval);
         std::string o;
-        emitArgs(o);
+        if (!multi_) emitArgs(o);
         switch (K.kind) {
             case PipelineKind::Compute:
-                if (!P.stages[(int)Stage::Compute].main) fail("program has no compute shader");
+                if (!SC(Stage::Compute).main) fail("program has no compute shader");
                 emitCS(o);
                 break;
             case PipelineKind::Classic:
                 if (gs || tess) fail("geometry/tessellation programs need PipelineKind::MeshGeometry/Tessellation");
-                if (P.stages[(int)Stage::Vertex].main) emitClassicVS(o);
-                if (P.stages[(int)Stage::Fragment].main) emitFS(o, false);
+                if (SC(Stage::Vertex).main) emitClassicVS(o);
+                if (SC(Stage::Fragment).main) emitFS(o, false);
                 break;
             case PipelineKind::MeshGeometry:
                 if (!gs) fail("program has no geometry shader");
-                emitGeometry(o);
-                if (P.stages[(int)Stage::Fragment].main) emitFS(o, true);
+                if (tess) fail("tessellation programs need PipelineKind::Tessellation");
+                emitGeometry(o, false);
+                if (SC(Stage::Fragment).main) emitFS(o, true);
+                else emitNullFS();
                 break;
             case PipelineKind::Tessellation:
                 if (!tess) fail("program has no tessellation evaluation shader");
-                emitTessellation(o);
-                if (P.stages[(int)Stage::Fragment].main) emitFS(o, true);
+                emitTessControlPass(o);
+                if (gs) {
+                    emitTessEvalRecords(o);
+                    emitGeometry(o, true);
+                } else {
+                    emitTessEvalMesh(o);
+                }
+                if (SC(Stage::Fragment).main) emitFS(o, true);
+                else emitNullFS();
                 break;
             case PipelineKind::XfbCapture:
                 emitXfb(o);
                 break;
+        }
+        if (multi_) {
+            // one argument buffer per stage program; unused stages keep a placeholder
+            o += "struct MGLArgs {\n";
+            for (int i = 0; i < (int)Stage::Count; i++)
+                o += argsEmitted_[i] ? std::string("    constant ") + kStageNs[i] + "::MGLArgs* " + kStageNs[i] + ";\n"
+                                     : std::string("    ulong ") + kStageNs[i] + ";\n";
+            o += "};\n\n";
         }
         o += entries_;
         out_.source = buildMSLPrelude(o) + "\n" + o;
@@ -3177,13 +3608,13 @@ MSLOutput Emitter::run() {
 
 std::string Emitter::recordSizes(MultiPassInfo& mp) {
     try {
-        if (!P.stages[(int)Stage::TessEval].main) return "";
-        bool hasTCS = P.stages[(int)Stage::TessControl].main != nullptr;
+        if (!SC(Stage::TessEval).main) return "";
+        bool hasTCS = SC(Stage::TessControl).main != nullptr;
         size_t nv, np;
         if (hasTCS) {
             nv = arrayedFields(Stage::TessControl, Storage::Out).size();
             np = patchFields(Stage::TessControl, Storage::Out).size();
-            mp.tcsOutputVertices = (uint32_t)P.refl.tcsOutputVertices;
+            mp.tcsOutputVertices = (uint32_t)RF(Stage::TessControl).tcsOutputVertices;
         } else {
             nv = producerFields(Stage::Vertex).size();
             np = 0;
@@ -3191,6 +3622,7 @@ std::string Emitter::recordSizes(MultiPassInfo& mp) {
         }
         mp.tcsVertexOutBytes = (uint32_t)(16 * std::max<size_t>(1, nv));
         mp.tcsPatchOutBytes = (uint32_t)(32 + 16 * np);
+        mp.tesVertexOutBytes = (uint32_t)(16 * std::max<size_t>(1, producerFields(Stage::TessEval).size()));
     } catch (EmitError& e) {
         return e.msg;
     }
@@ -3208,6 +3640,31 @@ std::string fillMultipassRecords(const LinkedProgram& prog, MultiPassInfo& mp) {
 MSLOutput generateMSL(const LinkedProgram& program, const VariantKey& key) {
     Emitter e(program, key);
     return e.run();
+}
+
+}  // namespace glsl
+
+namespace glsl {
+
+MSLOutput generateMSL(const LinkedProgram* const stages[(int)Stage::Count], const VariantKey& key) {
+    Emitter e(stages, key);
+    return e.run();
+}
+
+MultiPassInfo multipassInfo(const LinkedProgram* const stages[(int)Stage::Count]) {
+    static const VariantKey key;
+    // transform feedback layout comes from the program of the last vertex-processing stage
+    MultiPassInfo mp;
+    for (Stage st : {Stage::Geometry, Stage::TessEval, Stage::Vertex}) {
+        const LinkedProgram* p = stages[(int)st];
+        if (p && (p->stageMask & (1u << (int)st))) {
+            mp = p->refl.multipass;
+            break;
+        }
+    }
+    Emitter e(stages, key);
+    e.recordSizes(mp);
+    return mp;
 }
 
 }  // namespace glsl

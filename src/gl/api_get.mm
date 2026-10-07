@@ -291,7 +291,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
 
     // --- bindings ---
     case GL_ARRAY_BUFFER_BINDING: v = I(nameOf(ctx->arrayBuffer.get())); return true;
-    case GL_ELEMENT_ARRAY_BUFFER_BINDING: v = I(ctx->vao ? nameOf(ctx->vao->elementBuffer.get()) : 0); return true;
+    case GL_ELEMENT_ARRAY_BUFFER_BINDING: v = I(nameOf(ctx->bufferBindingRef(GL_ELEMENT_ARRAY_BUFFER)->get())); return true;
     case GL_COPY_READ_BUFFER_BINDING: v = I(nameOf(ctx->copyReadBuffer.get())); return true;
     case GL_COPY_WRITE_BUFFER_BINDING: v = I(nameOf(ctx->copyWriteBuffer.get())); return true;
     case GL_PIXEL_PACK_BUFFER_BINDING: v = I(nameOf(ctx->pixelPackBuffer.get())); return true;
@@ -395,14 +395,15 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
 
     // --- fixed function ---
     case GL_VIEWPORT: {
+        if (idx >= kMaxViewports) return false;
         Value r; r.type = VT::Float; r.n = 4;
         for (int k = 0; k < 4; k++) r.d[k] = ctx->viewport[idx][k];
         v = r;
         if (index < 0) v.type = VT::Int;  // glGetIntegerv(GL_VIEWPORT) returns ints; float getters use float
         return true;
     }
-    case GL_SCISSOR_BOX: v = I4(ctx->scissor[idx][0], ctx->scissor[idx][1], ctx->scissor[idx][2], ctx->scissor[idx][3]); return true;
-    case GL_DEPTH_RANGE: { Value r; r.type = VT::Double; r.n = 2; r.d[0] = ctx->depthRange[idx][0]; r.d[1] = ctx->depthRange[idx][1]; v = r; return true; }
+    case GL_SCISSOR_BOX: if (idx >= kMaxViewports) return false; v = I4(ctx->scissor[idx][0], ctx->scissor[idx][1], ctx->scissor[idx][2], ctx->scissor[idx][3]); return true;
+    case GL_DEPTH_RANGE: { if (idx >= kMaxViewports) return false; Value r; r.type = VT::Double; r.n = 2; r.d[0] = ctx->depthRange[idx][0]; r.d[1] = ctx->depthRange[idx][1]; v = r; return true; }
     case GL_COLOR_CLEAR_VALUE: v = F4(ctx->clearColor); return true;
     case GL_DEPTH_CLEAR_VALUE: { Value r; r.type = VT::Double; r.d[0] = ctx->clearDepth; v = r; return true; }
     case GL_STENCIL_CLEAR_VALUE: v = I(ctx->clearStencil); return true;
@@ -537,7 +538,12 @@ template <typename T>
 static void getv(GLenum pname, int index, T* data) {
     MGL_CTX();
     Value v;
-    if (!getState(ctx, pname, index, v)) return ctx->setError(index >= 0 ? GL_INVALID_ENUM : GL_INVALID_ENUM, "glGet(0x%x)", pname);
+    if (!getState(ctx, pname, index, v)) {
+        // an indexed state whose index is out of range is INVALID_VALUE, an unknown name INVALID_ENUM
+        Value probe;
+        bool indexedName = index > 0 && getState(ctx, pname, 0, probe);
+        return ctx->setError(indexedName ? GL_INVALID_VALUE : GL_INVALID_ENUM, "glGet(0x%x, %d)", pname, index);
+    }
     if constexpr (std::is_integral_v<T> && !std::is_same_v<T, GLboolean>) {
         if (isNormalizedFloatState(pname) && (v.type == VT::Float || v.type == VT::Double)) {
             // GL 4.6 table 2.x: normalized fixed-point conversion
