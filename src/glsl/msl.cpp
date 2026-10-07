@@ -1641,7 +1641,7 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         if (!sh) args += std::string(", component::") + kSwz[compIdx];
         return finish(tex + (sh ? ".gather_compare(" : ".gather(") + args + ")");
     }
-    std::string options, offset;
+    std::string options, offset, shadowBias;
     bool fragment = stage_ == Stage::Fragment;
     std::string ct = (dim == Dim::D3 || dim == Dim::Cube) ? "float3" : "float2";
     std::string gradFn = dim == Dim::D3 ? "gradient3d" : dim == Dim::Cube ? "gradientcube" : "gradient2d";
@@ -1665,17 +1665,22 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         if (!fragment) options = "level(" + b + ")";  // implicit LOD is 0 outside fragment shaders
         else if (!sh) options = "bias(" + b + ")";
         else {
-            // sample_compare has no bias(): scale the implicit derivatives instead
+            // sample_compare has no bias(): with a nonzero bias, scale the implicit derivatives.
+            // The bias is uniform for the draw, so the branch is coherent and bias 0 (nearly every
+            // app) pays nothing.
             coord = bind(coord, ct, pre);
-            std::string sc = bind("exp2(" + b + ")", "float", pre);
-            options = gradFn + "(dfdx(" + coord + ") * " + sc + ", dfdy(" + coord + ") * " + sc + ")";
+            shadowBias = bind(b, "float", pre);
+            options = gradFn + "(dfdx(" + coord + ") * exp2(" + shadowBias + "), dfdy(" + coord + ") * exp2(" + shadowBias + "))";
         }
     }
     std::string args = smp + ", " + coord;
     if (!layer.empty()) args += ", " + layer;
     if (sh) args += ", " + ref;
+    std::string plainArgs = args + (offset.empty() ? "" : ", " + offset);
     if (!options.empty()) args += ", " + options;
     if (!offset.empty()) args += ", " + offset;
+    if (!shadowBias.empty())
+        return finish("(" + shadowBias + " == 0.0f ? " + tex + ".sample_compare(" + plainArgs + ") : " + tex + ".sample_compare(" + args + "))");
     return finish(tex + (sh ? ".sample_compare(" : ".sample(") + args + ")");
 }
 
