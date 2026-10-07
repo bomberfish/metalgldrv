@@ -39,7 +39,7 @@ static GLint xfbProp(GLuint p, GLenum iface, GLuint index, GLenum prop) {
 }
 
 TEST(xfb_qualifier_resources) {
-    const char* vs = R"(#version 430 core
+    const char* vs = R"(#version 440 core
 const uint type_size = 8;
 layout (xfb_buffer = 1, xfb_stride = 4 * type_size) out;
 layout (xfb_buffer = 0, xfb_offset = 1 * type_size) out vec2 b0_v1;
@@ -60,7 +60,7 @@ void main() { b0_v1 = vec2(1); b1_v1 = vec2(2); b0_v3 = vec2(3); b0_v0 = in_vs.x
 }
 
 TEST(xfb_api_skip_components_resources) {
-    const char* vs = R"(#version 430 core
+    const char* vs = R"(#version 440 core
 out vec2 b0_v1; out vec2 b1_v1; out vec2 b0_v3; out vec2 b0_v0;
 in vec4 in_vs;
 void main() { b0_v1 = vec2(1); b1_v1 = vec2(2); b0_v3 = vec2(3); b0_v0 = in_vs.xy; })";
@@ -78,7 +78,7 @@ void main() { b0_v1 = vec2(1); b1_v1 = vec2(2); b0_v3 = vec2(3); b0_v0 = in_vs.x
 }
 
 TEST(xfb_qualifier_resources_separable_gs) {
-    const char* gs = R"(#version 430 core
+    const char* gs = R"(#version 440 core
 layout(points) in;
 layout(triangle_strip, max_vertices = 4) out;
 layout (xfb_buffer = 1, xfb_stride = 16) out;
