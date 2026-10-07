@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> xfbNames;
     bool xfbSeparate = false;
     std::string mslOut;
-    bool validate = true, quiet = false, compileOnly = false, timing = false, xfb = false;
+    bool validate = true, quiet = false, compileOnly = false, timing = false, xfb = false, capture = false;
     auto now = [] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     double t0 = 0, tc = 0;
     for (int i = 1; i < argc; i++) {
@@ -134,6 +134,7 @@ int main(int argc, char** argv) {
                 p = q + 1;
             }
         } else if (a == "--xfb-separate") xfbSeparate = true;
+        else if (a == "--capture") capture = true;  // emit the XfbCapture variant even for GS/tess programs
         else { fprintf(stderr, "usage: glslc -S <stage> <file> ... [--msl out] [--no-validate] [-q]\n"); return 2; }
     }
     LinkInput li;
@@ -160,7 +161,8 @@ int main(int argc, char** argv) {
     if (!quiet) printReflection(lr.reflection);
     VariantKey key;
     uint32_t sm = lr.reflection.stageMask;
-    key.kind = (sm & (1u << (int)Stage::Compute)) ? PipelineKind::Compute
+    key.kind = capture ? PipelineKind::XfbCapture
+             : (sm & (1u << (int)Stage::Compute)) ? PipelineKind::Compute
              : (sm & (1u << (int)Stage::TessEval)) ? PipelineKind::Tessellation
              : (sm & (1u << (int)Stage::Geometry)) ? PipelineKind::MeshGeometry
              : xfb ? PipelineKind::XfbCapture : PipelineKind::Classic;

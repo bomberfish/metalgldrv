@@ -34,6 +34,22 @@ vertex QuadOut quad_vs(uint vid [[vertex_id]], constant QuadArgs& a [[buffer(0)]
     return o;
 }
 
+// Layered framebuffers: one instance per layer.
+struct QuadOutLayered {
+    float4 pos [[position]];
+    float2 uv;
+    uint layer [[render_target_array_index]];
+};
+vertex QuadOutLayered quad_vs_layered(uint vid [[vertex_id]], uint iid [[instance_id]], constant QuadArgs& a [[buffer(0)]]) {
+    float2 t = float2(float(vid & 1), float((vid >> 1) & 1));
+    QuadOutLayered o;
+    float2 p = mix(a.rect.xy, a.rect.zw, t);
+    o.pos = float4(p.x, -p.y, a.depth, 1.0);
+    o.uv = mix(a.srcRect.xy, a.srcRect.zw, t);
+    o.layer = iid;
+    return o;
+}
+
 struct PresentArgs {
     texture2d<float> src;
 };
@@ -311,12 +327,14 @@ void clearWithQuad(Context* ctx, const QuadClear& q) {
         }
     }
     uint8_t masks[kMaxDrawBuffers];
-    std::string key = "clear_" + sig + "_s" + std::to_string(p.samples);
+    // a layered framebuffer is cleared in every layer
+    bool layered = p.layers > 1;
+    std::string key = "clear_" + sig + "_s" + std::to_string(p.samples) + (layered ? "_L" : "");
     for (int i = 0; i < kMaxDrawBuffers; i++) {
         masks[i] = (q.drawBufferMask & (1u << i)) ? q.colorWriteMask[i] : 0;
         key += "_" + std::to_string(colors[i]) + ":" + std::to_string(masks[i]);
     }
-    id<MTLRenderPipelineState> pso = internalPipeline(key, lib, @"quad_vs", @"clear_fs", colors, masks, p.samples);
+    id<MTLRenderPipelineState> pso = internalPipeline(key, lib, layered ? @"quad_vs_layered" : @"quad_vs", @"clear_fs", colors, masks, p.samples);
     if (!pso) return;
     [e setRenderPipelineState:pso];
     ctx->enc.pipeline = pso;
@@ -330,6 +348,7 @@ void clearWithQuad(Context* ctx, const QuadClear& q) {
     MTLViewport vp = {0, 0, (double)p.width, (double)p.height, 0, 1};
     [e setViewport:vp];
     ctx->enc.numViewports = 0;
+    ctx->enc.numScissors = 0;
     MTLScissorRect sc = q.scissored ? q.scissor : MTLScissorRect{0, 0, (NSUInteger)p.width, (NSUInteger)p.height};
     [e setScissorRect:sc];
     [e setCullMode:MTLCullModeNone];
@@ -349,7 +368,7 @@ void clearWithQuad(Context* ctx, const QuadClear& q) {
     }
     [ctx->renderArgTable setAddress:qa.gpu atIndex:0];
     [ctx->renderArgTable setAddress:va.gpu atIndex:1];
-    [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:layered ? p.layers : 1];
 }
 
 void resolveSample0(Context* ctx, id<MTLTexture> src, id<MTLTexture> dst, bool isSigned) {

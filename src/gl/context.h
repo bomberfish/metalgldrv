@@ -281,6 +281,13 @@ public:
     Framebuffer* passFb_ = nullptr;  // framebuffer the open pass was started for (stats only)
     bool passDirty = true;           // framebuffer binding/attachments changed
     PendingClear pendingClear;       // clears not yet applied (folded into next pass load action)
+    // Non-layered image bindings of a 3D texture slice go through a 2D copy (Metal has no 2D
+    // views of 3D textures); writable ones are copied back after the draw/dispatch.
+    struct ImageSliceWriteback {
+        id<MTLTexture> tmp, dst;
+        NSUInteger level, z;
+    };
+    std::vector<ImageSliceWriteback> imageWritebacks;
     uint64_t drawFbVersionSeen = 0;
     id<MTL4RenderCommandEncoder> renderEnc = nil;
     id<MTL4ComputeCommandEncoder> computeEnc = nil;
@@ -289,7 +296,7 @@ public:
         id pipeline = nil;
         id depthStencil = nil;
         MTLViewport vp[kMaxViewports];
-        int numViewports = 0;
+        int numViewports = 0, numScissors = 0;
         MTLScissorRect sc[kMaxViewports];
         int cull = -1, winding = -1, fill = -1, depthClip = -1;
         float depthBias[3] = {NAN, NAN, NAN};
@@ -342,8 +349,11 @@ id<MTLTexture> attachmentTexture(Context* ctx, const Attachment& a, const Format
 void markTextureWrite(Context* ctx, Texture* t);
 
 // Common entry-point prologue.
-#define MGL_CTX_RET(r)                     \
-    ::mgl::Context* ctx = ::mgl::currentContext(); \
+// The entry point's name is remembered for GL error logging (METALGLDRV_LOG=3) only.
+extern thread_local const char* t_apiName;
+#define MGL_CTX_RET(r)                                                         \
+    ::mgl::Context* ctx = ::mgl::currentContext();                         \
+    if (::mgl::g_logLevel >= ::mgl::LOG_DEBUG) ::mgl::t_apiName = __func__; \
     if (!ctx) return r
 #define MGL_CTX() MGL_CTX_RET()
 

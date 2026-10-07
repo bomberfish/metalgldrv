@@ -191,7 +191,13 @@ void Linker::collectStage(Stage s) {
     }
     // stage layouts merged across objects
     for (auto& sh : sc.shaders) {
-        auto merge = [](Layout& d, const Layout& l) {
+        auto merge = [&](Layout& d, const Layout& l) {
+            // GLSL 4.60 4.4: all declarations of a layout across a stage's shaders must agree
+            if (l.maxVertices >= 0 && d.maxVertices >= 0 && l.maxVertices != d.maxVertices) error("conflicting max_vertices declarations");
+            if (l.vertices >= 0 && d.vertices >= 0 && l.vertices != d.vertices) error("conflicting output patch vertex counts");
+            if (l.invocations >= 0 && d.invocations >= 0 && l.invocations != d.invocations) error("conflicting invocations declarations");
+            if (l.primitive != Layout::kNoPrimitive && d.primitive != Layout::kNoPrimitive && l.primitive != d.primitive)
+                error("conflicting primitive type declarations");
             for (int i = 0; i < 3; i++) if (l.localSize[i] >= 0) d.localSize[i] = l.localSize[i];
             if (l.maxVertices >= 0) d.maxVertices = l.maxVertices;
             if (l.invocations >= 0) d.invocations = l.invocations;
@@ -202,6 +208,15 @@ void Linker::collectStage(Stage s) {
             if (l.pointMode) d.pointMode = true;
             if (l.earlyFragmentTests) d.earlyFragmentTests = true;
         };
+        const Layout& l = sh->inLayout;
+        bool has = l.localSize[0] >= 0 || l.localSize[1] >= 0 || l.localSize[2] >= 0;
+        bool had = sc.inLayout.localSize[0] >= 0 || sc.inLayout.localSize[1] >= 0 || sc.inLayout.localSize[2] >= 0;
+        if (s == Stage::Compute && has && had)
+            for (int i = 0; i < 3; i++)
+                if (std::max(1, l.localSize[i]) != std::max(1, sc.inLayout.localSize[i])) {
+                    error("compute shaders declare conflicting local sizes");
+                    break;
+                }
         merge(sc.inLayout, sh->inLayout);
         merge(sc.outLayout, sh->outLayout);
     }
@@ -541,11 +556,21 @@ void Linker::assignUniforms() {
                 else if (blockVars[key].v->anonBlock != v->anonBlock)
                     // GLSL 4.60 §4.3.9: matched blocks must all have an instance name or all lack one
                     error("block '" + v->block->name + "' has an instance name in one stage but not in another");
+                else if (blockVars[key].v->block != v->block) {
+                    // Matched blocks need the same members: names, types and order (GLSL 4.60 §4.3.9).
+                    const auto& m0 = blockVars[key].v->block->members;
+                    const auto& m1 = v->block->members;
+                    bool same = m0.size() == m1.size();
+                    for (size_t i = 0; same && i < m0.size(); i++)
+                        same = m0[i].name == m1[i].name && m0[i].type.str() == m1[i].type.str() &&
+                               m0[i].type.dims == m1[i].type.dims;
+                    if (!same) error("block '" + v->block->name + "' is declared with different members in different stages");
+                }
                 blockVars[key].mask |= 1u << s;
                 continue;
             }
             if (v->q.storage != Storage::Uniform) continue;
-            if (v->builtin == BuiltinVar::DepthRange) continue;  // fed from MGLSys
+            if (v->builtin == BuiltinVar::DepthRange || v->builtin == BuiltinVar::NumSamples) continue;  // system values
             if (v->type.base == BT::Subroutine) continue;         // subroutine uniforms have their own interface
             bool opq = v->type.containsOpaque();
             bool aggregate = v->type.stripArrays().base == BT::Struct;
@@ -558,6 +583,8 @@ void Linker::assignUniforms() {
                     Entry& e = vec[it->second];
                     if (e.v->type != v->type && e.v->type.str() != v->type.str())
                         error("uniform '" + v->name + "' declared with different types in different stages");
+                    else if (v->type.stripArrays().base == BT::Image && e.v->q.layout.format != v->q.layout.format)
+                        error("image uniform '" + v->name + "' declared with different format qualifiers in different stages");
                     e.mask |= 1u << s;
                 }
             };
@@ -674,6 +701,7 @@ void Linker::assignUniforms() {
     // --- opaque uniforms --------------------------------------------------------
     std::map<int, int> acbByBinding;
     std::map<int, uint32_t> acNextOffset;
+    std::map<int, std::vector<std::pair<uint32_t, uint32_t>>> acRanges;  // binding -> [offset, end) of each counter
     // expand opaque leaves (struct members / arrays of structs) into individual uniforms named by their path
     struct OpaqueLeaf { const Variable* v; std::string path; Type type; uint32_t mask; bool explicitLoc; };
     std::vector<OpaqueLeaf> leaves;
@@ -706,7 +734,9 @@ void Linker::assignUniforms() {
         u.arraySize = lf.type.isArray() ? lf.type.dims[0] : 1;
         u.stageMask = lf.mask;
         u.binding = lf.explicitLoc ? std::max(0, v->q.layout.binding) : 0;
-        if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location;
+        // Atomic counters have no uniform location (GL 4.6 §7.6.1).
+        if (bt.base == BT::AtomicUint) u.location = -1;
+        else if (lf.explicitLoc && v->q.layout.location >= 0) u.location = v->q.layout.location;
         else {
             int loc = location;
             for (;;) {
@@ -718,7 +748,8 @@ void Linker::assignUniforms() {
             u.location = loc;
             location = loc + n;
         }
-        for (int i = 0; i < n; i++) usedLocs.insert(u.location + i);
+        if (u.location >= 0)
+            for (int i = 0; i < n; i++) usedLocs.insert(u.location + i);
         int uidx = (int)refl.uniforms.size();
         ob.uniformIndex = uidx;
         if (bt.base == BT::Sampler) {
@@ -741,6 +772,13 @@ void Linker::assignUniforms() {
             int binding = u.binding;
             uint32_t aoff = v->q.layout.offset >= 0 ? (uint32_t)v->q.layout.offset : acNextOffset[binding];
             acNextOffset[binding] = aoff + 4 * n;
+            // Distinct counters may not share storage (GLSL 4.60 §4.4.6.3).
+            for (auto [lo, hi] : acRanges[binding])
+                if (aoff < hi && lo < aoff + 4 * n) {
+                    error("atomic counter '" + lf.path + "' overlaps another counter at binding " + std::to_string(binding));
+                    break;
+                }
+            acRanges[binding].push_back({aoff, aoff + 4 * n});
             if (!acbByBinding.count(binding)) {
                 acbByBinding[binding] = (int)refl.atomicCounterBuffers.size();
                 AtomicCounterBuffer acb;
@@ -763,6 +801,32 @@ void Linker::assignUniforms() {
         }
         refl.uniforms.push_back(u);
         prog_->opaque[lf.path] = ob;
+    }
+    // Image uniform limits per stage and combined (GL 4.6 §7.6.1 / table 23.62).
+    {
+        enum : int {
+#define X(name, glenum, value) k_##name = value,
+#include "glsl/limits.def"
+#undef X
+        };
+        static const int stageMax[(int)Stage::Count] = {k_gl_MaxVertexImageUniforms, k_gl_MaxTessControlImageUniforms,
+                                                        k_gl_MaxTessEvaluationImageUniforms, k_gl_MaxGeometryImageUniforms,
+                                                        k_gl_MaxFragmentImageUniforms, k_gl_MaxComputeImageUniforms};
+        static const char* stageName[(int)Stage::Count] = {"vertex", "tessellation control", "tessellation evaluation",
+                                                           "geometry", "fragment", "compute"};
+        int perStage[(int)Stage::Count] = {}, combined = 0;
+        for (auto& lf : leaves) {
+            if (lf.type.stripArrays().base != BT::Image) continue;
+            int n = std::max(1, lf.type.totalArrayElements());
+            for (int s = 0; s < (int)Stage::Count; s++)
+                if (lf.mask & (1u << s)) perStage[s] += n, combined += n;
+        }
+        for (int s = 0; s < (int)Stage::Count; s++)
+            if (perStage[s] > stageMax[s])
+                error(std::string("too many image uniforms in the ") + stageName[s] + " shader (" + std::to_string(perStage[s]) + " > " +
+                      std::to_string(stageMax[s]) + ")");
+        if (combined > k_gl_MaxCombinedImageUniforms)
+            error("too many image uniforms in the program (" + std::to_string(combined) + " > " + std::to_string(k_gl_MaxCombinedImageUniforms) + ")");
     }
     // subroutines (per stage)
     for (int s = 0; s < (int)Stage::Count; s++) {
@@ -840,6 +904,35 @@ void Linker::assignUniforms() {
 }
 
 void Linker::checkVaryings() {
+    // Interfaces between consecutive pre-rasterization stages (GL 4.6 7.4.1): matching
+    // variables must have matching types (per-vertex arrays compared by element).
+    {
+        std::vector<Stage> chain;
+        for (Stage s : {Stage::Vertex, Stage::TessControl, Stage::TessEval, Stage::Geometry})
+            if (prog_->stages[(int)s].main) chain.push_back(s);
+        auto arrayedOut = [](Stage s, const Variable* v) { return s == Stage::TessControl && !v->q.patch; };
+        auto arrayedIn = [](Stage s, const Variable* v) { return s != Stage::Vertex && s != Stage::Fragment && !v->q.patch; };
+        for (size_t i = 0; i + 1 < chain.size(); i++) {
+            Stage ps = chain[i], cs = chain[i + 1];
+            std::map<std::string, const Variable*> outs;
+            for (auto* v : prog_->stages[(int)ps].globals)
+                if (v->q.storage == Storage::Out && v->builtin == BuiltinVar::None) outs[varyingKey(v, ps)] = v;
+            for (auto* v : prog_->stages[(int)cs].globals) {
+                if (v->q.storage != Storage::In || v->builtin != BuiltinVar::None) continue;
+                auto it = outs.find(varyingKey(v, cs));
+                if (it == outs.end()) continue;
+                Type a = it->second->type, b = v->type;
+                if (arrayedOut(ps, it->second) && a.isArray()) a = a.elem();
+                if (arrayedIn(cs, v) && b.isArray()) b = b.elem();
+                if (it->second->q.patch != v->q.patch) {
+                    error("per-patch qualifier mismatch for varying '" + v->name + "'");
+                    continue;
+                }
+                if (a.str() != b.str() && !(a.base == BT::Struct && b.base == BT::Struct && a.sdef->name == b.sdef->name))
+                    error("type mismatch for varying '" + v->name + "' ('" + a.str() + "' vs '" + b.str() + "')");
+            }
+        }
+    }
     // Find the last pre-rasterization stage and verify fragment inputs.
     Stage pre = Stage::Count;
     for (Stage s : {Stage::Geometry, Stage::TessEval, Stage::Vertex})
@@ -928,6 +1021,7 @@ void Linker::stageMetadata() {
             if (v->q.layout.xfbStride > 0 && vb < 4) explicitStride[vb] = v->q.layout.xfbStride;
             auto addQ = [&](const std::string& name, const Type& t, int buffer, int offset) {
                 if (buffer < 0 || buffer > 3) { error("xfb_buffer out of range"); return; }
+                if (pre == Stage::Geometry) mp.xfbBufferStream[buffer] = (uint32_t)std::max(0, v->q.layout.stream);
                 XfbVarying x;
                 x.name = name;
                 x.type = glTypeEnum(t);
@@ -966,7 +1060,12 @@ void Linker::stageMetadata() {
                     mp.xfbStride[buffer] = std::max<uint32_t>(mp.xfbStride[buffer], (uint32_t)offset);
                 }
             };
+            std::set<std::string> seenXfb;
             for (auto& name : in_.xfbVaryings) {
+                if (name != "gl_NextBuffer" && name.compare(0, 17, "gl_SkipComponents") != 0 && !seenXfb.insert(name).second) {
+                    error("transform feedback varying '" + name + "' specified more than once");
+                    continue;
+                }
                 if (name == "gl_NextBuffer") {
                     closeBuffer();
                     buffer++;
@@ -988,9 +1087,11 @@ void Linker::stageMetadata() {
                 }
                 Type t;
                 bool found = false;
+                int foundStream = 0;
                 for (auto& sh : ps.shaders)
                     for (auto& v : sh->vars) {
                         if (found || !v.global || v.q.storage != Storage::Out) continue;
+                        foundStream = v.q.layout.stream;
                         if (member.empty() && v.name == base && !v.anonBlock) { t = v.type; found = true; }
                         else if (member.empty() && v.anonBlock && v.block->findMember(base) >= 0) {
                             t = v.block->members[v.block->findMember(base)].type;
@@ -1001,6 +1102,7 @@ void Linker::stageMetadata() {
                         }
                     }
                 if (!found) { error("transform feedback varying '" + name + "' is not an output of the last vertex stage"); continue; }
+                if (pre == Stage::Geometry) mp.xfbBufferStream[buffer] = (uint32_t)std::max(0, foundStream);
                 if (elem >= 0) {
                     if (!t.isArray() || elem >= t.dims[0]) { error("transform feedback varying '" + name + "' index out of range"); continue; }
                     t = t.elem();
@@ -1015,6 +1117,9 @@ void Linker::stageMetadata() {
                 x.offset = offset;
                 r.xfbVaryings.push_back(x);
                 offset += compSize(t);
+                // GL 4.6 11.1.2.1 limits (MAX_TRANSFORM_FEEDBACK_INTERLEAVED/SEPARATE_COMPONENTS)
+                if (in_.xfbInterleaved && offset / 4 > 128) error("too many transform feedback components in buffer " + std::to_string(buffer));
+                if (!in_.xfbInterleaved && compSize(t) / 4 > 64) error("transform feedback varying '" + name + "' has too many components");
                 if (!in_.xfbInterleaved) {
                     closeBuffer();
                     buffer++;
@@ -1059,7 +1164,8 @@ LinkResult Linker::run() {
     if (!prog_->stageMask) error("no shaders attached");
     if ((prog_->stageMask & (1u << (int)Stage::Compute)) && (prog_->stageMask & ~(1u << (int)Stage::Compute)))
         error("a compute shader cannot be linked with other shader stages");
-    if ((prog_->stageMask & (1u << (int)Stage::TessEval)) == 0 && (prog_->stageMask & (1u << (int)Stage::TessControl)))
+    // GL 4.6 7.3: only non-separable programs need a TES alongside a TCS.
+    if (!in_.separable && (prog_->stageMask & (1u << (int)Stage::TessEval)) == 0 && (prog_->stageMask & (1u << (int)Stage::TessControl)))
         error("tessellation control shader requires a tessellation evaluation shader");
     if (!in_.separable && (prog_->stageMask & ~(1u << (int)Stage::Compute)) && !(prog_->stageMask & (1u << (int)Stage::Vertex)))
         error("program has no vertex shader");
