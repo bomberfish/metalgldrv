@@ -12,7 +12,7 @@ namespace mgl {
 
 enum {
     kMaxTextureUnits = 96,      // combined units exposed (GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS)
-    kMaxImageUnits = 8,
+    kMaxImageUnits = 16,
     kMaxUniformBufferBindings = 84,
     kMaxSSBOBindings = 16,
     kMaxAtomicCounterBindings = 8,
