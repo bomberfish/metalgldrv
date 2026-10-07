@@ -1194,6 +1194,22 @@ void Linker::stageMetadata() {
                 addQ(v->name, v->type, vb, v->q.layout.xfbOffset);
             }
         }
+        // builtin outputs captured through a gl_PerVertex redeclaration with xfb_offset
+        for (auto* v : ps.used) {
+            if (v->builtin == BuiltinVar::None || v->q.storage != Storage::Out || v->q.layout.xfbOffset < 0) continue;
+            int vb = v->q.layout.xfbBuffer >= 0 ? v->q.layout.xfbBuffer : stageBuffer;
+            if (v->q.layout.xfbStride > 0 && vb < 4) explicitStride[vb] = v->q.layout.xfbStride;
+            if (vb < 0 || vb > 3) { error("xfb_buffer out of range"); continue; }
+            XfbVarying x;
+            x.name = v->name;
+            x.type = glTypeEnum(v->type);
+            x.arraySize = v->type.isArray() ? v->type.dims[0] : 1;
+            x.buffer = vb;
+            x.offset = v->q.layout.xfbOffset;
+            r.xfbVaryings.push_back(x);
+            ends[vb] = std::max<uint32_t>(ends[vb], x.offset + compSize(v->type));
+            qualified = true;
+        }
         if (qualified) {
             for (int b = 0; b < 4; b++) {
                 if (!ends[b] && explicitStride[b] < 0) continue;

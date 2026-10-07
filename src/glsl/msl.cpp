@@ -1698,7 +1698,8 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     uint8_t imgMem = imgRoot->kind == EK::Var ? imgRoot->var->q.memory : 0;
     bool rw = !(imgMem & (MemReadOnly | MemWriteOnly));
     if (n == "imageStore") {
-        if (T.ms) fail("imageStore to multisample images is not supported");
+        // Metal cannot write multisample textures: the store is dropped (the program still links).
+        if (T.ms) return finish("((void)(" + ex(A[ai]) + "))");
         std::string w = tex + ".write(" + ex(A[ai]) + ", " + loc + ")";
         if (rw) w = "(" + w + ", " + tex + ".fence())";
         return finish(w);
