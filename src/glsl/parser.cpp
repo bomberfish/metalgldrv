@@ -1380,6 +1380,9 @@ bool Parser::redeclareBuiltin(const Qualifiers& q, const Type& t, const std::str
     auto it = scopes_[0].find(name);
     if (it == scopes_[0].end() || !it->second.var) return false;
     Variable* v = it->second.var;
+    // only the built-ins the spec lists as redeclarable (gl_FragCoord, gl_FragDepth, clip/cull distances,
+    // gl_TexCoord, ...); the fragment outputs gl_FragColor/gl_FragData are not
+    if (name == "gl_FragColor" || name == "gl_FragData") fail("'" + name + "' : cannot redeclare this built-in variable");
     if (q.invariant) v->q.invariant = true;
     if (q.precise) v->q.precise = true;
     if (q.hasLayout) {
@@ -1464,6 +1467,7 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             checkBinding(t, q.layout.binding, name);
         }
         if (t.stripArrays().base == BT::AtomicUint && global && !preamble_) {
+            if (q.layout.location >= 0) fail("'" + name + "' : the location layout qualifier is not allowed on atomic counters");
             // atomic counter offsets are assigned in declaration order per binding
             if (q.layout.binding < 0) fail("'" + name + "' : atomic counters require a binding layout qualifier");
             int b = q.layout.binding;
@@ -1555,6 +1559,7 @@ std::vector<Variable*> Parser::parseParamList() {
         for (;;) {
             Qualifiers pq;
             parseQualifiers(pq);
+            if (pq.hasLayout) fail("layout qualifiers are not allowed on function parameters");
             if (pq.storage == Storage::Buffer || pq.storage == Storage::Uniform || pq.storage == Storage::Shared)
                 fail("invalid storage qualifier on a function parameter");
             if (pq.storage == Storage::Temp) pq.storage = Storage::In;

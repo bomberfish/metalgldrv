@@ -46,7 +46,7 @@ enum : int {
 };
 }  // namespace limits_detail
 constexpr int kMaxCombinedTextureImageUnits = limits_detail::gl_MaxCombinedTextureImageUnits_v;
-constexpr int kMaxImageUnits = limits_detail::gl_MaxImageUnits_v;
+constexpr int kMaxImageUnits = limits_detail::gl_MaxImageUnits_v;  // must match mgl::kMaxImageUnits (static_assert in context.mm)
 constexpr int kMaxUniformBufferBindings = 84;
 constexpr int kMaxShaderStorageBufferBindings = 16;
 constexpr int kMaxAtomicCounterBufferBindings = limits_detail::gl_MaxAtomicCounterBindings_v;
