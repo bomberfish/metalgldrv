@@ -202,7 +202,10 @@ static void texImage(Context* ctx, GLenum target, GLint level, GLint internalfor
     if (!f) return ctx->setError(GL_INVALID_VALUE, "unsupported internal format 0x%x", internalformat);
     if (GLenum e = texImageFormatError(f, format, type, target))
         return ctx->setError(e, "format 0x%x/type 0x%x incompatible with internal format 0x%x", format, type, internalformat);
-    if ((target == GL_TEXTURE_3D || target == GL_PROXY_TEXTURE_3D) && !compressedSupports3D(f)) {
+    // Compressed formats have no 1D images (4x4 blocks), and only some support 3D.
+    bool noCompressed = (dims == 1 && f->comp == Comp::Compressed) ||
+                        ((target == GL_TEXTURE_3D || target == GL_PROXY_TEXTURE_3D) && !compressedSupports3D(f));
+    if (noCompressed) {
         // A generic compressed format may resolve to an uncompressed one; do so where the
         // chosen compressed format can't be used.
         GLenum generic = 0;
@@ -217,8 +220,8 @@ static void texImage(Context* ctx, GLenum target, GLint level, GLint internalfor
         }
         if (generic) f = resolveInternalFormat(generic, format, type);
     }
-    if ((target == GL_TEXTURE_3D || target == GL_PROXY_TEXTURE_3D) && !compressedSupports3D(f))
-        return ctx->setError(GL_INVALID_OPERATION, "compressed format 0x%x can't be used for 3D textures", f->internalFormat);
+    if ((dims == 1 && f->comp == Comp::Compressed) || ((target == GL_TEXTURE_3D || target == GL_PROXY_TEXTURE_3D) && !compressedSupports3D(f)))
+        return ctx->setError(GL_INVALID_OPERATION, "compressed format 0x%x can't be used for this target", f->internalFormat);
     if (f->comp == Comp::Compressed && (pixels || ctx->pixelUnpackBuffer) && !cpuCompressible(f)) {
         // No CPU encoder for this format (ASTC): store the image uncompressed.
         f = formatInfo(f->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8);
@@ -424,7 +427,22 @@ API void APIENTRY glCompressedTexImage3D(GLenum target, GLint level, GLenum inte
 }
 
 static void compressedSubImage(Context* ctx, Texture* t, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h,
-                               GLsizei d, GLenum format, GLsizei imageSize, const void* data) {
+                               GLsizei d, GLenum format, GLsizei imageSize, const void* data, int dims = 0) {
+    switch (format) {
+    case GL_COMPRESSED_RED: case GL_COMPRESSED_RG: case GL_COMPRESSED_RGB: case GL_COMPRESSED_RGBA: case GL_COMPRESSED_SRGB:
+    case GL_COMPRESSED_SRGB_ALPHA:
+        return ctx->setError(GL_INVALID_ENUM, "generic compressed format");
+    default: break;
+    }
+    if (dims) {  // DSA: the texture's target must suit the entry point
+        GLenum tt = t->target;
+        bool ok = dims == 1   ? tt == GL_TEXTURE_1D
+                  : dims == 2 ? (tt == GL_TEXTURE_2D || tt == GL_TEXTURE_1D_ARRAY)
+                              : (tt == GL_TEXTURE_2D_ARRAY || tt == GL_TEXTURE_CUBE_MAP_ARRAY || tt == GL_TEXTURE_3D || tt == GL_TEXTURE_CUBE_MAP);
+        if (!ok) return ctx->setError(GL_INVALID_OPERATION, "compressed sub-image: wrong texture target 0x%x", tt);
+    }
+    if (Buffer* pbo = ctx->pixelUnpackBuffer.get())
+        if (pbo->mapped && !(pbo->mapAccess & GL_MAP_PERSISTENT_BIT)) return ctx->setError(GL_INVALID_OPERATION, "unpack buffer is mapped");
     int face = faceIndex(target);
     if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE);
     const TexImageLevel& L = t->levels[face][level];
@@ -459,18 +477,25 @@ API void APIENTRY glCompressedTexSubImage1D(GLenum target, GLint level, GLint xo
     ctx->setError(GL_INVALID_OPERATION);
 }
 
+API void APIENTRY glCompressedTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize,
+                                                const void* data) {
+    MGL_CTX();
+    Texture* t = namedTex(ctx, texture);
+    if (t) compressedSubImage(ctx, t, t->target, level, xoffset, 0, 0, width, 1, 1, format, imageSize, data, 1);
+}
+
 API void APIENTRY glCompressedTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height,
                                                 GLenum format, GLsizei imageSize, const void* data) {
     MGL_CTX();
     Texture* t = namedTex(ctx, texture);
-    if (t) compressedSubImage(ctx, t, t->target, level, xoffset, yoffset, 0, width, height, 1, format, imageSize, data);
+    if (t) compressedSubImage(ctx, t, t->target, level, xoffset, yoffset, 0, width, height, 1, format, imageSize, data, 2);
 }
 
 API void APIENTRY glCompressedTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width,
                                                 GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void* data) {
     MGL_CTX();
     Texture* t = namedTex(ctx, texture);
-    if (t) compressedSubImage(ctx, t, t->target, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data);
+    if (t) compressedSubImage(ctx, t, t->target, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data, 3);
 }
 
 // --- immutable storage ---
