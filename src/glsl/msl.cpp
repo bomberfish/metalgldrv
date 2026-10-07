@@ -1610,7 +1610,7 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     bool isGrad = name.find("Grad") != std::string::npos;
     bool isOffset = name.find("Offset") != std::string::npos;
     bool isGather = name.find("Gather") != std::string::npos;
-    bool isQueryLod = name == "textureQueryLod";
+    bool isQueryLod = name == "textureQueryLod" || name == "textureQueryLOD";
     const Type& Pt = A[1]->type;
     int pn = Pt.isScalar() ? 1 : Pt.vec;
     std::string P = bind(ex(A[1]), mt(Pt), pre);
