@@ -101,3 +101,38 @@ emulation on the integer ALUs. Planned: move heavy ops into an
   signs with the wildcard dev profile, installs, streams console output).
 * `./build/tests/fp64test` – fp64 bit-exactness.
 * `tools/glslc` / `tests/glsl` – compiler tests and real-world shader corpus.
+* `METALGLDRV_STRICT=1 ./build/tests/mgltest` – the same suite in strict mode
+  (`tests/host/test_strict.cpp` covers the strict-only paths).
+
+## Environment variables
+Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `getenv`).
+
+* `METALGLDRV_STRICT=1` – accuracy features that are possible but cost
+  performance, and that conformance doesn't need. Read once at device creation
+  (`DeviceCaps::strict`, copied to `Context::strict`). The default mode stays
+  conformant (KHR-GL46 and KHR-Single-GL46 pass in both modes). Strict adds:
+  * `texelFetch` outside the texture or mip range returns zero in every
+    context. By default only robust-access contexts pay for the size checks
+    (GL leaves these reads undefined otherwise); they cost ~35% on a
+    fetch-bound shader.
+  * Multisample images: `GL_MAX_IMAGE_SAMPLES` / `gl_MaxImageSamples` = 4
+    (0 by default). `image2DMS[Array]` bind a per-sample 2D-array shadow
+    (slice = layer * samples + sample). Each draw/dispatch copies the texture
+    into the shadow, and writable bindings copy it back into every sample
+    afterwards, which splits the render pass at each such draw.
+* `METALGLDRV_LOG=<0-4>`, `METALGLDRV_LOG_FILE=<path|documents>` – log level / file.
+* `METALGLDRV_STATS=1` – per-function event counters, logged every 5 s.
+* `METALGLDRV_PROFILE=core` – EGL creates core instead of compatibility contexts.
+* `METALGLDRV_DUMP_GLSL`, `METALGLDRV_DUMP_MSL`, `METALGLDRV_DUMP_SPIRV`,
+  `METALGLDRV_DUMP_FAILED_GLSL`, `METALGLDRV_DUMP_FAILED_MSL` – shader dumps.
+* `METALGLDRV_MAX_FPS`, `METALGLDRV_UPSCALER=metalfx`, `METALGLDRV_CAPTURE*`,
+  `METALGLDRV_MSL_OPTS`, `METALGLDRV_MSL_OVERRIDE`, `METALGLDRV_GLSL_PATCH`,
+  `METALGLDRV_DEBUG_*` – presentation and debugging switches (see the
+  `getenv` sites).
+
+Accuracy features that stay on in the default mode because the CTS needs them:
+the non-seamless cube clamp (`mgl_cube_noseam`, texture_view), integer border
+colors (`mgl_int_border`, texture_border_clamp), feedback-loop snapshots
+(texture_barrier), and the varying spill (> 124 components; it backs the
+128-component GL_MAX_FRAGMENT_INPUT_COMPONENTS minimum and costs nothing below
+that).

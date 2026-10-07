@@ -13,6 +13,7 @@ Texture::~Texture() {
     dropViews();
     if (mtl) Device::get()->releaseAfter(mtl, std::max(lastUse, lastGpuWrite));
     if (fbSnapshot) Device::get()->releaseAfter(fbSnapshot, std::max(lastUse, lastGpuWrite));
+    if (msShadow) Device::get()->releaseAfter(msShadow, std::max(lastUse, lastGpuWrite));
     for (auto& [k, v] : fbSnapshotViews) Device::get()->retainUntil(v, std::max(lastUse, lastGpuWrite));
 }
 

@@ -43,6 +43,7 @@ static const char* slotKindName(SlotKind k) {
         case SlotKind::SubroutineIndices: return "SubroutineIndices";
         case SlotKind::LodBias: return "LodBias";
         case SlotKind::SamplerBorder: return "SamplerBorder";
+        case SlotKind::ImageSamples: return "ImageSamples";
     }
     return "?";
 }

@@ -49,4 +49,10 @@ id<MTLLibrary> internalLibrary();
 void resolveSample0(Context* ctx, id<MTLTexture> src, id<MTLTexture> dst, bool isSigned);
 void expandRgb32(Context* ctx, uint64_t srcAddr, uint64_t dstAddr, uint32_t texels, uint32_t alphaBits);
 
+// Multisample images (METALGLDRV_STRICT, draw.mm): copy every sample of the multisample texture
+// `ms` (all layers) into the 2D array `shadow` (slice = layer * samples + sample), and back.
+// kind: 0 float, 1 int, 2 uint.
+void msImageToShadow(Context* ctx, id<MTLTexture> ms, id<MTLTexture> shadow, int kind);
+void msImageFromShadow(Context* ctx, id<MTLTexture> shadow, id<MTLTexture> ms, int kind);
+
 }  // namespace mgl
