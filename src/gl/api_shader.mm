@@ -1597,6 +1597,12 @@ API GLint APIENTRY glGetProgramResourceLocation(GLuint program, GLenum iface, co
     }
     if (!name) return -1;
     if (iface == GL_UNIFORM) return uniformLocation(p, name);
+    if (isSub) {
+        // subroutine uniform arrays (of arrays) take flattened per-element locations
+        static const GLenum kShaderTypes[] = {GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER,
+                                              GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER, GL_COMPUTE_SHADER};
+        return glGetSubroutineUniformLocation(program, kShaderTypes[subroutineStage(iface, &isSubUniform)], name);
+    }
     const Resource* m;
     return resourceLocation(resourcesFor(p, iface), name, !isSub, &m);
 }
