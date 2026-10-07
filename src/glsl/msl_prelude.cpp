@@ -188,6 +188,24 @@ inline T mgl_int_border(T v, C c, ulong addr) {
     return o ? T(b[0]) : v;
 }
 )"});
+    c.push_back({{"mgl_int_border_gather"}, R"(// Gathered texels in GL order: x = (i0,j1), y = (i1,j1), z = (i1,j0), w = (i0,j0).
+inline bool mgl_border_out(int m, int2 p, int2 size) {
+    return ((m & 1) != 0 && (p.x < 0 || p.x >= size.x)) || ((m & 2) != 0 && (p.y < 0 || p.y >= size.y));
+}
+template <typename T>
+inline T mgl_int_border_gather(T v, float2 c, int2 size, int2 off, int comp, ulong addr) {
+    constant int4* b = (constant int4*)addr;
+    int m = b[1].x;
+    if (m == 0) return v;
+    int2 i0 = int2(floor(c * float2(size) - 0.5f)) + off, i1 = i0 + 1;
+    auto bc = b[0][comp];
+    if (mgl_border_out(m, int2(i0.x, i1.y), size)) v.x = bc;
+    if (mgl_border_out(m, int2(i1.x, i1.y), size)) v.y = bc;
+    if (mgl_border_out(m, int2(i1.x, i0.y), size)) v.z = bc;
+    if (mgl_border_out(m, int2(i0.x, i0.y), size)) v.w = bc;
+    return v;
+}
+)"});
     // --- arrays ---------------------------------------------------------------------
     c.push_back({{"mgl_array"}, R"(template <typename T, int N>
 struct mgl_array {
@@ -463,9 +481,12 @@ void collectIdents(const std::string& s, std::set<std::string>& out) {
 std::string buildMSLPrelude(const std::string& body) {
     static const std::vector<Chunk> chunks = buildChunks();
     std::set<std::string> idents;
+    auto addFp64Lib = [&]() {
+        for (auto& id : std::set<std::string>(idents))
+            if (id.compare(0, 8, "mgl_f64_") == 0 || id.compare(0, 8, "mgl_dmat") == 0) idents.insert("mgl_f64_lib");
+    };
     collectIdents(body, idents);
-    for (auto& id : std::set<std::string>(idents))
-        if (id.compare(0, 8, "mgl_f64_") == 0 || id.compare(0, 8, "mgl_dmat") == 0) idents.insert("mgl_f64_lib");
+    addFp64Lib();
     std::vector<bool> use(chunks.size(), false);
     // fixpoint: chunks can reference other chunks' symbols
     bool changed = true;
@@ -478,6 +499,7 @@ std::string buildMSLPrelude(const std::string& body) {
                     use[i] = true;
                     changed = true;
                     collectIdents(chunks[i].code, idents);
+                    addFp64Lib();  // e.g. the mgl_eq double overloads call mgl_f64_eq
                     break;
                 }
         }

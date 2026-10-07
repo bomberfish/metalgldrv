@@ -235,7 +235,10 @@ public:
     float currentAttrib[kMaxVertexAttribs][4];
     double currentAttribD[kMaxVertexAttribs][4];  // double view of the current values (glVertexAttribL*)
     uint32_t currentAttribType[kMaxVertexAttribs];  // GL_FLOAT / GL_INT / GL_UNSIGNED_INT
-    Ref<Query> activeQueries[8][4];  // [query target index][index]
+    Ref<Query> activeQueries[19][4];  // [query target index][index] (api_query.mm queryTargetIndex)
+    int statsQueriesActive = 0;       // active ARB_pipeline_statistics_query queries (draw-time counting)
+    id<MTLBuffer> statsSlots = nil;   // GPU-side statistics counters (2 x uint per draw slot)
+    uint32_t statsNext = 0;
     GLenum conditionalRenderMode = 0;
     Ref<Query> conditionalQuery;
 
@@ -279,6 +282,7 @@ public:
     // render pass tracking
     PassDesc curPass;
     bool passOpen = false;
+    uint64_t passCounter = 0;  // render passes begun (feedback-loop snapshots are per pass)
     Framebuffer* passFb_ = nullptr;  // framebuffer the open pass was started for (stats only)
     bool passDirty = true;           // framebuffer binding/attachments changed
     PendingClear pendingClear;       // clears not yet applied (folded into next pass load action)
@@ -351,6 +355,16 @@ id<MTLTexture> attachmentTexture(Context* ctx, const Attachment& a, const Format
 // GL_FRAMEBUFFER_SRGB is disabled).
 id<MTLTexture> attachmentWriteView(Context* ctx, const Attachment& a, id<MTLTexture> t);
 void markTextureWrite(Context* ctx, Texture* t);
+
+// ARB_pipeline_statistics_query (api_query.mm): counts of one draw/dispatch, added to the
+// active statistics queries. GPU-only counts go through mglStatsGpuSlot (returns the GPU
+// address of uint[3] {GS primitives emitted, TES invocations, tessellated primitives}, or 0).
+struct DrawStats {
+    uint64_t vertices = 0, primitives = 0, vsInvocations = 0, patches = 0, tesInvocations = 0, gsInvocations = 0, gsPrimitives = 0,
+             csInvocations = 0, clipPrimitives = 0, fsEstimate = 0;
+};
+void mglStatsCountDraw(Context* ctx, const DrawStats& st);
+uint64_t mglStatsGpuSlot(Context* ctx, bool gs, bool tess);
 
 // Common entry-point prologue.
 // The entry point's name is remembered for GL error logging (METALGLDRV_LOG=3) only.

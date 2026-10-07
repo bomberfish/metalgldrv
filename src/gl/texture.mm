@@ -11,6 +11,8 @@ namespace mgl {
 Texture::~Texture() {
     dropViews();
     if (mtl) Device::get()->releaseAfter(mtl, std::max(lastUse, lastGpuWrite));
+    if (fbSnapshot) Device::get()->releaseAfter(fbSnapshot, std::max(lastUse, lastGpuWrite));
+    for (auto& [k, v] : fbSnapshotViews) Device::get()->retainUntil(v, std::max(lastUse, lastGpuWrite));
 }
 
 void Texture::dropViews() {
@@ -400,8 +402,16 @@ static MTLSamplerAddressMode addressMode(GLenum wrap) {
 id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     static std::mutex m;
     static std::unordered_map<std::string, id<MTLSamplerState>> cache;
-    std::string key((const char*)&s, sizeof s);
-    key.push_back(isInteger ? 1 : 0);
+    // The key holds only what reaches the Metal descriptor, with LOD clamps quantized to 1/256
+    // (argument-buffer samplers come from a small device-wide pool).
+    auto q = [](float v, float lo, float hi) { return (int32_t)lroundf(std::clamp(v, lo, hi) * 256.0f); };
+    const float* bc = s.borderColor;
+    int border = bc[3] < 0.5f ? 0 : bc[0] + bc[1] + bc[2] > 1.5f ? 1 : 2;
+    int32_t k[] = {(int32_t)s.minFilter, (int32_t)s.magFilter, (int32_t)s.wrapS, (int32_t)s.wrapT, (int32_t)s.wrapR,
+                   q(s.minLod, 0.0f, 1000.0f), q(s.maxLod, 0.0f, 1000.0f), 0,
+                   s.compareMode == GL_COMPARE_REF_TO_TEXTURE ? (int32_t)s.compareFunc : 0,
+                   (int32_t)std::clamp(lroundf(s.maxAnisotropy), 1L, 16L), border, isInteger ? 1 : 0};
+    std::string key((const char*)k, sizeof k);
     std::lock_guard<std::mutex> g(m);
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
@@ -422,9 +432,10 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     if (b[3] < 0.5f) d.borderColor = MTLSamplerBorderColorTransparentBlack;
     else if (b[0] + b[1] + b[2] > 1.5f) d.borderColor = MTLSamplerBorderColorOpaqueWhite;
     else d.borderColor = MTLSamplerBorderColorOpaqueBlack;
-    d.lodMinClamp = std::max(0.0f, s.minLod);
-    d.lodMaxClamp = std::max(d.lodMinClamp, std::min(s.maxLod, 1000.0f));
-    d.lodBias = std::clamp(s.lodBias, -16.0f, 16.0f);
+    d.lodMinClamp = k[5] / 256.0f;
+    d.lodMaxClamp = std::max(d.lodMinClamp, k[6] / 256.0f);
+    // No lodBias: shaders add GL_TEXTURE_LOD_BIAS (SlotKind::LodBias); a sampler bias combined with
+    // a shader bias() loses LOD precision on Apple GPUs.
     d.maxAnisotropy = std::clamp((NSUInteger)lroundf(s.maxAnisotropy), (NSUInteger)1, (NSUInteger)16);
     if (d.maxAnisotropy > 1 && d.mipFilter == MTLSamplerMipFilterNotMipmapped) d.maxAnisotropy = 1;
     if (s.compareMode == GL_COMPARE_REF_TO_TEXTURE) d.compareFunction = compareFunc(s.compareFunc);

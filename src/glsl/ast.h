@@ -266,6 +266,10 @@ struct Shader {
     std::vector<StructDef*> structs;
     std::map<std::string, std::string> extensions;
     Layout inLayout, outLayout;          // stage-level layout(...) in/out; declarations
+    // Transform feedback layout qualifiers (GLSL 4.60 §4.4.2.1). Output variables / blocks carry their resolved
+    // xfb_buffer; block members their resolved xfb_offset (-1 = not captured).
+    bool xfbMode = false;                // any xfb_* qualifier used
+    int xfbStride[4] = {-1, -1, -1, -1}; // explicit xfb_stride per buffer
     bool hasMain = false;
     bool spirv = false;                  // decompiled from a SPIR-V module (interfaces match by location)
     // arenas
