@@ -69,7 +69,10 @@ static bool setCap(Context* ctx, GLenum cap, bool v, int index = -1) {
     case GL_SAMPLE_SHADING: ctx->sampleShading = v; return true;
     case GL_COLOR_LOGIC_OP: ctx->colorLogicOp = v; return true;
     case GL_DITHER: ctx->dither = v; return true;
-    case GL_FRAMEBUFFER_SRGB: ctx->framebufferSRGB = v; return true;
+    case GL_FRAMEBUFFER_SRGB:
+        if (ctx->framebufferSRGB != v) ctx->passDirty = true;  // attachments switch between sRGB and linear views
+        ctx->framebufferSRGB = v;
+        return true;
     case GL_LINE_SMOOTH: ctx->lineSmooth = v; return true;
     case GL_POLYGON_SMOOTH: ctx->polygonSmooth = v; return true;
     case GL_TEXTURE_CUBE_MAP_SEAMLESS: ctx->textureCubeSeamless = v; return true;
@@ -819,3 +822,11 @@ API GLenum APIENTRY glGetError(void) {
 
 API GLenum APIENTRY glGetGraphicsResetStatus(void) { return GL_NO_ERROR; }
 API GLenum APIENTRY glGetGraphicsResetStatusARB(void) { return GL_NO_ERROR; }
+
+API void APIENTRY glClampColor(GLenum target, GLenum clamp) {
+    MGL_CTX();
+    if (clamp != GL_TRUE && clamp != GL_FALSE && clamp != GL_FIXED_ONLY) return ctx->setError(GL_INVALID_ENUM);
+    // Only CLAMP_READ_COLOR survives in core; vertex/fragment color clamping are compatibility-only no-ops here.
+    if (target == GL_CLAMP_READ_COLOR) ctx->clampReadColor = clamp;
+    else if (ctx->coreProfile || (target != GL_CLAMP_VERTEX_COLOR && target != GL_CLAMP_FRAGMENT_COLOR)) ctx->setError(GL_INVALID_ENUM);
+}

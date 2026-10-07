@@ -10,6 +10,7 @@ From-scratch GLSL 1.10–4.60 → MSL 4.0 compiler. Public interface: `src/glsl/
 | `fold.cpp` | constant folding |
 | `link.cpp` | linking: reachability, attribute/output locations, uniform merging, std140/std430/default-block layout, argument slots, reflection |
 | `msl.cpp` | MSL emission |
+| `spirv.cpp` | SPIR-V front end (ARB_gl_spirv): parses modules, applies specialization constants, decompiles the entry point to GLSL 4.60 (structured CF -> if/for/switch, hoisted SSA locals, phi copies, interfaces keyed by location/binding); `METALGLDRV_DUMP_SPIRV=1` prints the GLSL, `glslc -S <stage> x.spv` runs it on the host |
 | `msl_prelude.cpp` | demand-driven MSL helper prelude (+ fp64 library hook) |
 
 Tools: `build/tools/glslc` (compile/link/emit/validate, `--time`, `--xfb a,b`), `build/tools/glslrun` (executes self-checking compute

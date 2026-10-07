@@ -460,6 +460,7 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     memcpy(s->tessDefaultOuter, ctx->patchDefaultOuter, sizeof s->tessDefaultOuter);
     memcpy(s->tessDefaultInner, ctx->patchDefaultInner, sizeof s->tessDefaultInner);
     memcpy(s->currentAttrib, ctx->currentAttrib, sizeof(float) * 4 * kMaxVertexAttribs);
+    memcpy(s->currentAttribD, ctx->currentAttribD, sizeof(double) * 4 * kMaxVertexAttribs);
     return sa.gpu;
 }
 
@@ -515,8 +516,10 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
             int loc = a.location + k;
             if (loc >= kMaxVertexAttribs) break;
             VertexAttribKey& ak = key.attribs[loc];
-            // dvec3/dvec4 span two locations but are specified through the first one.
-            const VertexAttrib* va = vao ? &vao->attribs[ts.base == BaseType::Double ? a.location : loc] : nullptr;
+            // dvec3/dvec4 (one location each) arrive in two Metal attributes: L and 16 + L
+            bool wideDouble = ts.base == BaseType::Double && ts.rows > 2;
+            VertexAttribKey& ak2 = key.attribs[16 + loc];
+            const VertexAttrib* va = vao ? &vao->attribs[loc] : nullptr;
             bool enabled = va && va->enabled;
             if (enabled) {
                 const VertexBinding& vb = vao->bindings[va->binding];
@@ -531,19 +534,15 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                     f = vertexFormatFor(va->type, va->size, false, true);
                 }
                 if (va->type == GL_DOUBLE && va->isLong) {
-                    // dvecN arrive as raw bits: double/dvec2 -> uint2/uint4 at `loc`; dvec3/4 span two
-                    // locations (uint4 + uint2/uint4). k indexes the location within the attribute.
-                    int comps = va->size;
-                    int dwords = comps * 2;
-                    int first = k == 0 ? std::min(dwords, 4) : dwords - 4;
-                    f = first == 2 ? MTLVertexFormatUInt2 : first == 4 ? MTLVertexFormatUInt4 : MTLVertexFormatInvalid;
-                    if (k > 0) {
-                        // second location of a dvec3/dvec4: same binding, +16 bytes
-                        ak.format = (uint8_t)f;
-                        ak.bufferIndex = glsl::kBufVertex0 + vao->attribs[a.location].binding;
-                        ak.offset = vao->attribs[a.location].relativeOffset + 16;
-                        bindingUsed |= 1u << vao->attribs[a.location].binding;
-                        continue;
+                    // dvecN arrive as raw bits: double/dvec2 -> uint2/uint4 at L; dvec3/4 -> uint4 at L
+                    // plus uint2/uint4 at 16 + L (same binding, +16 bytes)
+                    int dwords = va->size * 2;
+                    f = std::min(dwords, 4) == 2 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4;
+                    if (wideDouble) {
+                        int rest = std::max(2, dwords - 4);
+                        ak2.format = (uint8_t)(rest == 2 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4);
+                        ak2.bufferIndex = glsl::kBufVertex0 + va->binding;
+                        ak2.offset = va->relativeOffset + 16;
                     }
                 }
                 if (va->type == GL_FIXED || (va->type == GL_DOUBLE && !va->isLong)) {
@@ -566,6 +565,16 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                 ak.format = (uint8_t)f;
                 ak.bufferIndex = kBufCurrentAttribs;
                 ak.offset = 16 * loc;
+                if (ts.base == BaseType::Double) {
+                    // double current values: 32 bytes per location after the float block
+                    ak.format = (uint8_t)(ts.rows == 1 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4);
+                    ak.offset = 16 * kMaxVertexAttribs + 32 * loc;
+                    if (wideDouble) {
+                        ak2.format = (uint8_t)(ts.rows == 3 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4);
+                        ak2.bufferIndex = kBufCurrentAttribs;
+                        ak2.offset = ak.offset + 16;
+                    }
+                }
             }
         }
     }
@@ -637,8 +646,10 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         [table setAddress:addr attributeStride:stride atIndex:glsl::kBufVertex0 + b];
     }
     if (needCurrent) {
-        UploadAlloc ca = ctx->upload(16 * kMaxVertexAttribs, 16);
+        // floats (16 bytes per location) followed by doubles (32 bytes per location)
+        UploadAlloc ca = ctx->upload(48 * kMaxVertexAttribs, 16);
         memcpy(ca.cpu, ctx->currentAttrib, 16 * kMaxVertexAttribs);
+        memcpy(ca.cpu + 16 * kMaxVertexAttribs, ctx->currentAttribD, 32 * kMaxVertexAttribs);
         VertexBufferKey& bk = key.buffers[kBufCurrentAttribs];
         bk.used = 1;
         bk.stepFunction = MTLVertexStepFunctionConstant;

@@ -12,7 +12,7 @@ namespace mgl {
 
 enum {
     kMaxTextureUnits = 96,      // combined units exposed (GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS)
-    kMaxImageUnits = 8,
+    kMaxImageUnits = 16,
     kMaxUniformBufferBindings = 84,
     kMaxSSBOBindings = 16,
     kMaxAtomicCounterBindings = 8,
@@ -135,7 +135,8 @@ public:
     Ref<ShareGroup> share;
     int majorVersion, minorVersion;
     bool coreProfile, debugContext, forwardCompatible, robustAccess, noErrorMode;
-    bool loseContextOnReset = false;  // RESET_NOTIFICATION_STRATEGY requested at creation
+    bool loseContextOnReset = false;
+    GLenum clampReadColor = GL_FIXED_ONLY;  // glClampColor(GL_CLAMP_READ_COLOR)  // RESET_NOTIFICATION_STRATEGY requested at creation
     bool everCurrent = false;
 
     // ---- errors / debug ----
@@ -232,6 +233,7 @@ public:
     PixelStore pack, unpack;
     GLenum hints[8] = {GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE};
     float currentAttrib[kMaxVertexAttribs][4];
+    double currentAttribD[kMaxVertexAttribs][4];  // double view of the current values (glVertexAttribL*)
     uint32_t currentAttribType[kMaxVertexAttribs];  // GL_FLOAT / GL_INT / GL_UNSIGNED_INT
     Ref<Query> activeQueries[19][4];  // [query target index][index] (api_query.mm queryTargetIndex)
     int statsQueriesActive = 0;       // active ARB_pipeline_statistics_query queries (draw-time counting)
@@ -348,6 +350,9 @@ bool ensureTextureStorage(Context* ctx, Texture* t);
 id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarget, bool stencilSampling, bool* complete);
 id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger);
 id<MTLTexture> attachmentTexture(Context* ctx, const Attachment& a, const FormatInfo** fmt, int* w, int* h);
+// The texture a color attachment is rendered through (linear view of sRGB storage when
+// GL_FRAMEBUFFER_SRGB is disabled).
+id<MTLTexture> attachmentWriteView(Context* ctx, const Attachment& a, id<MTLTexture> t);
 void markTextureWrite(Context* ctx, Texture* t);
 
 // ARB_pipeline_statistics_query (api_query.mm): counts of one draw/dispatch, added to the

@@ -48,6 +48,8 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
     for (int i = 0; i < kMaxVertexAttribs; i++) {
         currentAttrib[i][0] = currentAttrib[i][1] = currentAttrib[i][2] = 0;
         currentAttrib[i][3] = 1;
+        currentAttribD[i][0] = currentAttribD[i][1] = currentAttribD[i][2] = 0;
+        currentAttribD[i][3] = 1;
         currentAttribType[i] = GL_FLOAT;
     }
     for (int i = 0; i < kNumTexTargets; i++) {
@@ -417,6 +419,8 @@ bool Context::resolvePass(PassDesc& p) {
         int aw, ah;
         id<MTLTexture> t = attachmentTexture(this, a, &f, &aw, &ah);
         if (!t) continue;
+        // GL_FRAMEBUFFER_SRGB disabled: sRGB attachments are written without encoding.
+        t = attachmentWriteView(this, a, t);
         p.color[i].tex = t;
         p.color[i].level = a.type == GL_TEXTURE ? a.level : 0;
         if (t.textureType == MTLTextureType3D) p.color[i].depthPlane = a.layered ? 0 : a.layer;

@@ -125,6 +125,13 @@ static const FormatInfo kFormats[] = {
 {GL_COMPRESSED_SIGNED_R11_EAC,          MTLPixelFormatEAC_R11Snorm,     GL_RED,  FmtKind::Snorm, Comp::Compressed, 1,  8, 4, 4, 0, 0, 1, R001, {0,1,2,3}, 0,0,0,0,0,0, SN},
 {GL_COMPRESSED_RG11_EAC,                MTLPixelFormatEAC_RG11Unorm,    GL_RG,   FmtKind::Unorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, RG01, {0,1,2,3}, 0,0,0,0,0,0, UN},
 {GL_COMPRESSED_SIGNED_RG11_EAC,         MTLPixelFormatEAC_RG11Snorm,    GL_RG,   FmtKind::Snorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, RG01, {0,1,2,3}, 0,0,0,0,0,0, SN},
+// KHR_texture_compression_astc_ldr
+#define ASTC(w, h) \
+{GL_COMPRESSED_RGBA_ASTC_##w##x##h##_KHR,         MTLPixelFormatASTC_##w##x##h##_LDR,  GL_RGBA, FmtKind::Unorm, Comp::Compressed, 4, 16, w, h, 0, 0, 1, IDENT,{0,1,2,3}, 0,0,0,0,0,0, UN}, \
+{GL_COMPRESSED_SRGB8_ALPHA8_ASTC_##w##x##h##_KHR, MTLPixelFormatASTC_##w##x##h##_sRGB, GL_RGBA, FmtKind::Unorm, Comp::Compressed, 4, 16, w, h, 1, 0, 1, IDENT,{0,1,2,3}, 0,0,0,0,0,0, UN},
+ASTC(4, 4) ASTC(5, 4) ASTC(5, 5) ASTC(6, 5) ASTC(6, 6) ASTC(8, 5) ASTC(8, 6) ASTC(8, 8)
+ASTC(10, 5) ASTC(10, 6) ASTC(10, 8) ASTC(10, 10) ASTC(12, 10) ASTC(12, 12)
+#undef ASTC
 };
 // clang-format on
 
@@ -160,26 +167,94 @@ bool isDepthOrStencil(const FormatInfo* f) {
     return f && (f->kind == FmtKind::Depth || f->kind == FmtKind::Stencil || f->kind == FmtKind::DepthStencil);
 }
 
+int viewClass(GLenum internalFormat) {
+    switch (internalFormat) {
+    case GL_RGBA32F: case GL_RGBA32UI: case GL_RGBA32I: return 128;
+    case GL_RGB32F: case GL_RGB32UI: case GL_RGB32I: return 96;
+    case GL_RGBA16F: case GL_RG32F: case GL_RGBA16UI: case GL_RG32UI: case GL_RGBA16I: case GL_RG32I: case GL_RGBA16:
+    case GL_RGBA16_SNORM: return 64;
+    case GL_RGB16: case GL_RGB16_SNORM: case GL_RGB16F: case GL_RGB16UI: case GL_RGB16I: return 48;
+    case GL_RG16F: case GL_R11F_G11F_B10F: case GL_R32F: case GL_RGB10_A2UI: case GL_RGBA8UI: case GL_RG16UI: case GL_R32UI:
+    case GL_RGBA8I: case GL_RG16I: case GL_R32I: case GL_RGB10_A2: case GL_RGBA8: case GL_RG16: case GL_RGBA8_SNORM:
+    case GL_RG16_SNORM: case GL_SRGB8_ALPHA8: case GL_RGB9_E5: return 32;
+    case GL_RGB8: case GL_RGB8_SNORM: case GL_SRGB8: case GL_RGB8UI: case GL_RGB8I: return 24;
+    case GL_R16F: case GL_RG8UI: case GL_R16UI: case GL_RG8I: case GL_R16I: case GL_RG8: case GL_R16: case GL_RG8_SNORM:
+    case GL_R16_SNORM: return 16;
+    case GL_R8UI: case GL_R8I: case GL_R8: case GL_R8_SNORM: return 8;
+    case GL_COMPRESSED_RED_RGTC1: case GL_COMPRESSED_SIGNED_RED_RGTC1: return 1001;
+    case GL_COMPRESSED_RG_RGTC2: case GL_COMPRESSED_SIGNED_RG_RGTC2: return 1002;
+    case GL_COMPRESSED_RGBA_BPTC_UNORM: case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM: return 1003;
+    case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT: case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT: return 1004;
+    case GL_COMPRESSED_RGB_S3TC_DXT1_EXT: case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT: return 1005;
+    case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT: case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT: return 1006;
+    case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT: case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT: return 1007;
+    case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT: case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT: return 1008;
+    case GL_COMPRESSED_R11_EAC: case GL_COMPRESSED_SIGNED_R11_EAC: return 1009;
+    case GL_COMPRESSED_RG11_EAC: case GL_COMPRESSED_SIGNED_RG11_EAC: return 1010;
+    case GL_COMPRESSED_RGB8_ETC2: case GL_COMPRESSED_SRGB8_ETC2: return 1011;
+    case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2: case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2: return 1012;
+    case GL_COMPRESSED_RGBA8_ETC2_EAC: case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC: return 1013;
+    default:
+        // ASTC: one class per block size, LDR and sRGB together.
+        if (internalFormat >= GL_COMPRESSED_RGBA_ASTC_4x4_KHR && internalFormat <= GL_COMPRESSED_RGBA_ASTC_12x12_KHR)
+            return 1100 + (int)(internalFormat - GL_COMPRESSED_RGBA_ASTC_4x4_KHR);
+        if (internalFormat >= GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR && internalFormat <= GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR)
+            return 1100 + (int)(internalFormat - GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR);
+        return 0;
+    }
+}
+
+bool compressedSupports3D(const FormatInfo* f) {
+    switch (f->internalFormat) {
+    case GL_COMPRESSED_RGBA_BPTC_UNORM: case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM: case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+    case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+        return true;
+    default: return f->comp != Comp::Compressed;
+    }
+}
+
+bool copyImageCompatible(const FormatInfo* a, const FormatInfo* b) {
+    if (a->internalFormat == b->internalFormat) return true;
+    int ca = viewClass(a->internalFormat), cb = viewClass(b->internalFormat);
+    if (!ca || !cb) return false;
+    if (ca == cb) return true;
+    bool ac = a->comp == Comp::Compressed, bc = b->comp == Comp::Compressed;
+    // §18.3.3 / Table 18.4: an uncompressed format whose texel size equals the block size.
+    if (ac != bc) {
+        int texelBits = ac ? cb : ca;
+        int blockBytes = ac ? a->bytesPerPixel : b->bytesPerPixel;
+        return texelBits < 1000 && texelBits == blockBytes * 8;
+    }
+    return false;
+}
+
 const FormatInfo* resolveInternalFormat(GLenum internalFormat, GLenum format, GLenum type) {
     // Unsized / generic internal formats: choose based on client type.
     bool isFloat = type == GL_FLOAT;
     bool isHalf = type == GL_HALF_FLOAT;
     bool isShortN = type == GL_UNSIGNED_SHORT || type == GL_SHORT;
     switch (internalFormat) {
-    case 1: case GL_RED: case GL_COMPRESSED_RED:
+    // Generic compressed formats pick a specific compressed format (CPU-encoded on upload).
+    case GL_COMPRESSED_RED: return formatInfo(GL_COMPRESSED_RED_RGTC1);
+    case GL_COMPRESSED_RG: return formatInfo(GL_COMPRESSED_RG_RGTC2);
+    case GL_COMPRESSED_RGB: return formatInfo(GL_COMPRESSED_RGB_S3TC_DXT1_EXT);
+    case GL_COMPRESSED_RGBA: return formatInfo(GL_COMPRESSED_RGBA_S3TC_DXT5_EXT);
+    case GL_COMPRESSED_SRGB: return formatInfo(GL_COMPRESSED_SRGB_S3TC_DXT1_EXT);
+    case GL_COMPRESSED_SRGB_ALPHA: return formatInfo(GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT);
+    case 1: case GL_RED:
         return formatInfo(isFloat ? GL_R32F : isHalf ? GL_R16F : isShortN ? GL_R16 : GL_R8);
-    case 2: case GL_RG: case GL_COMPRESSED_RG:
+    case 2: case GL_RG:
         return formatInfo(isFloat ? GL_RG32F : isHalf ? GL_RG16F : isShortN ? GL_RG16 : GL_RG8);
-    case 3: case GL_RGB: case GL_COMPRESSED_RGB:
+    case 3: case GL_RGB:
         if (type == GL_UNSIGNED_INT_10F_11F_11F_REV) return formatInfo(GL_R11F_G11F_B10F);
         if (type == GL_UNSIGNED_INT_5_9_9_9_REV) return formatInfo(GL_RGB9_E5);
         return formatInfo(isFloat ? GL_RGB32F : isHalf ? GL_RGB16F : isShortN ? GL_RGB16 : GL_RGB8);
-    case 4: case GL_RGBA: case GL_COMPRESSED_RGBA:
+    case 4: case GL_RGBA:
         if (type == GL_UNSIGNED_INT_2_10_10_10_REV) return formatInfo(GL_RGB10_A2);
         return formatInfo(isFloat ? GL_RGBA32F : isHalf ? GL_RGBA16F : isShortN ? GL_RGBA16 : GL_RGBA8);
     case GL_BGRA: return formatInfo(GL_RGBA8);
-    case GL_SRGB: case GL_COMPRESSED_SRGB: return formatInfo(GL_SRGB8);
-    case GL_SRGB_ALPHA: case GL_COMPRESSED_SRGB_ALPHA: return formatInfo(GL_SRGB8_ALPHA8);
+    case GL_SRGB: return formatInfo(GL_SRGB8);
+    case GL_SRGB_ALPHA: return formatInfo(GL_SRGB8_ALPHA8);
     case GL_DEPTH_COMPONENT:
         return formatInfo(isFloat ? GL_DEPTH_COMPONENT32F : type == GL_UNSIGNED_SHORT ? GL_DEPTH_COMPONENT16 : GL_DEPTH_COMPONENT24);
     case GL_DEPTH_STENCIL:
@@ -237,7 +312,7 @@ static int packedSize(GLenum type, int& comps) {
     }
 }
 
-static bool isIntegerFormat(GLenum format) {
+bool isIntegerFormat(GLenum format) {
     switch (format) {
     case GL_RED_INTEGER: case GL_GREEN_INTEGER: case GL_BLUE_INTEGER: case GL_ALPHA_INTEGER:
     case GL_RG_INTEGER: case GL_RGB_INTEGER: case GL_BGR_INTEGER: case GL_RGBA_INTEGER: case GL_BGRA_INTEGER:
@@ -346,6 +421,29 @@ size_t storageRowBytes(const FormatInfo* f, int width) {
 size_t storageImageBytes(const FormatInfo* f, int width, int height) {
     int rows = f->comp == Comp::Compressed ? (height + f->blockH - 1) / f->blockH : height;
     return storageRowBytes(f, width) * rows;
+}
+
+CompressedLayout compressedLayout(const FormatInfo* f, int width, int height, int dims, const PixelStore& ps) {
+    CompressedLayout l;
+    l.rowBytes = storageRowBytes(f, width);
+    l.rowStride = l.rowBytes;
+    l.rows = (height + f->blockH - 1) / f->blockH;
+    int rowsPerImage = l.rows;
+    l.skipBytes = 0;
+    int bs = ps.compressedBlockSize;
+    if (bs && ps.compressedBlockWidth) {
+        int bw = ps.compressedBlockWidth;
+        if (ps.rowLength) l.rowStride = (size_t)bs * ((ps.rowLength + bw - 1) / bw);
+        l.skipBytes += (size_t)ps.skipPixels / bw * bs;
+    }
+    if (dims > 1 && bs && ps.compressedBlockHeight) {
+        int bh = ps.compressedBlockHeight;
+        l.skipBytes += (size_t)ps.skipRows / bh * l.rowStride;
+        if (ps.imageHeight) rowsPerImage = (ps.imageHeight + bh - 1) / bh;
+    }
+    l.imageStride = l.rowStride * rowsPerImage;
+    if (dims > 2 && bs && ps.compressedBlockDepth) l.skipBytes += (size_t)ps.skipImages / ps.compressedBlockDepth * l.imageStride;
+    return l;
 }
 
 bool directUploadCompatible(const FormatInfo* f, GLenum format, GLenum type) {
@@ -890,25 +988,25 @@ void convertToStorage(const FormatInfo* f, GLenum format, GLenum type, const voi
 }
 
 void convertFromStorage(const FormatInfo* f, GLenum format, GLenum type, const void* src, size_t srcRowStride,
-                        void* dst, size_t dstRowStride, int width, int height, bool swapBytes, bool depthPlane) {
+                        void* dst, size_t dstRowStride, int width, int height, bool swapBytes, bool depthPlane,
+                        bool clampColor) {
     const uint8_t* s = (const uint8_t*)src;
     uint8_t* d = (uint8_t*)dst;
-    if (directUploadCompatible(f, format, type) && !swapBytes && f->baseFormat != GL_LUMINANCE &&
+    bool needClamp = clampColor && f->kind != FmtKind::Unorm;  // unorm values are already in [0,1]
+    if (!needClamp && directUploadCompatible(f, format, type) && !swapBytes && f->baseFormat != GL_LUMINANCE &&
         f->baseFormat != GL_LUMINANCE_ALPHA && f->baseFormat != GL_INTENSITY && f->baseFormat != GL_ALPHA) {
         size_t row = (size_t)width * f->bytesPerPixel;
         for (int y = 0; y < height; y++) memcpy(d + y * dstRowStride, s + y * srcRowStride, row);
         return;
     }
     int ps = clientPixelSize(format, type);
-    bool clampColor = f->kind == FmtKind::Unorm && type != GL_FLOAT && type != GL_HALF_FLOAT;
-    (void)clampColor;
     for (int y = 0; y < height; y++) {
         const uint8_t* sr = s + y * srcRowStride;
         uint8_t* dr = d + y * dstRowStride;
         for (int x = 0; x < width; x++) {
             Px px;
             decodeStorage(f, sr + x * f->bytesPerPixel, px);
-            encodeClient(format, type, px, dr + x * ps, swapBytes, false);
+            encodeClient(format, type, px, dr + x * ps, swapBytes, needClamp);
         }
     }
 }
