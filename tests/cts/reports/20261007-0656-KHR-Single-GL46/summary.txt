@@ -1,0 +1,10 @@
+group                                       Pass NotSupported   total
+---------------------------------------------------------------------
+KHR-Single-GL46.arrays_of_arrays_gl          806            0     806
+KHR-Single-GL46.enhanced_layouts            4250            0    4250
+KHR-Single-GL46.meshShader                     0          239     239
+KHR-Single-GL46.subgroups                      0         6053    6053
+---------------------------------------------------------------------
+TOTAL                                       5056         6292   11348
+
+11348 cases in 59.8s, 10 glcts process(es)

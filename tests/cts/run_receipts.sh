@@ -1,15 +1,18 @@
 #!/bin/bash
 # Full conformance receipt run: every mustpass case list, each archived with save_report.py.
-# Usage: tests/cts/run_receipts.sh   (logs in tests/cts/results/receipt-*.log)
+# Usage: tests/cts/run_receipts.sh [run names...]   (logs in tests/cts/results/receipt-*.log)
+#   With names (e.g. KHR-GL46-cfg6 KHR-NoContext), only those runs are done, to resume a stopped matrix.
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE/../.."
+only=("$@")
 wired_gb() { vm_stat | awk '/wired/ {printf "%d", $4*16384/1e9}'; }
 run() {  # name caselist surface [run.sh options...]
     local name=$1 list=$2 surface=$3; shift 3
+    if [ ${#only[@]} -gt 0 ] && [[ ! " ${only[*]} " =~ " $name " ]]; then return; fi
     # A run once left the Mac with ~48 GB wired and the session was killed for low memory: wait for
-    # wired memory to settle below 32 GB before each run, and stop the matrix if it doesn't.
+    # wired memory to settle below 40 GB (of 48) before each run, and stop the matrix if it doesn't.
     local waited=0
-    while [ "$(wired_gb)" -ge 32 ]; do
+    while [ "$(wired_gb)" -ge 40 ]; do
         [ $waited -ge 600 ] && { echo "wired memory stuck at $(wired_gb) GB; stopping before $name" >&2; exit 1; }
         sleep 30; waited=$((waited + 30))
     done
