@@ -1385,6 +1385,13 @@ void Decompiler::emitInsn(size_t o) {
                 inl_[w[2]] = p.expr;
                 return;
             }
+            // Input builtins are read-only: use them directly (TCS outputs must be indexed with the
+            // literal gl_InvocationID in GLSL).
+            if (p.storage == StorageClassInput && !p.flat && p.expr.compare(0, 3, "gl_") == 0 && simple(p.expr) &&
+                typeName(p.type) == typeName(w[1])) {
+                inl_[w[2]] = p.expr;
+                return;
+            }
             set(w[2], conv(load(p), p.type, w[1]));
             return;
         }
