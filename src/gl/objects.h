@@ -161,6 +161,10 @@ public:
     GLintptr bufferOffset = 0;
     GLsizeiptr bufferSize = -1;
     uint32_t bufferGeneration = 0;
+    // GL_RGB32* buffer textures read an RGBA32 copy (Metal has no 96-bit format),
+    // refreshed when the source buffer's contents may have changed.
+    id<MTLBuffer> bufferExpanded = nil;
+    uint64_t expandedVersion = ~0ull, expandedGpuWrite = ~0ull;
 
     // Metal storage. Allocated lazily when the texture is first used
     // (images may be specified level by level).
@@ -254,6 +258,8 @@ struct VertexAttrib {
     bool normalized = false, integer = false, isLong = false;
     GLuint relativeOffset = 0;
     GLuint binding = 0;
+    const void* pointer = nullptr;  // VERTEX_ATTRIB_ARRAY_POINTER: as given to *Pointer
+    GLsizei stride = 0;  // VERTEX_ATTRIB_ARRAY_STRIDE: as given to *Pointer (the binding holds the effective stride)
     const void* clientPointer = nullptr;  // compat: client-side arrays (no buffer bound)
 };
 

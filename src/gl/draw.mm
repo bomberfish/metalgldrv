@@ -565,6 +565,23 @@ static bool wantManualFetch(Context* ctx) {
     return unaligned;
 }
 
+// stage_in carries the upper half of a dvec3/dvec4 in Metal attribute 16 + L, which
+// doesn't exist for L = 15 (Metal has 31 attributes): such programs fetch in the shader.
+static bool wantManualFetch(Context* ctx, ProgramObj* prog) {
+    if (wantManualFetch(ctx)) return true;
+    VertexArray* vao = ctx->vao.get();
+    if (!vao) return false;
+    bool wideAt15 = false;
+    for (const auto& a : prog->refl.attributes) {
+        TypeShape ts = typeShape(a.type);
+        if (ts.base == BaseType::Double && ts.rows > 2 && a.location >= 0 && a.location + std::max(1, a.locationsUsed) > 15) wideAt15 = true;
+    }
+    if (!wideAt15) return false;
+    for (int l = 0; l < kMaxVertexAttribs; l++)
+        if (vao->attribs[l].enabled && vao->attribs[l].clientPointer) return false;
+    return true;
+}
+
 // Builds the render pipeline key & binds vertex buffers. Returns false if the draw must be skipped.
 static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& key, id<MTL4ArgumentTable> table, const DrawParams& d,
                              uint32_t minIndex, uint32_t maxIndex) {
@@ -2142,7 +2159,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
             MGL_INFO("layout prog %u mode %x indexed %d type %x flat %d:%s", prog->name, d.mode, d.indexed, d.indexType,
                      refl.usesFlatShading, desc.c_str());
     }
-    vk.manualFetch = wantManualFetch(ctx);
+    vk.manualFetch = wantManualFetch(ctx, prog);
     if (vk.manualFetch) fillVertexFetch(ctx, prog, vk);
     else vk.attribSignFlip = attribSignFlip(ctx, prog);
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
