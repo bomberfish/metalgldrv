@@ -68,14 +68,21 @@ bool Device::init() {
 #endif
         caps.hasFamilyApple9 = [mtl supportsFamily:MTLGPUFamilyApple9];
         caps.bcCompression = mtl.supportsBCTextureCompression;
+        // Sampler min/max reduction: an Apple10 GPU (M5) applies reductionMode; an Apple9 one (M4 Pro)
+        // accept the descriptor but always average.
+        caps.samplerReduction = [mtl supportsFamily:MTLGPUFamilyApple10];
+        // Framebuffer fetch ([[color(n)]] inputs) is an Apple-family feature; every GPU that runs
+        // Metal 4 is Apple7 or later.
+        caps.programmableBlending = [mtl supportsFamily:MTLGPUFamilyApple7];
         caps.maxThreadsPerThreadgroup = (uint32_t)mtl.maxThreadsPerThreadgroup.width;
         caps.maxThreadgroupMemory = (uint32_t)mtl.maxThreadgroupMemoryLength;
         if (@available(macOS 26.4, iOS 26.4, *)) {
             if (mtl.supportsPlacementSparse) sparseTileBytes = [mtl sparseTileSizeInBytesForSparsePageSize:kSparsePageSize];
         }
         caps.sparse = sparseTileBytes > 0;
-        MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d, sparse=%d)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression,
-                 caps.sparse);
+        caps.strict = envFlag("METALGLDRV_STRICT", false);
+        MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d, sparse=%d%s)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression,
+                 caps.sparse, caps.strict ? ", strict" : "");
     }
     return true;
 }

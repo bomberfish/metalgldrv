@@ -17,8 +17,8 @@ int locationsOf(const Type& t) {
         per = 0;
         for (auto& m : b.sdef->members) per += locationsOf(m.type);
     } else if (b.cols) {
-        per = b.cols * ((b.base == BT::Double && b.vec > 2) ? 2 : 1);
-    } else if (b.base == BT::Double && b.vec > 2) {
+        per = b.cols * ((b.is64() && b.vec > 2) ? 2 : 1);
+    } else if (b.is64() && b.vec > 2) {
         per = 2;
     }
     return per * t.totalArrayElements();
@@ -145,6 +145,7 @@ void collect(const LinkedProgram& P, Stage s, Storage storage, std::vector<Inter
     for (auto* v : vars) {
         if (!v->global || v->q.storage != storage) continue;
         if (v->builtin == BuiltinVar::WorkGroupSize) continue;
+        if (v->builtin >= BuiltinVar::SubgroupSize && v->builtin <= BuiltinVar::SubgroupID) continue;  // system values
         if (s == Stage::Vertex && storage == Storage::In && (v->builtin == BuiltinVar::None || isCompatAttrib(v->builtin))) continue;
         if (s == Stage::Fragment && storage == Storage::Out && v->builtin == BuiltinVar::None) continue;  // user outputs added above
         bool arrayed = perVertexArrayed(s, storage, v->q.patch);
@@ -225,7 +226,8 @@ std::vector<bool> usedArrayElements(const StageCode& sc, const Variable* v, int 
 void reflectProgramInterface(const LinkedProgram& P, Reflection& r) {
     r.programInputs.clear();
     r.programOutputs.clear();
-    static const Stage order[] = {Stage::Vertex, Stage::TessControl, Stage::TessEval, Stage::Geometry, Stage::Fragment, Stage::Compute};
+    static const Stage order[] = {Stage::Vertex, Stage::TessControl, Stage::TessEval, Stage::Geometry, Stage::Task, Stage::Mesh,
+                                  Stage::Fragment, Stage::Compute};
     Stage first = Stage::Count, last = Stage::Count;
     for (Stage s : order) {
         if (!P.stages[(int)s].main) continue;

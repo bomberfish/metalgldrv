@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include "gl/gltypes.h"
+#include "gl/internal_shaders.h"
 #include "gl/pipeline.h"
 #include "util/log.h"
 #include "util/stats.h"
@@ -226,8 +227,61 @@ static id<MTLTexture> imageSliceCopy(Context* ctx, id<MTLTexture> src, MTLPixelF
     return pf == tmp.pixelFormat ? tmp : [tmp newTextureViewWithPixelFormat:pf];
 }
 
-// Copies image slices written through imageSliceCopy() back into their 3D textures.
+// Multisample images (METALGLDRV_STRICT; otherwise GL_MAX_IMAGE_SAMPLES is 0 and these image
+// units are invalid). Metal can't write multisample textures from shaders, so the shader sees a
+// per-sample 2D-array shadow (slice = layer * samples + sample, see imageFn() in msl.cpp). Each
+// draw/dispatch copies the texture into the shadow first, and writable bindings copy the shadow
+// back into every sample afterwards (flushImageWritebacks), so all other uses of the texture
+// (sampling, attachments, blits, later image bindings) see the image writes.
+static id<MTLTexture> msImageShadow(Context* ctx, Texture* t, const ImageUnit& iu, MTLPixelFormat pf, const FormatInfo* f) {
+    id<MTLTexture> ms = t->mtl;
+    if (pf != ms.pixelFormat) {
+        ms = [ms newTextureViewWithPixelFormat:pf];
+        if (!ms) return nil;
+        ctx->dev->retainUntil(ms, ctx->serial());
+    }
+    NSUInteger S = ms.sampleCount, layers = ms.textureType == MTLTextureType2DMultisampleArray ? ms.arrayLength : 1;
+    id<MTLTexture> sh = t->msShadow;
+    if (!sh || sh.pixelFormat != pf || sh.width != ms.width || sh.height != ms.height || sh.arrayLength != layers * S) {
+        MTLTextureDescriptor* d = [MTLTextureDescriptor new];
+        d.textureType = MTLTextureType2DArray;
+        d.pixelFormat = pf;
+        d.width = ms.width;
+        d.height = ms.height;
+        d.arrayLength = layers * S;
+        d.storageMode = MTLStorageModePrivate;
+        d.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        if (pf == MTLPixelFormatR32Uint || pf == MTLPixelFormatR32Sint) d.usage |= MTLTextureUsageShaderAtomic;
+        if (t->msShadow) ctx->dev->releaseAfter(t->msShadow, ctx->serial());
+        t->msShadow = sh = [ctx->dev->mtl newTextureWithDescriptor:d];
+        if (!sh) return nil;
+        ctx->dev->makeResident(sh);
+    }
+    FmtKind k = f ? f->kind : t->storageFmt->kind;
+    int kind = k == FmtKind::UInt ? 2 : k == FmtKind::SInt ? 1 : 0;
+    MGL_STAT("ms-image-shadow");
+    msImageToShadow(ctx, ms, sh, kind);
+    if (iu.access != GL_READ_ONLY) {
+        bool queued = false;
+        for (auto& wb : ctx->msImageWritebacks) queued |= wb.shadow == sh;
+        if (!queued) ctx->msImageWritebacks.push_back({sh, ms, kind});
+    }
+    if (layers > 1 && !iu.layered) {
+        if ((NSUInteger)iu.layer >= layers) return nil;
+        id<MTLTexture> v = [sh newTextureViewWithPixelFormat:pf textureType:MTLTextureType2DArray levels:NSMakeRange(0, 1)
+                                                      slices:NSMakeRange(iu.layer * S, S)];
+        if (v) ctx->dev->retainUntil(v, ctx->serial());
+        return v;
+    }
+    return sh;
+}
+
+// Copies image slices written through imageSliceCopy() back into their 3D textures, and
+// multisample image shadows back into their textures.
 static void flushImageWritebacks(Context* ctx) {
+    for (auto& wb : ctx->msImageWritebacks) msImageFromShadow(ctx, wb.shadow, wb.ms, wb.kind);
+    ctx->msImageWritebacks.clear();
     if (ctx->imageWritebacks.empty()) return;
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
     [e barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
@@ -307,21 +361,17 @@ static id<MTLTexture> feedbackSnapshot(Context* ctx, Texture* t, id<MTLTexture> 
     return v;
 }
 
-// VariantKey::msArraySlots / msArray4: multisample texture and image slots bound to emulated
-// (2D array) multisample storage.
+// VariantKey::msArraySlots / msArray4: multisample sampler slots bound to emulated (2D array)
+// multisample storage. Multisample images always use that layout (ImageSamples slot).
 static void msArraySlots(Context* ctx, ProgramObj* prog, glsl::VariantKey& vk) {
     if (!ctx->dev->sparseTextures.load(std::memory_order_relaxed) || prog->composite) return;
     const auto& slots = prog->refl.slots;
     for (size_t i = 0; i < slots.size() && i < 64; i++) {
         const glsl::Slot& s = slots[i];
         if (s.textureTarget != GL_TEXTURE_2D_MULTISAMPLE && s.textureTarget != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) continue;
-        Texture* t = nullptr;
-        if (s.kind == glsl::SlotKind::Texture) {
-            int ti = texTargetIndex(s.textureTarget);
-            t = ti >= 0 ? ctx->textures[std::clamp(prog->samplerUnits[i], 0, kMaxTextureUnits - 1)][ti].get() : nullptr;
-        } else if (s.kind == glsl::SlotKind::Image) {
-            t = ctx->imageUnits[std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1)].tex.get();
-        }
+        if (s.kind != glsl::SlotKind::Texture) continue;
+        int ti = texTargetIndex(s.textureTarget);
+        Texture* t = ti >= 0 ? ctx->textures[std::clamp(prog->samplerUnits[i], 0, kMaxTextureUnits - 1)][ti].get() : nullptr;
         if (t && t->viewParent) t = t->viewParent.get();
         if (!t || !t->msArray) continue;
         uint64_t bits = 1ull << i;
@@ -544,6 +594,9 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                     view = t->mtl;
                     // image stores go to the buffer's memory: CPU access must wait for them
                     if (t->buffer) t->buffer->lastUse = t->buffer->lastGpuWrite = serial;
+                } else if (t->mtl.sampleCount > 1) {
+                    if (pf != t->mtl.pixelFormat && !(t->mtl.usage & MTLTextureUsagePixelFormatView)) pf = t->mtl.pixelFormat;
+                    if (ctx->strict) view = msImageShadow(ctx, t, iu, pf, f);
                 } else {
                     MTLTextureType vt = t->msArray ? MTLTextureType2DArray : mtlTextureType(s.textureTarget, t->samples);
                     // imageCube / imageCubeArray are declared as texture2d_array in MSL.
@@ -580,6 +633,14 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             } else {
                 v = 0;
             }
+            break;
+        }
+        case glsl::SlotKind::ImageSamples: {
+            // uint2 {samples, 0}: the multisample image's shadow has samples slices per layer
+            const ImageUnit& iu = ctx->imageUnits[std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1)];
+            // (sparse multisample textures are stored in that layout and bound directly)
+            if (iu.tex && iu.tex->msArray) v = iu.tex->samples;
+            else v = ctx->strict && iu.tex && iu.tex->mtl ? iu.tex->mtl.sampleCount : 0;
             break;
         }
         case glsl::SlotKind::SubroutineIndices: {
@@ -848,6 +909,61 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
     return true;
 }
 
+// KHR_blend_equation_advanced: index into glsl::kAdvancedBlendEquations, or -1.
+static int advancedBlendIndex(GLenum eq) {
+    if (eq < glsl::kAdvancedBlendEquations[0]) return -1;  // the classic equations are all below
+    for (int i = 0; i < 15; i++)
+        if (eq == glsl::kAdvancedBlendEquations[i]) return i;
+    return -1;
+}
+
+// VariantKey::advancedBlend for the current state (0 = none): draw buffer 0 blends with an advanced
+// equation, which the fragment shader computes from the destination it reads with framebuffer fetch.
+static uint8_t advancedBlendKey(Context* ctx) {
+    const BlendState& b = ctx->blend[0];
+    if (!b.enabled || !ctx->advancedBlendUsed) return 0;
+    int mode = advancedBlendIndex(b.eqRGB);
+    if (mode < 0) return 0;
+    Framebuffer* fb = ctx->drawFb.get();
+    const FormatInfo* f = nullptr;
+    bool noAlpha = false;
+    if (fb->isDefault) {
+        if (fb->drawBuffers[0] != GL_NONE && fb->surface && fb->surface->color) {
+            f = formatInfoForMTL(fb->surface->color.pixelFormat);
+            noAlpha = !fb->surface->hasAlpha;
+        }
+    } else if (fb->drawBuffers[0] >= GL_COLOR_ATTACHMENT0 && fb->drawBuffers[0] < GL_COLOR_ATTACHMENT0 + kMaxDrawBuffers) {
+        const Attachment& a = fb->att[fb->drawBuffers[0] - GL_COLOR_ATTACHMENT0];
+        if (a.type == GL_RENDERBUFFER && a.rb) f = a.rb->fmt;
+        else if (a.type == GL_TEXTURE && a.tex) f = a.tex->storageFmt;
+    }
+    // No color buffer 0, or an integer one (never blended): plain output.
+    if (!f || f->kind == FmtKind::UInt || f->kind == FmtKind::SInt) return 0;
+    uint8_t k = (uint8_t)(mode + 1);
+    if (noAlpha || f->aBits == 0) k |= glsl::kAdvancedBlendNoDstAlpha;
+    if (f->kind == FmtKind::Unorm || f->kind == FmtKind::Snorm) k |= glsl::kAdvancedBlendClamp;
+    return k;
+}
+
+// KHR_blend_equation_advanced draw-time errors (INVALID_OPERATION), or null.
+static const char* advancedBlendError(Context* ctx, ProgramObj* prog) {
+    Framebuffer* fb = ctx->drawFb.get();
+    int mode = -1;
+    bool otherBuffers = false;
+    for (int i = 0; i < kMaxDrawBuffers; i++) {
+        if (fb->drawBuffers[i] == GL_NONE) continue;
+        if (i > 0) otherBuffers = true;
+        if (ctx->blend[i].enabled && advancedBlendIndex(ctx->blend[i].eqRGB) >= 0) mode = advancedBlendIndex(ctx->blend[i].eqRGB);
+    }
+    if (mode < 0) return nullptr;
+    if (otherBuffers) return "advanced blending with more than one draw buffer";
+    if (fb->drawBuffers[0] == GL_FRONT_AND_BACK) return "advanced blending into FRONT_AND_BACK";
+    ProgramObj* fs = ctx->pipeline && !ctx->program ? ctx->pipeline->stages[(int)glsl::Stage::Fragment].get() : prog;
+    if (!fs || !(fs->refl.blendSupport & (1u << mode)))
+        return "the fragment shader does not declare the blend_support qualifier of the advanced blend equation";
+    return nullptr;
+}
+
 static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Reflection& refl) {
     const PassDesc& p = ctx->curPass;
     for (int i = 0; i < kMaxDrawBuffers; i++) {
@@ -864,7 +980,8 @@ static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Refle
         BlendKey& bk = key.blend[i];
         const FormatInfo* f = formatInfoForMTL(pf);
         bool intFmt = f && (f->kind == FmtKind::UInt || f->kind == FmtKind::SInt);
-        bk.enabled = b.enabled && !intFmt;
+        // Advanced equations (draw buffer 0 only) blend in the fragment shader (advancedBlendKey).
+        bk.enabled = b.enabled && !intFmt && !(i == 0 && advancedBlendIndex(b.eqRGB) >= 0);
         if (bk.enabled) {
             bk.srcRGB = blendFactor(b.srcRGB);
             bk.dstRGB = blendFactor(b.dstRGB);
@@ -1317,6 +1434,7 @@ ProgramObj* mglPipelineDrawProgram(Context* ctx) {
     r.fragOutputs = fs ? fs->refl.fragOutputs : std::vector<glsl::FragOutput>();
     r.usesFragDepth = fs && fs->refl.usesFragDepth;
     r.earlyFragmentTests = fs && fs->refl.earlyFragmentTests;
+    r.blendSupport = fs ? fs->refl.blendSupport : 0;
     r.usesDiscard = fs && fs->refl.usesDiscard;
     r.usesFlatShading = fs && fs->refl.usesFlatShading;
     r.multipass = glsl::multipassInfo(lp);
@@ -2076,7 +2194,16 @@ static bool validateDraw(Context* ctx, GLenum mode) {
         if (!pp->stages[(int)glsl::Stage::Vertex]) return false;  // missing stages: undefined rendering, no error
     }
     ProgramObj* prog = mglPipelineDrawProgram(ctx);
+    if (ctx->advancedBlendUsed)
+        if (const char* err = advancedBlendError(ctx, prog)) {
+            ctx->setError(GL_INVALID_OPERATION, "%s", err);
+            return false;
+        }
     if (!prog && ctx->coreProfile) return false;  // no program/pipeline: undefined rendering, not an error
+    if (prog && (prog->refl.stageMask & (1u << (int)glsl::Stage::Mesh))) {
+        ctx->setError(GL_INVALID_OPERATION, "programs with a mesh shader draw with glDrawMeshTasks*EXT");
+        return false;
+    }
     bool hasTess = prog && (prog->refl.stageMask & (1u << (int)glsl::Stage::TessEval));
     if (mode == GL_PATCHES && !hasTess) {
         ctx->setError(GL_INVALID_OPERATION);
@@ -2197,6 +2324,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
     vk.sparseImageSlots = sparseImageSlots(ctx, prog);
     msArraySlots(ctx, prog, vk);
+    vk.advancedBlend = advancedBlendKey(ctx);
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     bool primQueries = mglQueryPrimitivesActive(ctx);
     if (vk.kind != glsl::PipelineKind::Classic) {
@@ -2272,6 +2400,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
                 fk.kind = glsl::PipelineKind::Classic;
                 fk.primitive = vk.primitive;
                 fk.flatshadeLastVertex = vk.flatshadeLastVertex;
+                fk.advancedBlend = vk.advancedBlend;
                 fsVar = ctx->pipelines_->variant(f, fk);
                 if (!fsVar || !fsVar->ok) return;
             }
@@ -2347,7 +2476,8 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     }
     fillColorKey(ctx, key, frefl);
     key.rasterEnabled = !ctx->rasterizerDiscard;
-    key.topologyClass = (uint8_t)MTLPrimitiveTopologyClassUnspecified;  // point size is always written; only layered rendering needs a class
+    // Point size is always written; only layered rendering (gl_Layer from the vertex shader) needs a class.
+    key.topologyClass = (uint8_t)(refl.writesLayer ? topologyClass(d.mode) : MTLPrimitiveTopologyClassUnspecified);
     if (!setupVertexInput(ctx, prog, key, table, d, minIdx, maxIdx)) return;
     if (ctx->renderEnc != e) {
         // Should not happen (see above); never encode into an ended encoder.
@@ -2677,6 +2807,186 @@ API void APIENTRY glMultiDrawElementsIndirectCountARB(GLenum mode, GLenum type, 
 }
 
 // ---------------------------------------------------------------------------
+// EXT_mesh_shader draws: an object (task) + mesh render pipeline, no vertex input.
+// ---------------------------------------------------------------------------
+// Program of the current program / pipeline providing the mesh (and task) stages (null if none);
+// *fsProg receives the program of the fragment stage (may differ in a program pipeline).
+static ProgramObj* meshDrawProgram(Context* ctx, ProgramObj** fsProg) {
+    const uint32_t meshBit = 1u << (int)glsl::Stage::Mesh;
+    if (ctx->program) {
+        ProgramObj* p = ctx->program.get();
+        *fsProg = p;
+        return p->program && (p->refl.stageMask & meshBit) ? p : nullptr;
+    }
+    if (!ctx->pipeline) return nullptr;
+    ProgramPipelineObj* pp = ctx->pipeline.get();
+    ProgramObj* m = pp->stages[(int)glsl::Stage::Mesh].get();
+    if (!m || !m->program) return nullptr;
+    // the task stage must come from the mesh stage's program (both run from one variant)
+    ProgramObj* t = pp->stages[(int)glsl::Stage::Task].get();
+    if (t && t != m) return nullptr;
+    if (!t && (m->refl.stageMask & (1u << (int)glsl::Stage::Task))) return nullptr;
+    *fsProg = pp->stages[(int)glsl::Stage::Fragment].get();
+    return m;
+}
+
+// Validation shared by the mesh draw commands; returns the mesh program or null (error set).
+static ProgramObj* validateMeshDraw(Context* ctx, ProgramObj** fsProg) {
+    if (ctx->pipeline && !ctx->program) {
+        std::string err = pipelineValidationError(ctx->pipeline.get());
+        if (!err.empty()) {
+            ctx->setError(GL_INVALID_OPERATION, "%s", err.c_str());
+            return nullptr;
+        }
+    }
+    ProgramObj* prog = meshDrawProgram(ctx, fsProg);
+    if (!prog) {
+        ctx->setError(GL_INVALID_OPERATION, "no active program with a mesh shader");
+        return nullptr;
+    }
+    Framebuffer* fb = ctx->drawFb.get();
+    if (!fb || framebufferStatus(ctx, fb) != GL_FRAMEBUFFER_COMPLETE) {
+        ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return nullptr;
+    }
+    if (ctx->xfb && ctx->xfb->active && !ctx->xfb->paused) {
+        ctx->setError(GL_INVALID_OPERATION, "mesh draws cannot be used with active transform feedback");
+        return nullptr;
+    }
+    return prog;
+}
+
+// One mesh draw: direct (x, y, z) or with the group counts read by the GPU at `indirect`.
+static void executeMeshDraw(Context* ctx, ProgramObj* prog, ProgramObj* fsProg, GLuint x, GLuint y, GLuint z, Buffer* indirect,
+                            GLintptr indirectOffset, int drawID) {
+    MGL_STAT("draw");
+    if (!indirect && (!x || !y || !z)) return;
+    if (!mglCheckDrawConditional(ctx)) return;
+    const glsl::Reflection& refl = prog->refl;
+    glsl::VariantKey vk;
+    vk.kind = glsl::PipelineKind::Mesh;
+    vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
+    vk.rasterDiscard = ctx->rasterizerDiscard;
+    vk.sampleShading = ctx->sampleShading && ctx->minSampleShading > 0;
+    vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
+    ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
+    if (!var || !var->ok) return;
+    const glsl::EntryPoint* ms = var->entry(glsl::EntryPoint::Mesh);
+    const glsl::EntryPoint* os = var->entry(glsl::EntryPoint::Object);
+    if (!ms) return;
+    // Program pipeline whose fragment stage comes from another separable program (or none).
+    bool mixedFs = fsProg != prog;
+    ProgramVariant* fsVar = nullptr;
+    if (mixedFs && fsProg) {
+        glsl::VariantKey fk;
+        fk.kind = glsl::PipelineKind::Classic;
+        fk.flatshadeLastVertex = vk.flatshadeLastVertex;
+        fk.sampleShading = vk.sampleShading;
+        fk.sampleMask = vk.sampleMask;
+        fsVar = ctx->pipelines_->variant(fsProg, fk);
+        if (!fsVar || !fsVar->ok) return;
+    }
+    const glsl::Reflection& frefl = fsProg ? fsProg->refl : refl;
+    // Resolving bindings can end the render pass: build the arguments before acquiring the encoder.
+    uint64_t argAddr = buildArguments(ctx, prog, false);
+    uint64_t fsArgAddr = mixedFs && fsProg ? buildArguments(ctx, fsProg, false) : 0;
+    id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
+    if (!e) return;
+    RenderPipelineKey key;
+    key.variant = var;
+    if (mixedFs) {
+        key.fsVariant = fsVar;
+        key.fsVariantUid = fsVar ? fsVar->uid : ~0ull;
+    }
+    fillColorKey(ctx, key, frefl);
+    key.rasterEnabled = !ctx->rasterizerDiscard;
+    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    if (!pso) return;
+    if (ctx->enc.pipeline != pso) {
+        [e setRenderPipelineState:pso];
+        ctx->enc.pipeline = pso;
+    }
+    applyDynamicState(ctx, e, refl.meshOutputPrimitive, refl.writesViewportIndex);
+    id<MTL4ArgumentTable> table = ctx->renderArgTable;
+    uint64_t sysAddr = buildSys(ctx, prog, drawID, 0, 0, 0, false);
+    [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+    [table setAddress:sysAddr atIndex:glsl::kBufSys];
+    if (mixedFs) {
+        if (!ctx->enc.fsTableSplit) {
+            [e setArgumentTable:ctx->renderArgTableFS atStages:MTLRenderStageFragment];
+            ctx->enc.fsTableSplit = true;
+        }
+        [ctx->renderArgTableFS setAddress:fsArgAddr ? fsArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+        [ctx->renderArgTableFS setAddress:fsProg ? buildSys(ctx, fsProg, drawID, 0, 0, 0, false) : sysAddr atIndex:glsl::kBufSys];
+    } else if (ctx->enc.fsTableSplit) {
+        [e setArgumentTable:table atStages:MTLRenderStageFragment];
+        ctx->enc.fsTableSplit = false;
+    }
+    mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility queries
+    MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
+    MTLSize objTG = os ? MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2])
+                       : MTLSizeMake(1, 1, 1);
+    if (indirect) {
+        // DrawMeshTasksIndirectCommandEXT {x, y, z} matches MTLDispatchThreadgroupsIndirectArguments
+        [e drawMeshThreadgroupsWithIndirectBuffer:indirect->gpuAddress() + indirectOffset threadsPerObjectThreadgroup:objTG
+                        threadsPerMeshThreadgroup:meshTG];
+        indirect->lastUse = ctx->serial();
+    } else {
+        [e drawMeshThreadgroups:MTLSizeMake(x, y, z) threadsPerObjectThreadgroup:objTG threadsPerMeshThreadgroup:meshTG];
+    }
+    flushImageWritebacks(ctx);
+}
+
+API void APIENTRY glDrawMeshTasksEXT(GLuint x, GLuint y, GLuint z) {
+    MGL_CTX();
+    ProgramObj* fsProg = nullptr;
+    ProgramObj* prog = validateMeshDraw(ctx, &fsProg);
+    if (!prog) return;
+    // GL_MAX_TASK/MESH_WORK_GROUP_COUNT_EXT and _TOTAL_COUNT_EXT
+    if (x > 65535 || y > 65535 || z > 65535 || (uint64_t)x * y * z > (1u << 22)) return ctx->setError(GL_INVALID_VALUE);
+    executeMeshDraw(ctx, prog, fsProg, x, y, z, nullptr, 0, 0);
+}
+
+API void APIENTRY glMultiDrawMeshTasksIndirectEXT(GLintptr indirect, GLsizei drawcount, GLsizei stride) {
+    MGL_CTX();
+    if (drawcount <= 0 || (stride % 4)) return ctx->setError(GL_INVALID_VALUE);
+    ProgramObj* fsProg = nullptr;
+    ProgramObj* prog = validateMeshDraw(ctx, &fsProg);
+    if (!prog) return;
+    if (indirect < 0) return ctx->setError(GL_INVALID_VALUE);
+    GLsizei s = stride ? stride : 12;
+    Buffer* b = indirectBuffer(ctx, (const void*)indirect, (size_t)s * (drawcount - 1) + 12);
+    if (!b) return;
+    for (int i = 0; i < drawcount; i++) executeMeshDraw(ctx, prog, fsProg, 0, 0, 0, b, indirect + (GLintptr)i * s, i);
+}
+
+API void APIENTRY glDrawMeshTasksIndirectEXT(GLintptr indirect) {
+    MGL_CTX();
+    ProgramObj* fsProg = nullptr;
+    ProgramObj* prog = validateMeshDraw(ctx, &fsProg);
+    if (!prog) return;
+    if (indirect < 0) return ctx->setError(GL_INVALID_VALUE);
+    Buffer* b = indirectBuffer(ctx, (const void*)indirect, 12);
+    if (!b) return;
+    executeMeshDraw(ctx, prog, fsProg, 0, 0, 0, b, indirect, 0);
+}
+
+API void APIENTRY glMultiDrawMeshTasksIndirectCountEXT(GLintptr indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
+    MGL_CTX();
+    if (maxdrawcount < 0 || (stride % 4)) return ctx->setError(GL_INVALID_VALUE);
+    GLsizei n = readDrawCount(ctx, drawcount, maxdrawcount);
+    if (n < 0) return;
+    ProgramObj* fsProg = nullptr;
+    ProgramObj* prog = validateMeshDraw(ctx, &fsProg);
+    if (!prog || n == 0) return;
+    if (indirect < 0) return ctx->setError(GL_INVALID_VALUE);
+    GLsizei s = stride ? stride : 12;
+    Buffer* b = indirectBuffer(ctx, (const void*)indirect, (size_t)s * (n - 1) + 12);
+    if (!b) return;
+    for (int i = 0; i < n; i++) executeMeshDraw(ctx, prog, fsProg, 0, 0, 0, b, indirect + (GLintptr)i * s, i);
+}
+
+// ---------------------------------------------------------------------------
 // compute
 // ---------------------------------------------------------------------------
 static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indirect, GLintptr indirectOffset) {
@@ -2704,9 +3014,10 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
         st.csInvocations = (uint64_t)g[0] * g[1] * g[2] * prog->refl.localSize[0] * prog->refl.localSize[1] * prog->refl.localSize[2];
         mglStatsCountDraw(ctx, st);
     }
+    // Arguments first: binding them may encode copies (image shadows) into the compute encoder.
+    uint64_t argAddr = buildArguments(ctx, prog, true);
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
     [e setComputePipelineState:pso];
-    uint64_t argAddr = buildArguments(ctx, prog, true);
     [ctx->computeArgTable setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
     [ctx->computeArgTable setAddress:buildSys(ctx, prog, 0, 0, 0, 0) atIndex:glsl::kBufSys];
     MTLSize tg = MTLSizeMake(prog->refl.localSize[0], prog->refl.localSize[1], prog->refl.localSize[2]);

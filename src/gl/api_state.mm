@@ -23,6 +23,14 @@ static bool validBlendEq(GLenum e) {
     return e == GL_FUNC_ADD || e == GL_FUNC_SUBTRACT || e == GL_FUNC_REVERSE_SUBTRACT || e == GL_MIN || e == GL_MAX;
 }
 
+// KHR_blend_equation_advanced: BlendEquation(i) only (BlendEquationSeparate(i) rejects them).
+static bool validAdvancedBlendEq(Context* ctx, GLenum e) {
+    if (!ctx->dev->caps.programmableBlending) return false;
+    for (uint32_t a : glsl::kAdvancedBlendEquations)
+        if (e == a) return true;
+    return false;
+}
+
 static bool validCompare(GLenum f) { return f >= GL_NEVER && f <= GL_ALWAYS; }
 
 static bool validStencilOp(GLenum op) {
@@ -69,6 +77,10 @@ static bool setCap(Context* ctx, GLenum cap, bool v, int index = -1) {
     case GL_SAMPLE_SHADING: ctx->sampleShading = v; return true;
     case GL_COLOR_LOGIC_OP: ctx->colorLogicOp = v; return true;
     case GL_DITHER: ctx->dither = v; return true;
+    case GL_BLEND_ADVANCED_COHERENT_KHR:
+        if (!ctx->dev->caps.programmableBlending) return false;
+        ctx->blendAdvancedCoherent = v;
+        return true;
     case GL_FRAMEBUFFER_SRGB:
         if (ctx->framebufferSRGB != v) {
             ctx->applyClearNow();  // pending clears belong to the current attachment views
@@ -145,6 +157,7 @@ bool mglIsEnabled(Context* ctx, GLenum cap, int index, bool* out) {
     case GL_SAMPLE_SHADING: *out = ctx->sampleShading; return true;
     case GL_COLOR_LOGIC_OP: *out = ctx->colorLogicOp; return true;
     case GL_DITHER: *out = ctx->dither; return true;
+    case GL_BLEND_ADVANCED_COHERENT_KHR: *out = ctx->blendAdvancedCoherent; return ctx->dev->caps.programmableBlending;
     case GL_FRAMEBUFFER_SRGB: *out = ctx->framebufferSRGB; return true;
     case GL_LINE_SMOOTH: *out = ctx->lineSmooth; return true;
     case GL_POLYGON_SMOOTH: *out = ctx->polygonSmooth; return true;
@@ -332,7 +345,10 @@ API void APIENTRY glBlendFuncSeparatei(GLuint buf, GLenum sr, GLenum dr, GLenum 
 
 API void APIENTRY glBlendEquation(GLenum m) {
     MGL_CTX();
-    if (!validBlendEq(m)) return ctx->setError(GL_INVALID_ENUM);
+    if (!validBlendEq(m)) {
+        if (!validAdvancedBlendEq(ctx, m)) return ctx->setError(GL_INVALID_ENUM);
+        ctx->advancedBlendUsed = true;
+    }
     for (auto& b : ctx->blend) b.eqRGB = b.eqA = m;
 }
 
@@ -348,7 +364,10 @@ API void APIENTRY glBlendEquationSeparate(GLenum mr, GLenum ma) {
 API void APIENTRY glBlendEquationi(GLuint buf, GLenum m) {
     MGL_CTX();
     if (buf >= kMaxDrawBuffers) return ctx->setError(GL_INVALID_VALUE);
-    if (!validBlendEq(m)) return ctx->setError(GL_INVALID_ENUM);
+    if (!validBlendEq(m)) {
+        if (!validAdvancedBlendEq(ctx, m)) return ctx->setError(GL_INVALID_ENUM);
+        ctx->advancedBlendUsed = true;
+    }
     ctx->blend[buf].eqRGB = ctx->blend[buf].eqA = m;
 }
 
@@ -358,6 +377,13 @@ API void APIENTRY glBlendEquationSeparatei(GLuint buf, GLenum mr, GLenum ma) {
     if (!validBlendEq(mr) || !validBlendEq(ma)) return ctx->setError(GL_INVALID_ENUM);
     ctx->blend[buf].eqRGB = mr;
     ctx->blend[buf].eqA = ma;
+}
+
+// KHR_blend_equation_advanced: advanced blending reads the destination with framebuffer fetch,
+// which observes earlier fragments in order, so there is nothing to wait for.
+API void APIENTRY glBlendBarrierKHR(void) {
+    MGL_CTX();
+    (void)ctx;
 }
 
 API void APIENTRY glBlendColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {

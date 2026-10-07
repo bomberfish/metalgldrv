@@ -22,6 +22,8 @@ static bool stageFromName(const std::string& s, Stage& st) {
     else if (s == "geom" || s == "gs") st = Stage::Geometry;
     else if (s == "tesc") st = Stage::TessControl;
     else if (s == "tese") st = Stage::TessEval;
+    else if (s == "task") st = Stage::Task;
+    else if (s == "mesh") st = Stage::Mesh;
     else return false;
     return true;
 }
@@ -41,6 +43,7 @@ static const char* slotKindName(SlotKind k) {
         case SlotKind::SubroutineIndices: return "SubroutineIndices";
         case SlotKind::LodBias: return "LodBias";
         case SlotKind::SamplerBorder: return "SamplerBorder";
+        case SlotKind::ImageSamples: return "ImageSamples";
     }
     return "?";
 }
@@ -184,6 +187,7 @@ int main(int argc, char** argv) {
     uint32_t sm = lr.reflection.stageMask;
     key.kind = capture ? PipelineKind::XfbCapture
              : (sm & (1u << (int)Stage::Compute)) ? PipelineKind::Compute
+             : (sm & (1u << (int)Stage::Mesh)) ? PipelineKind::Mesh
              : (sm & (1u << (int)Stage::TessEval)) ? PipelineKind::Tessellation
              : (sm & (1u << (int)Stage::Geometry)) ? PipelineKind::MeshGeometry
              : xfb ? PipelineKind::XfbCapture : PipelineKind::Classic;

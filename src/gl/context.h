@@ -137,6 +137,7 @@ public:
     Ref<ShareGroup> share;
     int majorVersion, minorVersion;
     bool coreProfile, debugContext, forwardCompatible, robustAccess, noErrorMode;
+    bool strict;  // dev->caps.strict (METALGLDRV_STRICT)
     bool loseContextOnReset = false;
     GLenum clampReadColor = GL_FIXED_ONLY;  // glClampColor(GL_CLAMP_READ_COLOR)  // RESET_NOTIFICATION_STRATEGY requested at creation
     bool everCurrent = false;
@@ -226,6 +227,8 @@ public:
     bool colorLogicOp = false;
     GLenum logicOp = GL_COPY;
     bool dither = true, framebufferSRGB = false;
+    bool blendAdvancedCoherent = true;  // GL_BLEND_ADVANCED_COHERENT_KHR (framebuffer fetch is always coherent)
+    bool advancedBlendUsed = false;     // an advanced blend equation was ever set: draws validate it
     uint32_t clipDistanceMask = 0;
     GLenum clipOrigin = GL_LOWER_LEFT, clipDepthMode = GL_NEGATIVE_ONE_TO_ONE;
     GLenum provokingVertex = GL_LAST_VERTEX_CONVENTION;
@@ -295,6 +298,13 @@ public:
         NSUInteger level, z;
     };
     std::vector<ImageSliceWriteback> imageWritebacks;
+    // Writable multisample image bindings (METALGLDRV_STRICT): per-sample shadows written back into
+    // their multisample textures after the draw/dispatch (draw.mm, msImageShadow).
+    struct MSImageWriteback {
+        id<MTLTexture> shadow, ms;
+        int kind;  // 0 float, 1 int, 2 uint
+    };
+    std::vector<MSImageWriteback> msImageWritebacks;
     uint64_t drawFbVersionSeen = 0;
     id<MTL4RenderCommandEncoder> renderEnc = nil;
     id<MTL4ComputeCommandEncoder> computeEnc = nil;
@@ -367,6 +377,11 @@ struct DrawStats {
 };
 void mglStatsCountDraw(Context* ctx, const DrawStats& st);
 uint64_t mglStatsGpuSlot(Context* ctx, bool gs, bool tess);
+
+// Extensions advertised only on GPUs that can do them (api_get.mm): GL_EXTENSIONS names, and
+// the GLSL #extension names the shader compiler accepts on this device (CompileOptions).
+std::vector<const char*> mglDeviceExtensions(const DeviceCaps& caps);
+const std::vector<std::string>& mglDeviceGlslExtensions(const DeviceCaps& caps);
 
 // Common entry-point prologue.
 // The entry point's name is remembered for GL error logging (METALGLDRV_LOG=3) only.

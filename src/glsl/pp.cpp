@@ -21,6 +21,8 @@ const std::vector<std::string>& supportedExtensions() {
         "GL_ARB_fragment_layer_viewport",
         "GL_ARB_gpu_shader5",
         "GL_ARB_gpu_shader_fp64",
+        "GL_ARB_gpu_shader_int64",
+        "GL_ARB_shader_ballot",
         "GL_ARB_shader_draw_parameters",
         "GL_ARB_shader_atomic_counters",
         "GL_ARB_shader_atomic_counter_ops",
@@ -42,6 +44,15 @@ const std::vector<std::string>& supportedExtensions() {
         "GL_ARB_uniform_buffer_object",
         "GL_ARB_sample_shading",
         "GL_ARB_shader_group_vote",
+        "GL_KHR_shader_subgroup_basic",
+        "GL_KHR_shader_subgroup_vote",
+        "GL_KHR_shader_subgroup_arithmetic",
+        "GL_KHR_shader_subgroup_ballot",
+        "GL_KHR_shader_subgroup_shuffle",
+        "GL_KHR_shader_subgroup_shuffle_relative",
+        "GL_KHR_shader_subgroup_clustered",
+        "GL_KHR_shader_subgroup_quad",
+        "GL_NV_shader_subgroup_partitioned",
         "GL_ARB_cull_distance",
         "GL_ARB_tessellation_shader",
         "GL_ARB_geometry_shader4",
@@ -52,9 +63,11 @@ const std::vector<std::string>& supportedExtensions() {
         "GL_ARB_shader_subroutine",
         "GL_ARB_shader_precision",
         "GL_EXT_shader_integer_mix",
+        "GL_EXT_texture_shadow_lod",
         "GL_EXT_gpu_shader4",
         "GL_EXT_texture_array",
         "GL_EXT_geometry_shader4",
+        "GL_EXT_mesh_shader",
         "GL_AMD_vertex_shader_layer",
         "GL_AMD_vertex_shader_viewport_index",
     };
@@ -748,6 +761,10 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
         if (name != "all") {
             auto& exts = supportedExtensions();
             bool known = std::find(exts.begin(), exts.end(), name) != exts.end();
+            if (!known && opts_.deviceExtensions) {
+                auto& dev = *opts_.deviceExtensions;
+                known = std::find(dev.begin(), dev.end(), name) != dev.end();
+            }
             if (!known && res_.es) {
                 auto& es = supportedESExtensions();
                 known = std::find(es.begin(), es.end(), name) != es.end();
@@ -815,6 +832,8 @@ PPResult Preprocessor::run(const std::vector<std::string>& sources) {
         for (auto& e : supportedExtensions()) define(e, "1");
         if (opts_.sparseTexture)
             for (auto& e : sparseTextureExtensions()) define(e, "1");
+        if (opts_.deviceExtensions)
+            for (auto& e : *opts_.deviceExtensions) define(e, "1");
         if (res_.es)
             for (auto& e : supportedESExtensions()) define(e, "1");
         (void)stage_;
@@ -864,7 +883,6 @@ PPResult Preprocessor::run(const std::vector<std::string>& sources) {
     end.kind = PK::End;
     end.line = curLine_;
     res_.tokens.push_back(end);
-    (void)opts_;
     return std::move(res_);
 }
 

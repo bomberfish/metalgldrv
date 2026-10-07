@@ -35,6 +35,8 @@ struct Acc {
     std::string sizeExpr;     // SSBO bound size expression
 };
 
+bool isSubgroupVar(BuiltinVar b) { return b >= BuiltinVar::SubgroupSize && b <= BuiltinVar::SubgroupID; }
+
 bool isSimpleIdent(const std::string& s) {
     if (s.empty()) return false;
     for (char c : s)
@@ -43,7 +45,7 @@ bool isSimpleIdent(const std::string& s) {
 }
 
 const char* kSwz = "xyzw";
-static const char* const kStageNs[] = {"vs", "tcs", "tes", "gs", "fs", "cs"};
+static const char* const kStageNs[] = {"vs", "tcs", "tes", "gs", "fs", "cs", "ts", "ms"};
 
 class Emitter {
 public:
@@ -110,6 +112,7 @@ private:
     bool hasShared_ = false;
     std::map<std::string, std::string> interpLeaf_;  // FS input leaf accessor (without "g.") -> In member, for interpolateAt*
     bool needEq_ = false;
+    std::string payloadSpace_ = "object_data";  // address space of G::PL (task/mesh payload)
 
     [[noreturn]] void fail(const std::string& m) { throw EmitError{m}; }
 
@@ -120,6 +123,8 @@ private:
             case BT::Double: return "ulong";
             case BT::Int: return "int";
             case BT::UInt: return "uint";
+            case BT::Int64: return "long";
+            case BT::UInt64: return "ulong";
             case BT::Bool: return "bool";
             default: return "void";
         }
@@ -142,7 +147,10 @@ private:
             if (t.dim == Dim::Cube) return t.arrayed ? "depthcube_array<float>" : "depthcube<float>";
             return t.arrayed ? "depth2d_array<float>" : "depth2d<float>";
         }
-        if (t.ms) return (t.arrayed ? "texture2d_ms_array<" : "texture2d_ms<") + T + (image ? ", access::read" : "") + ">";
+        // Metal can't write multisample textures: multisample images are bound as per-sample
+        // 2D-array shadows (draw.mm, msImageShadow), slice = layer * samples + sample.
+        if (t.ms && image) return "texture2d_array<" + T + acc + ">";
+        if (t.ms) return t.arrayed ? "texture2d_ms_array<" + T + ">" : "texture2d_ms<" + T + ">";
         switch (t.dim) {
             case Dim::D1:
             case Dim::D2:
@@ -202,6 +210,11 @@ private:
                 return v < 0 ? "(" + std::to_string(v) + ")" : std::to_string(v);
             }
             case BT::UInt: return std::to_string((uint32_t)s.u) + "u";
+            case BT::Int64: {
+                if (s.i == INT64_MIN) return "(-9223372036854775807l - 1l)";
+                return s.i < 0 ? "(" + std::to_string(s.i) + "l)" : std::to_string(s.i) + "l";
+            }
+            case BT::UInt64: return std::to_string(s.u) + "ul";
             case BT::Bool: return s.b ? "true" : "false";
             default: return "0";
         }
@@ -244,6 +257,8 @@ private:
                 case BT::Float: return "mgl_f64_from_float(" + s + ")";
                 case BT::Int: return "mgl_f64_from_int(" + s + ")";
                 case BT::UInt: return "mgl_f64_from_uint(" + s + ")";
+                case BT::Int64: return "mgl_f64_from_i64(" + s + ")";
+                case BT::UInt64: return "mgl_f64_from_u64(" + s + ")";
                 case BT::Bool: return "mgl_f64_from_bool(" + s + ")";
                 default: fail("bad conversion to double");
             }
@@ -254,10 +269,14 @@ private:
                 case BT::Float: return "mgl_f64_to_float(" + s + ")";
                 case BT::Int: return "mgl_f64_to_int(" + s + ")";
                 case BT::UInt: return "mgl_f64_to_uint(" + s + ")";
+                case BT::Int64: return "mgl_f64_to_i64(" + s + ")";
+                case BT::UInt64: return "mgl_f64_to_u64(" + s + ")";
                 case BT::Bool: return "mgl_f64_to_bool(" + s + ")";
                 default: fail("bad conversion from double");
             }
         }
+        if ((from.base == BT::Int64 || from.base == BT::UInt64) && (to.base == BT::Int || to.base == BT::UInt))  // keep the low 32 bits
+            return mt(to) + "(" + mt(to.withBase(BT::UInt)) + "(" + mt(from.withBase(BT::UInt64)) + "(" + s + ") & 0xFFFFFFFFul))";
         return mt(to) + "(" + s + ")";
     }
     std::string f64one(const Type& t) {
@@ -294,11 +313,19 @@ private:
         bool perThread = v->builtin == BuiltinVar::InvocationID || v->builtin == BuiltinVar::PrimitiveID ||
                          v->builtin == BuiltinVar::PatchVerticesIn || v->builtin == BuiltinVar::TessCoord ||
                          v->builtin == BuiltinVar::CompatUniform || v->builtin == BuiltinVar::DepthRange ||
-                         v->builtin == BuiltinVar::NumSamples;
+                         v->builtin == BuiltinVar::NumSamples || isSubgroupVar(v->builtin);
         if (perThread) return false;
         if (stage_ == Stage::TessControl) return v->q.storage == Storage::In || v->q.storage == Storage::Out;
         if (stage_ == Stage::TessEval) return v->q.storage == Storage::In;
+        if (stage_ == Stage::Mesh) return v->q.storage == Storage::Out;  // outputs are shared by the workgroup
         return false;
+    }
+    // gl_MeshVerticesEXT / gl_MeshPrimitivesEXT: stored as one threadgroup array per used member
+    static bool isMeshBlock(const Variable* v) {
+        return v->builtin == BuiltinVar::MeshVertices || v->builtin == BuiltinVar::MeshPrimitives;
+    }
+    static std::string meshMemberArray(const Variable* v, int member) {
+        return "S->bi_" + v->name + "_" + v->block->members[member].name;
     }
     bool rootInThreadgroup(const Expr* e) const {
         while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
@@ -307,6 +334,7 @@ private:
     std::string varName(const Variable* v) {
         if (v->builtin != BuiltinVar::None) return (inThreadgroup(v) ? "S->bi_" : "bi_") + v->name;
         if (v->global) {
+            if (v->q.storage == Storage::TaskPayload) return "PL->g_" + v->name;
             if (inThreadgroup(v)) return "S->g_" + v->name;
             return "g_" + v->name;
         }
@@ -342,6 +370,8 @@ private:
     std::string ctor(const Expr* e);
     std::string callUser(const Expr* e);
     std::string callBuiltin(const Expr* e);
+    std::string subgroupFn(const Expr* e);
+    bool sgLane_ = false;
     std::string textureFn(const Expr* e, const std::string& name);
     std::string imageFn(const Expr* e, const std::string& name);
     std::string sparseFn(const Expr* e, const std::string& name);
@@ -365,6 +395,7 @@ private:
     }
     std::string texBias_;  // LOD bias (float) of the sampler resolved by the last texRef(), "" for images
     std::string texBorder_;  // emulated integer border (GPU address) of the last texRef(), "" if none
+    std::string texSamples_;  // uint2 sample count of the multisample image of the last texRef(), "" if none
     std::string withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs, const std::vector<Type>& ptypes,
                          const Type& ret, const std::function<std::string(size_t, const Expr*)>& argFn, const std::string& firstArg = "");
     std::string subroutineDispatchers();
@@ -382,7 +413,9 @@ private:
         std::map<const Variable*, std::set<int>> usedMembers;  // members of gl_in/gl_out referenced by the stage
         std::string mainName;
         bool hasShared = false;
+        bool hasPayload = false;  // task/mesh: taskPayloadSharedEXT variable (G::PL)
         bool prepared = false;
+        bool sgLane = false;  // G::mgl_sgl (subgroup lane) is used
     };
     StageInfo si_[(int)Stage::Count];
     std::string entries_;  // entry point functions, appended after all namespaces
@@ -407,6 +440,10 @@ private:
     std::vector<Field> arrayedFields(Stage st, Storage storage);
     std::vector<Field> patchFields(Stage st, Storage storage);
     std::string acc(const Field& f, const std::string& prefix, const std::string& j = "");
+    // record slot of a varying leaf (int64 travels as its ulong bits)
+    static std::string pk(const Field& f, const std::string& a) {
+        return "mgl_pk(" + (f.type.base == BT::Int64 ? "as_type<ulong>(" + a + ")" : a) + ")";
+    }
     std::string vsInputs(bool stageIn, std::string& inStruct, bool& anyIn, const std::string& g);
     std::string runVS(const std::string& gv, const std::string& vid, const std::string& inst);
     struct RasterOut {
@@ -454,6 +491,9 @@ private:
     std::string tesRun(const std::string& coord, const std::string& patch, const std::string& cps);
     void emitTessEvalMesh(std::string& o);
     void emitVertexMesh(std::string& o);
+    void emitMesh(std::string& o);
+    std::string workgroupBuiltins(Stage st, const int* localSize, std::string& params);
+    std::set<std::string> fragmentInputNames();
     bool fsReadsPrimitiveId() const {
         const StageCode& f = SC(Stage::Fragment);
         return f.main && f.usedNames.count("gl_PrimitiveID");
@@ -468,12 +508,12 @@ private:
     void collectStructs(std::vector<const StructDef*>& order);
     void emitArgs(std::string& o);
     void flatten(const Type& t, const std::string& acc, std::vector<std::pair<Type, std::string>>& leaves);
-    // double vectors travel as one flat uint2 varying per component
+    // double (and 64-bit integer) vectors travel as one flat uint2 varying per component
     static void splitDoubleLeaves(std::vector<std::pair<Type, std::string>>& leaves) {
         std::vector<std::pair<Type, std::string>> out;
         for (auto& [t, acc] : leaves) {
-            if (t.base == BT::Double && t.isVector())
-                for (int c = 0; c < t.vec; c++) out.push_back({Type::scalar(BT::Double), acc + "." + kSwz[c]});
+            if (t.is64() && t.isVector())
+                for (int c = 0; c < t.vec; c++) out.push_back({Type::scalar(t.base), acc + "." + kSwz[c]});
             else
                 out.push_back({t, acc});
         }
@@ -528,7 +568,7 @@ bool Emitter::bufAccess(const Expr* e, Acc& a) {
             if (!bufAccess(e->args[0], a)) return false;
             std::string idx;
             const Expr* ie = e->args[1];
-            if (ie->cv) idx = std::to_string(ie->type.base == BT::UInt ? (uint32_t)ie->cv->c[0].u : (uint32_t)ie->cv->c[0].i) + "u";
+            if (ie->cv) idx = std::to_string((uint32_t)ie->cv->c[0].u) + "u";
             else idx = "uint(" + ex(ie) + ")";
             if (a.blockArray) {
                 a.blockArray = false;
@@ -887,8 +927,8 @@ std::string Emitter::ex(const Expr* e) {
                 if (v->builtin == BuiltinVar::NumSamples) return "int(get_num_samples())";
                 if (v->builtin == BuiltinVar::WorkGroupSize) {
                     const auto& r = P->refl;
-                    return "uint3(" + std::to_string(r.localSize[0]) + "u, " + std::to_string(r.localSize[1]) + "u, " +
-                           std::to_string(r.localSize[2]) + "u)";
+                    const int* ls = stage_ == Stage::Task ? r.taskLocalSize : stage_ == Stage::Mesh ? r.meshLocalSize : r.localSize;
+                    return "uint3(" + std::to_string(ls[0]) + "u, " + std::to_string(ls[1]) + "u, " + std::to_string(ls[2]) + "u)";
                 }
                 if (v->type.isOpaque()) fail("opaque variable '" + v->name + "' used as a value");
                 if (v->constVal && v->q.storage == Storage::Const && !v->param) {
@@ -897,7 +937,13 @@ std::string Emitter::ex(const Expr* e) {
                 }
                 return varName(v);
             }
-            if (e->kind == EK::Field) return ex(e->args[0]) + ".m_" + e->args[0]->type.sdef->members[e->field].name;
+            if (e->kind == EK::Field) {
+                // mesh built-in output blocks live in threadgroup memory as one array per used member
+                const Expr* b = e->args[0];
+                if (b->kind == EK::Index && b->args[0]->kind == EK::Var && isMeshBlock(b->args[0]->var))
+                    return meshMemberArray(b->args[0]->var, e->field) + "[" + ex(b->args[1]) + "]";
+                return ex(e->args[0]) + ".m_" + e->args[0]->type.sdef->members[e->field].name;
+            }
             const Expr* b = e->args[0];
             std::string idx = ex(e->args[1]);
             if (b->type.isOpaque() || b->type.stripArrays().isOpaque()) fail("opaque array used as a value");
@@ -1137,10 +1183,12 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         std::string t = "A->s" + std::to_string(ob.slot), sm = ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : "";
         texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         texBorder_ = ob.borderSlot >= 0 ? "A->s" + std::to_string(ob.borderSlot) : "";
+        texSamples_ = ob.samplesSlot >= 0 ? "A->s" + std::to_string(ob.samplesSlot) : "";
         if (e->kind == EK::Index) {
             std::string idx = ex(e->args[1]);
             if (!texBias_.empty()) texBias_ += "[" + idx + "]";
             if (!texBorder_.empty()) texBorder_ += "[" + idx + "]";
+            if (!texSamples_.empty()) texSamples_ += "[" + idx + "]";
             return {t + "[" + idx + "]", sm.empty() ? "" : sm + "[" + idx + "]"};
         }
         return {t, sm};
@@ -1152,6 +1200,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
             std::string n = varName(v);
             texBias_ = v->type.base == BT::Sampler ? n + "_b" : "";
             texBorder_ = "";  // not emulated through function parameters
+            texSamples_ = v->type.base == BT::Image && v->type.ms ? n + "_n" : "";
             return {n + "_t", n + "_s"};
         }
         auto it = P->opaque.find(v->name);
@@ -1160,6 +1209,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         texSlot_ = ob.slot;
         texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         texBorder_ = ob.borderSlot >= 0 ? "A->s" + std::to_string(ob.borderSlot) : "";
+        texSamples_ = ob.samplesSlot >= 0 ? "A->s" + std::to_string(ob.samplesSlot) : "";
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
     }
     if (e->kind == EK::Index) {
@@ -1168,6 +1218,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         auto r = texRef(base);
         texBias_ = texBias_.empty() ? "" : texBias_ + "[" + idx + "]";
         texBorder_ = texBorder_.empty() ? "" : texBorder_ + "[" + idx + "]";
+        texSamples_ = texSamples_.empty() ? "" : texSamples_ + "[" + idx + "]";
         return {r.first + "[" + idx + "]", r.second.empty() ? "" : r.second + "[" + idx + "]"};
     }
     fail("unsupported sampler/image expression");
@@ -1212,7 +1263,10 @@ std::string Emitter::callUser(const Expr* e) {
             auto r = texRef(a);
             return r.first + ", " + r.second + ", " + texBias_;
         }
-        if (a->type.base == BT::Image) return texRef(a).first;
+        if (a->type.base == BT::Image) {
+            std::string t = texRef(a).first;
+            return a->type.ms ? t + ", " + texSamples_ : t;
+        }
         if (a->type.base == BT::AtomicUint) {
             std::string pre;
             return atomicPtr(a, pre);
@@ -1288,6 +1342,14 @@ std::string Emitter::callBuiltin(const Expr* e) {
     if (n.compare(0, 7, "texture") == 0 || n.compare(0, 6, "shadow") == 0 || n.compare(0, 10, "texelFetch") == 0)
         return textureFn(e, n);
     if (n.compare(0, 6, "sparse") == 0) return sparseFn(e, n);
+    if (n.compare(0, 8, "subgroup") == 0) return subgroupFn(e);
+    // ARB_shader_ballot
+    if (n == "ballotARB") return "ulong(simd_ballot(" + ex(A[0]) + "))";
+    if (n == "readInvocationARB") return "mgl_sg_shfl(" + ex(A[0]) + ", " + ex(A[1]) + ")";
+    if (n == "readFirstInvocationARB") return "mgl_sg_first(" + ex(A[0]) + ")";
+    if (n == "doubleBitsToInt64" || n == "doubleBitsToUint64" || n == "int64BitsToDouble" || n == "uint64BitsToDouble" ||
+        n == "packInt2x32" || n == "packUint2x32" || n == "unpackInt2x32" || n == "unpackUint2x32")
+        return "as_type<" + mt(rt) + ">(" + ex(A[0]) + ")";  // ARB_gpu_shader_int64 (doubles are ulong bit patterns)
     bool anyDouble = rt.stripArrays().base == BT::Double;
     for (auto* x : A) anyDouble |= x->type.stripArrays().base == BT::Double;
     if (anyDouble) return builtinF64(e);
@@ -1311,7 +1373,7 @@ std::string Emitter::callBuiltin(const Expr* e) {
         {"anyInvocationARB", "simd_any"}, {"allInvocationsARB", "simd_all"},
     };
     if (auto it = direct.find(n); it != direct.end()) return simple(it->second);
-    if (n == "sign") return (A[0]->type.base == BT::Int ? "mgl_isign(" : "sign(") + a(0) + ")";
+    if (n == "sign") return (A[0]->type.base == BT::Int || A[0]->type.base == BT::Int64 ? "mgl_isign(" : "sign(") + a(0) + ")";
     if (n == "radians") return "(" + a(0) + " * 0.0174532925199432958f)";
     if (n == "degrees") return "(" + a(0) + " * 57.2957795130823209f)";
     if (n == "atan") return A.size() == 2 ? "atan2(" + a(0) + ", " + a(1) + ")" : "atan(" + a(0) + ")";
@@ -1405,9 +1467,13 @@ std::string Emitter::callBuiltin(const Expr* e) {
         return withOuts(callee, e, bi->paramOut, bi->params, rt, [&](size_t i, const Expr* x) { return ex(x); });
     }
     if (n == "ldexp") return "ldexp(" + a(0) + ", " + a(1) + ")";
+    if (n == "EmitMeshTasksEXT") return "mgl_EmitMeshTasks(uint3(" + a(0) + ", " + a(1) + ", " + a(2) + "))";
+    if (n == "SetMeshOutputsEXT") return "mgl_SetMeshOutputs(" + a(0) + ", " + a(1) + ")";
     if (n == "barrier") {
         if (stage_ == Stage::TessControl) return "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)";
         if (stage_ == Stage::Compute) return "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device | mem_flags::mem_texture)";
+        if (stage_ == Stage::Task) return "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device | mem_flags::mem_texture | mem_flags::mem_object_data)";
+        if (stage_ == Stage::Mesh) return "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device | mem_flags::mem_texture)";
         return "((void)0)";
     }
     if (n == "memoryBarrier" || n == "memoryBarrierBuffer" || n == "memoryBarrierImage" || n == "memoryBarrierAtomicCounter" ||
@@ -1416,8 +1482,9 @@ std::string Emitter::callBuiltin(const Expr* e) {
                           : n == "memoryBarrierImage" ? "mem_flags::mem_texture"
                           : n == "memoryBarrier" || n == "groupMemoryBarrier" ? "mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture"
                           : "mem_flags::mem_device";
-        if (stage_ != Stage::Compute && n == "memoryBarrierShared") return "((void)0)";
-        if (stage_ != Stage::Compute) flags = "mem_flags::mem_device | mem_flags::mem_texture";
+        bool workgroup = stage_ == Stage::Compute || stage_ == Stage::Task || stage_ == Stage::Mesh;
+        if (!workgroup && n == "memoryBarrierShared") return "((void)0)";
+        if (!workgroup) flags = "mem_flags::mem_device | mem_flags::mem_texture";
         return "atomic_thread_fence(" + flags + ", memory_order_seq_cst)";
     }
     if (n.compare(0, 13, "atomicCounter") == 0) {
@@ -1457,6 +1524,86 @@ std::string Emitter::callBuiltin(const Expr* e) {
     if (n == "EmitStreamVertex") return "mgl_EmitVertex(int(" + a(0) + "))";
     if (n == "EndStreamPrimitive") return "mgl_EndPrimitive(int(" + a(0) + "))";
     fail("builtin function '" + n + "' is not supported yet");
+}
+
+// KHR_shader_subgroup: SIMD-group functions (prelude mgl_sg_*; doubles are ulong bit patterns, mgl_sgd_*).
+std::string Emitter::subgroupFn(const Expr* e) {
+    const std::string n = e->fn->name.substr(8);
+    const auto& A = e->args;
+    auto a = [&](size_t i) { return ex(A[i]); };
+    auto lane = [&]() {
+        sgLane_ = true;
+        return std::string("mgl_sgl");
+    };
+    if (n == "Barrier") {
+        bool tg = stage_ != Stage::Vertex && stage_ != Stage::Fragment;  // the other stages run in kernels / mesh functions
+        return std::string("simdgroup_barrier(mem_flags::mem_device") + (tg ? " | mem_flags::mem_threadgroup" : "") + " | mem_flags::mem_texture)";
+    }
+    if (n.compare(0, 13, "MemoryBarrier") == 0) {
+        std::string k = n.substr(13);
+        std::string flags = k == "Shared" ? "mem_flags::mem_threadgroup"
+                          : k == "Image" ? "mem_flags::mem_texture"
+                          : k == "Buffer" ? "mem_flags::mem_device"
+                          : "mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture";
+        if (stage_ != Stage::Compute && k == "") flags = "mem_flags::mem_device | mem_flags::mem_texture";
+        return "atomic_thread_fence(" + flags + ", memory_order_seq_cst, thread_scope_simdgroup)";
+    }
+    if (n == "Elect") return "(" + lane() + " == ctz(mgl_sg_mask()))";
+    if (n == "All") return "simd_all(mgl_sg_k(" + a(0) + "))";
+    if (n == "Any") return "simd_any(mgl_sg_k(" + a(0) + "))";
+    if (n == "Ballot") return "mgl_sg_ballot(" + a(0) + ")";
+    if (n == "InverseBallot") return "mgl_sg_bit(" + a(0) + ", " + lane() + ")";
+    if (n == "BallotBitExtract") return "mgl_sg_bit(" + a(0) + ", " + a(1) + ")";
+    if (n == "BallotBitCount") return "popcount(" + a(0) + ".x)";
+    if (n == "BallotInclusiveBitCount") return "popcount(" + a(0) + ".x & (0xffffffffu >> (31u - " + lane() + ")))";
+    if (n == "BallotExclusiveBitCount") return "popcount(" + a(0) + ".x & ((1u << " + lane() + ") - 1u))";
+    if (n == "BallotFindLSB") return "ctz(" + a(0) + ".x)";
+    if (n == "BallotFindMSB") return "(31u - clz(" + a(0) + ".x))";
+    const Type& t = A[0]->type;
+    bool dbl = t.base == BT::Double;
+    if (n == "AllEqual") return std::string(dbl ? "mgl_sgd_alleq(" : "mgl_sg_alleq(") + a(0) + ")";
+    // permutations: read the value of another lane
+    auto from = [&](const std::string& src) { return "mgl_sg_shfl(" + a(0) + ", " + src + ")"; };
+    if (n == "Broadcast" || n == "Shuffle") return from(a(1));
+    if (n == "BroadcastFirst") return "mgl_sg_first(" + a(0) + ")";
+    if (n == "ShuffleXor") return from("(" + lane() + " ^ " + a(1) + ")");
+    if (n == "ShuffleUp") return from("(" + lane() + " - " + a(1) + ")");
+    if (n == "ShuffleDown") return from("(" + lane() + " + " + a(1) + ")");
+    if (n == "QuadBroadcast") return from("((" + lane() + " & ~3u) | (" + a(1) + " & 3u))");
+    if (n == "QuadSwapHorizontal") return from("(" + lane() + " ^ 1u)");
+    if (n == "QuadSwapVertical") return from("(" + lane() + " ^ 2u)");
+    if (n == "QuadSwapDiagonal") return from("(" + lane() + " ^ 3u)");
+    if (n == "PartitionNV") return std::string(dbl ? "mgl_sgd_part(" : "mgl_sg_part(") + a(0) + ")";
+    // arithmetic
+    int kind = 0;  // 0 reduce, 1 inclusive, 2 exclusive, 3 clustered
+    std::string op = n;
+    bool part = op.compare(0, 11, "Partitioned") == 0;  // NV_shader_subgroup_partitioned: within the lanes of a ballot
+    if (part) op = op.substr(11, op.size() - 13);
+    if (op.compare(0, 9, "Inclusive") == 0) kind = 1, op = op.substr(9);
+    else if (op.compare(0, 9, "Exclusive") == 0) kind = 2, op = op.substr(9);
+    else if (op.compare(0, 9, "Clustered") == 0) kind = 3, op = op.substr(9);
+    static const std::map<std::string, std::string> ops = {{"Add", "add"}, {"Mul", "mul"}, {"Min", "min"}, {"Max", "max"},
+                                                           {"And", "and"}, {"Or", "or"}, {"Xor", "xor"}};
+    auto it = ops.find(op);
+    if (it == ops.end()) fail("builtin function 'subgroup" + n + "' is not supported yet");
+    const std::string& o = it->second;
+    bool boolean = t.base == BT::Bool;
+    std::string v = a(0);
+    if (boolean) v = vecName(BT::UInt, t.vec) + "(" + v + ")";
+    std::string r;
+    if (part) r = "mgl_sg_pred<" + std::string(dbl ? "mgl_sgd_" : "mgl_sg_") + o + ">(" + v + ", " + lane() + ", " + a(1) + ", " +
+                  std::to_string(kind) + ")";
+    // native reductions and scans (operand through mgl_sg_k, see the prelude)
+    else if (!dbl && kind == 0 && o != "add" && o != "mul") r = "simd_" + o + "(mgl_sg_k(" + v + "))";
+    else if (!dbl && kind == 0) r = std::string(o == "add" ? "simd_sum(" : "simd_product(") + "mgl_sg_k(" + v + "))";
+    else if (!dbl && kind != 3 && (o == "add" || o == "mul"))
+        r = std::string("simd_prefix_") + (kind == 1 ? "inclusive_" : "exclusive_") + (o == "add" ? "sum(" : "product(") + "mgl_sg_k(" + v + "))";
+    else {
+        std::string O = (dbl ? "mgl_sgd_" : "mgl_sg_") + o;
+        if (kind == 1 || kind == 2) r = "mgl_sg_scan<" + O + ">(" + v + ", " + lane() + ", " + (kind == 1 ? "true" : "false") + ")";
+        else r = "mgl_sg_red<" + O + ">(" + v + ", " + lane() + ", " + (kind == 3 ? "uint(" + a(1) + ")" : "32u") + ")";
+    }
+    return boolean ? "(" + r + " != 0u)" : r;
 }
 
 std::string Emitter::builtinF64(const Expr* e) {
@@ -1610,10 +1757,14 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
             return finish(r);
         }
         // Out-of-range texel coordinates or levels read as zero (as robust GL implementations
-        // do; Metal's read() is undefined there). Casting to uint folds the < 0 test in.
+        // do; Metal's read() is undefined there). Casting to uint folds the < 0 test in. GL leaves
+        // these reads undefined without robust access, so only robust contexts and
+        // METALGLDRV_STRICT pay for the size queries.
+        const bool robust = this->P->robustTexelFetch;
         if (dim == Dim::Buffer) {
             P = bind(P, "int", pre);
             r = tex + ".read(uint(" + P + "))";
+            if (!robust) return finish(r);
             return finish("(uint(" + P + ") < " + tex + ".get_width() ? " + r + " : decltype(" + r + ")(0))");
         }
         bool hasLod = !(dim == Dim::Rect || A.size() < 3 || (off && A.size() < 4));
@@ -1643,6 +1794,7 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
             r = texCall(tex, "read", "uint2(" + P + ")" + lod);
             inb = "all(uint2(" + P + ") < uint2(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + ")))";
         }
+        if (!robust) return finish(r);
         if (hasLod) inb = L + " < " + tex + ".get_num_mip_levels() && " + inb;
         return finish("(" + inb + " ? " + r + " : decltype(" + r + ")(0))");
     }
@@ -1859,26 +2011,34 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     const bool sparseImg = texSlot_ >= 0 && texSlot_ < 64 && ((K.sparseImageSlots >> texSlot_) & 1);
     std::string pre;
     auto finish = [&](const std::string& r) { return pre.empty() ? r : "(" + pre + r + ")"; };
-    const int msN = T.ms ? msArraySamples() : 0;  // emulated multisample storage: slice = layer * msN + sample
-    if (msN && n == "imageSize")
-        return T.arrayed ? "int3(" + tex + ".get_width(), " + tex + ".get_height(), int(" + tex + ".get_array_size()) / " + std::to_string(msN) + ")"
-                         : "int2(" + tex + ".get_width(), " + tex + ".get_height())";
-    if (msN && n == "imageSamples") return std::to_string(msN);
+    const std::string samples = T.ms ? "(" + texSamples_ + ").x" : "";
     if (n == "imageSize") {
         std::string w = tex + ".get_width()", h = tex + ".get_height()";
         std::string r;
-        if (T.dim == Dim::Buffer) r = "int(" + w + ")";
+        if (T.ms) r = T.arrayed ? "int3(" + w + ", " + h + ", int(" + tex + ".get_array_size() / max(" + samples + ", 1u)))" : "int2(" + w + ", " + h + ")";
+        else if (T.dim == Dim::Buffer) r = "int(" + w + ")";
         else if (T.dim == Dim::D1) r = T.arrayed ? "int2(" + w + ", " + tex + ".get_array_size())" : "int(" + w + ")";
         else if (T.dim == Dim::D3) r = "int3(" + w + ", " + h + ", " + tex + ".get_depth())";
         else if (T.dim == Dim::Cube) r = T.arrayed ? "int3(" + w + ", " + h + ", int(" + tex + ".get_array_size()) / 6)" : "int2(" + w + ", " + h + ")";
         else r = T.arrayed ? "int3(" + w + ", " + h + ", " + tex + ".get_array_size())" : "int2(" + w + ", " + h + ")";
         return r;
     }
-    if (n == "imageSamples") return "int(" + tex + ".get_num_samples())";
+    if (n == "imageSamples") return "int(" + samples + ")";
     std::string P = bind(ex(A[1]), mt(A[1]->type), pre);
     std::string coord, layer;
     bool layered = T.arrayed || T.dim == Dim::Cube;
-    switch (T.dim) {
+    size_t ai = 2;
+    if (T.ms) {
+        // per-sample shadow: slice = layer * samples + sample
+        std::string s = "uint(" + ex(A[ai++]) + ")";
+        if (T.arrayed) {
+            coord = "uint2(" + P + ".xy)";
+            layer = "(uint(" + P + ".z) * " + samples + " + " + s + ")";
+        } else {
+            coord = "uint2(" + P + ")";
+            layer = s;
+        }
+    } else switch (T.dim) {
         case Dim::D1:
             coord = T.arrayed ? "uint2(uint(" + P + ".x), 0u)" : "uint2(uint(" + P + "), 0u)";
             if (T.arrayed) layer = "uint(" + P + ".y)";
@@ -1893,34 +2053,23 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
         case Dim::Buffer: coord = "uint(" + P + ")"; break;
         default: fail("bad image");
     }
-    size_t ai = 2;
-    std::string sample;
-    if (T.ms) sample = "uint(" + ex(A[ai++]) + ")";
-    if (msN) {
-        // a 2D array image: the sample selects the slice
-        layer = layer.empty() ? sample : "(" + layer + ") * " + std::to_string(msN) + "u + " + sample;
-        sample.clear();
-    }
-    const bool ms = T.ms && !msN;  // a real multisample texture (Metal can't write those)
     std::string loc = coord + (layer.empty() ? "" : ", " + layer);
     std::string resident;  // residency test of the texel for sparse images
     if (sparseImg && n != "imageLoad" && n != "imageStore") {  // stores to uncommitted texels are dropped
-        if (!sample.empty()) sample = bind(sample, "uint", pre);
         // the coordinate/layer expressions are evaluated twice: bind them
         coord = bind(coord, T.dim == Dim::D3 ? "uint3" : (T.dim == Dim::Buffer ? "uint" : "uint2"), pre);
         if (!layer.empty()) layer = bind(layer, "uint", pre);
         loc = coord + (layer.empty() ? "" : ", " + layer);
-        resident = tex + ".sparse_read(" + loc + (sample.empty() ? "" : ", " + sample) + ").resident()";
+        resident = tex + ".sparse_read(" + loc + ").resident()";
     }
     if (n == "imageLoad") {
-        std::string args = loc + (sample.empty() ? "" : ", " + sample);
-        if (!sparseImg) return finish(texCall(tex, "read", args));
+        if (!sparseImg) return finish(texCall(tex, "read", loc));
         // uncommitted texels read (0, 0, 0, 1) for formats without alpha, else zero
         const Expr* root = A[0];
         while (root->kind == EK::Index) root = root->args[0];
         const std::string fmt = root->kind == EK::Var ? root->var->q.layout.format : "";
         const char* alpha1 = fmt.compare(0, 4, "rgba") == 0 || fmt.compare(0, 8, "rgb10_a2") == 0 ? "0" : "1";
-        std::string r = tex + ".sparse_read(" + args + "), " + alpha1;
+        std::string r = tex + ".sparse_read(" + loc + "), " + alpha1;
         if (sparseRes_.empty()) return finish("mgl_sparse_or0(" + r + ")");
         return finish("mgl_sparse_val0(" + r + ", " + sparseRes_ + ")");
     }
@@ -1930,8 +2079,6 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     uint8_t imgMem = imgRoot->kind == EK::Var ? imgRoot->var->q.memory : 0;
     bool rw = !(imgMem & (MemReadOnly | MemWriteOnly));
     if (n == "imageStore") {
-        // Metal cannot write multisample textures: the store is dropped (the program still links).
-        if (ms) return finish("((void)(" + ex(A[ai]) + "))");
         std::string w = tex + ".write(" + ex(A[ai]) + ", " + loc + ")";
         if (rw) w = "(" + w + ", " + tex + ".fence())";
         return finish(w);
@@ -1939,12 +2086,6 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     std::string S = scalarName(T.sampled);
     std::string V = vecName(T.sampled, 4);
     if (T.sampled == BT::Float) fail("float image atomics are not supported by Metal");
-    if (ms) {
-        // Metal cannot write multisample textures: like stores, atomics are dropped (and return 0).
-        std::string r = "(";
-        for (size_t i = ai; i < A.size(); i++) r += "(void)(" + ex(A[i]) + "), ";
-        return finish(r + S + "(0))");
-    }
     auto fenced = [&](std::string v) {
         if (!resident.empty()) v = "(" + resident + " ? " + v + " : " + S + "(0))";
         if (!rw) return finish(v);
@@ -1989,7 +2130,12 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
             block(s, o, in);
             o += "\n";
             return;
-        case SK::Expr: o += ind(in) + ex(s->expr) + ";\n"; return;
+        case SK::Expr:
+            o += ind(in) + ex(s->expr) + ";\n";
+            // EmitMeshTasksEXT() terminates the task shader invocation
+            if (s->expr->kind == EK::Builtin && s->expr->fn->name == "EmitMeshTasksEXT" && curFn_ && curFn_->name == "main")
+                o += ind(in) + "return;\n";
+            return;
         case SK::Decl:
             for (auto* v : s->vars) {
                 if (v->type.isOpaque()) fail("local variables of opaque type are not supported");
@@ -2128,9 +2274,10 @@ std::string Emitter::fnSignature(const Function* f) {
         if (t.base == BT::Image) {
             if (t.dims.size() > 1) fail("arrays of arrays of images as function parameters are not supported");
             if (t.isArray())
-                r += "constant array<" + texType(t.stripArrays(), p->q.memory) + ", " + std::to_string(t.dims[0]) + ">& " + n + "_t";
+                r += "constant array<" + texType(t.stripArrays(), p->q.memory) + ", " + std::to_string(t.dims[0]) + ">& " + n + "_t" +
+                     (t.ms ? ", constant array<uint2, " + std::to_string(t.dims[0]) + ">& " + n + "_n" : "");
             else
-                r += texType(t, p->q.memory) + " " + n + "_t";
+                r += texType(t, p->q.memory) + " " + n + "_t" + (t.ms ? ", uint2 " + n + "_n" : "");
             continue;
         }
         if (t.base == BT::AtomicUint) {
@@ -2221,7 +2368,7 @@ void Emitter::flatten(const Type& t, const std::string& acc, std::vector<std::pa
 }
 
 std::string Emitter::interpAttr(const Qualifiers& q, const Type& leaf) {
-    if (leaf.base == BT::Int || leaf.base == BT::UInt || leaf.base == BT::Bool || q.interp == Interp::Flat) return ", flat";
+    if (leaf.isIntLike() || leaf.base == BT::Bool || q.interp == Interp::Flat || q.perprimitive) return ", flat";
     if (q.interp == Interp::NoPerspective)
         return q.centroid ? ", centroid_no_perspective" : q.sample ? ", sample_no_perspective" : ", center_no_perspective";
     if (q.centroid) return ", centroid_perspective";
@@ -2311,19 +2458,20 @@ void Emitter::emitArgs(std::string& o) {
         };
         // multisample uniforms bound to emulated (2D array) multisample storage, see VariantKey::msArraySlots
         auto msArray = [&](int slot) { return ob.type.ms && slot >= 0 && slot < 64 && ((K.msArraySlots >> slot) & 1); };
-        auto arrayType = [&](uint8_t memory) {
+        auto arrayType = [&]() {
             Type t = ob.type;
             t.ms = false;
             t.arrayed = true;
-            return texType(t, memory);
+            return texType(t, 0);
         };
         if (ob.kind == SlotKind::Texture) {
-            group(ob.slot, msArray(ob.slot) ? arrayType(0) : texType(ob.type, 0));
+            group(ob.slot, msArray(ob.slot) ? arrayType() : texType(ob.type, 0));
             group(ob.samplerSlot, "sampler");
             if (ob.biasSlot >= 0) group(ob.biasSlot, "float2");
             if (ob.borderSlot >= 0) group(ob.borderSlot, "ulong");
         } else if (ob.kind == SlotKind::Image) {
-            group(ob.slot, msArray(ob.slot) ? arrayType(ob.memory) : texType(ob.type, ob.memory));
+            group(ob.slot, texType(ob.type, ob.memory));
+            if (ob.samplesSlot >= 0) group(ob.samplesSlot, "uint2");
         }
     }
     for (auto& acb : P->refl.atomicCounterBuffers) decl[acb.slot] = "device uchar* s" + std::to_string(acb.slot) + ";";
@@ -2341,7 +2489,7 @@ void Emitter::emitArgs(std::string& o) {
     o += "};\n\n";
 }
 
-static const char* kNsNames[] = {"vs", "tcs", "tes", "gs", "fs", "cs"};
+static const char* kNsNames[] = {"vs", "tcs", "tes", "gs", "fs", "cs", "ts", "ms"};
 
 static std::string replaceJ(const std::string& s, const std::string& j) {
     std::string r = s;
@@ -2382,7 +2530,8 @@ void Emitter::prepareStage(Stage s) {
         if (e->kind == EK::Field) {
             const Expr* b = e->args[0];
             if (b->kind == EK::Index) b = b->args[0];
-            if (b->kind == EK::Var && b->var->block && (b->var->builtin == BuiltinVar::In || b->var->builtin == BuiltinVar::Out))
+            if (b->kind == EK::Var && b->var->block &&
+                (b->var->builtin == BuiltinVar::In || b->var->builtin == BuiltinVar::Out || isMeshBlock(b->var)))
                 si.usedMembers[b->var].insert(e->field);
         }
         for (auto* a : e->args) ve(a);
@@ -2417,6 +2566,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     helpers_.clear();
     helperByKey_.clear();
     needEq_ = false;
+    sgLane_ = false;
     fnNames_.clear();
     tempN_ = 0;
     ns_ = kNsNames[(int)s];
@@ -2440,12 +2590,18 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     }
 
     members += "    constant MGLArgs* A;\n    constant MGLSys* sys;\n";
-    std::string sharedDecl;
+    std::string sharedDecl, payloadDecl;
     std::set<std::string> declared;
     for (auto* v : sc_->globals) {
         if (declared.count(v->name)) continue;
         declared.insert(v->name);
         if (v->q.storage == Storage::Uniform || v->q.storage == Storage::Buffer) continue;
+        if (v->q.storage == Storage::TaskPayload) {
+            payloadDecl += "    " + mt(v->type) + " g_" + v->name + ";\n";
+            continue;
+        }
+        // mesh outputs nothing writes or reads take no threadgroup memory
+        if (s == Stage::Mesh && v->q.storage == Storage::Out && !sc_->used.count(v)) continue;
         if (v->type.isArray() && v->type.dims[0] == 0) fail("unsized global array '" + v->name + "'");
         if (inThreadgroup(v)) {
             sharedDecl += "    " + mt(v->type) + " g_" + v->name + ";\n";
@@ -2456,6 +2612,12 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         if (!v->init && v->q.storage != Storage::In) zero += "        " + varName(v) + " = {};\n";
     }
     for (auto* v : si.builtins) {
+        if (isMeshBlock(v)) {
+            for (int mi : si.usedMembers[v])
+                sharedDecl += "    " + mt(v->block->members[mi].type.arrayOf(v->type.dims[0])) + " bi_" + v->name + "_" +
+                              v->block->members[mi].name + ";\n";
+            continue;
+        }
         if (inThreadgroup(v)) sharedDecl += "    " + mt(v->type) + " bi_" + v->name + ";\n";
         else {
             members += "    " + mt(v->type) + " bi_" + v->name + ";\n";
@@ -2466,13 +2628,50 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         members += "    float4 bi_gl_Position;\n";
         zero += "        bi_gl_Position = {};\n";
     }
+    if (s == Stage::Mesh) sharedDecl += "    uint mgl_nv, mgl_np;\n";  // SetMeshOutputsEXT()
     si.hasShared = hasShared_ = !sharedDecl.empty();
     if (hasShared_) members += "    threadgroup MGLShared* S;\n";
+    si.hasPayload = !payloadDecl.empty();
+    if (si.hasPayload) members += "    " + payloadSpace_ + " MGLPayload* PL;\n";
 
     for (auto& [m, f] : sc_->defs)
         if (sc_->reachable.count(f)) funcs += emitFunction(f);
     funcs += subroutineDispatchers();
     temps_.clear();
+    // Subgroup builtins, from the lane index: compute and fragment entry points set mgl_sgl from
+    // [[thread_index_in_simdgroup]], other stages (which may run in vertex functions) derive it.
+    std::string sgInit;
+    for (auto* v : si.builtins) {
+        std::string m = "        bi_" + v->name + " = ";
+        if (v->type.base == BT::UInt64) {  // ARB_shader_ballot masks
+            switch (v->builtin) {
+                case BuiltinVar::SubgroupEqMask: sgInit += m + "ulong(1u << mgl_sgl);\n"; break;
+                case BuiltinVar::SubgroupGeMask: sgInit += m + "ulong(0xffffffffu << mgl_sgl);\n"; break;
+                case BuiltinVar::SubgroupGtMask: sgInit += m + "ulong(0xfffffffeu << mgl_sgl);\n"; break;
+                case BuiltinVar::SubgroupLeMask: sgInit += m + "ulong(0xffffffffu >> (31u - mgl_sgl));\n"; break;
+                case BuiltinVar::SubgroupLtMask: sgInit += m + "ulong((1u << mgl_sgl) - 1u);\n"; break;
+                default: continue;
+            }
+            sgLane_ = true;
+            continue;
+        }
+        switch (v->builtin) {
+            case BuiltinVar::SubgroupSize: sgInit += m + "32u;\n"; break;
+            case BuiltinVar::SubgroupInvocationID: sgInit += m + "mgl_sgl;\n"; break;
+            case BuiltinVar::SubgroupEqMask: sgInit += m + "uint4(1u << mgl_sgl, 0u, 0u, 0u);\n"; break;
+            case BuiltinVar::SubgroupGeMask: sgInit += m + "uint4(0xffffffffu << mgl_sgl, 0u, 0u, 0u);\n"; break;
+            case BuiltinVar::SubgroupGtMask: sgInit += m + "uint4(0xfffffffeu << mgl_sgl, 0u, 0u, 0u);\n"; break;
+            case BuiltinVar::SubgroupLeMask: sgInit += m + "uint4(0xffffffffu >> (31u - mgl_sgl), 0u, 0u, 0u);\n"; break;
+            case BuiltinVar::SubgroupLtMask: sgInit += m + "uint4((1u << mgl_sgl) - 1u, 0u, 0u, 0u);\n"; break;
+            default: continue;
+        }
+        if (v->builtin != BuiltinVar::SubgroupSize) sgLane_ = true;
+    }
+    si.sgLane = sgLane_;
+    if (sgLane_) {
+        members += "    uint mgl_sgl;\n";
+        if (s != Stage::Fragment && s != Stage::Compute) sgInit = "        mgl_sgl = mgl_sg_lane();\n" + sgInit;
+    }
     std::string initBody;
     declared.clear();
     for (auto* v : sc_->globals) {
@@ -2483,7 +2682,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     }
     init = "    void mgl_init() {\n";
     for (auto& t : temps_) init += "        " + t + "\n";
-    init += initBody + "    }\n";
+    init += sgInit + initBody + "    }\n";
     // Zeroes the members nothing else initializes (outputs, globals without initializer). Entry
     // points call this instead of value-initializing G: on Apple GPUs, zeroing all of a large G
     // (whether `G g = {}` or member by member) broke fragment shaders that can discard, which
@@ -2506,6 +2705,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         o += "; }\n";
     }
     if (hasShared_) o += "struct MGLShared {\n" + sharedDecl + "};\n";
+    if (si.hasPayload) o += "struct MGLPayload {\n" + payloadDecl + "};\n";
     o += helpers_;
     o += preG;
     o += "struct G {\n" + members + extraMembers + init + funcs + extraMethods + "};\n";
@@ -2778,7 +2978,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
     r.vertexCopy += "v.mgl_pos = " + g + "bi_gl_Position;\n";
     r.vertexCopy += "if ((" + sys + "flags & 4u) == 0u) v.mgl_pos.y = -v.mgl_pos.y;\n";
     r.vertexCopy += "if (" + sys + "depthMode == 0u) v.mgl_pos.z = (v.mgl_pos.z + v.mgl_pos.w) * 0.5f;\n";
-    if (!mesh || points) {
+    if (points) {
         r.vertexStruct += "    float mgl_psize [[point_size]];\n";
         if (si.bi.count(BuiltinVar::PointSize) && si.bi[BuiltinVar::PointSize]->q.storage == Storage::Out)
             r.vertexCopy += "v.mgl_psize = (" + sys + "flags & 1u) != 0u ? " + g + "bi_gl_PointSize : " + sys + "pointSize;\n";
@@ -2869,7 +3069,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
         // spilled: each vertex writes them to a device buffer record, primitives carry their vertices'
         // record slots, and the fragment shader interpolates them from [[barycentric_coord]].
         // Programs within the budgets are unaffected.
-        auto scalars = [](const Type& t) { return (t.base == BT::Double ? 2 : 1) * t.components(); };
+        auto scalars = [](const Type& t) { return (t.is64() ? 2 : 1) * t.components(); };
         int vbase = 4 + ((!mesh || points) ? 1 : 0) + nclip + ncull;
         int pbase = (fsReadsPrimitiveId() ? 1 : 0) /* mgl_primid */ + (r.hasPrim ? (int)std::count(r.primStruct.begin(), r.primStruct.end(), ';') : 0);
         int total = 0;
@@ -2900,7 +3100,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
     }
     for (auto& f : passed) {
         std::string a = acc(f, g);
-        if (f.type.base == BT::Double) {
+        if (f.type.is64()) {
             r.vertexStruct += "    uint2 " + f.name + " [[user(" + f.name + ")]];\n";
             r.vertexCopy += "v." + f.name + " = as_type<uint2>(" + a + ");\n";
         } else {
@@ -2918,7 +3118,7 @@ std::string Emitter::spillVertexCode(const RasterOut& ro, const std::string& g, 
     std::string c = slot + " = atomic_fetch_add_explicit(" + D + "spillCounter, 1u, memory_order_relaxed);\n";
     c += "if (" + slot + " < " + D + "spillCapacity) {\n    device uint4* mgl_w = " + D + "spillBuffer + " + slot + " * " +
          std::to_string(NS) + "u;\n";
-    for (size_t i = 0; i < NS; i++) c += "    mgl_w[" + std::to_string(i) + "] = mgl_pk(" + acc(ro.spill[i], g) + ");\n";
+    for (size_t i = 0; i < NS; i++) c += "    mgl_w[" + std::to_string(i) + "] = " + pk(ro.spill[i], acc(ro.spill[i], g)) + ";\n";
     c += "} else {\n    " + slot + " = 0xffffffffu;\n}\n";
     return c;
 }
@@ -2946,7 +3146,12 @@ void Emitter::emitClassicVS(std::string& o) {
     } else {
         copyIn = vsInputs(true, inS, anyIn, "g.");
     }
-    RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, true);
+    // A classic vertex function writes the point size for every topology (one variant) unless it
+    // writes gl_Layer: the pipeline then needs a topology class, which forbids a point size for
+    // lines and triangles. Variants are per primitive mode already.
+    const Variable* layerV = si.bi.count(BuiltinVar::Layer) ? si.bi[BuiltinVar::Layer] : nullptr;
+    bool layered = layerV && layerV->q.storage == Storage::Out && layerV->written;
+    RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, !layered || K.primitive == 0 /* GL_POINTS */);
     o += "struct In {\n" + inS + "};\nstruct Out {\n" + ro.vertexStruct + "};\n}  // namespace vs\n\n";
     if (K.xfbInVertex) {
         // Transform feedback with vertex shader side effects: the vertex shader runs once per
@@ -3067,6 +3272,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                     mn = mn.substr(0, mn.find_first_of(".["));
                     int mi = v->block->findMember(mn);
                     if (mi >= 0) lq = v->block->members[mi].q;
+                    lq.perprimitive = lq.perprimitive || q.perprimitive;
                 }
             }
             if (spIt != spillIdx_.end()) {
@@ -3087,7 +3293,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                     copyIn += "    bool mgl_spok = " + ok + ";\n";
                     anyIn = true;
                 }
-                std::string tn = lt.base == BT::Double ? "ulong" : mt(lt);
+                std::string tn = mt(lt);
                 auto vtx = [&](int k) { return "mgl_upk_" + tn + "(mgl_sr" + std::to_string(k) + "[" + std::to_string(si0) + "])"; };
                 std::string val;
                 if (lt.base != BT::Float || lq.interp == Interp::Flat || spillIpp_ == 1) {
@@ -3107,9 +3313,9 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                 copyIn += "    if (mgl_spok) " + leaves[i].second + " = " + val + ";\n";
                 continue;
             }
-            if (lt.base == BT::Double) {
+            if (lt.is64()) {
                 inS += "    uint2 " + nm + " [[user(" + nm + "), flat]];\n";
-                copyIn += "    " + leaves[i].second + " = as_type<ulong>(in." + nm + ");\n";
+                copyIn += "    " + leaves[i].second + " = as_type<" + mt(lt) + ">(in." + nm + ");\n";
                 anyIn = true;
                 continue;
             }
@@ -3276,9 +3482,23 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     std::string alpha;
     if (color0Float && sc_->primary->compat)
         alpha = "    if (sys.alphaFunc != 0x0207u && !mgl_alpha_pass(" + color0 + ".a, sys.alphaFunc, sys.alphaRef)) discard_fragment();\n";
+    std::string advBlend;
+    if (color0Float && (K.advancedBlend & kAdvancedBlendEquationMask)) {
+        // KHR_blend_equation_advanced: blend color output 0 with the destination read by framebuffer fetch
+        // (fixed-function blending is off for the attachment).
+        params += ", float4 mgl_dst [[color(0)]]";
+        advBlend = "    " + color0 + " = mgl_blend_advanced(" + color0 + ", mgl_dst, " +
+                 std::to_string((K.advancedBlend & kAdvancedBlendEquationMask) - 1) + "u, " +
+                 ((K.advancedBlend & kAdvancedBlendNoDstAlpha) ? "true" : "false") + ", " +
+                 ((K.advancedBlend & kAdvancedBlendClamp) ? "true" : "false") + ");\n";
+    }
     bool useInterp = !interpLeaf_.empty();
     emitBody(Stage::Fragment, o, inS, useInterp ? "    thread In* mgl_in;\n" : "");
     if (useInterp) copyIn += "    g.mgl_in = &in;\n";
+    if (si.sgLane) {
+        params += ", uint mgl_sgl [[thread_index_in_simdgroup]]";
+        copyIn += "    g.mgl_sgl = mgl_sgl;\n";
+    }
     o += outS + "}  // namespace fs\n\n";
     std::string e;
     if (sc_->inLayout.earlyFragmentTests) e += "[[early_fragment_tests]]\n";
@@ -3287,7 +3507,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
     e += "    fs::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Fragment) + ";\n    g.sys = &sys;\n" + copyIn;
     e += "    g.mgl_init();\n    g." + si.mainName + "();\n";
-    if (anyOut) e += "    fs::Out o;\n" + copyOut + alpha + "    return o;\n";
+    if (anyOut) e += "    fs::Out o;\n" + copyOut + alpha + advBlend + "    return o;\n";
     e += "}\n\n";
     entries_ += e;
     out_.entryPoints.push_back({"mgl_fs", Stage::Fragment, EntryPoint::Fragment});
@@ -3303,10 +3523,15 @@ void Emitter::emitCS(std::string& o) {
     std::string e = "[[max_total_threads_per_threadgroup(" + std::to_string(r.localSize[0] * r.localSize[1] * r.localSize[2]) +
                     ")]] kernel void mgl_cs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint3 mgl_gid [[thread_position_in_grid]], "
                     "uint3 mgl_lid [[thread_position_in_threadgroup]], uint3 mgl_wid [[threadgroup_position_in_grid]], uint mgl_lidx [[thread_index_in_threadgroup]], "
-                    "uint3 mgl_nwg [[threadgroups_per_grid]]) {\n";
+                    "uint3 mgl_nwg [[threadgroups_per_grid]]";
+    if (si.sgLane) e += ", uint mgl_sgl [[thread_index_in_simdgroup]]";
+    if (si.bi.count(BuiltinVar::SubgroupID)) e += ", uint mgl_sgid [[simdgroup_index_in_threadgroup]]";
+    if (si.bi.count(BuiltinVar::NumSubgroups)) e += ", uint mgl_nsg [[simdgroups_per_threadgroup]]";
+    e += ") {\n";
     if (si.hasShared) e += "    threadgroup cs::MGLShared mgl_shared;\n";
     e += "    cs::G g;\n    g.A = &A;\n    g.sys = &sys;\n";
     if (si.hasShared) e += "    g.S = &mgl_shared;\n";
+    if (si.sgLane) e += "    g.mgl_sgl = mgl_sgl;\n";
     for (auto* v : si.builtins) {
         switch (v->builtin) {
             case BuiltinVar::NumWorkGroups: e += "    g.bi_" + v->name + " = mgl_nwg;\n"; break;
@@ -3318,6 +3543,8 @@ void Emitter::emitCS(std::string& o) {
                 e += "    g.bi_" + v->name + " = (mgl_lid.z * " + std::to_string(r.localSize[1]) + "u + mgl_lid.y) * " +
                      std::to_string(r.localSize[0]) + "u + mgl_lid.x;\n";
                 break;
+            case BuiltinVar::SubgroupID: e += "    g.bi_" + v->name + " = mgl_sgid;\n"; break;
+            case BuiltinVar::NumSubgroups: e += "    g.bi_" + v->name + " = mgl_nsg;\n"; break;
             default: break;
         }
     }
@@ -3431,7 +3658,7 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
         e += "    if (mgl_tid < " + N + "u) {\n";
         e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_tid] + uint(D.baseVertex)", "mgl_inst"), 8);
         useStage(Stage::Vertex);
-        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_tid].s[" + std::to_string(i) + "] = mgl_pk(" + acc(vf[i], "vg.") + ");\n";
+        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_tid].s[" + std::to_string(i) + "] = " + pk(vf[i], acc(vf[i], "vg.")) + ";\n";
         e += "    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
         loop += indentBy(gsUnpack(vf, "mgl_vin[j].s[$I]", "g."), 12);
     } else {
@@ -3525,6 +3752,297 @@ void Emitter::emitVertexMesh(std::string& o) {
 }
 
 // ---------------------------------------------------------------------------
+// Mesh shaders (EXT_mesh_shader): the task shader runs as a Metal object function, the mesh shader as a Metal
+// mesh function. Mesh outputs are written to threadgroup memory (they are shared by the workgroup and indexed
+// freely); after the shader the workgroup copies the SetMeshOutputsEXT() counts of vertices and primitives
+// into the Metal mesh.
+// ---------------------------------------------------------------------------
+// Size and alignment of a type in MSL (as declared by mt()).
+static void mslLayout(const Type& t, uint32_t& size, uint32_t& align) {
+    if (!t.dims.empty()) {
+        uint32_t es, ea;
+        mslLayout(t.elem(), es, ea);
+        size = es * (uint32_t)std::max(1, t.dims[0]);
+        align = ea;
+        return;
+    }
+    if (t.base == BT::Struct) {
+        uint32_t off = 0, al = 1;
+        for (auto& m : t.sdef->members) {
+            if (m.type.isArray() && m.type.dims[0] == 0) continue;
+            uint32_t ms, ma;
+            mslLayout(m.type, ms, ma);
+            off = (off + ma - 1) / ma * ma + ms;
+            al = std::max(al, ma);
+        }
+        size = std::max<uint32_t>(al, (off + al - 1) / al * al);
+        align = al;
+        return;
+    }
+    uint32_t sc = t.base == BT::Double ? 8 : t.base == BT::Bool ? 1 : 4;
+    auto vecSize = [&](int n) { return n == 1 ? sc : n == 2 ? 2 * sc : 4 * sc; };
+    if (t.cols) {
+        size = t.cols * vecSize(t.vec);
+        align = vecSize(t.vec);
+        return;
+    }
+    size = align = vecSize(t.vec);
+}
+
+// Entry point parameters and G initialization of the workgroup built-ins of task / mesh shaders.
+std::string Emitter::workgroupBuiltins(Stage st, const int* ls, std::string& params) {
+    params += ", uint3 mgl_wid [[threadgroup_position_in_grid]], uint3 mgl_lid [[thread_position_in_threadgroup]], "
+              "uint mgl_lidx [[thread_index_in_threadgroup]]";
+    std::string c;
+    bool nwg = false;
+    for (auto* v : si_[(int)st].builtins) {
+        std::string m = "    g.bi_" + v->name + " = ";
+        switch (v->builtin) {
+            case BuiltinVar::NumWorkGroups:
+                if (!nwg) params += ", uint3 mgl_nwg [[threadgroups_per_grid]]";
+                nwg = true;
+                c += m + "mgl_nwg;\n";
+                break;
+            case BuiltinVar::WorkGroupID: c += m + "mgl_wid;\n"; break;
+            case BuiltinVar::LocalInvocationID: c += m + "mgl_lid;\n"; break;
+            case BuiltinVar::GlobalInvocationID:
+                c += m + "mgl_wid * uint3(" + std::to_string(ls[0]) + "u, " + std::to_string(ls[1]) + "u, " + std::to_string(ls[2]) +
+                     "u) + mgl_lid;\n";
+                break;
+            case BuiltinVar::LocalInvocationIndex:
+                c += m + "(mgl_lid.z * " + std::to_string(ls[1]) + "u + mgl_lid.y) * " + std::to_string(ls[0]) + "u + mgl_lid.x;\n";
+                break;
+            case BuiltinVar::DrawID: c += m + "sys.drawID;\n"; break;
+            default: break;
+        }
+    }
+    return c;
+}
+
+void Emitter::emitMesh(std::string& o) {
+    const Reflection& MR = RF(Stage::Mesh);
+    const bool hasTask = SC(Stage::Task).main != nullptr;
+    const uint32_t outPrim = MR.meshOutputPrimitive;
+    const bool points = outPrim == gl::POINTS, lines = outPrim == gl::LINES;
+    const int ipp = points ? 1 : lines ? 2 : 3;
+    const int maxV = std::clamp(MR.meshMaxVertices, 1, 256), maxP = std::clamp(MR.meshMaxPrimitives, 1, 256);
+    const std::string MV = std::to_string(maxV), MP = std::to_string(maxP);
+    uint32_t payloadBytes = 0;
+
+    // ---- task shader -> object function
+    if (hasTask) {
+        payloadSpace_ = "object_data";
+        const int* ls = RF(Stage::Task).taskLocalSize;
+        prepareStage(Stage::Task);
+        emitBody(Stage::Task, o, "", "    uint3 mgl_tasks;\n", "    void mgl_EmitMeshTasks(uint3 n) { mgl_tasks = n; }\n");
+        StageInfo& tsi = si_[(int)Stage::Task];
+        o += "}  // namespace ts\n\n";
+        std::string params;
+        std::string bi = workgroupBuiltins(Stage::Task, ls, params);
+        std::string e = "[[object]] void mgl_ts(";
+        if (tsi.hasPayload) {
+            e += "object_data ts::MGLPayload& mgl_pl [[payload]], ";
+            for (auto* v : SC(Stage::Task).globals)
+                if (v->q.storage == Storage::TaskPayload) {
+                    uint32_t sz, al;
+                    mslLayout(v->type, sz, al);
+                    payloadBytes = (sz + al - 1) / al * al;
+                }
+            if (payloadBytes > 16384) fail("taskPayloadSharedEXT variable exceeds GL_MAX_TASK_PAYLOAD_SIZE_EXT (16384 bytes)");
+        }
+        e += "mesh_grid_properties mgl_mgp, constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
+        if (tsi.hasShared) e += "    threadgroup ts::MGLShared mgl_shared;\n";
+        e += "    ts::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Task) + ";\n    g.sys = &sys;\n    g.mgl_tasks = uint3(0u);\n";
+        if (tsi.hasShared) e += "    g.S = &mgl_shared;\n";
+        if (tsi.hasPayload) e += "    g.PL = &mgl_pl;\n";
+        e += bi;
+        // EmitMeshTasksEXT() is called in uniform control flow: the first invocation's counts size the mesh grid.
+        // The (always true) sys test works around a Metal compiler crash at pipeline creation: an object function whose
+        // only buffer accesses go through pointers loaded from the argument buffer, and that writes its payload, takes
+        // down the compiler service (XPC_ERROR_CONNECTION_INTERRUPTED); a read of a directly bound buffer avoids it.
+        e += "    g.mgl_init();\n    g." + tsi.mainName + "();\n"
+             "    if (mgl_lidx == 0u && sys.depthMode != 0xffffffffu) mgl_mgp.set_threadgroups_per_grid(g.mgl_tasks);\n}\n\n";
+        entries_ += e;
+        EntryPoint ep{"mgl_ts", Stage::Task, EntryPoint::Object};
+        for (int i = 0; i < 3; i++) ep.threadsPerThreadgroup[i] = ls[i];
+        ep.payloadBytes = payloadBytes;
+        out_.entryPoints.push_back(ep);
+    }
+
+    // ---- mesh shader -> mesh function
+    const int* ls = MR.meshLocalSize;
+    const int NT = ls[0] * ls[1] * ls[2];
+    prepareStage(Stage::Mesh);
+    useStage(Stage::Mesh);
+    StageInfo& msi = si_[(int)Stage::Mesh];
+    // accessor of a used member of gl_MeshVerticesEXT / gl_MeshPrimitivesEXT for element `k` ("" when unused)
+    auto member = [&](BuiltinVar block, const char* name) -> std::string {
+        auto it = msi.bi.find(block);
+        if (it == msi.bi.end()) return "";
+        const Variable* v = it->second;
+        int mi = v->block->findMember(name);
+        if (mi < 0 || !msi.usedMembers[v].count(mi)) return "";
+        return "g." + meshMemberArray(v, mi) + "[k]";
+    };
+    auto byName = [&](const char* name) -> const Variable* {
+        for (auto* v : msi.builtins)
+            if (v->name == name) return v;
+        return nullptr;
+    };
+    std::string vs, vc, ps, pc;  // vertex / primitive struct members and copies
+    int vscalars = 4, pscalars = 0;
+    vs += "    float4 mgl_pos [[position]];\n";
+    std::string pos = member(BuiltinVar::MeshVertices, "gl_Position");
+    vc += "v.mgl_pos = " + (pos.empty() ? std::string("float4(0.0f)") : pos) + ";\n";
+    vc += "if ((sys.flags & 4u) == 0u) v.mgl_pos.y = -v.mgl_pos.y;\n";
+    vc += "if (sys.depthMode == 0u) v.mgl_pos.z = (v.mgl_pos.z + v.mgl_pos.w) * 0.5f;\n";
+    if (points) {
+        std::string psz = member(BuiltinVar::MeshVertices, "gl_PointSize");
+        vs += "    float mgl_psize [[point_size]];\n";
+        vc += "v.mgl_psize = " + (psz.empty() ? std::string("sys.pointSize") : "(sys.flags & 1u) != 0u ? " + psz + " : sys.pointSize") + ";\n";
+        vscalars++;
+    }
+    std::string clipD = member(BuiltinVar::MeshVertices, "gl_ClipDistance"), cullD = member(BuiltinVar::MeshVertices, "gl_CullDistance");
+    int nclip = clipD.empty() ? 0 : 8, ncull = cullD.empty() ? 0 : 8;
+    if (nclip + ncull > 0) {
+        vs += "    float mgl_clip [[clip_distance]] [" + std::to_string(nclip + ncull) + "];\n";
+        vscalars += nclip + ncull;
+    }
+    for (int i = 0; i < nclip; i++)
+        vc += "v.mgl_clip[" + std::to_string(i) + "] = ((sys.clipDistanceMask >> " + std::to_string(i) + "u) & 1u) != 0u ? " + clipD + "[" +
+              std::to_string(i) + "] : 1.0f;\n";
+    for (int i = 0; i < ncull; i++)
+        vc += "v.mgl_clip[" + std::to_string(nclip + i) + "] = " + cullD + "[" + std::to_string(i) + "] < 0.0f ? -1.0f : 1e20f;\n";
+    // per-primitive built-ins
+    if (fsReadsPrimitiveId()) {
+        std::string pid = member(BuiltinVar::MeshPrimitives, "gl_PrimitiveID");
+        ps += "    int mgl_primid [[user(mgl_primid)]];\n";
+        pc += "p.mgl_primid = " + (pid.empty() ? std::string("int(k)") : pid) + ";\n";
+        pscalars++;
+    }
+    if (std::string l = member(BuiltinVar::MeshPrimitives, "gl_Layer"); !l.empty()) {
+        ps += "    uint mgl_layer [[render_target_array_index]];\n";
+        pc += "p.mgl_layer = uint(" + l + ");\n";
+        pscalars++;
+    }
+    if (std::string l = member(BuiltinVar::MeshPrimitives, "gl_ViewportIndex"); !l.empty()) {
+        ps += "    uint mgl_vp [[viewport_array_index]];\n";
+        pc += "p.mgl_vp = uint(" + l + ");\n";
+        pscalars++;
+    }
+    std::string cull = member(BuiltinVar::MeshPrimitives, "gl_CullPrimitiveEXT");
+    // user varyings the fragment shader reads
+    std::set<std::string> fsNames = fragmentInputNames();
+    bool flatPerVertex = false;  // a flat per-vertex varying reaches the fragment shader
+    std::set<std::string> names;
+    for (auto* v : SC(Stage::Mesh).globals) {
+        if (v->q.storage != Storage::Out || v->builtin != BuiltinVar::None || !SC(Stage::Mesh).used.count(v)) continue;
+        std::vector<Field> f;
+        fieldsOfVar(v, Stage::Mesh, true, f);
+        for (auto& x : f) {
+            if (!fsNames.count(x.name) || !names.insert(x.name).second) continue;
+            if (x.type.base == BT::Bool) fail("boolean varyings are not allowed");
+            bool dbl = x.type.base == BT::Double;
+            std::string decl = "    " + (dbl ? std::string("uint2") : mt(x.type)) + " " + x.name + " [[user(" + x.name + ")]];\n";
+            std::string val = dbl ? "as_type<uint2>(" + acc(x, "g.", "k") + ")" : acc(x, "g.", "k");
+            int n = (dbl ? 2 : 1) * x.type.components();
+            if (v->q.perprimitive) {
+                ps += decl;
+                pc += "p." + x.name + " = " + val + ";\n";
+                pscalars += n;
+            } else {
+                vs += decl;
+                vc += "v." + x.name + " = " + val + ";\n";
+                vscalars += n;
+                if (x.type.base != BT::Float || v->q.interp == Interp::Flat) flatPerVertex = true;
+            }
+        }
+    }
+    // Metal: at most 124 unique scalars per vertex + primitive and 32 KB per mesh
+    if (vscalars + pscalars > kMeshOutputScalars)
+        fail("mesh shader outputs read by the fragment shader exceed 124 scalars per vertex and primitive");
+    if (maxV * 4 * vscalars + maxP * (4 * pscalars + 2 * ipp) > kMeshBytes)
+        fail("mesh shader outputs exceed the mesh output memory (max_vertices / max_primitives too large for the outputs)");
+    if (ps.empty()) ps = "    uint mgl_unused [[user(mgl_unused)]];\n";  // keep the primitive struct non-empty
+    std::string topo = points ? "point" : lines ? "line" : "triangle";
+    std::string preG = "struct MV {\n" + vs + "};\nstruct MP {\n" + ps + "};\n";
+    preG += "using MeshT = mesh<MV, MP, " + MV + ", " + MP + ", topology::" + topo + ">;\n";
+    payloadSpace_ = hasTask ? "const object_data" : "thread";
+    emitBody(Stage::Mesh, o, preG, "", "    void mgl_SetMeshOutputs(uint nv, uint np) { S->mgl_nv = nv; S->mgl_np = np; }\n");
+    o += "}  // namespace ms\n\n";
+
+    std::string params;
+    std::string bi = workgroupBuiltins(Stage::Mesh, ls, params);
+    std::string e = "[[mesh]] void mgl_ms(ms::MeshT mgl_mo, ";
+    if (msi.hasPayload && hasTask) e += "const object_data ms::MGLPayload& mgl_pl [[payload]], ";
+    e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
+    e += "    threadgroup ms::MGLShared mgl_shared;\n";
+    e += "    if (mgl_lidx == 0u) {\n        mgl_shared.mgl_nv = 0u;\n        mgl_shared.mgl_np = 0u;\n    }\n";
+    e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    ms::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Mesh) + ";\n    g.sys = &sys;\n    g.S = &mgl_shared;\n";
+    if (msi.hasPayload) {
+        if (!hasTask) e += "    ms::MGLPayload mgl_pl = {};  // no task shader: the payload is undefined\n";
+        e += "    g.PL = &mgl_pl;\n";
+    }
+    e += bi;
+    e += "    g.mgl_init();\n    g." + msi.mainName + "();\n";
+    e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    uint nv = min(mgl_shared.mgl_nv, " + MV + "u), np = min(mgl_shared.mgl_np, " + MP + "u);\n";
+    e += "    for (uint k = mgl_lidx; k < nv; k += " + std::to_string(NT) + "u) {\n        ms::MV v;\n" + indentBy(vc, 8) +
+         "        mgl_mo.set_vertex(k, v);\n    }\n";
+    // indices (GL's last-vertex provoking convention rotates flat-shaded primitives)
+    const Variable* iv = byName(points ? "gl_PrimitivePointIndicesEXT" : lines ? "gl_PrimitiveLineIndicesEXT" : "gl_PrimitiveTriangleIndicesEXT");
+    std::string ixT = points ? "uint" : lines ? "uint2" : "uint3";
+    std::string idx = ixT + " ix = min(" + (iv ? "g." + varName(iv) + "[k]" : ixT + "(0u)") + ", " + ixT + "(" + MV + "u - 1u));\n";
+    std::vector<std::string> order = points ? std::vector<std::string>{"ix"} : lines ? std::vector<std::string>{"ix.x", "ix.y"}
+                                                                                     : std::vector<std::string>{"ix.x", "ix.y", "ix.z"};
+    if (K.flatshadeLastVertex && flatPerVertex && !points) std::rotate(order.begin(), order.end() - 1, order.end());
+    auto prim = [&](const std::string& slot) {
+        std::string c = idx;
+        for (int i = 0; i < ipp; i++)
+            c += "mgl_mo.set_index(" + slot + " * " + std::to_string(ipp) + "u + " + std::to_string(i) + "u, " + order[i] + ");\n";
+        c += "ms::MP p;\n" + (pc.empty() ? std::string("p.mgl_unused = 0u;\n") : pc) + "mgl_mo.set_primitive(" + slot + ", p);\n";
+        return c;
+    };
+    if (cull.empty()) {
+        e += "    for (uint k = mgl_lidx; k < np; k += " + std::to_string(NT) + "u) {\n" + indentBy(prim("k"), 8) + "    }\n";
+        e += "    if (mgl_lidx == 0u) mgl_mo.set_primitive_count(np);\n";
+    } else {
+        // gl_CullPrimitiveEXT: compact the kept primitives
+        e += "    if (mgl_lidx == 0u) {\n        uint j = 0u;\n        for (uint k = 0u; k < np; k++) {\n            if (" + cull +
+             ") continue;\n" + indentBy(prim("j"), 12) + "            j++;\n        }\n        mgl_mo.set_primitive_count(j);\n    }\n";
+    }
+    e += "}\n\n";
+    entries_ += e;
+    EntryPoint ep{"mgl_ms", Stage::Mesh, EntryPoint::Mesh};
+    for (int i = 0; i < 3; i++) ep.threadsPerThreadgroup[i] = ls[i];
+    ep.maxMeshVertices = maxV;
+    ep.maxMeshPrimitives = maxP;
+    out_.entryPoints.push_back(ep);
+    fragInputsAvailable_ = names;
+    haveVsOutputs_ = true;
+}
+
+// Varying leaf names the fragment shader reads (user inputs and compatibility varyings).
+std::set<std::string> Emitter::fragmentInputNames() {
+    std::set<std::string> fsNames;
+    if (!SC(Stage::Fragment).main) return fsNames;
+    Stage keep = stage_;
+    prepareStage(Stage::Fragment);
+    useStage(Stage::Fragment);
+    for (auto* v : sc_->globals) {
+        if (v->q.storage != Storage::In || v->builtin != BuiltinVar::None) continue;
+        std::vector<std::pair<Type, std::string>> leaves;
+        flatten(v->type, "", leaves);
+        splitDoubleLeaves(leaves);
+        std::string key = varyingKey(v, Stage::Fragment);
+        for (size_t i = 0; i < leaves.size(); i++) fsNames.insert(key + "_" + std::to_string(i));
+    }
+    useStage(keep);
+    return fsNames;
+}
+
+// ---------------------------------------------------------------------------
 // Tessellation: pass 1 = VS + TCS kernel, pass 2 = object (patch) + mesh (TES), or
 // TES records (mgl_tes_count / mgl_tes_gen) feeding a geometry shader or transform feedback.
 // ---------------------------------------------------------------------------
@@ -3592,21 +4110,21 @@ void Emitter::emitTessControlPass(std::string& o) {
         e += "    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);\n";
         useStage(Stage::TessControl);
         e += "    {\n        device uint4* r = (device uint4*)(D.tcsVertexOut + (mgl_gp * " + std::to_string(OUTV) + "u + mgl_tid) * " + sVB + ");\n";
-        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = mgl_pk(" + acc(recV[i], "", "mgl_tid") + ");\n";
+        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "", "mgl_tid")) + ";\n";
         e += "    }\n    if (mgl_tid == 0u) {\n        device float* lv = (device float*)mgl_pout;\n";
         const Variable* lo = tsi.bi.count(BuiltinVar::TessLevelOuter) ? tsi.bi[BuiltinVar::TessLevelOuter] : nullptr;
         const Variable* li = tsi.bi.count(BuiltinVar::TessLevelInner) ? tsi.bi[BuiltinVar::TessLevelInner] : nullptr;
         for (int i = 0; i < 4; i++) e += "        lv[" + std::to_string(i) + "] = " + (lo ? varName(lo) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
         for (int i = 0; i < 2; i++) e += "        lv[" + std::to_string(4 + i) + "] = " + (li ? varName(li) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
         e += "        device uint4* pr = (device uint4*)(mgl_pout + 32u);\n";
-        for (size_t i = 0; i < recP.size(); i++) e += "        pr[" + std::to_string(i) + "] = mgl_pk(" + acc(recP[i], "") + ");\n";
+        for (size_t i = 0; i < recP.size(); i++) e += "        pr[" + std::to_string(i) + "] = " + pk(recP[i], acc(recP[i], "")) + ";\n";
         e += "    }\n}\n\n";
     } else {
         threads1 = 32;
         e += "    uint mgl_cp = mgl_tid;\n    if (mgl_cp < mgl_pv) {\n" + indentBy(vsRun, 8);
         useStage(Stage::Vertex);
         e += "        device uint4* r = (device uint4*)(D.tcsVertexOut + (mgl_gp * mgl_pv + mgl_cp) * " + sVB + ");\n";
-        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = mgl_pk(" + acc(recV[i], "vg.") + ");\n";
+        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "vg.")) + ";\n";
         e += "    }\n    if (mgl_tid == 0u) {\n        device float* lv = (device float*)mgl_pout;\n";
         e += "        for (int i = 0; i < 4; i++) lv[i] = sys.tessDefaultOuter[i];\n        lv[4] = sys.tessDefaultInner[0];\n"
              "        lv[5] = sys.tessDefaultInner[1];\n    }\n}\n\n";
@@ -3686,6 +4204,17 @@ void Emitter::emitTessEvalMesh(std::string& o) {
         ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
         ro.primCopy += "p.mgl_primid = int(pl.patch);\n";
     }
+    // gl_Layer / gl_ViewportIndex (ARB_shader_viewport_layer_array) are per primitive while the TES runs
+    // per vertex: the vertex loop saves them and each primitive takes its first vertex's value.
+    std::string perVertexSave, perVertexDecl;
+    for (const char* bi : {"gl_Layer", "gl_ViewportIndex"}) {
+        std::string src = std::string("g.bi_") + bi, arr = std::string("mgl_pv_") + bi;
+        size_t at = ro.primCopy.find(src);
+        if (at == std::string::npos) continue;
+        ro.primCopy.replace(at, src.size(), arr + "[mgl_idx[k * " + std::to_string(ipp) + "u]]");
+        perVertexDecl += "    threadgroup int " + arr + "[" + std::to_string(MAXV) + "];\n";
+        perVertexSave += arr + "[k] = " + src + ";\n";
+    }
     std::string preG = "struct MV {\n" + ro.vertexStruct + "};\nstruct MP {\n" + ro.primStruct + "};\n";
     preG += "using MeshT = mesh<MV, MP, " + std::to_string(MAXV) + ", " + std::to_string(MAXP) + ", topology::" + topo + ">;\n";
     emitBody(Stage::TessEval, o, preG);
@@ -3704,7 +4233,7 @@ void Emitter::emitTessEvalMesh(std::string& o) {
          "uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
     if (esi.hasShared) e += "    threadgroup tes::MGLShared mgl_sh;\n    threadgroup tes::MGLShared* S = &mgl_sh;\n";
     e += "    threadgroup float3 mgl_co[" + std::to_string(MAXV) + "];\n    threadgroup float mgl_tp[" + std::to_string(MAXV) + "];\n";
-    e += "    threadgroup ushort mgl_idx[" + std::to_string(MAXP * 3) + "];\n    threadgroup uint mgl_cnt[2];\n";
+    e += "    threadgroup ushort mgl_idx[" + std::to_string(MAXP * 3) + "];\n    threadgroup uint mgl_cnt[2];\n" + perVertexDecl;
     e += "    device const float* lv = (device const float*)(D.tcsPatchOut + pl.gp * " + sPB + ");\n";
     e += indentBy(tesLoadControlPoints("pl.gp", "pl.cps", NT), 4);
     e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch(), 8);
@@ -3714,10 +4243,10 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     if (!ro.spill.empty()) e += "    threadgroup uint mgl_svs[" + std::to_string(MAXV) + "];\n";
     e += "    for (uint k = mgl_tid; k < nv; k += " + std::to_string(NT) + "u) {\n";
     e += indentBy(tesRun("mgl_co[k]", "pl.patch", "pl.cps"), 8);
-    e += "        tes::MV v;\n" + indentBy(ro.vertexCopy, 8);
+    e += "        tes::MV v;\n" + indentBy(ro.vertexCopy, 8) + indentBy(perVertexSave, 8);
     e += indentBy(spillVertexCode(ro, "g.", "D.", "mgl_svs[k]"), 8);
     e += "        mgl_mo.set_vertex(k, v);\n    }\n";
-    if (!ro.spill.empty()) e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    if (!ro.spill.empty() || !perVertexSave.empty()) e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
     e += "    for (uint k = mgl_tid; k < np * " + std::to_string(ipp) + "u; k += " + std::to_string(NT) + "u) mgl_mo.set_index(k, mgl_idx[k]);\n";
     std::string sp = spillPrimCode(ro, ipp, [&](int k) {
         return "mgl_svs[mgl_idx[k * " + std::to_string(ipp) + "u + " + std::to_string(k) + "u]]";
@@ -3785,7 +4314,7 @@ void Emitter::emitTessEvalRecords(std::string& o) {
     e += indentBy(tesRun("mgl_co[k]", "patch", "cps"), 8);
     e += "        device uint4* rec = (device uint4*)(D.tesVertexOut + (vo + k) * " + std::to_string(tesRB_) + "u);\n";
     useStage(Stage::TessEval);
-    for (size_t i = 0; i < tesRec_.size(); i++) e += "        rec[" + std::to_string(i) + "] = mgl_pk(" + acc(tesRec_[i], "g.") + ");\n";
+    for (size_t i = 0; i < tesRec_.size(); i++) e += "        rec[" + std::to_string(i) + "] = " + pk(tesRec_[i], acc(tesRec_[i], "g.")) + ";\n";
     e += "    }\n";
     e += "    for (uint k = mgl_tid; k < np * " + ipp + "; k += " + std::to_string(NT) + "u) D.tesPrimOut[po * " + ipp + " + k] = vo + uint(mgl_idx[k]);\n}\n\n";
     entries_ += e;
@@ -3879,7 +4408,7 @@ void Emitter::captureWords(Stage st, const std::string& g, std::vector<std::tupl
             int n = lt.vec;
             for (int c = 0; c < n; c++) {
                 std::string comp = n == 1 ? la : la + "." + kSwz[c];
-                if (lt.base == BT::Double) {
+                if (lt.is64()) {
                     out.push_back({x.buffer, off, "as_type<uint2>(" + comp + ").x"});
                     out.push_back({x.buffer, off + 4, "as_type<uint2>(" + comp + ").y"});
                     off += 8;
@@ -4039,7 +4568,7 @@ void Emitter::emitGeometryXfb(std::string& o, bool fromTes) {
         e += "    vs::Rec mgl_vin[" + N + "];\n    for (uint mgl_j = 0; mgl_j < " + N + "u; mgl_j++) {\n";
         e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_j] + uint(D.baseVertex)", "mgl_inst"), 8);
         useStage(Stage::Vertex);
-        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_j].s[" + std::to_string(i) + "] = mgl_pk(" + acc(vf[i], "vg.") + ");\n";
+        for (size_t i = 0; i < vf.size(); i++) e += "        mgl_vin[mgl_j].s[" + std::to_string(i) + "] = " + pk(vf[i], acc(vf[i], "vg.")) + ";\n";
         e += "    }\n";
         loop = "    for (uint j = 0; j < " + N + "u; j++) {\n" + indentBy(gsUnpack(vf, "mgl_vin[j].s[$I]", "g."), 8) + "    }\n";
     } else {
@@ -4136,11 +4665,18 @@ MSLOutput Emitter::run() {
             case PipelineKind::XfbCapture:
                 emitXfb(o);
                 break;
+            case PipelineKind::Mesh:
+                if (!SC(Stage::Mesh).main) fail("program has no mesh shader");
+                emitMesh(o);
+                if (SC(Stage::Fragment).main) emitFS(o, true);
+                else emitNullFS();
+                break;
         }
         if (multi_) {
             // one argument buffer per stage program; unused stages keep a placeholder
             o += "struct MGLArgs {\n";
-            for (int i = 0; i < (int)Stage::Count; i++)
+            const uint32_t meshStages = (1u << (int)Stage::Task) | (1u << (int)Stage::Mesh);
+            for (int i = 0; i < ((stageMask_ & meshStages) ? (int)Stage::Count : kClassicStageCount); i++)
                 o += argsEmitted_[i] ? std::string("    constant ") + kStageNs[i] + "::MGLArgs* " + kStageNs[i] + ";\n"
                                      : std::string("    ulong ") + kStageNs[i] + ";\n";
             o += "};\n\n";

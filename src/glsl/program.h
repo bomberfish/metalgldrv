@@ -62,6 +62,7 @@ struct OpaqueBinding {
     int samplerSlot = -1;
     int biasSlot = -1;  // sampler uniforms: LodBias slots (count elements)
     int borderSlot = -1;  // integer samplers: emulated border color (SlotKind::SamplerBorder)
+    int samplesSlot = -1;  // multisample images: sample count (SlotKind::ImageSamples)
     int count = 1;   // array elements
     bool isArray = false;  // declared as an array (also when count == 1)
     int uniformIndex = -1;
@@ -87,6 +88,8 @@ struct LinkedProgram {
     StageCode stages[(int)Stage::Count];
     uint32_t stageMask = 0;
     bool separable = false;
+    bool strict = false;            // LinkInput::strict
+    bool robustTexelFetch = false;  // LinkInput::robustTexelFetch
     Reflection refl;
     std::map<std::string, uint32_t> defaultOffsets;        // default-block uniform var name -> byte offset
     std::map<std::string, OpaqueBinding> opaque;           // opaque uniform var name -> binding

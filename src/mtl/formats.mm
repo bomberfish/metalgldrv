@@ -56,7 +56,7 @@ static const FormatInfo kFormats[] = {
 {GL_RGB32F,                 MTLPixelFormatRGBA32Float,             GL_RGB,                FmtKind::Float,   Comp::F32,   4,16, 1, 1, 0, 1, 1, RGB1, {0,1,2,3},32,32,32, 0, 0, 0, FL},
 {GL_RGBA32F,                MTLPixelFormatRGBA32Float,             GL_RGBA,               FmtKind::Float,   Comp::F32,   4,16, 1, 1, 0, 1, 1, IDENT,{0,1,2,3},32,32,32,32, 0, 0, FL},
 {GL_R11F_G11F_B10F,         MTLPixelFormatRG11B10Float,            GL_RGB,                FmtKind::Float,   Comp::P111110F,3,4,1, 1, 0, 1, 1, RGB1, {0,1,2,3},11,11,10, 0, 0, 0, FL},
-{GL_RGB9_E5,                MTLPixelFormatRGB9E5Float,             GL_RGB,                FmtKind::Float,   Comp::P999E5,3, 4, 1, 1, 0, 0, 1, RGB1, {0,1,2,3}, 9, 9, 9, 0, 0, 0, FL},
+{GL_RGB9_E5,                MTLPixelFormatRGB9E5Float,             GL_RGB,                FmtKind::Float,   Comp::P999E5,3, 4, 1, 1, 0, 1, 1, RGB1, {0,1,2,3}, 9, 9, 9, 0, 0, 0, FL},
 {GL_R8I,                    MTLPixelFormatR8Sint,                  GL_RED,                FmtKind::SInt,    Comp::S8,    1, 1, 1, 1, 0, 1, 0, R001, {0,1,2,3}, 8, 0, 0, 0, 0, 0, SI},
 {GL_R8UI,                   MTLPixelFormatR8Uint,                  GL_RED,                FmtKind::UInt,    Comp::U8,    1, 1, 1, 1, 0, 1, 0, R001, {0,1,2,3}, 8, 0, 0, 0, 0, 0, UI},
 {GL_R16I,                   MTLPixelFormatR16Sint,                 GL_RED,                FmtKind::SInt,    Comp::S16,   1, 2, 1, 1, 0, 1, 0, R001, {0,1,2,3},16, 0, 0, 0, 0, 0, SI},

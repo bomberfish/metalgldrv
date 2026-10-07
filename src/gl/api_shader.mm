@@ -32,6 +32,8 @@ static glsl::Stage stageForType(GLenum type, bool* ok) {
     case GL_GEOMETRY_SHADER: return glsl::Stage::Geometry;
     case GL_FRAGMENT_SHADER: return glsl::Stage::Fragment;
     case GL_COMPUTE_SHADER: return glsl::Stage::Compute;
+    case GL_TASK_SHADER_EXT: return glsl::Stage::Task;
+    case GL_MESH_SHADER_EXT: return glsl::Stage::Mesh;
     default: *ok = false; return glsl::Stage::Vertex;
     }
 }
@@ -62,7 +64,7 @@ void setupLinkedProgram(ProgramObj* p) {
         const auto& sl = r.slots[s];
         if (sl.kind == glsl::SlotKind::Texture || sl.kind == glsl::SlotKind::Sampler || sl.kind == glsl::SlotKind::Image ||
             sl.kind == glsl::SlotKind::LodBias ||
-            sl.kind == glsl::SlotKind::SamplerBorder) {
+            sl.kind == glsl::SlotKind::SamplerBorder || sl.kind == glsl::SlotKind::ImageSamples) {
             if (sl.index < r.uniforms.size()) p->samplerUnits[s] = r.uniforms[sl.index].binding + sl.element;
         }
     }
@@ -183,6 +185,8 @@ API void APIENTRY glCompileShader(GLuint shader) {
     glsl::CompileOptions opts;
     opts.compatibilityProfile = !ctx->coreProfile;
     opts.sparseTexture = ctx->dev->caps.sparse;
+    opts.deviceExtensions = &mglDeviceGlslExtensions(ctx->dev->caps);
+    opts.strict = ctx->strict;
     glsl::CompileResult r = glsl::compile(st, s->sources, opts);
     s->shader = r.shader;
     s->compiled = r.shader != nullptr;
@@ -290,6 +294,7 @@ API void APIENTRY glSpecializeShader(GLuint shader, const GLchar* pEntryPoint, G
     glsl::CompileOptions opts;
     opts.compatibilityProfile = false;
     opts.sparseTexture = ctx->dev->caps.sparse;
+    opts.strict = ctx->strict;
     glsl::SpecializeResult r = glsl::specializeSpirv(*s->spirvModule, st, pEntryPoint, constants, opts);
     switch (r.status) {
     case glsl::SpecializeStatus::BadEntryPoint: return ctx->setError(GL_INVALID_VALUE, "no SPIR-V entry point '%s' for this stage", pEntryPoint);
@@ -496,6 +501,8 @@ API void APIENTRY glLinkProgram(GLuint program) {
     in.xfbVaryings = p->xfbVaryings;
     in.xfbInterleaved = p->xfbBufferMode == GL_INTERLEAVED_ATTRIBS;
     in.separable = p->separable;
+    in.strict = ctx->strict;
+    in.robustTexelFetch = ctx->robustAccess;
     p->linkGeneration++;
     // A failed (re)link keeps the previous executable (p->program, refl, variants): GL keeps
     // using it while the program stays current (§7.3); only LINK_STATUS turns false.
@@ -547,7 +554,9 @@ API void APIENTRY glLinkProgram(GLuint program) {
     bool multiPass = sm & ((1u << (int)glsl::Stage::Geometry) | (1u << (int)glsl::Stage::TessEval));
     if (!multiPass && !envFlag("METALGLDRV_LAZY_COMPILE")) {
         glsl::VariantKey vk;
-        vk.kind = (sm & (1u << (int)glsl::Stage::Compute)) ? glsl::PipelineKind::Compute : glsl::PipelineKind::Classic;
+        vk.kind = (sm & (1u << (int)glsl::Stage::Compute)) ? glsl::PipelineKind::Compute
+                : (sm & (1u << (int)glsl::Stage::Mesh))    ? glsl::PipelineKind::Mesh
+                                                           : glsl::PipelineKind::Classic;
         ProgramVariant* v = ctx->pipelines_->variant(p, vk);
         if (v && !v->ok) {
             // Report backend failures through the link status so apps see them.
@@ -650,6 +659,18 @@ API void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
         params[0] = r.localSize[0];
         params[1] = r.localSize[1];
         params[2] = r.localSize[2];
+        break;
+    // EXT_mesh_shader
+    case GL_TASK_WORK_GROUP_SIZE_EXT:
+        if (!p->linked || !(r.stageMask & (1 << (int)glsl::Stage::Task))) return ctx->setError(GL_INVALID_OPERATION);
+        for (int i = 0; i < 3; i++) params[i] = r.taskLocalSize[i];
+        break;
+    case GL_MESH_WORK_GROUP_SIZE_EXT: case GL_MESH_VERTICES_OUT_EXT: case GL_MESH_PRIMITIVES_OUT_EXT: case GL_MESH_OUTPUT_TYPE_EXT:
+        if (!p->linked || !(r.stageMask & (1 << (int)glsl::Stage::Mesh))) return ctx->setError(GL_INVALID_OPERATION);
+        if (pname == GL_MESH_WORK_GROUP_SIZE_EXT) for (int i = 0; i < 3; i++) params[i] = r.meshLocalSize[i];
+        else if (pname == GL_MESH_VERTICES_OUT_EXT) *params = r.meshMaxVertices;
+        else if (pname == GL_MESH_PRIMITIVES_OUT_EXT) *params = r.meshMaxPrimitives;
+        else *params = (GLint)r.meshOutputPrimitive;
         break;
     case GL_PROGRAM_SEPARABLE: *params = p->linked && p->linkedSeparable; break;
     case GL_PROGRAM_BINARY_RETRIEVABLE_HINT: *params = p->retrievableHint; break;
@@ -897,6 +918,8 @@ API void APIENTRY glGetActiveUniformBlockiv(GLuint program, GLuint index, GLenum
     case GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER: *params = !!(b.stageMask & (1 << (int)S::Geometry)); break;
     case GL_UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER: *params = !!(b.stageMask & (1 << (int)S::Fragment)); break;
     case GL_UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER: *params = !!(b.stageMask & (1 << (int)S::Compute)); break;
+    case GL_UNIFORM_BLOCK_REFERENCED_BY_TASK_SHADER_EXT: *params = !!(b.stageMask & (1 << (int)S::Task)); break;
+    case GL_UNIFORM_BLOCK_REFERENCED_BY_MESH_SHADER_EXT: *params = !!(b.stageMask & (1 << (int)S::Mesh)); break;
     default: ctx->setError(GL_INVALID_ENUM);
     }
 }
@@ -935,6 +958,8 @@ API void APIENTRY glGetActiveAtomicCounterBufferiv(GLuint program, GLuint index,
     case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_GEOMETRY_SHADER: *params = !!(a.stageMask & (1 << (int)S::Geometry)); break;
     case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_FRAGMENT_SHADER: *params = !!(a.stageMask & (1 << (int)S::Fragment)); break;
     case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_COMPUTE_SHADER: *params = !!(a.stageMask & (1 << (int)S::Compute)); break;
+    case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TASK_SHADER_EXT: *params = !!(a.stageMask & (1 << (int)S::Task)); break;
+    case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_MESH_SHADER_EXT: *params = !!(a.stageMask & (1 << (int)S::Mesh)); break;
     default: ctx->setError(GL_INVALID_ENUM);
     }
 }
@@ -954,7 +979,7 @@ API void APIENTRY glGetTransformFeedbackVarying(GLuint program, GLuint index, GL
 // ---------------------------------------------------------------------------
 // uniform setters
 // ---------------------------------------------------------------------------
-enum class SrcKind { Float, Int, UInt, Double };
+enum class SrcKind { Float, Int, UInt, Double, Int64, UInt64 };
 
 static void setUniform(Context* ctx, ProgramObj* p, GLint location, GLsizei count, SrcKind kind, int comps, int cols, bool transpose,
                        const void* data) {
@@ -973,10 +998,12 @@ static void setUniform(Context* ctx, ProgramObj* p, GLint location, GLsizei coun
     if (ts.base == BaseType::Sampler || ts.base == BaseType::Image) {
         if (kind != SrcKind::Int || comps != 1 || matrix) return ctx->setError(GL_INVALID_OPERATION);
     } else if (ts.base == BaseType::Bool) {
-        if (kind == SrcKind::Double || matrix || ts.components() != comps) return ctx->setError(GL_INVALID_OPERATION);
+        if (kind == SrcKind::Double || kind == SrcKind::Int64 || kind == SrcKind::UInt64 || matrix || ts.components() != comps)
+            return ctx->setError(GL_INVALID_OPERATION);
     } else {
         bool ok = (ts.base == BaseType::Float && kind == SrcKind::Float) || (ts.base == BaseType::Int && kind == SrcKind::Int) ||
-                  (ts.base == BaseType::UInt && kind == SrcKind::UInt) || (ts.base == BaseType::Double && kind == SrcKind::Double);
+                  (ts.base == BaseType::UInt && kind == SrcKind::UInt) || (ts.base == BaseType::Double && kind == SrcKind::Double) ||
+                  (ts.base == BaseType::Int64 && kind == SrcKind::Int64) || (ts.base == BaseType::UInt64 && kind == SrcKind::UInt64);
         if (!ok) return ctx->setError(GL_INVALID_OPERATION, "uniform type mismatch");
         if ((ts.cols > 1) != matrix || ts.cols != (matrix ? cols : 1) || ts.rows != rows) return ctx->setError(GL_INVALID_OPERATION, "uniform size mismatch");
     }
@@ -995,7 +1022,7 @@ static void setUniform(Context* ctx, ProgramObj* p, GLint location, GLsizei coun
             if ((int)sl.index != loc.uniform) continue;
             if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Sampler && sl.kind != glsl::SlotKind::Image &&
                 sl.kind != glsl::SlotKind::LodBias &&
-                sl.kind != glsl::SlotKind::SamplerBorder)
+                sl.kind != glsl::SlotKind::SamplerBorder && sl.kind != glsl::SlotKind::ImageSamples)
                 continue;
             int e = (int)sl.element - loc.element;
             if (e >= 0 && e < n) p->samplerUnits[s] = v[e];
@@ -1004,7 +1031,7 @@ static void setUniform(Context* ctx, ProgramObj* p, GLint location, GLsizei coun
     }
     if (u.offset < 0) return;
     uint8_t* base = p->uniformData.data() + u.offset;
-    int elemSize = ts.base == BaseType::Double ? 8 : 4;
+    int elemSize = ts.base == BaseType::Double || ts.base == BaseType::Int64 || ts.base == BaseType::UInt64 ? 8 : 4;
     int arrayStride = u.arrayStride ? u.arrayStride : (matrix ? cols * u.matrixStride : comps * elemSize);
     int matStride = u.matrixStride ? u.matrixStride : rows * elemSize;
     for (int i = 0; i < n; i++) {
@@ -1042,84 +1069,86 @@ static ProgramObj* activeUniformProgram(Context* ctx) {
     return nullptr;
 }
 
-#define UNIFORM_SCALARS(N, T, Kind, suffix)                                                                                  \
-    API void APIENTRY glUniform1##suffix(GLint loc, T v0) {                                                                    \
-        MGL_CTX();                                                                                                           \
-        T v[1] = {v0};                                                                                                       \
-        setUniform(ctx, activeUniformProgram(ctx), loc, 1, Kind, 1, 1, false, v);                                           \
-    }                                                                                                                        \
-    API void APIENTRY glUniform2##suffix(GLint loc, T v0, T v1) {                                                              \
-        MGL_CTX();                                                                                                           \
-        T v[2] = {v0, v1};                                                                                                   \
-        setUniform(ctx, activeUniformProgram(ctx), loc, 1, Kind, 2, 1, false, v);                                           \
-    }                                                                                                                        \
-    API void APIENTRY glUniform3##suffix(GLint loc, T v0, T v1, T v2) {                                                        \
-        MGL_CTX();                                                                                                           \
-        T v[3] = {v0, v1, v2};                                                                                               \
-        setUniform(ctx, activeUniformProgram(ctx), loc, 1, Kind, 3, 1, false, v);                                           \
-    }                                                                                                                        \
-    API void APIENTRY glUniform4##suffix(GLint loc, T v0, T v1, T v2, T v3) {                                                  \
-        MGL_CTX();                                                                                                           \
-        T v[4] = {v0, v1, v2, v3};                                                                                           \
-        setUniform(ctx, activeUniformProgram(ctx), loc, 1, Kind, 4, 1, false, v);                                           \
-    }                                                                                                                        \
-    API void APIENTRY glUniform1##suffix##v(GLint loc, GLsizei c, const T* v) {                                                \
-        MGL_CTX();                                                                                                           \
-        setUniform(ctx, activeUniformProgram(ctx), loc, c, Kind, 1, 1, false, v);                                           \
-    }                                                                                                                        \
-    API void APIENTRY glUniform2##suffix##v(GLint loc, GLsizei c, const T* v) {                                                \
-        MGL_CTX();                                                                                                           \
-        setUniform(ctx, activeUniformProgram(ctx), loc, c, Kind, 2, 1, false, v);                                           \
-    }                                                                                                                        \
-    API void APIENTRY glUniform3##suffix##v(GLint loc, GLsizei c, const T* v) {                                                \
-        MGL_CTX();                                                                                                           \
-        setUniform(ctx, activeUniformProgram(ctx), loc, c, Kind, 3, 1, false, v);                                           \
-    }                                                                                                                        \
-    API void APIENTRY glUniform4##suffix##v(GLint loc, GLsizei c, const T* v) {                                                \
-        MGL_CTX();                                                                                                           \
-        setUniform(ctx, activeUniformProgram(ctx), loc, c, Kind, 4, 1, false, v);                                           \
-    }                                                                                                                        \
-    API void APIENTRY glProgramUniform1##suffix(GLuint prog, GLint loc, T v0) {                                                \
-        MGL_CTX();                                                                                                           \
-        T v[1] = {v0};                                                                                                       \
-        setUniform(ctx, getProgram(ctx, prog), loc, 1, Kind, 1, 1, false, v);                                               \
-    }                                                                                                                        \
-    API void APIENTRY glProgramUniform2##suffix(GLuint prog, GLint loc, T v0, T v1) {                                          \
-        MGL_CTX();                                                                                                           \
-        T v[2] = {v0, v1};                                                                                                   \
-        setUniform(ctx, getProgram(ctx, prog), loc, 1, Kind, 2, 1, false, v);                                               \
-    }                                                                                                                        \
-    API void APIENTRY glProgramUniform3##suffix(GLuint prog, GLint loc, T v0, T v1, T v2) {                                    \
-        MGL_CTX();                                                                                                           \
-        T v[3] = {v0, v1, v2};                                                                                               \
-        setUniform(ctx, getProgram(ctx, prog), loc, 1, Kind, 3, 1, false, v);                                               \
-    }                                                                                                                        \
-    API void APIENTRY glProgramUniform4##suffix(GLuint prog, GLint loc, T v0, T v1, T v2, T v3) {                              \
-        MGL_CTX();                                                                                                           \
-        T v[4] = {v0, v1, v2, v3};                                                                                           \
-        setUniform(ctx, getProgram(ctx, prog), loc, 1, Kind, 4, 1, false, v);                                               \
-    }                                                                                                                        \
-    API void APIENTRY glProgramUniform1##suffix##v(GLuint prog, GLint loc, GLsizei c, const T* v) {                            \
-        MGL_CTX();                                                                                                           \
-        setUniform(ctx, getProgram(ctx, prog), loc, c, Kind, 1, 1, false, v);                                               \
-    }                                                                                                                        \
-    API void APIENTRY glProgramUniform2##suffix##v(GLuint prog, GLint loc, GLsizei c, const T* v) {                            \
-        MGL_CTX();                                                                                                           \
-        setUniform(ctx, getProgram(ctx, prog), loc, c, Kind, 2, 1, false, v);                                               \
-    }                                                                                                                        \
-    API void APIENTRY glProgramUniform3##suffix##v(GLuint prog, GLint loc, GLsizei c, const T* v) {                            \
-        MGL_CTX();                                                                                                           \
-        setUniform(ctx, getProgram(ctx, prog), loc, c, Kind, 3, 1, false, v);                                               \
-    }                                                                                                                        \
-    API void APIENTRY glProgramUniform4##suffix##v(GLuint prog, GLint loc, GLsizei c, const T* v) {                            \
-        MGL_CTX();                                                                                                           \
-        setUniform(ctx, getProgram(ctx, prog), loc, c, Kind, 4, 1, false, v);                                               \
+#define UNIFORM_SCALARS(T, Kind, suffix, ext)                                                                                       \
+    API void APIENTRY glUniform1##suffix##ext(GLint loc, T v0) {                                                                    \
+        MGL_CTX();                                                                                                                  \
+        T v[1] = {v0};                                                                                                              \
+        setUniform(ctx, activeUniformProgram(ctx), loc, 1, Kind, 1, 1, false, v);                                                   \
+    }                                                                                                                               \
+    API void APIENTRY glUniform2##suffix##ext(GLint loc, T v0, T v1) {                                                              \
+        MGL_CTX();                                                                                                                  \
+        T v[2] = {v0, v1};                                                                                                          \
+        setUniform(ctx, activeUniformProgram(ctx), loc, 1, Kind, 2, 1, false, v);                                                   \
+    }                                                                                                                               \
+    API void APIENTRY glUniform3##suffix##ext(GLint loc, T v0, T v1, T v2) {                                                        \
+        MGL_CTX();                                                                                                                  \
+        T v[3] = {v0, v1, v2};                                                                                                      \
+        setUniform(ctx, activeUniformProgram(ctx), loc, 1, Kind, 3, 1, false, v);                                                   \
+    }                                                                                                                               \
+    API void APIENTRY glUniform4##suffix##ext(GLint loc, T v0, T v1, T v2, T v3) {                                                  \
+        MGL_CTX();                                                                                                                  \
+        T v[4] = {v0, v1, v2, v3};                                                                                                  \
+        setUniform(ctx, activeUniformProgram(ctx), loc, 1, Kind, 4, 1, false, v);                                                   \
+    }                                                                                                                               \
+    API void APIENTRY glUniform1##suffix##v##ext(GLint loc, GLsizei c, const T* v) {                                                \
+        MGL_CTX();                                                                                                                  \
+        setUniform(ctx, activeUniformProgram(ctx), loc, c, Kind, 1, 1, false, v);                                                   \
+    }                                                                                                                               \
+    API void APIENTRY glUniform2##suffix##v##ext(GLint loc, GLsizei c, const T* v) {                                                \
+        MGL_CTX();                                                                                                                  \
+        setUniform(ctx, activeUniformProgram(ctx), loc, c, Kind, 2, 1, false, v);                                                   \
+    }                                                                                                                               \
+    API void APIENTRY glUniform3##suffix##v##ext(GLint loc, GLsizei c, const T* v) {                                                \
+        MGL_CTX();                                                                                                                  \
+        setUniform(ctx, activeUniformProgram(ctx), loc, c, Kind, 3, 1, false, v);                                                   \
+    }                                                                                                                               \
+    API void APIENTRY glUniform4##suffix##v##ext(GLint loc, GLsizei c, const T* v) {                                                \
+        MGL_CTX();                                                                                                                  \
+        setUniform(ctx, activeUniformProgram(ctx), loc, c, Kind, 4, 1, false, v);                                                   \
+    }                                                                                                                               \
+    API void APIENTRY glProgramUniform1##suffix##ext(GLuint prog, GLint loc, T v0) {                                                \
+        MGL_CTX();                                                                                                                  \
+        T v[1] = {v0};                                                                                                              \
+        setUniform(ctx, getProgram(ctx, prog), loc, 1, Kind, 1, 1, false, v);                                                       \
+    }                                                                                                                               \
+    API void APIENTRY glProgramUniform2##suffix##ext(GLuint prog, GLint loc, T v0, T v1) {                                          \
+        MGL_CTX();                                                                                                                  \
+        T v[2] = {v0, v1};                                                                                                          \
+        setUniform(ctx, getProgram(ctx, prog), loc, 1, Kind, 2, 1, false, v);                                                       \
+    }                                                                                                                               \
+    API void APIENTRY glProgramUniform3##suffix##ext(GLuint prog, GLint loc, T v0, T v1, T v2) {                                    \
+        MGL_CTX();                                                                                                                  \
+        T v[3] = {v0, v1, v2};                                                                                                      \
+        setUniform(ctx, getProgram(ctx, prog), loc, 1, Kind, 3, 1, false, v);                                                       \
+    }                                                                                                                               \
+    API void APIENTRY glProgramUniform4##suffix##ext(GLuint prog, GLint loc, T v0, T v1, T v2, T v3) {                              \
+        MGL_CTX();                                                                                                                  \
+        T v[4] = {v0, v1, v2, v3};                                                                                                  \
+        setUniform(ctx, getProgram(ctx, prog), loc, 1, Kind, 4, 1, false, v);                                                       \
+    }                                                                                                                               \
+    API void APIENTRY glProgramUniform1##suffix##v##ext(GLuint prog, GLint loc, GLsizei c, const T* v) {                            \
+        MGL_CTX();                                                                                                                  \
+        setUniform(ctx, getProgram(ctx, prog), loc, c, Kind, 1, 1, false, v);                                                       \
+    }                                                                                                                               \
+    API void APIENTRY glProgramUniform2##suffix##v##ext(GLuint prog, GLint loc, GLsizei c, const T* v) {                            \
+        MGL_CTX();                                                                                                                  \
+        setUniform(ctx, getProgram(ctx, prog), loc, c, Kind, 2, 1, false, v);                                                       \
+    }                                                                                                                               \
+    API void APIENTRY glProgramUniform3##suffix##v##ext(GLuint prog, GLint loc, GLsizei c, const T* v) {                            \
+        MGL_CTX();                                                                                                                  \
+        setUniform(ctx, getProgram(ctx, prog), loc, c, Kind, 3, 1, false, v);                                                       \
+    }                                                                                                                               \
+    API void APIENTRY glProgramUniform4##suffix##v##ext(GLuint prog, GLint loc, GLsizei c, const T* v) {                            \
+        MGL_CTX();                                                                                                                  \
+        setUniform(ctx, getProgram(ctx, prog), loc, c, Kind, 4, 1, false, v);                                                       \
     }
 
-UNIFORM_SCALARS(_, GLfloat, SrcKind::Float, f)
-UNIFORM_SCALARS(_, GLint, SrcKind::Int, i)
-UNIFORM_SCALARS(_, GLuint, SrcKind::UInt, ui)
-UNIFORM_SCALARS(_, GLdouble, SrcKind::Double, d)
+UNIFORM_SCALARS(GLfloat, SrcKind::Float, f, )
+UNIFORM_SCALARS(GLint, SrcKind::Int, i, )
+UNIFORM_SCALARS(GLuint, SrcKind::UInt, ui, )
+UNIFORM_SCALARS(GLdouble, SrcKind::Double, d, )
+UNIFORM_SCALARS(GLint64, SrcKind::Int64, i64, ARB)  // ARB_gpu_shader_int64
+UNIFORM_SCALARS(GLuint64, SrcKind::UInt64, ui64, ARB)
 
 #define UNIFORM_MATRIX(name, T, Kind, C, R)                                                                              \
     API void APIENTRY glUniformMatrix##name(GLint loc, GLsizei c, GLboolean t, const T* v) {                              \
@@ -1174,7 +1203,7 @@ static void getUniform(Context* ctx, GLuint program, GLint location, GLsizei buf
         out[0] = (T)u.binding;
         return;
     }
-    int elemSize = ts.base == BaseType::Double ? 8 : 4;
+    int elemSize = ts.base == BaseType::Double || ts.base == BaseType::Int64 || ts.base == BaseType::UInt64 ? 8 : 4;
     int matStride = u.matrixStride ? u.matrixStride : ts.rows * elemSize;
     int arrayStride = u.arrayStride ? u.arrayStride : (ts.cols > 1 ? ts.cols * matStride : comps * elemSize);
     const uint8_t* src = p->uniformData.data() + u.offset + (size_t)loc.element * arrayStride;
@@ -1204,6 +1233,8 @@ static void getUniform(Context* ctx, GLuint program, GLint location, GLsizei buf
             }
             case BaseType::Int: { int32_t i; memcpy(&i, e, 4); v = (T)i; break; }
             case BaseType::UInt: case BaseType::Bool: { uint32_t i; memcpy(&i, e, 4); v = (T)i; break; }
+            case BaseType::Int64: { int64_t i; memcpy(&i, e, 8); v = (T)i; break; }
+            case BaseType::UInt64: { uint64_t i; memcpy(&i, e, 8); v = (T)i; break; }
             default: v = 0;
             }
             out[c * ts.rows + r] = v;
@@ -1218,6 +1249,16 @@ API void APIENTRY glGetnUniformfv(GLuint program, GLint location, GLsizei bufSiz
 API void APIENTRY glGetnUniformiv(GLuint program, GLint location, GLsizei bufSize, GLint* params) { MGL_CTX(); getUniform(ctx, program, location, bufSize, params); }
 API void APIENTRY glGetnUniformuiv(GLuint program, GLint location, GLsizei bufSize, GLuint* params) { MGL_CTX(); getUniform(ctx, program, location, bufSize, params); }
 API void APIENTRY glGetnUniformdv(GLuint program, GLint location, GLsizei bufSize, GLdouble* params) { MGL_CTX(); getUniform(ctx, program, location, bufSize, params); }
+API void APIENTRY glGetUniformi64vARB(GLuint program, GLint location, GLint64* params) { MGL_CTX(); getUniform(ctx, program, location, -1, params); }
+API void APIENTRY glGetUniformui64vARB(GLuint program, GLint location, GLuint64* params) { MGL_CTX(); getUniform(ctx, program, location, -1, params); }
+API void APIENTRY glGetnUniformi64vARB(GLuint program, GLint location, GLsizei bufSize, GLint64* params) {
+    MGL_CTX();
+    getUniform(ctx, program, location, bufSize, params);
+}
+API void APIENTRY glGetnUniformui64vARB(GLuint program, GLint location, GLsizei bufSize, GLuint64* params) {
+    MGL_CTX();
+    getUniform(ctx, program, location, bufSize, params);
+}
 
 // ---------------------------------------------------------------------------
 // program interface query (GL 4.3)
@@ -1281,6 +1322,7 @@ int propertySupported(GLenum iface, GLenum prop) {
     case GL_BUFFER_DATA_SIZE: return ub || sb || acb;
     case GL_REFERENCED_BY_VERTEX_SHADER: case GL_REFERENCED_BY_TESS_CONTROL_SHADER: case GL_REFERENCED_BY_TESS_EVALUATION_SHADER:
     case GL_REFERENCED_BY_GEOMETRY_SHADER: case GL_REFERENCED_BY_FRAGMENT_SHADER: case GL_REFERENCED_BY_COMPUTE_SHADER:
+    case GL_REFERENCED_BY_TASK_SHADER_EXT: case GL_REFERENCED_BY_MESH_SHADER_EXT:
         return uni || ub || acb || sb || bv || in || out;
     case GL_TOP_LEVEL_ARRAY_SIZE: case GL_TOP_LEVEL_ARRAY_STRIDE: return bv;
     case GL_NUM_COMPATIBLE_SUBROUTINES: case GL_COMPATIBLE_SUBROUTINES: return isSubUniform;
@@ -1300,6 +1342,7 @@ int locationsPerElement(GLenum t) {
     case GL_FLOAT_MAT3: case GL_FLOAT_MAT3x2: case GL_FLOAT_MAT3x4: case GL_DOUBLE_MAT3x2: return 3;
     case GL_FLOAT_MAT4: case GL_FLOAT_MAT4x2: case GL_FLOAT_MAT4x3: case GL_DOUBLE_MAT4x2: return 4;
     case GL_DOUBLE_VEC3: case GL_DOUBLE_VEC4: return 2;
+    case GL_INT64_VEC3_ARB: case GL_INT64_VEC4_ARB: case GL_UNSIGNED_INT64_VEC3_ARB: case GL_UNSIGNED_INT64_VEC4_ARB: return 2;
     case GL_DOUBLE_MAT2x3: case GL_DOUBLE_MAT2x4: return 4;
     case GL_DOUBLE_MAT3: case GL_DOUBLE_MAT3x4: return 6;
     case GL_DOUBLE_MAT4: case GL_DOUBLE_MAT4x3: return 8;
@@ -1576,6 +1619,8 @@ API void APIENTRY glGetProgramResourceiv(GLuint program, GLenum iface, GLuint in
         case GL_REFERENCED_BY_GEOMETRY_SHADER: vals.push_back(!!(x.stageMask & (1 << (int)S::Geometry))); break;
         case GL_REFERENCED_BY_FRAGMENT_SHADER: vals.push_back(!!(x.stageMask & (1 << (int)S::Fragment))); break;
         case GL_REFERENCED_BY_COMPUTE_SHADER: vals.push_back(!!(x.stageMask & (1 << (int)S::Compute))); break;
+        case GL_REFERENCED_BY_TASK_SHADER_EXT: vals.push_back(!!(x.stageMask & (1 << (int)S::Task))); break;
+        case GL_REFERENCED_BY_MESH_SHADER_EXT: vals.push_back(!!(x.stageMask & (1 << (int)S::Mesh))); break;
         case GL_TOP_LEVEL_ARRAY_SIZE: vals.push_back(x.topLevelArraySize); break;
         case GL_TOP_LEVEL_ARRAY_STRIDE: vals.push_back(x.topLevelArrayStride); break;
         case GL_LOCATION: vals.push_back(x.location); break;
@@ -1734,7 +1779,12 @@ std::string pipelineValidationError(ProgramPipelineObj* pp) {
     if (!pp->stages[(int)glsl::Stage::Vertex] &&
         (pp->stages[(int)glsl::Stage::Geometry] || pp->stages[(int)glsl::Stage::TessControl] || pp->stages[(int)glsl::Stage::TessEval]))
         return "pipeline has geometry or tessellation stages but no vertex program";
-    if (!pp->stages[(int)glsl::Stage::Vertex] && !pp->stages[(int)glsl::Stage::Compute])
+    if (pp->stages[(int)glsl::Stage::Mesh] &&
+        (pp->stages[(int)glsl::Stage::Vertex] || pp->stages[(int)glsl::Stage::Geometry] || pp->stages[(int)glsl::Stage::TessControl] ||
+         pp->stages[(int)glsl::Stage::TessEval]))
+        return "pipeline has both mesh and vertex processing stages";
+    if (pp->stages[(int)glsl::Stage::Task] && !pp->stages[(int)glsl::Stage::Mesh]) return "pipeline has a task program but no mesh program";
+    if (!pp->stages[(int)glsl::Stage::Vertex] && !pp->stages[(int)glsl::Stage::Compute] && !pp->stages[(int)glsl::Stage::Mesh])
         return "pipeline has no vertex or compute program";
     return "";
 }
@@ -1758,7 +1808,7 @@ API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint 
     ProgramPipelineObj* pp = pipelineObj(ctx, pipeline, true);
     if (!pp) return;
     const GLbitfield all = GL_VERTEX_SHADER_BIT | GL_TESS_CONTROL_SHADER_BIT | GL_TESS_EVALUATION_SHADER_BIT | GL_GEOMETRY_SHADER_BIT |
-                           GL_FRAGMENT_SHADER_BIT | GL_COMPUTE_SHADER_BIT;
+                           GL_FRAGMENT_SHADER_BIT | GL_COMPUTE_SHADER_BIT | GL_TASK_SHADER_BIT_EXT | GL_MESH_SHADER_BIT_EXT;
     if (stages != GL_ALL_SHADER_BITS && (stages & ~all)) return ctx->setError(GL_INVALID_VALUE);
     ProgramObj* p = nullptr;
     if (program) {
@@ -1769,7 +1819,8 @@ API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint 
     const std::pair<GLbitfield, glsl::Stage> map[] = {
         {GL_VERTEX_SHADER_BIT, glsl::Stage::Vertex}, {GL_TESS_CONTROL_SHADER_BIT, glsl::Stage::TessControl},
         {GL_TESS_EVALUATION_SHADER_BIT, glsl::Stage::TessEval}, {GL_GEOMETRY_SHADER_BIT, glsl::Stage::Geometry},
-        {GL_FRAGMENT_SHADER_BIT, glsl::Stage::Fragment}, {GL_COMPUTE_SHADER_BIT, glsl::Stage::Compute}};
+        {GL_FRAGMENT_SHADER_BIT, glsl::Stage::Fragment}, {GL_COMPUTE_SHADER_BIT, glsl::Stage::Compute},
+        {GL_TASK_SHADER_BIT_EXT, glsl::Stage::Task}, {GL_MESH_SHADER_BIT_EXT, glsl::Stage::Mesh}};
     for (auto& [bit, st] : map) {
         if (!(stages & bit)) continue;
         pp->stages[(int)st] = (p && (p->refl.stageMask & (1u << (int)st))) ? p : nullptr;
@@ -1810,6 +1861,8 @@ API void APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* p
     case GL_GEOMETRY_SHADER: *params = nm(pp->stages[(int)glsl::Stage::Geometry].get()); break;
     case GL_FRAGMENT_SHADER: *params = nm(pp->stages[(int)glsl::Stage::Fragment].get()); break;
     case GL_COMPUTE_SHADER: *params = nm(pp->stages[(int)glsl::Stage::Compute].get()); break;
+    case GL_TASK_SHADER_EXT: *params = nm(pp->stages[(int)glsl::Stage::Task].get()); break;
+    case GL_MESH_SHADER_EXT: *params = nm(pp->stages[(int)glsl::Stage::Mesh].get()); break;
     case GL_VALIDATE_STATUS: *params = pp->validated; break;
     case GL_INFO_LOG_LENGTH: *params = pp->infoLog.empty() ? 0 : (GLint)pp->infoLog.size() + 1; break;
     default: ctx->setError(GL_INVALID_ENUM);

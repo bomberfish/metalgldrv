@@ -12,7 +12,8 @@ enum class BIOp : uint16_t { Generic };
 const std::vector<const Builtin*>* findBuiltins(const std::string& name);
 
 // GLSL source declaring builtin variables/constants/compat uniforms for a stage.
-const std::string& builtinPreamble(Stage stage);
+// `strict`: METALGLDRV_STRICT limits (CompileOptions::strict).
+const std::string& builtinPreamble(Stage stage, bool strict = false);
 
 // Map a builtin variable name (as declared by the preamble) to its id.
 BuiltinVar builtinVarId(const std::string& name, Stage stage);

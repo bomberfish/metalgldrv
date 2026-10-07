@@ -56,7 +56,7 @@ functionality, for limits above the spec minimum, or where the test itself doesn
 | group | cases | reason |
 |---|---|---|
 | subgroups | 6053 | KHR_shader_subgroup is optional |
-| meshShader | 239 | NV/EXT mesh shader extensions are optional |
+| meshShader.propertyTests.max_mesh_output_size_*_view_index_* | 8 | multiview variants: GL_MAX_MESH_MULTIVIEW_VIEW_COUNT_EXT is 1, the EXT minimum (GL_OVR_multiview isn't exposed) |
 
 ## Warnings
 

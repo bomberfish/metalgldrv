@@ -19,7 +19,7 @@ const char* kExtensions[] = {
     "GL_ARB_enhanced_layouts", "GL_ARB_explicit_attrib_location", "GL_ARB_explicit_uniform_location",
     "GL_ARB_fragment_coord_conventions", "GL_ARB_fragment_layer_viewport", "GL_ARB_fragment_shader",
     "GL_ARB_framebuffer_no_attachments", "GL_ARB_framebuffer_object", "GL_ARB_framebuffer_sRGB", "GL_ARB_geometry_shader4",
-    "GL_ARB_get_program_binary", "GL_ARB_get_texture_sub_image", "GL_ARB_gl_spirv", "GL_ARB_gpu_shader5", "GL_ARB_gpu_shader_fp64",
+    "GL_ARB_get_program_binary", "GL_ARB_get_texture_sub_image", "GL_ARB_gl_spirv", "GL_ARB_gpu_shader5", "GL_ARB_gpu_shader_fp64", "GL_ARB_gpu_shader_int64",
     "GL_ARB_half_float_pixel", "GL_ARB_half_float_vertex", "GL_ARB_indirect_parameters", "GL_ARB_instanced_arrays",
     "GL_ARB_internalformat_query", "GL_ARB_internalformat_query2", "GL_ARB_invalidate_subdata", "GL_ARB_map_buffer_alignment",
     "GL_ARB_map_buffer_range", "GL_ARB_multi_bind", "GL_ARB_multi_draw_indirect", "GL_ARB_multisample",
@@ -27,10 +27,10 @@ const char* kExtensions[] = {
     "GL_ARB_point_parameters", "GL_ARB_point_sprite", "GL_ARB_polygon_offset_clamp", "GL_ARB_program_interface_query",
     "GL_ARB_provoking_vertex", "GL_ARB_query_buffer_object", "GL_ARB_robust_buffer_access_behavior", "GL_ARB_robustness",
     "GL_ARB_sample_shading", "GL_ARB_sampler_objects", "GL_ARB_seamless_cube_map", "GL_ARB_seamless_cubemap_per_texture",
-    "GL_ARB_separate_shader_objects", "GL_ARB_shader_atomic_counter_ops", "GL_ARB_shader_atomic_counters",
+    "GL_ARB_separate_shader_objects", "GL_ARB_shader_atomic_counter_ops", "GL_ARB_shader_ballot", "GL_ARB_shader_atomic_counters",
     "GL_ARB_shader_bit_encoding", "GL_ARB_shader_draw_parameters", "GL_ARB_shader_group_vote",
     "GL_ARB_shader_image_load_store", "GL_ARB_shader_image_size", "GL_ARB_shader_objects", "GL_ARB_shader_precision",
-    "GL_ARB_shader_storage_buffer_object", "GL_ARB_shader_subroutine", "GL_ARB_shader_texture_image_samples",
+    "GL_ARB_shader_storage_buffer_object", "GL_ARB_shader_subroutine", "GL_ARB_shader_texture_image_samples", "GL_ARB_shader_viewport_layer_array",
     "GL_ARB_shader_texture_lod", "GL_ARB_shading_language_100", "GL_ARB_shading_language_420pack",
     "GL_ARB_shading_language_packing", "GL_ARB_shadow", "GL_ARB_spirv_extensions", "GL_ARB_stencil_texturing", "GL_ARB_sync",
     "GL_ARB_tessellation_shader", "GL_ARB_texture_barrier", "GL_ARB_texture_border_clamp", "GL_ARB_texture_buffer_object",
@@ -50,46 +50,54 @@ const char* kExtensions[] = {
     "GL_EXT_blend_color", "GL_EXT_blend_equation_separate", "GL_EXT_blend_func_separate", "GL_EXT_blend_minmax",
     "GL_EXT_blend_subtract", "GL_EXT_draw_buffers2", "GL_EXT_draw_instanced", "GL_EXT_draw_range_elements",
     "GL_EXT_framebuffer_blit", "GL_EXT_framebuffer_multisample", "GL_EXT_framebuffer_object", "GL_EXT_framebuffer_sRGB",
-    "GL_EXT_gpu_program_parameters", "GL_EXT_gpu_shader4", "GL_EXT_multi_draw_arrays", "GL_EXT_packed_depth_stencil",
+    "GL_EXT_gpu_program_parameters", "GL_EXT_gpu_shader4", "GL_EXT_mesh_shader", "GL_EXT_multi_draw_arrays", "GL_EXT_packed_depth_stencil",
     "GL_EXT_packed_float", "GL_EXT_packed_pixels", "GL_EXT_pixel_buffer_object", "GL_EXT_polygon_offset_clamp",
     "GL_EXT_provoking_vertex", "GL_EXT_rescale_normal", "GL_EXT_separate_specular_color", "GL_EXT_shader_integer_mix",
     "GL_EXT_shadow_funcs", "GL_EXT_stencil_two_side", "GL_EXT_stencil_wrap", "GL_EXT_texture3D", "GL_EXT_texture_array",
     "GL_EXT_texture_compression_dxt1", "GL_EXT_texture_compression_rgtc", "GL_EXT_texture_compression_s3tc",
     "GL_EXT_texture_edge_clamp", "GL_EXT_texture_filter_anisotropic", "GL_EXT_texture_integer", "GL_EXT_texture_lod_bias",
     "GL_EXT_texture_mirror_clamp", "GL_EXT_texture_rectangle", "GL_EXT_texture_sRGB", "GL_EXT_texture_sRGB_decode",
-    "GL_EXT_texture_shared_exponent", "GL_EXT_texture_snorm", "GL_EXT_texture_swizzle", "GL_EXT_timer_query",
+    "GL_EXT_texture_shadow_lod", "GL_EXT_texture_shared_exponent", "GL_EXT_texture_snorm", "GL_EXT_texture_swizzle", "GL_EXT_timer_query",
     "GL_EXT_transform_feedback", "GL_EXT_vertex_array_bgra", "GL_IBM_texture_mirrored_repeat", "GL_KHR_context_flush_control",
     "GL_KHR_debug", "GL_KHR_no_error", "GL_KHR_parallel_shader_compile", "GL_KHR_robust_buffer_access_behavior",
-    "GL_KHR_robustness", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
-    "GL_NV_depth_clamp", "GL_NV_texture_barrier",
+    "GL_KHR_robustness", "GL_KHR_shader_subgroup", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
+    "GL_NV_depth_clamp", "GL_NV_shader_subgroup_partitioned", "GL_NV_texture_barrier",
 };
-// Extensions that depend on the device (inserted in name order).
-const char* kSparseExtensions[] = {"GL_ARB_sparse_buffer", "GL_ARB_sparse_texture", "GL_ARB_sparse_texture2",
-                                   "GL_ARB_sparse_texture_clamp"};
+struct DeviceExtension {
+    const char* name;
+    bool glsl;  // also a GLSL #extension
+    bool (*supported)(const DeviceCaps&);
+};
+const DeviceExtension kDeviceExtensions[] = {
+    {"GL_ARB_texture_filter_minmax", false, [](const DeviceCaps& c) { return c.samplerReduction; }},
+    {"GL_KHR_blend_equation_advanced", true, [](const DeviceCaps& c) { return c.programmableBlending; }},
+    {"GL_KHR_blend_equation_advanced_coherent", false, [](const DeviceCaps& c) { return c.programmableBlending; }},
+    // The GLSL side of sparse_texture2/_clamp is gated by CompileOptions::sparseTexture.
+    {"GL_ARB_sparse_buffer", false, [](const DeviceCaps& c) { return c.sparse; }},
+    {"GL_ARB_sparse_texture", false, [](const DeviceCaps& c) { return c.sparse; }},
+    {"GL_ARB_sparse_texture2", false, [](const DeviceCaps& c) { return c.sparse; }},
+    {"GL_ARB_sparse_texture_clamp", false, [](const DeviceCaps& c) { return c.sparse; }},
+};
 
-const std::vector<const char*>& extensionList() {
-    static const std::vector<const char*> list = [] {
-        std::vector<const char*> r(std::begin(kExtensions), std::end(kExtensions));
-        Device* d = Device::get();
-        if (d && d->caps.sparse) {
-            auto at = std::find_if(r.begin(), r.end(), [](const char* e) { return strcmp(e, "GL_ARB_sparse_buffer") > 0; });
-            r.insert(at, std::begin(kSparseExtensions), std::end(kSparseExtensions));
+// kExtensions plus the ones that depend on the GPU (mglDeviceExtensions), sorted.
+struct ExtensionList {
+    std::vector<const char*> names;
+    std::string joined;
+};
+
+const ExtensionList& extensions(Context* ctx) {
+    static const ExtensionList l = [ctx] {
+        ExtensionList r;
+        r.names.assign(std::begin(kExtensions), std::end(kExtensions));
+        for (const char* e : mglDeviceExtensions(ctx->dev->caps)) r.names.push_back(e);
+        std::sort(r.names.begin(), r.names.end(), [](const char* a, const char* b) { return strcmp(a, b) < 0; });
+        for (auto e : r.names) {
+            if (!r.joined.empty()) r.joined += ' ';
+            r.joined += e;
         }
         return r;
     }();
-    return list;
-}
-
-std::string& extensionString() {
-    static std::string s = [] {
-        std::string r;
-        for (auto e : extensionList()) {
-            if (!r.empty()) r += ' ';
-            r += e;
-        }
-        return r;
-    }();
-    return s;
+    return l;
 }
 
 enum class VT { Bool, Int, Int64, Float, Double, Enum };
@@ -120,6 +128,23 @@ GLuint nameOf(Object* o) { return o ? o->name : 0; }
 
 }  // namespace
 
+std::vector<const char*> mgl::mglDeviceExtensions(const DeviceCaps& caps) {
+    std::vector<const char*> r;
+    for (const auto& e : kDeviceExtensions)
+        if (e.supported(caps)) r.push_back(e.name);
+    return r;
+}
+
+const std::vector<std::string>& mgl::mglDeviceGlslExtensions(const DeviceCaps& caps) {
+    static const std::vector<std::string> r = [&caps] {
+        std::vector<std::string> v;
+        for (const auto& e : kDeviceExtensions)
+            if (e.glsl && e.supported(caps)) v.push_back(e.name);
+        return v;
+    }();
+    return r;
+}
+
 bool mglIsEnabled(Context* ctx, GLenum cap, int index, bool* out);
 bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat);  // compat.mm
 
@@ -131,6 +156,10 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
 #include "glsl/limits.def"
 #undef X
     };
+    if (pname == GL_MAX_IMAGE_SAMPLES && ctx->strict) {
+        v = I(glsl::kStrictMaxImageSamples);
+        return true;
+    }
     if (pname != 0)
         for (auto& [e, val] : kShaderLimits)
             if (e == pname) {
@@ -152,7 +181,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
         return true;
     }
     case GL_CONTEXT_PROFILE_MASK: v = I(ctx->coreProfile ? GL_CONTEXT_CORE_PROFILE_BIT : GL_CONTEXT_COMPATIBILITY_PROFILE_BIT); return true;
-    case GL_NUM_EXTENSIONS: v = I((int64_t)extensionList().size()); return true;
+    case GL_NUM_EXTENSIONS: v = I((int64_t)extensions(ctx).names.size()); return true;
     case GL_NUM_SHADING_LANGUAGE_VERSIONS: v = I(17); return true;
     case GL_NUM_SPIR_V_EXTENSIONS: v = I((int)glsl::supportedSpirvExtensions().size()); return true;
     case GL_CLAMP_READ_COLOR: v = E(ctx->clampReadColor); return true;
@@ -256,7 +285,51 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_MAX_COMPUTE_WORK_GROUP_COUNT: v = I(index < 0 ? 65535 : 65535); return true;
     case GL_MAX_COMPUTE_WORK_GROUP_SIZE: { int64_t s[3] = {1024, 1024, 64}; v = I(s[std::min(idx, 2)]); return true; }
     case GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS: v = I(1024); return true;
+    // KHR_shader_subgroup: SIMD-groups (32 threads on every Apple GPU)
+    case GL_SUBGROUP_SIZE_KHR: v = I(32); return true;
+    case GL_SUBGROUP_SUPPORTED_STAGES_KHR:
+        v = I(GL_VERTEX_SHADER_BIT | GL_TESS_CONTROL_SHADER_BIT | GL_TESS_EVALUATION_SHADER_BIT | GL_GEOMETRY_SHADER_BIT |
+              GL_FRAGMENT_SHADER_BIT | GL_COMPUTE_SHADER_BIT);
+        return true;
+    case GL_SUBGROUP_SUPPORTED_FEATURES_KHR:
+        v = I(GL_SUBGROUP_FEATURE_BASIC_BIT_KHR | GL_SUBGROUP_FEATURE_VOTE_BIT_KHR | GL_SUBGROUP_FEATURE_ARITHMETIC_BIT_KHR |
+              GL_SUBGROUP_FEATURE_BALLOT_BIT_KHR | GL_SUBGROUP_FEATURE_SHUFFLE_BIT_KHR | GL_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT_KHR |
+              GL_SUBGROUP_FEATURE_CLUSTERED_BIT_KHR | GL_SUBGROUP_FEATURE_QUAD_BIT_KHR | GL_SUBGROUP_FEATURE_PARTITIONED_BIT_NV);
+        return true;
+    case GL_SUBGROUP_QUAD_ALL_STAGES_KHR: v = B(true); return true;
     case GL_MAX_COMPUTE_SHARED_MEMORY_SIZE: v = I(32768); return true;
+    // EXT_mesh_shader: task shaders run as Metal object functions, mesh shaders as mesh functions whose outputs
+    // are staged in threadgroup memory before they are copied into the Metal mesh. Apple GPUs give a threadgroup
+    // 32 KB (an object threadgroup 16 bytes less: Metal reserves them for the mesh grid properties) and a mesh
+    // threadgroup 60 KB of threadgroup memory + mesh output together; the payload is separate (at most 16 KB).
+    // Two limits are below the EXT minimums for that reason (see docs/glsl-compiler.md, mesh shaders).
+    case GL_MAX_TASK_WORK_GROUP_TOTAL_COUNT_EXT: case GL_MAX_MESH_WORK_GROUP_TOTAL_COUNT_EXT: v = I(1 << 22); return true;
+    case GL_MAX_TASK_WORK_GROUP_COUNT_EXT: case GL_MAX_MESH_WORK_GROUP_COUNT_EXT: v = I(65535); return true;
+    case GL_MAX_TASK_WORK_GROUP_INVOCATIONS_EXT: case GL_MAX_MESH_WORK_GROUP_INVOCATIONS_EXT: v = I(128); return true;
+    case GL_MAX_TASK_WORK_GROUP_SIZE_EXT: case GL_MAX_MESH_WORK_GROUP_SIZE_EXT: v = I(128); return true;
+    case GL_MAX_TASK_PAYLOAD_SIZE_EXT: v = I(16384); return true;
+    case GL_MAX_TASK_SHARED_MEMORY_SIZE_EXT: v = I(32752); return true;  // EXT minimum 32768
+    case GL_MAX_TASK_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT: v = I(32768); return true;
+    case GL_MAX_MESH_SHARED_MEMORY_SIZE_EXT: case GL_MAX_MESH_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT: v = I(28672); return true;
+    case GL_MAX_MESH_OUTPUT_MEMORY_SIZE_EXT: v = I(30720); return true;  // EXT minimum 32768: outputs are held twice
+    case GL_MAX_MESH_PAYLOAD_AND_OUTPUT_MEMORY_SIZE_EXT: v = I(48128); return true;
+    case GL_MAX_MESH_OUTPUT_COMPONENTS_EXT: v = I(128); return true;
+    case GL_MAX_MESH_OUTPUT_VERTICES_EXT: case GL_MAX_MESH_OUTPUT_PRIMITIVES_EXT: v = I(256); return true;
+    case GL_MAX_MESH_OUTPUT_LAYERS_EXT: v = I(8); return true;
+    case GL_MAX_MESH_MULTIVIEW_VIEW_COUNT_EXT: v = I(1); return true;
+    case GL_MESH_OUTPUT_PER_VERTEX_GRANULARITY_EXT: case GL_MESH_OUTPUT_PER_PRIMITIVE_GRANULARITY_EXT: v = I(1); return true;
+    case GL_MAX_PREFERRED_TASK_WORK_GROUP_INVOCATIONS_EXT: case GL_MAX_PREFERRED_MESH_WORK_GROUP_INVOCATIONS_EXT: v = I(32); return true;
+    case GL_MESH_PREFERS_LOCAL_INVOCATION_VERTEX_OUTPUT_EXT: case GL_MESH_PREFERS_LOCAL_INVOCATION_PRIMITIVE_OUTPUT_EXT:
+    case GL_MESH_PREFERS_COMPACT_VERTEX_OUTPUT_EXT: case GL_MESH_PREFERS_COMPACT_PRIMITIVE_OUTPUT_EXT:
+        v = B(false); return true;
+    case GL_MAX_TASK_UNIFORM_BLOCKS_EXT: case GL_MAX_MESH_UNIFORM_BLOCKS_EXT: v = I(14); return true;
+    case GL_MAX_TASK_TEXTURE_IMAGE_UNITS_EXT: case GL_MAX_MESH_TEXTURE_IMAGE_UNITS_EXT: v = I(32); return true;
+    case GL_MAX_TASK_IMAGE_UNIFORMS_EXT: case GL_MAX_MESH_IMAGE_UNIFORMS_EXT: v = I(kMaxImageUnits); return true;
+    case GL_MAX_TASK_UNIFORM_COMPONENTS_EXT: case GL_MAX_MESH_UNIFORM_COMPONENTS_EXT: v = I(16384); return true;
+    case GL_MAX_COMBINED_TASK_UNIFORM_COMPONENTS_EXT: case GL_MAX_COMBINED_MESH_UNIFORM_COMPONENTS_EXT: v = I(16384 + 14 * 65536 / 4); return true;
+    case GL_MAX_TASK_ATOMIC_COUNTER_BUFFERS_EXT: case GL_MAX_MESH_ATOMIC_COUNTER_BUFFERS_EXT: v = I(kMaxAtomicCounterBindings); return true;
+    case GL_MAX_TASK_ATOMIC_COUNTERS_EXT: case GL_MAX_MESH_ATOMIC_COUNTERS_EXT: v = I(1024); return true;
+    case GL_MAX_TASK_SHADER_STORAGE_BLOCKS_EXT: case GL_MAX_MESH_SHADER_STORAGE_BLOCKS_EXT: v = I(kMaxSSBOBindings); return true;
     case GL_MAX_CLIP_DISTANCES: case GL_MAX_CULL_DISTANCES: case GL_MAX_COMBINED_CLIP_AND_CULL_DISTANCES: v = I(8); return true;
     case GL_MAX_SUBROUTINES: v = I(256); return true;
     case GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS: v = I(1024); return true;
@@ -618,7 +691,7 @@ API const GLubyte* APIENTRY glGetString(GLenum name) {
             ctx->setError(GL_INVALID_ENUM);
             return nullptr;
         }
-        return (const GLubyte*)extensionString().c_str();
+        return (const GLubyte*)extensions(ctx).joined.c_str();
     default: ctx->setError(GL_INVALID_ENUM); return nullptr;
     }
 }
@@ -627,11 +700,12 @@ API const GLubyte* APIENTRY glGetStringi(GLenum name, GLuint index) {
     MGL_CTX_RET(nullptr);
     static const char* glslVersions[] = {"460", "450", "440", "430", "420", "410", "400", "330", "150", "140", "130", "120", "110", "100", "300 es", "310 es", ""};
     if (name == GL_EXTENSIONS) {
-        if (index >= (GLuint)extensionList().size()) {
+        const auto& names = extensions(ctx).names;
+        if (index >= names.size()) {
             ctx->setError(GL_INVALID_VALUE);
             return nullptr;
         }
-        return (const GLubyte*)extensionList()[index];
+        return (const GLubyte*)names[index];
     }
     if (name == GL_SHADING_LANGUAGE_VERSION) {
         if (index >= 17) {

@@ -1,5 +1,6 @@
 #include "glsl/builtins.h"
 
+#include <cstring>
 #include <sstream>
 #include <unordered_map>
 
@@ -83,6 +84,70 @@ const char* kSigs[] = {
     "vec4 ftransform()",
 };
 
+// ARB_gpu_shader_int64
+const char* kInt64Sigs[] = {
+    "genI64 abs(genI64)", "genI64 sign(genI64)", "genI64 min(genI64,genI64)", "genI64 min(genI64,int64_t)",
+    "genU64 min(genU64,genU64)", "genU64 min(genU64,uint64_t)", "genI64 max(genI64,genI64)", "genI64 max(genI64,int64_t)",
+    "genU64 max(genU64,genU64)", "genU64 max(genU64,uint64_t)", "genI64 clamp(genI64,genI64,genI64)",
+    "genI64 clamp(genI64,int64_t,int64_t)", "genU64 clamp(genU64,genU64,genU64)", "genU64 clamp(genU64,uint64_t,uint64_t)",
+    "genI64 mix(genI64,genI64,genB)", "genU64 mix(genU64,genU64,genB)", "genI64 doubleBitsToInt64(genD)",
+    "genU64 doubleBitsToUint64(genD)", "genD int64BitsToDouble(genI64)", "genD uint64BitsToDouble(genU64)",
+    "int64_t packInt2x32(ivec2)", "uint64_t packUint2x32(uvec2)", "ivec2 unpackInt2x32(int64_t)", "uvec2 unpackUint2x32(uint64_t)",
+    "vecB lessThan(vecI64,vecI64)", "vecB lessThan(vecU64,vecU64)", "vecB lessThanEqual(vecI64,vecI64)",
+    "vecB lessThanEqual(vecU64,vecU64)", "vecB greaterThan(vecI64,vecI64)", "vecB greaterThan(vecU64,vecU64)",
+    "vecB greaterThanEqual(vecI64,vecI64)", "vecB greaterThanEqual(vecU64,vecU64)", "vecB equal(vecI64,vecI64)",
+    "vecB equal(vecU64,vecU64)", "vecB notEqual(vecI64,vecI64)", "vecB notEqual(vecU64,vecU64)",
+    // ARB_shader_ballot
+    "uint64_t ballotARB(bool)", "genF readInvocationARB(genF,uint)", "genI readInvocationARB(genI,uint)",
+    "genU readInvocationARB(genU,uint)", "genF readFirstInvocationARB(genF)", "genI readFirstInvocationARB(genI)",
+    "genU readFirstInvocationARB(genU)",
+};
+
+// KHR_shader_subgroup. Extra placeholders, expanded before addSig: genT = genF/genD/genI/genU/genB,
+// genN = numeric (genF/genD/genI/genU), genL = logical (genI/genU/genB).
+const char* kSubgroupSigs[] = {
+    // basic
+    "void subgroupBarrier()", "void subgroupMemoryBarrier()", "void subgroupMemoryBarrierBuffer()",
+    "void subgroupMemoryBarrierImage()", "bool subgroupElect()",
+    // vote
+    "bool subgroupAll(bool)", "bool subgroupAny(bool)", "bool subgroupAllEqual(genT)",
+    // arithmetic
+    "genN subgroupAdd(genN)", "genN subgroupMul(genN)", "genN subgroupMin(genN)", "genN subgroupMax(genN)",
+    "genL subgroupAnd(genL)", "genL subgroupOr(genL)", "genL subgroupXor(genL)",
+    "genN subgroupInclusiveAdd(genN)", "genN subgroupInclusiveMul(genN)", "genN subgroupInclusiveMin(genN)",
+    "genN subgroupInclusiveMax(genN)", "genL subgroupInclusiveAnd(genL)", "genL subgroupInclusiveOr(genL)",
+    "genL subgroupInclusiveXor(genL)", "genN subgroupExclusiveAdd(genN)", "genN subgroupExclusiveMul(genN)",
+    "genN subgroupExclusiveMin(genN)", "genN subgroupExclusiveMax(genN)", "genL subgroupExclusiveAnd(genL)",
+    "genL subgroupExclusiveOr(genL)", "genL subgroupExclusiveXor(genL)",
+    // ballot
+    "genT subgroupBroadcast(genT,uint)", "genT subgroupBroadcastFirst(genT)", "uvec4 subgroupBallot(bool)",
+    "bool subgroupInverseBallot(uvec4)", "bool subgroupBallotBitExtract(uvec4,uint)", "uint subgroupBallotBitCount(uvec4)",
+    "uint subgroupBallotInclusiveBitCount(uvec4)", "uint subgroupBallotExclusiveBitCount(uvec4)",
+    "uint subgroupBallotFindLSB(uvec4)", "uint subgroupBallotFindMSB(uvec4)",
+    // shuffle, shuffle_relative
+    "genT subgroupShuffle(genT,uint)", "genT subgroupShuffleXor(genT,uint)", "genT subgroupShuffleUp(genT,uint)",
+    "genT subgroupShuffleDown(genT,uint)",
+    // clustered
+    "genN subgroupClusteredAdd(genN,uint)", "genN subgroupClusteredMul(genN,uint)", "genN subgroupClusteredMin(genN,uint)",
+    "genN subgroupClusteredMax(genN,uint)", "genL subgroupClusteredAnd(genL,uint)", "genL subgroupClusteredOr(genL,uint)",
+    "genL subgroupClusteredXor(genL,uint)",
+    // quad
+    "genT subgroupQuadBroadcast(genT,uint)", "genT subgroupQuadSwapHorizontal(genT)", "genT subgroupQuadSwapVertical(genT)",
+    "genT subgroupQuadSwapDiagonal(genT)",
+    // NV_shader_subgroup_partitioned
+    "uvec4 subgroupPartitionNV(genT)",
+    "genN subgroupPartitionedAddNV(genN,uvec4)", "genN subgroupPartitionedMulNV(genN,uvec4)", "genN subgroupPartitionedMinNV(genN,uvec4)",
+    "genN subgroupPartitionedMaxNV(genN,uvec4)", "genL subgroupPartitionedAndNV(genL,uvec4)", "genL subgroupPartitionedOrNV(genL,uvec4)",
+    "genL subgroupPartitionedXorNV(genL,uvec4)", "genN subgroupPartitionedInclusiveAddNV(genN,uvec4)",
+    "genN subgroupPartitionedInclusiveMulNV(genN,uvec4)", "genN subgroupPartitionedInclusiveMinNV(genN,uvec4)",
+    "genN subgroupPartitionedInclusiveMaxNV(genN,uvec4)", "genL subgroupPartitionedInclusiveAndNV(genL,uvec4)",
+    "genL subgroupPartitionedInclusiveOrNV(genL,uvec4)", "genL subgroupPartitionedInclusiveXorNV(genL,uvec4)",
+    "genN subgroupPartitionedExclusiveAddNV(genN,uvec4)", "genN subgroupPartitionedExclusiveMulNV(genN,uvec4)",
+    "genN subgroupPartitionedExclusiveMinNV(genN,uvec4)", "genN subgroupPartitionedExclusiveMaxNV(genN,uvec4)",
+    "genL subgroupPartitionedExclusiveAndNV(genL,uvec4)", "genL subgroupPartitionedExclusiveOrNV(genL,uvec4)",
+    "genL subgroupPartitionedExclusiveXorNV(genL,uvec4)",
+};
+
 struct Ctx {
     std::unordered_map<std::string, std::vector<const Builtin*>> byName;
     std::vector<std::unique_ptr<Builtin>> all;
@@ -113,7 +178,8 @@ std::string replaceAll(std::string s, const std::string& a, const std::string& b
 // Resolve a placeholder type word given the current generic size / matrix shape.
 bool resolveWord(const std::string& w, int n, int mc, int mr, Type& out) {
     auto vecOf = [&](BT b, int k) { return k == 1 ? Type::scalar(b) : Type::vector(b, k); };
-    static const std::pair<const char*, BT> bases[] = {{"F", BT::Float}, {"D", BT::Double}, {"I", BT::Int}, {"U", BT::UInt}, {"B", BT::Bool}};
+    static const std::pair<const char*, BT> bases[] = {{"F", BT::Float}, {"D", BT::Double}, {"I", BT::Int}, {"U", BT::UInt}, {"B", BT::Bool},
+                                                       {"I64", BT::Int64}, {"U64", BT::UInt64}};
     for (auto& b : bases) {
         if (w == std::string("gen") + b.first) { out = vecOf(b.second, n); return true; }
         if (w == std::string("vec") + b.first) { out = vecOf(b.second, n); return true; }
@@ -248,10 +314,14 @@ void addTextureFunctions(Ctx& c) {
             // texture
             if (cubeArrShadow) {
                 c.add("texture", F, {T, P, F});
+                c.addBias("texture", F, {T, P, F, F});  // EXT_texture_shadow_lod
+                c.add("textureLod", F, {T, P, F, F});   // EXT_texture_shadow_lod
                 c.add("textureGrad", F, {T, P, F, gradT, gradT});  // nonstandard but harmless
             } else {
                 c.add("texture", ret, {T, P});
-                bool bias = !rect && !(sh && arr && T.dim == Dim::D2);
+                // (sampler2DArrayShadow bias, textureLod on sampler2DArrayShadow / samplerCubeShadow and
+                // textureLodOffset on sampler2DArrayShadow: EXT_texture_shadow_lod)
+                bool bias = !rect;
                 if (bias) c.addBias("texture", ret, {T, P, F});
                 // textureLod
                 if (!rect) c.add("textureLod", ret, {T, P, F});
@@ -580,10 +650,27 @@ Ctx& ctx() {
     static Ctx* c = [] {
         Ctx* c = new Ctx;
         for (const char* s : kSigs) addSig(*c, s);
+        for (const char* s : kSubgroupSigs) {
+            static const std::pair<const char*, const char*> groups[] = {{"genT", "FDIUB"}, {"genN", "FDIU"}, {"genL", "IUB"}};
+            std::string sig = s;
+            bool expanded = false;
+            for (auto& [ph, bases] : groups) {
+                if (sig.find(ph) == std::string::npos) continue;
+                for (const char* b = bases; *b; b++) addSig(*c, replaceAll(sig, ph, std::string("gen") + *b));
+                expanded = true;
+            }
+            if (!expanded) addSig(*c, sig);
+        }
+        c->add("subgroupMemoryBarrierShared", Type::voidT(), {})->stageMask = 1u << (int)Stage::Compute;
+        for (const char* s : kInt64Sigs) addSig(*c, s);
         addTextureFunctions(*c);
         addSparseTextureFunctions(*c);
         addImageFunctions(*c);
         addMatrixFunctions(*c);
+        // EXT_mesh_shader
+        c->add("EmitMeshTasksEXT", Type::voidT(), {Type::scalar(BT::UInt), Type::scalar(BT::UInt), Type::scalar(BT::UInt)})->stageMask =
+            1u << (int)Stage::Task;
+        c->add("SetMeshOutputsEXT", Type::voidT(), {Type::scalar(BT::UInt), Type::scalar(BT::UInt)})->stageMask = 1u << (int)Stage::Mesh;
         return c;
     }();
     return *c;
@@ -767,6 +854,32 @@ in uvec3 gl_GlobalInvocationID;
 in uint gl_LocalInvocationIndex;
 )";
 
+// EXT_mesh_shader: task and mesh shaders run workgroups like compute shaders.
+const char* kMeshCommonPreamble = R"(
+in uvec3 gl_NumWorkGroups;
+const uvec3 gl_WorkGroupSize = uvec3(1, 1, 1);
+in uvec3 gl_WorkGroupID;
+in uvec3 gl_LocalInvocationID;
+in uvec3 gl_GlobalInvocationID;
+in uint gl_LocalInvocationIndex;
+in int gl_DrawID;
+in int gl_DrawIDARB;
+const ivec3 gl_MaxTaskWorkGroupSizeEXT = ivec3(128, 128, 128);
+const ivec3 gl_MaxMeshWorkGroupSizeEXT = ivec3(128, 128, 128);
+const int gl_MaxMeshOutputVerticesEXT = 256;
+const int gl_MaxMeshOutputPrimitivesEXT = 256;
+const int gl_MaxMeshViewCountEXT = 1;
+)";
+
+const char* kMeshPreamble = R"(
+out gl_MeshPerVertexEXT { vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8]; float gl_CullDistance[8]; } gl_MeshVerticesEXT[];
+perprimitiveEXT out gl_MeshPerPrimitiveEXT { int gl_PrimitiveID; int gl_Layer; int gl_ViewportIndex; bool gl_CullPrimitiveEXT;
+  int gl_PrimitiveShadingRateEXT; } gl_MeshPrimitivesEXT[];
+out uint gl_PrimitivePointIndicesEXT[];
+out uvec2 gl_PrimitiveLineIndicesEXT[];
+out uvec3 gl_PrimitiveTriangleIndicesEXT[];
+)";
+
 }  // namespace
 
 const std::vector<const Builtin*>* findBuiltins(const std::string& name) {
@@ -775,14 +888,16 @@ const std::vector<const Builtin*>* findBuiltins(const std::string& name) {
     return it == c.byName.end() ? nullptr : &it->second;
 }
 
-const std::string& builtinPreamble(Stage stage) {
-    static std::string cache[(int)Stage::Count];
+const std::string& builtinPreamble(Stage stage, bool strict) {
+    static std::string cache[2][(int)Stage::Count];
     static bool init = false;
     if (!init) {
         init = true;
+        for (int st = 0; st < 2; st++)
         for (int s = 0; s < (int)Stage::Count; s++) {
             std::string p;
-#define X(name, glenum, value) p += "const int " #name " = " + std::to_string(value) + ";\n";
+#define X(name, glenum, value) \
+    p += "const int " #name " = " + std::to_string(st && !std::strcmp(#name, "gl_MaxImageSamples") ? kStrictMaxImageSamples : value) + ";\n";
 #include "limits.def"
 #undef X
             p += kCommonPreamble;
@@ -793,12 +908,14 @@ const std::string& builtinPreamble(Stage stage) {
                 case Stage::Geometry: p += kPerVertexIn; p += kGeometryPreamble; break;
                 case Stage::Fragment: p += kFragmentPreamble; break;
                 case Stage::Compute: p += kComputePreamble; break;
+                case Stage::Task: p += kMeshCommonPreamble; break;
+                case Stage::Mesh: p += kMeshCommonPreamble; p += kMeshPreamble; break;
                 default: break;
             }
-            cache[s] = p;
+            cache[st][s] = p;
         }
     }
-    return cache[(int)stage];
+    return cache[strict ? 1 : 0][(int)stage];
 }
 
 BuiltinVar builtinVarId(const std::string& n, Stage stage) {
@@ -836,6 +953,15 @@ BuiltinVar builtinVarId(const std::string& n, Stage stage) {
         {"gl_LocalInvocationID", BuiltinVar::LocalInvocationID}, {"gl_GlobalInvocationID", BuiltinVar::GlobalInvocationID},
         {"gl_LocalInvocationIndex", BuiltinVar::LocalInvocationIndex}, {"gl_WorkGroupSize", BuiltinVar::WorkGroupSize},
         {"gl_DepthRange", BuiltinVar::DepthRange}, {"gl_NumSamples", BuiltinVar::NumSamples},
+        {"gl_MeshVerticesEXT", BuiltinVar::MeshVertices}, {"gl_MeshPrimitivesEXT", BuiltinVar::MeshPrimitives},
+        {"gl_PrimitivePointIndicesEXT", BuiltinVar::PrimitiveIndices}, {"gl_PrimitiveLineIndicesEXT", BuiltinVar::PrimitiveIndices},
+        {"gl_PrimitiveTriangleIndicesEXT", BuiltinVar::PrimitiveIndices}, {"gl_CullPrimitiveEXT", BuiltinVar::CullPrimitive},
+        {"gl_PrimitiveShadingRateEXT", BuiltinVar::PrimitiveShadingRate},
+        {"gl_SubgroupSize", BuiltinVar::SubgroupSize}, {"gl_SubgroupInvocationID", BuiltinVar::SubgroupInvocationID},
+        {"gl_SubgroupEqMask", BuiltinVar::SubgroupEqMask}, {"gl_SubgroupGeMask", BuiltinVar::SubgroupGeMask},
+        {"gl_SubgroupGtMask", BuiltinVar::SubgroupGtMask}, {"gl_SubgroupLeMask", BuiltinVar::SubgroupLeMask},
+        {"gl_SubgroupLtMask", BuiltinVar::SubgroupLtMask}, {"gl_NumSubgroups", BuiltinVar::NumSubgroups},
+        {"gl_SubgroupID", BuiltinVar::SubgroupID},
     };
     if (n == "gl_Color") return stage == Stage::Fragment ? BuiltinVar::FragColorIn : BuiltinVar::Color;
     if (n == "gl_SecondaryColor") return stage == Stage::Fragment ? BuiltinVar::SecondaryColorIn : BuiltinVar::SecondaryColor;

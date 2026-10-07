@@ -155,8 +155,7 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
     if (internalformat == GL_STENCIL_INDEX || internalformat == GL_STENCIL_INDEX1 || internalformat == GL_STENCIL_INDEX4 ||
         internalformat == GL_STENCIL_INDEX16)
         f = formatInfo(GL_STENCIL_INDEX8);
-    // RGB9_E5 is accepted (as Mesa does on desktop GL) but leaves the framebuffer incomplete.
-    if (!f || (!f->renderable && f->internalFormat != GL_RGB9_E5))
+    if (!f || !f->renderable)
         return ctx->setError(GL_INVALID_ENUM, "renderbuffer format 0x%x", internalformat);
     if (w < 0 || h < 0 || samples < 0) return ctx->setError(GL_INVALID_VALUE);
     if (w > 16384 || h > 16384) return ctx->setError(GL_INVALID_VALUE);

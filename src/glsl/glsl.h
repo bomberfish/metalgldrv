@@ -25,7 +25,9 @@
 
 namespace glsl {
 
-enum class Stage : uint8_t { Vertex, TessControl, TessEval, Geometry, Fragment, Compute, Count };
+// Task and Mesh (EXT_mesh_shader) come after Compute so the classic stages keep their indices.
+enum class Stage : uint8_t { Vertex, TessControl, TessEval, Geometry, Fragment, Compute, Task, Mesh, Count };
+constexpr int kClassicStageCount = 6;  // stages without Task/Mesh (program pipeline argument table size)
 
 // ---------------------------------------------------------------------------
 // Shader objects
@@ -46,7 +48,10 @@ enum : int {
 };
 }  // namespace limits_detail
 constexpr int kMaxCombinedTextureImageUnits = limits_detail::gl_MaxCombinedTextureImageUnits_v;
-constexpr int kMaxImageUnits = limits_detail::gl_MaxImageUnits_v;  // must match mgl::kMaxImageUnits (static_assert in context.mm)
+constexpr int kMaxImageUnits = limits_detail::gl_MaxImageUnits_v;
+// GL_MAX_IMAGE_SAMPLES / gl_MaxImageSamples under METALGLDRV_STRICT (limits.def has the default, 0):
+// multisample images through per-sample shadows (src/gl/draw.mm).
+constexpr int kStrictMaxImageSamples = 4;  // must match mgl::kMaxImageUnits (static_assert in context.mm)
 constexpr int kMaxUniformBufferBindings = 84;
 constexpr int kMaxShaderStorageBufferBindings = 16;
 constexpr int kMaxAtomicCounterBufferBindings = limits_detail::gl_MaxAtomicCounterBindings_v;
@@ -55,9 +60,22 @@ struct CompileOptions {
     bool compatibilityProfile = true;  // accept GL compatibility builtins (gl_Vertex, ftransform, ...)
     int maxVersion = 460;
     bool sparseTexture = false;  // GL_ARB_sparse_texture2 / GL_ARB_sparse_texture_clamp (device supports sparse textures)
+    // Extensions this device supports beyond supportedExtensions() (#extension and predefined macros).
+    const std::vector<std::string>* deviceExtensions = nullptr;
+    bool strict = false;  // METALGLDRV_STRICT (limits that differ, e.g. gl_MaxImageSamples)
 };
 // Shader extensions that exist only when CompileOptions::sparseTexture is set.
 const std::vector<std::string>& sparseTextureExtensions();
+
+// KHR_blend_equation_advanced equations (GL enums), in the bit order of Layout::blendSupport /
+// Reflection::blendSupport and the index order of VariantKey::advancedBlend.
+constexpr uint32_t kAdvancedBlendEquations[15] = {
+    0x9294 /* MULTIPLY */,  0x9295 /* SCREEN */,     0x9296 /* OVERLAY */,    0x9297 /* DARKEN */,
+    0x9298 /* LIGHTEN */,   0x9299 /* COLORDODGE */, 0x929A /* COLORBURN */,  0x929B /* HARDLIGHT */,
+    0x929C /* SOFTLIGHT */, 0x929E /* DIFFERENCE */, 0x92A0 /* EXCLUSION */,  0x92AD /* HSL_HUE */,
+    0x92AE /* HSL_SATURATION */, 0x92AF /* HSL_COLOR */, 0x92B0 /* HSL_LUMINOSITY */};
+// VariantKey::advancedBlend flags above the equation number.
+enum : uint8_t { kAdvancedBlendEquationMask = 0x1f, kAdvancedBlendNoDstAlpha = 0x20, kAdvancedBlendClamp = 0x40 };
 
 CompileResult compile(Stage stage, const std::vector<std::string>& sources, const CompileOptions& opts = {});
 
@@ -103,7 +121,8 @@ const std::vector<std::string>& supportedSpirvExtensions();
 enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer,
                                 SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */,
                                 LodBias /* like Sampler: float (low 32 bits) GL_TEXTURE_LOD_BIAS of the unit's effective sampler */,
-                                SamplerBorder /* integer samplers: GPU address of int4[2] {border color, clamp-to-border axis mask} */ };
+                                SamplerBorder /* integer samplers: GPU address of int4[2] {border color, clamp-to-border axis mask} */,
+                                ImageSamples /* multisample images: uint2 {sample count of the bound image, 0} */ };
 
 struct Slot {
     SlotKind kind;
@@ -198,6 +217,11 @@ struct LinkInput {
     std::vector<std::string> xfbVaryings;         // glTransformFeedbackVaryings
     bool xfbInterleaved = true;
     bool separable = false;
+    // METALGLDRV_STRICT: emit the accuracy features that cost performance and aren't needed for
+    // conformance (integer border colors, ...).
+    bool strict = false;
+    // texelFetch outside the texture / mip range returns zero (robust access; on under strict).
+    bool robustTexelFetch = false;
 };
 
 struct LinkedProgram;  // opaque compiled program state (holds the per-stage IR)
@@ -249,7 +273,12 @@ struct Reflection {
     int tcsOutputVertices = 0;
     uint32_t tesPrimitiveMode = 0, tesSpacing = 0, tesOrder = 0;
     bool tesPointMode = false;
+    // mesh shaders (EXT_mesh_shader)
+    int taskLocalSize[3] = {1, 1, 1}, meshLocalSize[3] = {1, 1, 1};
+    int meshMaxVertices = 0, meshMaxPrimitives = 0;
+    uint32_t meshOutputPrimitive = 0;  // GL_POINTS / GL_LINES / GL_TRIANGLES
     bool usesFragDepth = false, earlyFragmentTests = false, usesDiscard = false;
+    uint16_t blendSupport = 0;              // fragment shader blend_support_* qualifiers (KHR_blend_equation_advanced)
     bool usesFp64 = false;
     bool usesFlatShading = false;           // any flat-qualified input reaching the fragment shader
     bool writesLayer = false, writesViewportIndex = false;  // by the last pre-rasterization stage
@@ -292,6 +321,7 @@ enum class PipelineKind : uint8_t {
     Tessellation,   // VS+TCS as compute kernel(s), TES(+GS) as object/mesh, + fragment
     Compute,
     XfbCapture,     // vertex-processing stages as compute kernel writing xfb buffers
+    Mesh,           // EXT_mesh_shader: optional task (object) + mesh, + fragment
 };
 
 struct VariantKey {
@@ -318,10 +348,14 @@ struct VariantKey {
     // atomics check residency, as accesses to uncommitted texels must read zero and change
     // nothing (ARB_sparse_texture2), but would otherwise hit lines left in the GPU caches.
     uint64_t sparseImageSlots = 0;
-    // Texture/image slots (< 64) of multisample uniforms bound to sparse multisample textures, which
-    // are stored as 2D arrays with one slice per sample (layer * samples + sample) because Metal
-    // shaders can't write multisample textures; msArray4: those with 4 samples (else 2).
+    // Texture slots (< 64) of multisample samplers bound to sparse multisample textures, which are
+    // stored as 2D arrays with one slice per sample (layer * samples + sample, the layout of
+    // multisample image shadows) so that images can write them; msArray4: those with 4 samples (else 2).
     uint64_t msArraySlots = 0, msArray4 = 0;
+    // Fragment: KHR_blend_equation_advanced on color output 0: 1 + index into kAdvancedBlendEquations
+    // (0 = none), plus kAdvancedBlendNoDstAlpha / kAdvancedBlendClamp. The shader reads the destination
+    // with framebuffer fetch and blends; fixed-function blending is off for that attachment.
+    uint8_t advancedBlend = 0;
 };
 
 struct EntryPoint {
