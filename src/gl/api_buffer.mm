@@ -170,7 +170,7 @@ API void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
     Buffer* b = bufferForBind(ctx, buffer);
     if (b == (Buffer*)-1) return;
     *r = b;
-    if (target == GL_ELEMENT_ARRAY_BUFFER) ctx->vao->version++;
+    if (target == GL_ELEMENT_ARRAY_BUFFER && ctx->vao) ctx->vao->version++;
 }
 
 static bool indexedTargetInfo(Context* ctx, GLenum target, GLuint index, IndexedBufferBinding** out, Ref<Buffer>** generic) {
@@ -238,16 +238,49 @@ API void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, 
     bindRange(ctx, target, index, buffer, offset, size, false);
 }
 
+// ARB_multi_bind (GL 4.6 §6.1.1): first+count beyond the binding points is INVALID_OPERATION;
+// a bad entry raises an error and is skipped while the others still bind.
+static bool multiBindCheck(Context* ctx, GLenum target, GLuint first, GLsizei count) {
+    int max;
+    switch (target) {
+    case GL_UNIFORM_BUFFER: max = kMaxUniformBufferBindings; break;
+    case GL_SHADER_STORAGE_BUFFER: max = kMaxSSBOBindings; break;
+    case GL_ATOMIC_COUNTER_BUFFER: max = kMaxAtomicCounterBindings; break;
+    case GL_TRANSFORM_FEEDBACK_BUFFER: max = kMaxXfbBuffers; break;
+    default: ctx->setError(GL_INVALID_ENUM); return false;
+    }
+    if (count < 0) return ctx->setError(GL_INVALID_VALUE), false;
+    if ((uint64_t)first + (uint64_t)count > (uint64_t)max) return ctx->setError(GL_INVALID_OPERATION), false;
+    return true;
+}
+
 API void APIENTRY glBindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers) {
     MGL_CTX();
-    for (int i = 0; i < count; i++) bindRange(ctx, target, first + i, buffers ? buffers[i] : 0, 0, 0, true);
+    if (!multiBindCheck(ctx, target, first, count)) return;
+    for (int i = 0; i < count; i++) {
+        GLuint b = buffers ? buffers[i] : 0;
+        if (b && !ctx->share->buffers.get(b)) {
+            ctx->setError(GL_INVALID_OPERATION, "BindBuffersBase: %u is not a buffer", b);
+            continue;
+        }
+        bindRange(ctx, target, first + i, b, 0, 0, true);
+    }
 }
 
 API void APIENTRY glBindBuffersRange(GLenum target, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets,
                                      const GLsizeiptr* sizes) {
     MGL_CTX();
+    if (!multiBindCheck(ctx, target, first, count)) return;
     for (int i = 0; i < count; i++) {
         GLuint b = buffers ? buffers[i] : 0;
+        if (b && !ctx->share->buffers.get(b)) {
+            ctx->setError(GL_INVALID_OPERATION, "BindBuffersRange: %u is not a buffer", b);
+            continue;
+        }
+        if (b && (offsets[i] < 0 || sizes[i] <= 0)) {
+            ctx->setError(GL_INVALID_VALUE);
+            continue;
+        }
         bindRange(ctx, target, first + i, b, b ? offsets[i] : 0, b ? sizes[i] : 0, b == 0);
     }
 }
@@ -283,7 +316,9 @@ static void bufferStorage(Context* ctx, Buffer* b, GLsizeiptr size, const void* 
 
 static void bufferSubData(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, const void* data) {
     if (offset < 0 || size < 0 || offset + size > b->size) return ctx->setError(GL_INVALID_VALUE);
-    if (b->mapped && !(b->mapAccess & GL_MAP_PERSISTENT_BIT)) return ctx->setError(GL_INVALID_OPERATION);
+    // Updating a non-persistently mapped range is an error; the rest of the buffer stays writable.
+    if (b->mapped && !(b->mapAccess & GL_MAP_PERSISTENT_BIT) && offset < b->mapOffset + b->mapLength && b->mapOffset < offset + size)
+        return ctx->setError(GL_INVALID_OPERATION);
     if (b->immutable && !(b->storageFlags & GL_DYNAMIC_STORAGE_BIT)) return ctx->setError(GL_INVALID_OPERATION);
     if (!data || !size) return;
     writeBuffer(ctx, b, offset, size, data);
@@ -666,4 +701,21 @@ API void APIENTRY glGetNamedBufferPointerv(GLuint buffer, GLenum pname, void** p
     Buffer* b = lookupBuffer(ctx, buffer);
     if (!b) return ctx->setError(GL_INVALID_OPERATION);
     *params = b->mapPointer;
+}
+
+// EXT_transform_feedback: binds from `offset` to the end of the buffer.
+API void APIENTRY glBindBufferOffsetEXT(GLenum target, GLuint index, GLuint buffer, GLintptr offset) {
+    MGL_CTX();
+    if (target != GL_TRANSFORM_FEEDBACK_BUFFER) return ctx->setError(GL_INVALID_ENUM);
+    IndexedBufferBinding* ib;
+    Ref<Buffer>* generic;
+    if (!indexedTargetInfo(ctx, target, index, &ib, &generic)) return;
+    if (offset < 0 || (offset % 4)) return ctx->setError(GL_INVALID_VALUE);
+    Buffer* b = bufferForBind(ctx, buffer);
+    if (b == (Buffer*)-1) return;
+    *generic = b;
+    auto& bb = ctx->xfb->buffers[index];
+    bb.buffer = b;
+    bb.offset = b ? offset : 0;
+    bb.size = 0;
 }

@@ -22,7 +22,10 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     h = hashBytes(&key.rasterDiscard, 1, h);
     h = hashBytes(&key.attribSignFlip, sizeof key.attribSignFlip, h);
     h = hashBytes(&key.manualFetch, 1, h);
-    if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch) {
+    h = hashBytes(&key.xfbInVertex, 1, h);
+    h = hashBytes(&key.sampleShading, 1, h);
+    h = hashBytes(&key.sampleMask, 1, h);
+    if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch || key.xfbInVertex) {
         // Field by field: VertexFetch has padding bytes with indeterminate contents.
         for (const glsl::VertexFetch& f : key.attribs) {
             uint64_t packed[2] = {(uint64_t)f.enabled | (uint64_t)f.normalized << 1 | (uint64_t)f.integer << 2 | (uint64_t)f.isDouble << 3 |
@@ -42,7 +45,13 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     if (!prog->program) {
         v->error = "program not linked";
     } else {
-        v->msl = glsl::generateMSL(*prog->program, key);
+        if (prog->composite) {
+            const glsl::LinkedProgram* st[(int)glsl::Stage::Count];
+            for (int i = 0; i < (int)glsl::Stage::Count; i++) st[i] = prog->stageLinked[i].get();
+            v->msl = glsl::generateMSL(st, key);
+        } else {
+            v->msl = glsl::generateMSL(*prog->program, key);
+        }
         if (!v->msl.error.empty()) {
             v->error = v->msl.error;
         } else {
@@ -193,6 +202,21 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
     if (!pso) MGL_ERR("render pipeline creation failed: %s", err.localizedDescription.UTF8String);
     render_[k] = pso;
     return pso;
+}
+
+id<MTLComputePipelineState> PipelineCache::computePipeline(ProgramVariant* v, const std::string& name) {
+    auto it = v->computeByName.find(name);
+    if (it != v->computeByName.end()) return it->second;
+    const glsl::EntryPoint* cs = v->entry(name);
+    if (!cs || cs->kind != glsl::EntryPoint::Kernel) return nil;
+    MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
+    d.computeFunctionDescriptor = fn(v->lib, cs->name);
+    d.requiredThreadsPerThreadgroup = MTLSizeMake(cs->threadsPerThreadgroup[0], cs->threadsPerThreadgroup[1], cs->threadsPerThreadgroup[2]);
+    NSError* err = nil;
+    id<MTLComputePipelineState> p = [ctx_->dev->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
+    if (!p) MGL_ERR("compute pipeline %s creation failed: %s", name.c_str(), err.localizedDescription.UTF8String);
+    v->computeByName[name] = p;
+    return p;
 }
 
 id<MTLComputePipelineState> PipelineCache::computePipeline(ProgramVariant* v) {

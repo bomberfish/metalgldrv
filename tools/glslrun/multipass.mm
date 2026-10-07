@@ -166,22 +166,56 @@ int runPipeline(const PipelineArgs& pa) {
             return true;
         };
         if (xfbOnly) {
-            if (!computePass(entry(EntryPoint::Kernel), MTLSizeMake(gs ? 1 : nverts * pa.instances, 1, 1), true)) return 5;
+            // Same protocol as the runtime: (GS) count pass, CPU prefix sums, write pass.
+            auto byName = [&](const char* n) -> const EntryPoint* {
+                for (auto& e : mo.entryPoints) if (e.name == n) return &e;
+                return nullptr;
+            };
+            uint32_t outVpp = gs ? (r.gsOutputPrimitive == 0 ? 1 : r.gsOutputPrimitive == 3 ? 2 : 3) : pa.vpp;
+            uint32_t limit = UINT32_MAX;
+            for (int b = 0; b < 4; b++)
+                if ((r.multipass.xfbBufferMask & (1u << b)) && r.multipass.xfbStride[b])
+                    limit = std::min<uint32_t>(limit, pa.xfbCapacity / r.multipass.xfbStride[b] / outVpp);
+            MGLDrawInfo* ip = (MGLDrawInfo*)infoBuf.contents;
+            for (int k = 0; k < 4; k++) ip->xfbPrimLimit[k] = limit;
+            uint64_t generated = 0;
+            if (!gs) {
+                generated = (uint64_t)prims * pa.instances;
+                if (!computePass(byName("mgl_xfb"), MTLSizeMake(nverts * pa.instances, 1, 1), true)) return 5;
+            } else {
+                uint32_t items = prims * pa.instances * std::max(1, r.gsInvocations);
+                id<MTLBuffer> cnt = [dev newBufferWithLength:std::max<size_t>(16, items * 16) options:MTLResourceStorageModeShared];
+                id<MTLBuffer> off = [dev newBufferWithLength:std::max<size_t>(16, items * 16) options:MTLResourceStorageModeShared];
+                resources = [resources arrayByAddingObjectsFromArray:@[ cnt, off ]];
+                ip->itemCount = items;
+                ip->itemCounts = cnt.gpuAddress;
+                ip->itemOffsets = off.gpuAddress;
+                if (!computePass(byName("mgl_gs_count"), MTLSizeMake(items, 1, 1), true)) return 5;
+                [cb commit];
+                [cb waitUntilCompleted];
+                cb = [q commandBuffer];
+                const uint32_t* c = (const uint32_t*)cnt.contents;
+                uint32_t* o = (uint32_t*)off.contents;
+                for (uint32_t i = 0; i < items; i++) {
+                    o[i * 4] = (uint32_t)generated;
+                    generated += c[i * 4];
+                }
+                if (!computePass(byName("mgl_gs_write"), MTLSizeMake(items, 1, 1), true)) return 5;
+            }
             [cb commit];
             [cb waitUntilCompleted];
             if (cb.error) { fprintf(stderr, "GPU error: %s\n", cb.error.localizedDescription.UTF8String); return 6; }
-            const uint32_t* c = (const uint32_t*)counters.contents;
-            printf("xfb: written=%u generated=%u\n", c[0], c[1]);
+            uint32_t written = (uint32_t)std::min<uint64_t>(generated, limit);
+            printf("xfb: written=%u generated=%u\n", written, (uint32_t)generated);
             for (int b = 0; b < 4; b++) {
                 if (!(r.multipass.xfbBufferMask & (1u << b))) continue;
                 const float* f = (const float*)xfbBuf[b].contents;
-                uint32_t outVpp = gs ? (r.gsOutputPrimitive == 0 ? 1 : r.gsOutputPrimitive == 3 ? 2 : 3) : pa.vpp;
-                uint32_t n = r.multipass.xfbStride[b] / 4 * c[0] * outVpp;
+                uint32_t n = r.multipass.xfbStride[b] / 4 * written * outVpp;
                 printf("buffer %d (stride %u):", b, r.multipass.xfbStride[b]);
                 for (uint32_t i = 0; i < n && i < 64; i++) printf(" %g", f[i]);
                 printf("\n");
             }
-            if (pa.expectPrims >= 0 && (int)c[0] != pa.expectPrims) return 7;
+            if (pa.expectPrims >= 0 && (int)written != pa.expectPrims) return 7;
             return 0;
         }
         if (tess && !computePass(entry(EntryPoint::Kernel), MTLSizeMake(prims, pa.instances, 1), false)) return 5;

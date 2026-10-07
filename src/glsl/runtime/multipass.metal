@@ -27,6 +27,16 @@ struct MGLDrawInfo {
     device uchar* tcsVertexOut;
     device uchar* tcsPatchOut;
     device atomic_uint* counters;
+    device uint4* itemCounts;
+    device const uint4* itemOffsets;
+    device uchar* tesVertexOut;
+    device uint* tesPrimOut;
+    uint itemCount;
+    uint tesPrimCount;
+    uint xfbPrimLimit[4];
+    uint xfbStreamBase[4];
+    uint xfbBufferStream[4];
+    device uint* gsRecord;
 };
 inline device const uchar* mgl_vptr(constant MGLDrawInfo& D, uint b, uint off, uint vid, uint inst) {
     device const uchar* p = D.vertexBuffer[b];
@@ -187,7 +197,7 @@ inline uint3 mgl_upk_uint3(uint4 u) { return u.xyz; }
 inline uint4 mgl_upk_uint4(uint4 u) { return u; }
 inline ulong mgl_upk_ulong(uint4 u) { return as_type<ulong>(u.xy); }
 
-//@chunk mgl_tess mgl_tess_setup mgl_tess_unit
+//@chunk mgl_tess mgl_tess_setup mgl_tess_unit mgl_tess_unit_size
 // GL tessellation primitive generator (GL 4.6 section 11.2.2). The work for one
 // patch is split into "units" (one ring-side strip, the center, or one isoline),
 // each small enough for one mesh threadgroup (<= 130 vertices, <= 128 primitives).
@@ -460,4 +470,41 @@ inline void mgl_tess_unit(thread const mgl_tess& T, uint unit, threadgroup float
             mgl_tess_tri(T, co, idx, np, p00, p10, p11);
             mgl_tess_tri(T, co, idx, np, p00, p11, p01);
         }
+}
+
+// (vertices, primitives) mgl_tess_unit generates for `unit`, without generating them.
+inline uint2 mgl_tess_unit_size(thread const mgl_tess& T, uint unit) {
+    if (T.domain == 2u) {
+        uint n = T.no[1];
+        return uint2(n + 1u, T.points != 0u ? n + 1u : n);
+    }
+    if (T.special == 1u) return uint2(3u, T.points != 0u ? 3u : 1u);
+    if (T.special == 2u) return uint2(4u, T.points != 0u ? 4u : 2u);
+    uint sides = T.domain == 0u ? 3u : 4u;
+    if (T.points != 0u) {
+        uint u = unit;
+        for (uint r = 0; r < T.rings; r++) {
+            bool full;
+            if (T.domain == 0u) full = T.ni[0] >= 2u * r + 1u;
+            else full = T.ni[0] >= 2u * r + 1u && T.ni[1] >= 2u * r + 1u && 2u * r < min(T.ni[0], T.ni[1]);
+            uint cnt = full ? sides : 1u;
+            if (u < cnt) {
+                uint n;
+                if (full) n = mgl_tess_rowsegs(T, r, u);
+                else if (T.domain == 0u) n = 1u;
+                else n = mgl_tess_rowsegs(T, r, T.ni[0] == 2u * r ? 2u : 1u) + 1u;
+                return uint2(n, n);
+            }
+            u -= cnt;
+        }
+        return uint2(0u);
+    }
+    if (unit < sides * T.rings) {
+        uint r = unit / sides, s = unit % sides;
+        uint a = mgl_tess_rowsegs(T, r, s), b = mgl_tess_rowsegs(T, r + 1u, s);
+        return uint2(a + b + 2u, a + b);
+    }
+    if (T.domain == 0u) return uint2(3u, 1u);
+    uint du = T.ni[0] - 2u * T.rings, dv = T.ni[1] - 2u * T.rings;
+    return uint2((du + 1u) * (dv + 1u), 2u * du * dv);
 }
