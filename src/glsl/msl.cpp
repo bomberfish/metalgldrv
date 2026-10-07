@@ -2357,6 +2357,7 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                     if (n <= 2) {
                         inS += "    uint" + std::to_string(2 * n) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
                         code += "    " + a + " = as_type<" + vecName(BT::Double, n) + ">(in.a" + L0 + ");\n";
+                        loc++;
                     } else {
                         inS += "    uint4 a" + L0 + " [[attribute(" + L0 + ")]];\n";
                         inS += "    uint" + std::to_string(2 * (n - 2)) + " a" + L1 + " [[attribute(" + L1 + ")]];\n";
@@ -2364,7 +2365,6 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                                 vecName(BT::Double, n - 2) + ">(in.a" + L1 + "));\n";
                         loc += 1;
                     }
-                    loc++;
                     anyIn = true;
                     continue;
                 }
