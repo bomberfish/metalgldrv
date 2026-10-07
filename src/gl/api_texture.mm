@@ -1323,7 +1323,20 @@ API void APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum internalfo
     if (border != 0 || width < 0 || height < 0) return ctx->setError(GL_INVALID_VALUE);
     const FormatInfo* rf;
     int rl, rs;
-    id<MTLTexture> src = readAttachmentTexture(ctx, ctx->readFb.get(), &rf, &rl, &rs);
+    // Depth/stencil internal formats copy from the depth/stencil buffer (the read buffer
+    // selects color buffers only).
+    const FormatInfo* df = formatInfo(internalformat);
+    bool depthDst = (df && isDepthOrStencil(df)) || internalformat == GL_DEPTH_COMPONENT || internalformat == GL_DEPTH_STENCIL ||
+                    internalformat == GL_STENCIL_INDEX;
+    bool stencilOnly = (df && df->kind == FmtKind::Stencil) || internalformat == GL_STENCIL_INDEX;
+    if ((df && df->kind == FmtKind::DepthStencil) || internalformat == GL_DEPTH_STENCIL) {
+        // A depth/stencil copy needs both a depth and a stencil buffer to read from.
+        Framebuffer* rfb = ctx->readFb.get();
+        if (rfb && !rfb->isDefault && (rfb->att[kAttDepth].type == GL_NONE || rfb->att[kAttStencil].type == GL_NONE))
+            return ctx->setError(GL_INVALID_OPERATION, "depth/stencil copy without depth and stencil buffers");
+    }
+    id<MTLTexture> src = depthDst ? readDepthStencilTexture(ctx, ctx->readFb.get(), stencilOnly, &rf, &rl, &rs)
+                                  : readAttachmentTexture(ctx, ctx->readFb.get(), &rf, &rl, &rs);
     if (!src) return ctx->setError(GL_INVALID_OPERATION);
     GLenum fmt = isDepthOrStencil(rf) ? (rf->kind == FmtKind::DepthStencil ? GL_DEPTH_STENCIL : GL_DEPTH_COMPONENT) : GL_RGBA;
     GLenum type = rf->kind == FmtKind::Float ? GL_FLOAT : GL_UNSIGNED_BYTE;
