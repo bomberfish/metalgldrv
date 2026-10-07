@@ -1177,7 +1177,8 @@ void Linker::stageMetadata() {
                         end = std::max(end, c.offset + c.size);
                     }
                 if (!any && strides[b] < 0) continue;
-                mp.xfbBufferMask |= 1u << b;
+                // a buffer with a declared stride but no captured outputs is not written (and need not be bound)
+                if (any) mp.xfbBufferMask |= 1u << b;
                 mp.xfbStride[b] = strides[b] >= 0 ? (uint32_t)strides[b] : roundUp(end, dbl ? 8 : 4);
             }
         } else if (!in_.xfbVaryings.empty()) {

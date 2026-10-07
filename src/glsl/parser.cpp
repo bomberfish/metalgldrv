@@ -756,6 +756,7 @@ StructDef* Parser::parseStruct() {
             parseArrayDims(nd);
             if (!nd.dims.empty()) m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end());
             m.q = mq;
+            if (mq.hasLayout && !preamble_) fail("'" + m.name + "' : layout qualifiers are not allowed on structure members");
             for (int d : m.type.dims)
                 if (d == 0 && !preamble_) fail("'" + m.name + "' : structure members must have a declared array size");
             if (sd->findMember(m.name) >= 0) fail("duplicate struct member '" + m.name + "'");
@@ -946,6 +947,13 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     }
     if ((q.storage == Storage::In || q.storage == Storage::Out) && !preamble_) {
         if (q.layout.component >= 0) fail("'component' : cannot be applied to a block");
+        if (q.layout.location < 0) {
+            // GLSL 4.60 §4.4.1: without a block location, all or none of the members have one
+            size_t withLoc = 0;
+            for (const Member& m : sd->members) withLoc += m.q.layout.location >= 0;
+            if (withLoc && withLoc != sd->members.size())
+                fail("'location' : either all or none of the members of block '" + sd->name + "' must have a location");
+        }
         for (const Member& m : sd->members)
             checkComponent(m.type, m.q.layout.component, m.q.layout.location >= 0 || q.layout.location >= 0, m.line);
     }
@@ -1099,7 +1107,7 @@ void Parser::checkInterfaceLocations() {
             [&](const Type& t, int loc, int comp, const Qualifiers& q, bool member, const std::string& name, int ln) -> int {
             if (t.isArray()) {
                 Type e = t.elem();
-                for (int i = 0; i < std::max(1, t.dims[0]); i++) loc = add(e, loc, i ? -1 : comp, q, member, name, ln);
+                for (int i = 0; i < std::max(1, t.dims[0]); i++) loc = add(e, loc, comp, q, member, name, ln);  // every element keeps the component
                 return loc;
             }
             if (t.base == BT::Struct) {
@@ -1112,6 +1120,8 @@ void Parser::checkInterfaceLocations() {
             int aux = (q.centroid ? 1 : 0) | (q.sample ? 2 : 0) | (q.patch ? 4 : 0);
             for (int c = 0; c < cols; c++) {
                 int comps = t.vec * (dbl ? 2 : 1);
+                // vertex shader inputs: every scalar/vector, dvec3/dvec4 included, uses one location (GLSL 4.60 §4.4.1.1)
+                if (st == Stage::Vertex && in) comps = std::min(comps, 4 - std::max(comp, 0));
                 int start = std::max(comp, 0);
                 while (comps > 0) {
                     int n = std::min(comps, 4 - start);
