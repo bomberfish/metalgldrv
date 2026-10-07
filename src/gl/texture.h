@@ -9,6 +9,8 @@ namespace mgl {
 MTLTextureType mtlTextureType(GLenum target, int samples);
 int textureStorageLevelFor(const Texture* t);
 bool ensureBufferTexture(Context* ctx, Texture* t);
+// Bytes per texel of a buffer texture's data store (GL_RGB32* are 12, stored as 16).
+inline int bufferTexelBytes(const FormatInfo* f) { return f->baseFormat == GL_RGB && f->bytesPerPixel == 16 ? 12 : f->bytesPerPixel; }
 bool textureComplete(const Texture* t, const SamplerState& s, int* firstLevel, int* lastLevel);
 id<MTLTexture> dummyTexture(Context* ctx, MTLTextureType type, FmtKind kind);
 const void* resolveUnpackSource(Context* ctx, const void* pixels, size_t needed, bool* err);

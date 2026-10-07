@@ -692,3 +692,8 @@ bool Surface::resize(int w, int h) {
 }
 
 }  // namespace mgl
+
+// The GLSL compiler validates bindings against its own copies of these limits.
+static_assert(mgl::kMaxImageUnits == glsl::kMaxImageUnits, "image unit limits disagree");
+static_assert(mgl::kMaxTextureUnits == glsl::kMaxCombinedTextureImageUnits, "texture unit limits disagree");
+static_assert(mgl::kMaxAtomicCounterBindings == glsl::kMaxAtomicCounterBufferBindings, "atomic counter binding limits disagree");
