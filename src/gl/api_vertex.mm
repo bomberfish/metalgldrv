@@ -421,8 +421,9 @@ API void APIENTRY glGetVertexAttribIuiv(GLuint index, GLenum pname, GLuint* para
 
 API void APIENTRY glGetVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params) {
     MGL_CTX();
-    if (pname == GL_CURRENT_VERTEX_ATTRIB && index < kMaxVertexAttribs && ctx->currentAttribType[index] == GL_DOUBLE) {
-        memcpy(params, ctx->currentAttribL[index], sizeof(double) * 4);
+    if (pname == GL_CURRENT_VERTEX_ATTRIB) {
+        if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
+        memcpy(params, ctx->currentAttribD[index], sizeof(double) * 4);
         return;
     }
     glGetVertexAttribdv(index, pname, params);
@@ -476,7 +477,34 @@ static void setAttrib(Context* ctx, GLuint index, float x, float y, float z, flo
     a[2] = z;
     a[3] = w;
     ctx->currentAttribType[index] = GL_FLOAT;
+    double* d = ctx->currentAttribD[index];
+    d[0] = x;
+    d[1] = y;
+    d[2] = z;
+    d[3] = w;
 }
+
+// glVertexAttribL*: 64-bit current values (missing components 0, 0, 0, 1 like the other setters)
+static void setAttribL(Context* ctx, GLuint index, int n, const double* v) {
+    if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
+    double d[4] = {0, 0, 0, 1};
+    for (int k = 0; k < n; k++) d[k] = v[k];
+    memcpy(ctx->currentAttribD[index], d, sizeof d);
+    for (int k = 0; k < 4; k++) ctx->currentAttrib[index][k] = (float)d[k];
+    ctx->currentAttribType[index] = GL_DOUBLE;
+}
+API void APIENTRY glVertexAttribL1d(GLuint i, GLdouble x) { MGL_CTX(); double v[] = {x}; setAttribL(ctx, i, 1, v); }
+API void APIENTRY glVertexAttribL2d(GLuint i, GLdouble x, GLdouble y) { MGL_CTX(); double v[] = {x, y}; setAttribL(ctx, i, 2, v); }
+API void APIENTRY glVertexAttribL3d(GLuint i, GLdouble x, GLdouble y, GLdouble z) { MGL_CTX(); double v[] = {x, y, z}; setAttribL(ctx, i, 3, v); }
+API void APIENTRY glVertexAttribL4d(GLuint i, GLdouble x, GLdouble y, GLdouble z, GLdouble w) {
+    MGL_CTX();
+    double v[] = {x, y, z, w};
+    setAttribL(ctx, i, 4, v);
+}
+API void APIENTRY glVertexAttribL1dv(GLuint i, const GLdouble* v) { MGL_CTX(); setAttribL(ctx, i, 1, v); }
+API void APIENTRY glVertexAttribL2dv(GLuint i, const GLdouble* v) { MGL_CTX(); setAttribL(ctx, i, 2, v); }
+API void APIENTRY glVertexAttribL3dv(GLuint i, const GLdouble* v) { MGL_CTX(); setAttribL(ctx, i, 3, v); }
+API void APIENTRY glVertexAttribL4dv(GLuint i, const GLdouble* v) { MGL_CTX(); setAttribL(ctx, i, 4, v); }
 
 static void setAttribI(Context* ctx, GLuint index, const void* v, GLenum type) {
     if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
@@ -525,27 +553,6 @@ VA_F(4Nsv, (GLuint i, const GLshort* v), i, std::max(-1.f, v[0] / 32767.f), std:
 VA_F(4Niv, (GLuint i, const GLint* v), i, std::max(-1.f, v[0] / 2147483647.f), std::max(-1.f, v[1] / 2147483647.f), std::max(-1.f, v[2] / 2147483647.f), std::max(-1.f, v[3] / 2147483647.f))
 VA_F(4Nusv, (GLuint i, const GLushort* v), i, v[0] / 65535.f, v[1] / 65535.f, v[2] / 65535.f, v[3] / 65535.f)
 VA_F(4Nuiv, (GLuint i, const GLuint* v), i, v[0] / 4294967295.f, v[1] / 4294967295.f, v[2] / 4294967295.f, v[3] / 4294967295.f)
-static void setAttribL(Context* ctx, GLuint index, double x, double y, double z, double w) {
-    if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
-    double* d = ctx->currentAttribL[index];
-    d[0] = x; d[1] = y; d[2] = z; d[3] = w;
-    float* f = ctx->currentAttrib[index];
-    f[0] = (float)x; f[1] = (float)y; f[2] = (float)z; f[3] = (float)w;
-    ctx->currentAttribType[index] = GL_DOUBLE;
-}
-#define VA_L(name, args, ...)                         \
-    API void APIENTRY glVertexAttrib##name args {     \
-        MGL_CTX();                                    \
-        setAttribL(ctx, __VA_ARGS__);                 \
-    }
-VA_L(L1d, (GLuint i, GLdouble x), i, x, 0, 0, 1)
-VA_L(L2d, (GLuint i, GLdouble x, GLdouble y), i, x, y, 0, 1)
-VA_L(L3d, (GLuint i, GLdouble x, GLdouble y, GLdouble z), i, x, y, z, 1)
-VA_L(L4d, (GLuint i, GLdouble x, GLdouble y, GLdouble z, GLdouble w), i, x, y, z, w)
-VA_L(L1dv, (GLuint i, const GLdouble* v), i, v[0], 0, 0, 1)
-VA_L(L2dv, (GLuint i, const GLdouble* v), i, v[0], v[1], 0, 1)
-VA_L(L3dv, (GLuint i, const GLdouble* v), i, v[0], v[1], v[2], 1)
-VA_L(L4dv, (GLuint i, const GLdouble* v), i, v[0], v[1], v[2], v[3])
 
 #define VA_I(name, T, Enum, args, ...)                  \
     API void APIENTRY glVertexAttribI##name args {      \

@@ -86,15 +86,21 @@ const char* kSigs[] = {
 struct Ctx {
     std::unordered_map<std::string, std::vector<const Builtin*>> byName;
     std::vector<std::unique_ptr<Builtin>> all;
-    void add(const std::string& name, const Type& ret, std::vector<Type> params, std::vector<uint8_t> outs = {}) {
+    Builtin* add(const std::string& name, const Type& ret, std::vector<Type> params, std::vector<uint8_t> outs = {}) {
         auto b = std::make_unique<Builtin>();
         b->name = name;
         b->op = BIOp::Generic;
         b->ret = ret;
         b->params = std::move(params);
         b->paramOut = outs.empty() ? std::vector<uint8_t>(b->params.size(), 0) : std::move(outs);
-        byName[name].push_back(b.get());
+        Builtin* r = b.get();
+        byName[name].push_back(r);
         all.push_back(std::move(b));
+        return r;
+    }
+    // Lookups with an explicit LOD bias need implicit derivatives: fragment shaders only.
+    void addBias(const std::string& name, const Type& ret, std::vector<Type> params) {
+        add(name, ret, std::move(params))->stageMask = 1u << (int)Stage::Fragment;
     }
 };
 
@@ -245,14 +251,14 @@ void addTextureFunctions(Ctx& c) {
             } else {
                 c.add("texture", ret, {T, P});
                 bool bias = !rect && !(sh && arr && T.dim == Dim::D2);
-                if (bias) c.add("texture", ret, {T, P, F});
+                if (bias) c.addBias("texture", ret, {T, P, F});
                 // textureLod
                 if (!rect) c.add("textureLod", ret, {T, P, F});
                 // textureGrad
                 c.add("textureGrad", ret, {T, P, gradT, gradT});
                 if (!cube) {
                     c.add("textureOffset", ret, {T, P, offT});
-                    if (bias) c.add("textureOffset", ret, {T, P, offT, F});
+                    if (bias) c.addBias("textureOffset", ret, {T, P, offT, F});
                     if (!rect) c.add("textureLodOffset", ret, {T, P, F, offT});
                     c.add("textureGradOffset", ret, {T, P, gradT, gradT, offT});
                 }
@@ -277,11 +283,11 @@ void addTextureFunctions(Ctx& c) {
                 }
                 for (auto& pp : projP) {
                     c.add("textureProj", ret, {T, pp});
-                    if (!rect) c.add("textureProj", ret, {T, pp, F});
+                    if (!rect) c.addBias("textureProj", ret, {T, pp, F});
                     if (!rect) c.add("textureProjLod", ret, {T, pp, F});
                     c.add("textureProjGrad", ret, {T, pp, gradT, gradT});
                     c.add("textureProjOffset", ret, {T, pp, offT});
-                    if (!rect) c.add("textureProjOffset", ret, {T, pp, offT, F});
+                    if (!rect) c.addBias("textureProjOffset", ret, {T, pp, offT, F});
                     if (!rect) c.add("textureProjLodOffset", ret, {T, pp, F, offT});
                     c.add("textureProjGradOffset", ret, {T, pp, gradT, gradT, offT});
                 }
@@ -337,7 +343,7 @@ void addTextureFunctions(Ctx& c) {
         Type T = S(l.sampler);
         for (auto& p : l.coords) {
             c.add(l.name, l.ret, {T, p});
-            if (l.bias) c.add(l.name, l.ret, {T, p, F});
+            if (l.bias) c.addBias(l.name, l.ret, {T, p, F});
         }
     }
     const std::vector<L> lods = {

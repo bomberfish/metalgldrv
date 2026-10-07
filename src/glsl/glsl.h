@@ -37,12 +37,45 @@ struct CompileResult {
     std::string infoLog;
 };
 
+// Implementation limits the compiler enforces (must match the runtime's GL_MAX_* queries, src/gl/context.h).
+constexpr int kMaxCombinedTextureImageUnits = 96;
+constexpr int kMaxImageUnits = 8;
+constexpr int kMaxUniformBufferBindings = 84;
+constexpr int kMaxShaderStorageBufferBindings = 16;
+constexpr int kMaxAtomicCounterBufferBindings = 8;
+
 struct CompileOptions {
     bool compatibilityProfile = true;  // accept GL compatibility builtins (gl_Vertex, ftransform, ...)
     int maxVersion = 460;
 };
 
 CompileResult compile(Stage stage, const std::vector<std::string>& sources, const CompileOptions& opts = {});
+
+// ---------------------------------------------------------------------------
+// SPIR-V shader modules (ARB_gl_spirv). glShaderBinary stores a parsed module;
+// glSpecializeShader selects an entry point, applies specialization constants and
+// decompiles it to GLSL 4.60 that compile() consumes (src/glsl/spirv.cpp).
+// ---------------------------------------------------------------------------
+struct SpirvModule;  // opaque, immutable
+
+// Checks the header and instruction stream; null (and *error) when malformed.
+std::shared_ptr<const SpirvModule> parseSpirv(const void* data, size_t bytes, std::string* error);
+
+enum class SpecializeStatus : uint8_t {
+    Ok,             // result.compile.shader is set
+    BadEntryPoint,  // no entry point with that name for the stage (GL_INVALID_VALUE)
+    BadConstantId,  // a constant index names no specialization constant (GL_INVALID_VALUE)
+    Failed,         // module could not be translated (compile status FALSE, see infoLog)
+};
+struct SpecializeResult {
+    SpecializeStatus status = SpecializeStatus::Failed;
+    CompileResult compile;
+    std::string glsl;  // generated GLSL (debugging; METALGLDRV_DUMP_SPIRV prints it)
+};
+SpecializeResult specializeSpirv(const SpirvModule& module, Stage stage, const std::string& entryPoint,
+                                 const std::vector<std::pair<uint32_t, uint32_t>>& constants, const CompileOptions& opts = {});
+// SPIR-V extensions accepted in OpExtension (GL_SPIR_V_EXTENSIONS).
+const std::vector<std::string>& supportedSpirvExtensions();
 
 // ---------------------------------------------------------------------------
 // Program reflection. All "type" fields are GL enums (GL_FLOAT_VEC4, GL_SAMPLER_2D...).
@@ -159,7 +192,8 @@ struct MultiPassInfo {
 struct SubroutineUniform {
     std::string name;
     int location = -1;               // GL subroutine uniform location (per stage); arrays occupy [location, location+arraySize)
-    int arraySize = 1;
+    int arraySize = 1;               // total elements (arrays of arrays are flattened)
+    std::vector<int> dims;           // array dimensions, outermost first (empty: not an array)
     std::vector<int> compatible;     // indices into StageSubroutines::functions
 };
 struct StageSubroutines {
@@ -308,6 +342,7 @@ struct alignas(16) MGLSys {
     float tessDefaultInner[2];             // GL_PATCH_DEFAULT_INNER_LEVEL
     uint32_t pad2[2];
     float currentAttrib[32][4];            // glVertexAttrib* values for disabled arrays
+    double currentAttribD[16][4];          // the same as doubles (glVertexAttribL*; dvec inputs)
 };
 
 // Per-draw description for pipelines without stage_in (PipelineKind::MeshGeometry,

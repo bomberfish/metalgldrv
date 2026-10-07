@@ -458,6 +458,7 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     memcpy(s->tessDefaultOuter, ctx->patchDefaultOuter, sizeof s->tessDefaultOuter);
     memcpy(s->tessDefaultInner, ctx->patchDefaultInner, sizeof s->tessDefaultInner);
     memcpy(s->currentAttrib, ctx->currentAttrib, sizeof(float) * 4 * kMaxVertexAttribs);
+    memcpy(s->currentAttribD, ctx->currentAttribD, sizeof(double) * 4 * kMaxVertexAttribs);
     return sa.gpu;
 }
 
@@ -480,21 +481,18 @@ static bool wantManualFetch(Context* ctx) {
     return unaligned;
 }
 
-// dvec3/dvec4 (and matrices of them) occupy one GL location but don't fit one Metal
-// vertex attribute: such programs fetch their inputs in the shader.
+// stage_in carries the upper half of a dvec3/dvec4 in Metal attribute 16 + L, which
+// doesn't exist for L = 15 (Metal has 31 attributes): such programs fetch in the shader.
 static bool wantManualFetch(Context* ctx, ProgramObj* prog) {
     if (wantManualFetch(ctx)) return true;
     VertexArray* vao = ctx->vao.get();
     if (!vao) return false;
-    bool wide = false;
+    bool wideAt15 = false;
     for (const auto& a : prog->refl.attributes) {
-        switch (a.type) {
-        case GL_DOUBLE_VEC3: case GL_DOUBLE_VEC4: case GL_DOUBLE_MAT2x3: case GL_DOUBLE_MAT2x4: case GL_DOUBLE_MAT3:
-        case GL_DOUBLE_MAT3x4: case GL_DOUBLE_MAT4: case GL_DOUBLE_MAT4x3: wide = true; break;
-        default: break;
-        }
+        TypeShape ts = typeShape(a.type);
+        if (ts.base == BaseType::Double && ts.rows > 2 && a.location >= 0 && a.location + std::max(1, a.locationsUsed) > 15) wideAt15 = true;
     }
-    if (!wide) return false;
+    if (!wideAt15) return false;
     for (int l = 0; l < kMaxVertexAttribs; l++)
         if (vao->attribs[l].enabled && vao->attribs[l].clientPointer) return false;
     return true;
@@ -533,6 +531,9 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
             int loc = a.location + k;
             if (loc >= kMaxVertexAttribs) break;
             VertexAttribKey& ak = key.attribs[loc];
+            // dvec3/dvec4 (one location each) arrive in two Metal attributes: L and 16 + L
+            bool wideDouble = ts.base == BaseType::Double && ts.rows > 2;
+            VertexAttribKey& ak2 = key.attribs[16 + loc];
             const VertexAttrib* va = vao ? &vao->attribs[loc] : nullptr;
             bool enabled = va && va->enabled;
             if (enabled) {
@@ -548,9 +549,16 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                     f = vertexFormatFor(va->type, va->size, false, true);
                 }
                 if (va->type == GL_DOUBLE && va->isLong) {
-                    // dvecN arrive as raw bits (uint2/uint4); dvec3/dvec4 only get their first two
-                    // components here (programs with them normally use manual fetch).
-                    f = va->size == 1 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4;
+                    // dvecN arrive as raw bits: double/dvec2 -> uint2/uint4 at L; dvec3/4 -> uint4 at L
+                    // plus uint2/uint4 at 16 + L (same binding, +16 bytes)
+                    int dwords = va->size * 2;
+                    f = std::min(dwords, 4) == 2 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4;
+                    if (wideDouble) {
+                        int rest = std::max(2, dwords - 4);
+                        ak2.format = (uint8_t)(rest == 2 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4);
+                        ak2.bufferIndex = glsl::kBufVertex0 + va->binding;
+                        ak2.offset = va->relativeOffset + 16;
+                    }
                 }
                 if (va->type == GL_FIXED || (va->type == GL_DOUBLE && !va->isLong)) {
                     static bool warned = false;
@@ -572,6 +580,16 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                 ak.format = (uint8_t)f;
                 ak.bufferIndex = kBufCurrentAttribs;
                 ak.offset = 16 * loc;
+                if (ts.base == BaseType::Double) {
+                    // double current values: 32 bytes per location after the float block
+                    ak.format = (uint8_t)(ts.rows == 1 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4);
+                    ak.offset = 16 * kMaxVertexAttribs + 32 * loc;
+                    if (wideDouble) {
+                        ak2.format = (uint8_t)(ts.rows == 3 ? MTLVertexFormatUInt2 : MTLVertexFormatUInt4);
+                        ak2.bufferIndex = kBufCurrentAttribs;
+                        ak2.offset = ak.offset + 16;
+                    }
+                }
             }
         }
     }
@@ -643,8 +661,10 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         [table setAddress:addr attributeStride:stride atIndex:glsl::kBufVertex0 + b];
     }
     if (needCurrent) {
-        UploadAlloc ca = ctx->upload(16 * kMaxVertexAttribs, 16);
+        // floats (16 bytes per location) followed by doubles (32 bytes per location)
+        UploadAlloc ca = ctx->upload(48 * kMaxVertexAttribs, 16);
         memcpy(ca.cpu, ctx->currentAttrib, 16 * kMaxVertexAttribs);
+        memcpy(ca.cpu + 16 * kMaxVertexAttribs, ctx->currentAttribD, 32 * kMaxVertexAttribs);
         VertexBufferKey& bk = key.buffers[kBufCurrentAttribs];
         bk.used = 1;
         bk.stepFunction = MTLVertexStepFunctionConstant;

@@ -12,7 +12,7 @@ namespace mgl {
 
 enum {
     kMaxTextureUnits = 96,      // combined units exposed (GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS)
-    kMaxImageUnits = 8,
+    kMaxImageUnits = 16,
     kMaxUniformBufferBindings = 84,
     kMaxSSBOBindings = 16,
     kMaxAtomicCounterBindings = 8,
@@ -233,7 +233,7 @@ public:
     PixelStore pack, unpack;
     GLenum hints[8] = {GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE};
     float currentAttrib[kMaxVertexAttribs][4];
-    double currentAttribL[kMaxVertexAttribs][4];   // exact values from glVertexAttribL* (type GL_DOUBLE)
+    double currentAttribD[kMaxVertexAttribs][4];  // double view of the current values (glVertexAttribL*)
     uint32_t currentAttribType[kMaxVertexAttribs];  // GL_FLOAT / GL_INT / GL_UNSIGNED_INT
     Ref<Query> activeQueries[8][4];  // [query target index][index]
     GLenum conditionalRenderMode = 0;

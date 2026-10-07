@@ -284,7 +284,10 @@ public:
     std::string infoLog;
     std::shared_ptr<const glsl::Shader> shader;
     int attachCount = 0;  // programs this shader is attached to (deletion is deferred until 0)
-    // SPIR-V (ARB_gl_spirv) not supported; binary shaders rejected.
+    // ARB_gl_spirv: module from glShaderBinary (SPIR_V_BINARY state); compiled once specialized.
+    bool spirvBinary = false;
+    bool specialized = false;
+    std::shared_ptr<const glsl::SpirvModule> spirvModule;
 };
 
 struct PipelineCacheEntry;
@@ -299,6 +302,7 @@ public:
     GLenum xfbBufferMode = GL_INTERLEAVED_ATTRIBS;
     bool separable = false, retrievableHint = false;
     bool linkedSeparable = false;  // PROGRAM_SEPARABLE as of the last successful link (what queries report)
+    bool linkedSpirv = false;      // linked from SPIR-V shaders: reflection carries no names
 
     // link results
     bool linked = false, validated = false;
