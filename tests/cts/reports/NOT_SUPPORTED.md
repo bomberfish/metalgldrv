@@ -51,7 +51,7 @@ functionality, for limits above the spec minimum, or where the test itself doesn
 |---|---|---|
 | sparse_texture_tests, sparse_texture2_tests, sparse_texture_clamp_tests, sparse_buffer_tests | 2950 | ARB_sparse_texture/texture2/texture_clamp/buffer are optional extensions that metalgldrv doesn't expose |
 | negative_texture_lookup_functions_with_bias_tests (sparse variants) | 30 | need ARB_sparse_texture2 |
-| fragment_shading_rate | 1067 | EXT_fragment_shading_rate is optional |
+| fragment_shading_rate | 1067 | EXT_fragment_shading_rate is optional; since the FSR change below it is exposed with METALGLDRV_STRICT=1, where 1052 pass and only the 15 `render_target.*` cases stay NotSupported (they need GL_OVR_multiview) |
 | blend_equation_advanced | 88 | KHR_blend_equation_advanced is optional |
 | texture_filter_minmax_tests | 5 | ARB_texture_filter_minmax is optional |
 | ext_texture_shadow_lod | 15 | EXT_texture_shadow_lod is optional |
@@ -59,7 +59,7 @@ functionality, for limits above the spec minimum, or where the test itself doesn
 | post_depth_coverage_tests | 2 | ARB_post_depth_coverage is optional |
 | shader_viewport_layer_array | 3 | ARB_shader_viewport_layer_array is optional |
 | shaders.shader_integer_mix.prototypes | 1 | EXT_shader_integer_mix is optional |
-| sample_variables, es_31_compatibility.sample_variables | 76 | 8-sample variants; GL_MAX_SAMPLES is 4, the GL 4.6 minimum (the GPU supports 1/2/4) |
+| sample_variables, es_31_compatibility.sample_variables | 76 | 8-sample variants; GL_MAX_SAMPLES is 4, the GL 4.6 minimum (the GPU supports 1/2/4). 8x emulation was evaluated and rejected, see "8x MSAA" below |
 | shader_image_size, shader_image_load_store, shader_texture_image_samples_tests (multisample variants) | 39 | GL_MAX_IMAGE_SAMPLES is 0, the GL 4.6 minimum |
 | internalformat.renderbuffer.rgb9_e5 | 1 | RGB9_E5 isn't a required renderable format |
 | texture_swizzle | 192 | the test's own static format/target exclusions (depth or RGB9_E5 with multisample/3D targets); no driver query is involved |
@@ -114,3 +114,79 @@ the minimum).
   cap. GL_MAX_TASK_SHARED_MEMORY_SIZE_EXT is 32752 (minimum 32768), and GL_MAX_MESH_OUTPUT_MEMORY_SIZE_EXT is 30720
   (minimum 32768). The CTS passes with these values.
 - ARB_sparse_texture: after a page is decommitted, the GPU may read its old contents for about 0.2–0.5 s.
+
+# EXT_fragment_shading_rate (METALGLDRV_STRICT=1)
+
+Exposed with `_primitive` and `_attachment` in strict mode only. Metal's rasterization rate maps can't express GL's
+per-draw, per-primitive and attachment rates, so coarse shading is emulated in the fragment shader
+(docs/glsl-compiler.md, "Coarse shading"). The supported rates are 1x1, 1x2, 2x1 and 2x2, which are the required
+ones for 1 and 4 samples. Larger requests clamp as the spec describes, so a coarse fragment always lies inside one
+Metal quad. Limits: attachment texels are 2..16 pixels with aspect ratio 1, the attachment has one layer, and it
+isn't allowed on the default framebuffer. All five combiner ops are supported. Shaders that write gl_FragDepth or
+gl_SampleMask get the 1x1 rate (both `..._SUPPORTED_EXT` queries are FALSE), as do shaders that shade per sample or
+read gl_FragCoord without enabling the extension, and draws with sample shading or a partial SAMPLE_MASK_VALUE.
+Draws whose rate can only be 1x1 use the regular pipelines, so default mode and non-FSR draws are unchanged.
+
+`KHR-GL46.fragment_shading_rate.*`: 1052 pass, and 15 `render_target.*` are NotSupported because they need
+GL_OVR_multiview. The CTS only checks gl_ShadingRateEXT. A shader that failed to compile also passed, because
+those cases skip pixels that weren't rendered. The emulation itself (one invocation per coarse fragment,
+inputs at the fragment centre, perspective-correct values, derivatives, implicit and queried LOD, discard,
+side effects, scissor, partial coverage, the primitive rate from VS/GS/separable/mesh, attachment rates, MSAA
+coverage masks, interpolateAt*, quad subgroup operations) is covered by `tests/host/test_fsr.cpp`, which passes on
+the M4 Pro and on the iPad M5.
+
+Full runs on the M4 Pro with this change (gl46-main at 64x64 config 1, and gl46-khr-single), 0 Fail/Crash/Timeout:
+default KHR-GL46 18061 pass / 1652 NotSupported / 1 CompatibilityWarning (unchanged), strict 19152 / 561 / 1
+(previously 18100 / 1613); KHR-Single-GL46 11340 / 8 in both modes. `tests/host` passes in both modes on the Mac and
+the iPad.
+
+Known deviations:
+- Metal splits polygons that cross the clip volume into several triangles. A coarse fragment that straddles an
+  internal edge of that fan is shaded once per triangle, and each invocation covers only its own pixels. Every
+  pixel still gets exactly one value, and the values agree because the triangles share the attribute planes.
+  The extra invocation and the partial gl_SampleMaskIn are visible, though. At 1x1 the same split only affects
+  multisampled pixels, where GL allows several invocations per fragment.
+- Every pixel lane still runs the shader. The emulation provides the semantics, not a speedup.
+
+# 8x MSAA (GL_MAX_SAMPLES = 8): not exposed
+
+Both GPUs render 1, 2 or 4 samples. The probes behind this analysis are on the M4 Pro: custom sample positions
+(`setSamplePositions`) do move coverage, helper-lane writes are dropped, the vertex function runs once per view
+under vertex amplification, and so does a mesh function.
+
+What an emulation with two 4x halves (samples 0-3 and 4-7 at different programmable positions) can keep within
+GL's rules:
+- Fragment shaders running once per covered half. GL 4.6 7.13.1 allows 1..N invocations per fragment when
+  multisampled, gl_SampleMaskIn holds the samples "covered for this invocation", and every covered sample is in
+  exactly one invocation.
+- Interpolation at the half's pixel centre ("anywhere within the pixel", 14.3.1).
+- gl_SampleID / gl_SampleMask / gl_SamplePosition with a +4 / <<4 offset in the second half.
+- Alpha-to-coverage giving twice the 4-sample count (only proportionality is required).
+- Occlusion queries summed over both halves, and vertex or tessellation-evaluation shaders running twice (both
+  "may be executed more than once").
+
+What it breaks:
+1. Geometry, task and mesh shader side effects run twice. GL fixes those invocation counts, unlike VS/TES. Both
+   ways to feed two halves re-run these stages: drawing twice, or one draw with vertex amplification into two
+   slices (a shifted viewport per slice gives the second sample set). The probes showed the vertex and mesh
+   functions running once per view. Masking the stores in the second run doesn't fix it either, because atomics
+   return different values and geometry that depends on them diverges between the halves. Only capturing the
+   post-GS / mesh output once and rasterizing it twice is correct.
+2. With two passes, the second half of draw N runs after the first half of draw N+1. A later draw's buffer, image
+   or atomic writes then reach an earlier draw's replayed vertex fetch, uniforms or indirect arguments, and
+   glMemoryBarrier / glTextureBarrier ordering breaks too. Metal 4 allows one open render encoder per command
+   buffer, so the second half has to be a recorded replay of every encoder and argument-table call. That replay
+   must split at every side-effecting draw and barrier. Transform feedback, primitive queries and VS-captured
+   feedback must run in one half only.
+3. The amplification variant needs a viewport per half. That is 2x GL_MAX_VIEWPORTS (16, the GL minimum) Metal
+   viewports, and Metal has 16, so shaders that write gl_ViewportIndex would need amplification-dependent
+   position shifts, which re-run the pre-rasterization stages again (point 1). A double-width 4x layout avoids
+   the second pass. But then lines, points and polygon-offset slopes are distorted along one axis, 8x surfaces
+   are limited to 8192 pixels against a MAX_TEXTURE_SIZE of 16384, and every fragment shader needs the coarse
+   emulation.
+
+Beyond these, every multisample path (storage, texelFetch, textureSamples, resolves, blits, CopyImageSubData,
+views, clears, invalidation, readback, sparse multisample storage, internalformat queries) would need an 8x form.
+A version without the fixes in 1 and 2 deviates in ways GL forbids, and the full version means capturing
+GS/mesh output and replaying render passes across the whole draw path, for the 76 cases above. GL_MAX_SAMPLES
+therefore stays 4, the GL 4.6 minimum, which is conformant.
