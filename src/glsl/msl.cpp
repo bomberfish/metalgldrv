@@ -103,6 +103,8 @@ private:
     int tempN_ = 0;
     std::map<const Function*, std::string> fnNames_;
     std::set<std::string> fragInputsAvailable_;  // from the vertex stage
+    static constexpr int kMeshOutputScalars = 124;  // Metal: unique scalars of a mesh vertex + primitive
+    static constexpr int kMeshBytes = 32768 - 512;   // Metal: total mesh output size (with some slack)
     bool haveVsOutputs_ = false;
     bool hasShared_ = false;
     std::map<std::string, std::string> interpLeaf_;  // FS input leaf accessor (without "g.") -> In member, for interpolateAt*
@@ -396,8 +398,21 @@ private:
         std::string vertexStruct, primStruct, vertexCopy, primCopy;
         std::set<std::string> names;
         bool hasPrim = false;
+        std::vector<Field> spill;  // mesh: varyings past Metal's output budget, passed through MGLDrawInfo::spillBuffer
     };
-    RasterOut rasterOutput(Stage producer, const std::string& g, bool mesh, bool points);
+    // Varying spill: a spilled vertex gets a record slot (written here; `slot` names the uint receiving it),
+    // primitives carry the slots of their vertices in `mgl_spill`.
+    std::string spillVertexCode(const RasterOut& ro, const std::string& g, const std::string& D, const std::string& slot);
+    std::string spillPrimCode(const RasterOut& ro, int ipp, const std::function<std::string(int)>& slotOf);
+    std::map<std::string, size_t> spillIdx_;  // fragment input leaf name -> spilled leaf index
+    void noteSpill(const RasterOut& ro, int ipp) {
+        spillIdx_.clear();
+        for (size_t i = 0; i < ro.spill.size(); i++) spillIdx_[ro.spill[i].name] = i;
+        spillIpp_ = ipp;
+    }
+    int spillIpp_ = 0;
+    // meshV/meshP/ipp: mesh output dimensions (mesh producers), used for Metal's mesh size budget.
+    RasterOut rasterOutput(Stage producer, const std::string& g, bool mesh, bool points, int meshV = 0, int meshP = 0, int ipp = 3);
     void emitClassicVS(std::string& o);
     void emitFS(std::string& o, bool meshInput);
     // Mesh render pipelines need a fragment function; programs without a fragment shader
@@ -423,6 +438,7 @@ private:
     std::string tesLoadPatch();
     std::string tesRun(const std::string& coord, const std::string& patch, const std::string& cps);
     void emitTessEvalMesh(std::string& o);
+    void emitVertexMesh(std::string& o);
     bool fsReadsPrimitiveId() const {
         const StageCode& f = SC(Stage::Fragment);
         return f.main && f.usedNames.count("gl_PrimitiveID");
@@ -2618,7 +2634,7 @@ std::string Emitter::runVS(const std::string& gv, const std::string& vid, const 
 // ---------------------------------------------------------------------------
 // Rasterizer-facing outputs (classic vertex out struct or mesh vertex/primitive)
 // ---------------------------------------------------------------------------
-Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool mesh, bool points) {
+Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool mesh, bool points, int meshV, int meshP, int ipp) {
     RasterOut r;
     auto fields = producerFields(st);
     useStage(st);
@@ -2705,12 +2721,51 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
             }
         useStage(keep);
     }
+    std::vector<Field> passed;
     for (auto& f : fields) {
         if (f.key == "pos" || f.key == "psize" || f.key == "clipv") continue;
         if (filter && f.key != "clipd" && f.key != "culld" && !fsNames.count(f.name)) continue;
         if (f.key == "clipd" && !fsClip) continue;
         if (f.key == "culld" && !fsCull) continue;
         if (f.type.base == BT::Bool) fail("boolean varyings are not allowed");
+        passed.push_back(f);
+    }
+    if (mesh) {
+        // Metal limits a mesh vertex + primitive to 124 unique scalars (position included) and the whole
+        // mesh (meshV vertices + meshP primitives + indices) to 32 KB. Varyings past those budgets are
+        // spilled: each vertex writes them to a device buffer record, primitives carry their vertices'
+        // record slots, and the fragment shader interpolates them from [[barycentric_coord]].
+        // Programs within the budgets are unaffected.
+        auto scalars = [](const Type& t) { return (t.base == BT::Double ? 2 : 1) * t.components(); };
+        int vbase = 4 + ((!mesh || points) ? 1 : 0) + nclip + ncull;
+        int pbase = (fsReadsPrimitiveId() ? 1 : 0) /* mgl_primid */ + (r.hasPrim ? (int)std::count(r.primStruct.begin(), r.primStruct.end(), ';') : 0);
+        int total = 0;
+        for (auto& f : passed) total += scalars(f.type);
+        auto vertexBudget = [&](int pscalars) {
+            int b = kMeshOutputScalars - pscalars;
+            if (meshV > 0) b = std::min(b, (kMeshBytes - meshP * (4 * pscalars + 2 * ipp)) / (4 * meshV));
+            return b;
+        };
+        if (vbase + total > vertexBudget(pbase)) {
+            int avail = vertexBudget(pbase + 3 /* mgl_spill */) - vbase;
+            if (avail < 0) fail("too many varyings for a mesh pipeline");
+            std::vector<Field> keep;
+            for (auto& f : passed) {
+                if (r.spill.empty() && scalars(f.type) <= avail) {
+                    avail -= scalars(f.type);
+                    keep.push_back(f);
+                } else {
+                    if (f.key == "clipd" || f.key == "culld") fail("too many varyings together with gl_ClipDistance/gl_CullDistance");
+                    r.spill.push_back(f);
+                }
+            }
+            passed.swap(keep);
+            r.primStruct += "    uint3 mgl_spill [[user(mgl_spill)]];\n";
+            r.hasPrim = true;
+            for (auto& f : r.spill) r.names.insert(f.name);
+        }
+    }
+    for (auto& f : passed) {
         std::string a = acc(f, g);
         if (f.type.base == BT::Double) {
             r.vertexStruct += "    uint2 " + f.name + " [[user(" + f.name + ")]];\n";
@@ -2722,6 +2777,24 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
         r.names.insert(f.name);
     }
     return r;
+}
+
+std::string Emitter::spillVertexCode(const RasterOut& ro, const std::string& g, const std::string& D, const std::string& slot) {
+    if (ro.spill.empty()) return "";
+    size_t NS = ro.spill.size();
+    std::string c = slot + " = atomic_fetch_add_explicit(" + D + "spillCounter, 1u, memory_order_relaxed);\n";
+    c += "if (" + slot + " < " + D + "spillCapacity) {\n    device uint4* mgl_w = " + D + "spillBuffer + " + slot + " * " +
+         std::to_string(NS) + "u;\n";
+    for (size_t i = 0; i < NS; i++) c += "    mgl_w[" + std::to_string(i) + "] = mgl_pk(" + acc(ro.spill[i], g) + ");\n";
+    c += "} else {\n    " + slot + " = 0xffffffffu;\n}\n";
+    return c;
+}
+
+std::string Emitter::spillPrimCode(const RasterOut& ro, int ipp, const std::function<std::string(int)>& slotOf) {
+    if (ro.spill.empty()) return "";
+    std::string v[3] = {"0u", "0u", "0u"};
+    for (int k = 0; k < ipp; k++) v[k] = slotOf(k);
+    return "p.mgl_spill = uint3(" + v[0] + ", " + v[1] + ", " + v[2] + ");\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -2834,6 +2907,8 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
         if (k == BuiltinVar::FragColorIn || k == BuiltinVar::SecondaryColorIn || k == BuiltinVar::TexCoord || k == BuiltinVar::FogFragCoord)
             ins.push_back(v);
     std::set<std::string> names;
+    bool spillIn = false;
+    std::set<std::string> baryModes;
     for (auto* v : ins) {
         std::string key = varyingKey(v, Stage::Fragment);
         std::vector<std::pair<Type, std::string>> leaves;
@@ -2851,6 +2926,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             }
             Type lt = leaves[i].first;
             Qualifiers lq = q;
+            auto spIt = spillIdx_.find(nm);
             if (v->block) {
                 size_t dot = leaves[i].second.find(".m_", 2 + varName(v).size());
                 if (dot != std::string::npos) {
@@ -2859,6 +2935,44 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                     int mi = v->block->findMember(mn);
                     if (mi >= 0) lq = v->block->members[mi].q;
                 }
+            }
+            if (spIt != spillIdx_.end()) {
+                // spilled varying: the primitive's vertex values come from the spill buffer
+                if (interpVars.count(v)) fail("interpolateAt*() on a varying past the mesh output budget is not supported");
+                size_t NS = spillIdx_.size(), si0 = spIt->second;
+                if (!spillIn) {
+                    spillIn = true;
+                    inS += "    uint3 mgl_spill [[user(mgl_spill), flat]];\n";
+                    params += ", constant MGLDrawInfo& D [[buffer(22)]]";
+                    std::string ok;
+                    for (int k = 0; k < spillIpp_; k++) {
+                        std::string sk = "in.mgl_spill[" + std::to_string(k) + "]";
+                        copyIn += "    device const uint4* mgl_sr" + std::to_string(k) + " = D.spillBuffer + min(" + sk +
+                                  ", D.spillCapacity - 1u) * " + std::to_string(NS) + "u;\n";
+                        ok += (k ? " && " : "") + sk + " < D.spillCapacity";
+                    }
+                    copyIn += "    bool mgl_spok = " + ok + ";\n";
+                    anyIn = true;
+                }
+                std::string tn = lt.base == BT::Double ? "ulong" : mt(lt);
+                auto vtx = [&](int k) { return "mgl_upk_" + tn + "(mgl_sr" + std::to_string(k) + "[" + std::to_string(si0) + "])"; };
+                std::string val;
+                if (lt.base != BT::Float || lq.interp == Interp::Flat || spillIpp_ == 1) {
+                    val = vtx(0);  // flat: vertex 0 of the record is the provoking vertex
+                } else {
+                    std::string mode = std::string(lq.sample ? "sample" : lq.centroid ? "centroid" : "center") +
+                                       (lq.interp == Interp::NoPerspective ? "_no_perspective" : "_perspective");
+                    if (lq.sample) needSid();
+                    std::string bv = "mgl_b_" + mode;
+                    if (!baryModes.count(mode)) {
+                        baryModes.insert(mode);
+                        params += ", float3 " + bv + " [[barycentric_coord, " + mode + "]]";
+                    }
+                    val = vtx(0) + " * " + bv + ".x + " + vtx(1) + " * " + bv + ".y";
+                    if (spillIpp_ == 3) val += " + " + vtx(2) + " * " + bv + ".z";
+                }
+                copyIn += "    if (mgl_spok) " + leaves[i].second + " = " + val + ";\n";
+                continue;
             }
             if (lt.base == BT::Double) {
                 inS += "    uint2 " + nm + " [[user(" + nm + "), flat]];\n";
@@ -3137,7 +3251,7 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
     prepareStage(Stage::Geometry);
     StageInfo& gsi = si_[(int)Stage::Geometry];
     bool writesPrimId = gsi.bi.count(BuiltinVar::PrimitiveID) && gsi.bi[BuiltinVar::PrimitiveID]->q.storage == Storage::Out;
-    RasterOut ro = rasterOutput(Stage::Geometry, "", true, points);
+    RasterOut ro = rasterOutput(Stage::Geometry, "", true, points, maxV, maxP, points ? 1 : lines ? 2 : 3);
     if (fsReadsPrimitiveId()) {  // per-primitive outputs count against the 124-scalar interface limit
         ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
         ro.primCopy += std::string("p.mgl_primid = ") + (writesPrimId ? "bi_gl_PrimitiveID" : "mgl_primIn") + ";\n";
@@ -3146,20 +3260,29 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
     preG += "using MeshT = mesh<MV, MP, " + std::to_string(maxV) + ", " + std::to_string(maxP) + ", topology::" + topo + ">;\n";
     std::string members = "    thread MeshT* mgl_mo;\n    uint mgl_nv, mgl_np, mgl_strip;\n    int mgl_primIn;\n";
     std::string MV = std::to_string(maxV), MP = std::to_string(maxP);
+    int gipp = points ? 1 : lines ? 2 : 3;
+    std::string spillV;  // spill record slots of the last three emitted vertices
+    if (!ro.spill.empty()) {
+        members += "    uint mgl_svs[3];\n    constant MGLDrawInfo* mgl_SD;\n";
+        spillV = indentBy(spillVertexCode(ro, "", "mgl_SD->", "mgl_svs[mgl_nv % 3u]"), 8);
+    }
     // only vertex stream 0 is rasterized
     std::string m = "    void mgl_EmitVertex(int s) {\n        if (s != 0 || mgl_nv >= " + MV + "u) return;\n        MV v;\n" +
-                    indentBy(ro.vertexCopy, 8) + "        mgl_mo->set_vertex(mgl_nv, v);\n        uint c = mgl_nv++;\n        mgl_strip++;\n";
-    std::string prim = "            MP p;\n" + indentBy(ro.primCopy, 12) + "            mgl_mo->set_primitive(mgl_np, p);\n            mgl_np++;\n";
+                    indentBy(ro.vertexCopy, 8) + spillV + "        mgl_mo->set_vertex(mgl_nv, v);\n        uint c = mgl_nv++;\n        mgl_strip++;\n";
+    auto prim = [&](std::vector<std::string> idx) {
+        std::string sp = spillPrimCode(ro, gipp, [&](int k) { return "mgl_svs[(" + idx[k] + ") % 3u]"; });
+        return "            MP p;\n" + indentBy(ro.primCopy, 12) + indentBy(sp, 12) + "            mgl_mo->set_primitive(mgl_np, p);\n            mgl_np++;\n";
+    };
     if (points)
-        m += "        if (mgl_np < " + MP + "u) {\n            mgl_mo->set_index(mgl_np, c);\n" + prim + "        }\n";
+        m += "        if (mgl_np < " + MP + "u) {\n            mgl_mo->set_index(mgl_np, c);\n" + prim({"c"}) + "        }\n";
     else if (lines)
         m += "        if (mgl_strip >= 2u && mgl_np < " + MP + "u) {\n            mgl_mo->set_index(2u * mgl_np, c);\n"
-             "            mgl_mo->set_index(2u * mgl_np + 1u, c - 1u);\n" + prim + "        }\n";
+             "            mgl_mo->set_index(2u * mgl_np + 1u, c - 1u);\n" + prim({"c", "c - 1u"}) + "        }\n";
     else
         m += "        if (mgl_strip >= 3u && mgl_np < " + MP + "u) {\n            uint a = c - 2u, b = c - 1u;\n"
              "            if (((mgl_strip - 3u) & 1u) != 0u) { uint t = a; a = b; b = t; }\n"
              "            mgl_mo->set_index(3u * mgl_np, c);\n            mgl_mo->set_index(3u * mgl_np + 1u, a);\n"
-             "            mgl_mo->set_index(3u * mgl_np + 2u, b);\n" + prim + "        }\n";
+             "            mgl_mo->set_index(3u * mgl_np + 2u, b);\n" + prim({"c", "a", "b"}) + "        }\n";
     m += "    }\n    void mgl_EndPrimitive(int s) { if (s == 0) mgl_strip = 0u; }\n";
     emitBody(Stage::Geometry, o, preG, members, m);
     o += "}  // namespace gs\n\n";
@@ -3186,6 +3309,7 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
     e += "    if (mgl_tid == 0u) {\n";
     e += "        gs::G g = {};\n        g.A = " + argsOf(Stage::Geometry) + ";\n        g.sys = &sys;\n        g.mgl_mo = &mgl_mo;\n        g.mgl_nv = 0u;\n"
          "        g.mgl_np = 0u;\n        g.mgl_strip = 0u;\n        g.mgl_primIn = int(mgl_prim);\n";
+    if (!ro.spill.empty()) e += "        g.mgl_SD = &D;\n";
     e += loop;
     useStage(Stage::Geometry);
     for (auto* v : gsi.builtins) {
@@ -3201,7 +3325,65 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
     ep.threadsPerThreadgroup[0] = NV;
     ep.maxMeshVertices = maxV;
     ep.maxMeshPrimitives = maxP;
+    ep.spillRecordBytes = (uint32_t)(16 * ro.spill.size());
     out_.entryPoints.push_back(ep);
+    noteSpill(ro, gipp);
+    fragInputsAvailable_ = ro.names;
+    haveVsOutputs_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Vertex shader on a mesh stage (no GS/tessellation): used when the fragment inputs do not fit a classic
+// Metal vertex -> fragment interface, so that the excess can be spilled (see rasterOutput). One threadgroup per
+// input primitive of the decomposed list, one thread per vertex.
+// ---------------------------------------------------------------------------
+void Emitter::emitVertexMesh(std::string& o) {
+    uint32_t prim = K.primitive;
+    bool points = prim == gl::POINTS, lines = prim == gl::LINES || prim == gl::LINES_ADJACENCY;
+    bool adj = prim == gl::LINES_ADJACENCY || prim == gl::TRIANGLES_ADJACENCY;
+    if (prim != gl::POINTS && prim != gl::LINES && prim != gl::TRIANGLES && !adj) fail("unsupported primitive for a vertex mesh pipeline");
+    int NV = points ? 1 : lines ? (adj ? 4 : 2) : (adj ? 6 : 3);
+    int ipp = points ? 1 : lines ? 2 : 3;
+    // vertices of the rasterized primitive, provoking vertex first (flat inputs read the first mesh vertex)
+    std::vector<int> used = points ? std::vector<int>{0} : lines ? (adj ? std::vector<int>{1, 2} : std::vector<int>{0, 1})
+                                                                 : (adj ? std::vector<int>{0, 2, 4} : std::vector<int>{0, 1, 2});
+    if (K.flatshadeLastVertex) std::rotate(used.begin(), used.end() - 1, used.end());
+    emitBody(Stage::Vertex, o);
+    o += "}  // namespace vs\n\n";
+    RasterOut ro = rasterOutput(Stage::Vertex, "vg.", true, points, NV, 1, ipp);
+    if (fsReadsPrimitiveId()) {
+        ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
+        ro.primCopy += "p.mgl_primid = int(mgl_prim);\n";
+    }
+    std::string topo = points ? "point" : lines ? "line" : "triangle";
+    o += "struct mgl_VM_V {\n" + ro.vertexStruct + "};\nstruct mgl_VM_P {\n" + ro.primStruct + "};\n";
+    o += "using mgl_VM_T = mesh<mgl_VM_V, mgl_VM_P, " + std::to_string(NV) + ", 1, topology::" + topo + ">;\n\n";
+    std::string N = std::to_string(NV);
+    std::string e = "[[mesh]] void mgl_vsm(mgl_VM_T mgl_mo, constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], "
+                    "constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], "
+                    "uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
+    e += "    uint mgl_prim = mgl_tg.x, mgl_inst = mgl_tg.y;\n";
+    if (!ro.spill.empty()) e += "    threadgroup uint mgl_svs[" + N + "];\n";
+    e += "    if (mgl_tid < " + N + "u) {\n";
+    e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_tid] + uint(D.baseVertex)", "mgl_inst"), 8);
+    useStage(Stage::Vertex);
+    e += "        mgl_VM_V v;\n" + indentBy(ro.vertexCopy, 8);
+    e += indentBy(spillVertexCode(ro, "vg.", "D.", "mgl_svs[mgl_tid]"), 8);
+    e += "        mgl_mo.set_vertex(mgl_tid, v);\n    }\n";
+    if (!ro.spill.empty()) e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    if (mgl_tid == 0u) {\n";
+    for (int k = 0; k < ipp; k++) e += "        mgl_mo.set_index(" + std::to_string(k) + ", " + std::to_string(used[k]) + ");\n";
+    std::string sp = spillPrimCode(ro, ipp, [&](int k) { return "mgl_svs[" + std::to_string(used[k]) + "]"; });
+    e += "        mgl_VM_P p;\n" + indentBy(ro.primCopy, 8) + indentBy(sp, 8);
+    e += "        mgl_mo.set_primitive(0, p);\n        mgl_mo.set_primitive_count(1);\n    }\n}\n\n";
+    entries_ += e;
+    EntryPoint ep{"mgl_vsm", Stage::Vertex, EntryPoint::Mesh};
+    ep.threadsPerThreadgroup[0] = NV;
+    ep.maxMeshVertices = NV;
+    ep.maxMeshPrimitives = 1;
+    ep.spillRecordBytes = (uint32_t)(16 * ro.spill.size());
+    out_.entryPoints.push_back(ep);
+    noteSpill(ro, ipp);
     fragInputsAvailable_ = ro.names;
     haveVsOutputs_ = true;
 }
@@ -3363,7 +3545,7 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     std::string sPB = std::to_string(ts_.PB) + "u";
     prepareStage(Stage::TessEval);
     StageInfo& esi = si_[(int)Stage::TessEval];
-    RasterOut ro = rasterOutput(Stage::TessEval, "g.", true, points);
+    RasterOut ro = rasterOutput(Stage::TessEval, "g.", true, points, MAXV, MAXP, ipp);
     if (fsReadsPrimitiveId()) {
         ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
         ro.primCopy += "p.mgl_primid = int(pl.patch);\n";
@@ -3393,13 +3575,19 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     e += "        mgl_tess T = pl.T;\n        uint nv, np;\n        mgl_tess_unit(T, mgl_tg.x, mgl_co, mgl_tp, mgl_idx, nv, np);\n";
     e += "        mgl_cnt[0] = nv;\n        mgl_cnt[1] = np;\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
     e += "    uint nv = mgl_cnt[0], np = mgl_cnt[1];\n";
+    if (!ro.spill.empty()) e += "    threadgroup uint mgl_svs[" + std::to_string(MAXV) + "];\n";
     e += "    for (uint k = mgl_tid; k < nv; k += " + std::to_string(NT) + "u) {\n";
     e += indentBy(tesRun("mgl_co[k]", "pl.patch", "pl.cps"), 8);
     e += "        tes::MV v;\n" + indentBy(ro.vertexCopy, 8);
+    e += indentBy(spillVertexCode(ro, "g.", "D.", "mgl_svs[k]"), 8);
     e += "        mgl_mo.set_vertex(k, v);\n    }\n";
+    if (!ro.spill.empty()) e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
     e += "    for (uint k = mgl_tid; k < np * " + std::to_string(ipp) + "u; k += " + std::to_string(NT) + "u) mgl_mo.set_index(k, mgl_idx[k]);\n";
+    std::string sp = spillPrimCode(ro, ipp, [&](int k) {
+        return "mgl_svs[mgl_idx[k * " + std::to_string(ipp) + "u + " + std::to_string(k) + "u]]";
+    });
     e += "    for (uint k = mgl_tid; k < np; k += " + std::to_string(NT) + "u) {\n        tes::MP p;\n" + indentBy(ro.primCopy, 8) +
-         "        mgl_mo.set_primitive(k, p);\n    }\n";
+         indentBy(sp, 8) + "        mgl_mo.set_primitive(k, p);\n    }\n";
     e += "    if (mgl_tid == 0u) {\n        mgl_mo.set_primitive_count(np);\n"
          "        if (D.stats != nullptr) {  // pipeline statistics: TES invocations, tessellated primitives\n"
          "            atomic_fetch_add_explicit(D.stats + 1, nv, memory_order_relaxed);\n"
@@ -3412,7 +3600,9 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     ms.threadsPerThreadgroup[0] = NT;
     ms.maxMeshVertices = MAXV;
     ms.maxMeshPrimitives = MAXP;
+    ms.spillRecordBytes = (uint32_t)(16 * ro.spill.size());
     out_.entryPoints.push_back(ms);
+    noteSpill(ro, ipp);
     fragInputsAvailable_ = ro.names;
     haveVsOutputs_ = true;
 }
@@ -3789,9 +3979,9 @@ MSLOutput Emitter::run() {
                 if (SC(Stage::Fragment).main) emitFS(o, false);
                 break;
             case PipelineKind::MeshGeometry:
-                if (!gs) fail("program has no geometry shader");
                 if (tess) fail("tessellation programs need PipelineKind::Tessellation");
-                emitGeometry(o, false);
+                if (gs) emitGeometry(o, false);
+                else emitVertexMesh(o);  // vertex shader outputs past the classic interface limit
                 if (SC(Stage::Fragment).main) emitFS(o, true);
                 else emitNullFS();
                 break;

@@ -1220,6 +1220,13 @@ void Linker::checkVaryings() {
         auto arrayedIn = [](Stage s, const Variable* v) { return s != Stage::Vertex && s != Stage::Fragment && !v->q.patch; };
         for (size_t i = 0; i + 1 < chain.size(); i++) {
             Stage ps = chain[i], cs = chain[i + 1];
+            // GLSL 4.60 7.1.1: a built-in block redeclared on both sides of an interface must be redeclared the same way
+            {
+                std::vector<std::string> po, ci;
+                for (auto& sh : prog_->stages[(int)ps].shaders) if (!sh->perVertexOut.empty()) po = sh->perVertexOut;
+                for (auto& sh : prog_->stages[(int)cs].shaders) if (!sh->perVertexIn.empty()) ci = sh->perVertexIn;
+                if (!po.empty() && !ci.empty() && po != ci) error("gl_PerVertex is redeclared differently in consecutive shader stages");
+            }
             std::map<std::string, const Variable*> outs;
             for (auto* v : prog_->stages[(int)ps].globals)
                 if (v->q.storage == Storage::Out && v->builtin == BuiltinVar::None) outs[varyingKey(v, ps)] = v;
@@ -1291,6 +1298,30 @@ void Linker::stageMetadata() {
         if (!r.tesPrimitiveMode) error("tessellation evaluation shader does not declare a primitive mode");
     }
     if (auto& fs = prog_->stages[(int)Stage::Fragment]; fs.main) {
+        // Metal passes at most 124 user scalars from a vertex function to a fragment function
+        if (prog_->stages[(int)Stage::Vertex].main && !prog_->stages[(int)Stage::Geometry].main &&
+            !prog_->stages[(int)Stage::TessEval].main) {
+            int scalars = 0;
+            for (auto* v : fs.used) {
+                if (v->q.storage != Storage::In) continue;
+                bool compat = v->builtin == BuiltinVar::FragColorIn || v->builtin == BuiltinVar::SecondaryColorIn ||
+                              v->builtin == BuiltinVar::TexCoord || v->builtin == BuiltinVar::FogFragCoord ||
+                              v->builtin == BuiltinVar::ClipDistance || v->builtin == BuiltinVar::CullDistance;
+                if (v->builtin != BuiltinVar::None && !compat) continue;
+                std::function<int(const Type&)> count = [&](const Type& t) -> int {
+                    int n = std::max(1, t.totalArrayElements());
+                    Type b = t.stripArrays();
+                    if (b.base == BT::Struct) {
+                        int c = 0;
+                        for (auto& m : b.sdef->members) c += count(m.type);
+                        return n * c;
+                    }
+                    return n * b.components() * (b.base == BT::Double ? 2 : 1);
+                };
+                scalars += count(v->type);
+            }
+            r.vsMeshPassthrough = scalars > 124;
+        }
         r.usesFragDepth = fs.writesFragDepth;
         r.earlyFragmentTests = fs.inLayout.earlyFragmentTests;
         r.usesDiscard = fs.usesDiscard;

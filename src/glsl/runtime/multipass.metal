@@ -38,6 +38,10 @@ struct MGLDrawInfo {
     uint xfbBufferStream[4];
     device uint* gsRecord;
     device atomic_uint* stats;
+    device uint4* spillBuffer;
+    device atomic_uint* spillCounter;
+    uint spillCapacity;
+    uint pad1;
 };
 inline device const uchar* mgl_vptr(constant MGLDrawInfo& D, uint b, uint off, uint vid, uint inst) {
     device const uchar* p = D.vertexBuffer[b];
