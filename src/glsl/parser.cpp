@@ -843,6 +843,25 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     if (blockName == "gl_PerVertex" && !preamble_) {
         // Redeclaration of a builtin block: members map onto the existing builtins.
         if (!inst.empty() && inst != "gl_in" && inst != "gl_out") fail("invalid gl_PerVertex redeclaration");
+        if (q.storage == Storage::Out && inst.empty()) {
+            // transform feedback qualifiers (enhanced layouts) apply to the builtin outputs
+            int cur = q.layout.xfbOffset;
+            for (auto& m : sd->members) {
+                int off = m.q.layout.xfbOffset >= 0 ? m.q.layout.xfbOffset : cur;
+                auto it = scopes_[0].find(m.name);
+                Variable* bv = it != scopes_[0].end() ? it->second.var : nullptr;
+                if (off >= 0 && bv && bv->builtin != BuiltinVar::None) {
+                    bv->q.layout.xfbOffset = off;
+                    if (m.q.layout.xfbBuffer >= 0) bv->q.layout.xfbBuffer = m.q.layout.xfbBuffer;
+                    else if (q.layout.xfbBuffer >= 0) bv->q.layout.xfbBuffer = q.layout.xfbBuffer;
+                    if (q.layout.xfbStride >= 0) bv->q.layout.xfbStride = q.layout.xfbStride;
+                }
+                if (off >= 0) {
+                    Type b = m.type.stripArrays();
+                    cur = off + b.components() * (b.base == BT::Double ? 8 : 4) * std::max(1, m.type.totalArrayElements());
+                }
+            }
+        }
         return;
     }
     sd->instanceName = inst;

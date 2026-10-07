@@ -2348,6 +2348,27 @@ std::string Decompiler::run() {
                        num(arrayLen(t)) + "];\n";
         }
     }
+    // transform feedback of builtin outputs: gl_PerVertex redeclaration carrying the xfb qualifiers
+    for (uint32_t id : usedGlobals_) {
+        uint32_t pt = typeOf(id), st = in(pt)[3];
+        if (in(pt)[2] != StorageClassOutput || !isBuiltinStruct(st)) continue;
+        bool xfb = false;
+        for (uint32_t i = 0; i + 2 < len(st); i++)
+            if (mdeco(st, i).offset >= 0) xfb = true;
+        if (!xfb) continue;
+        const Deco& d = deco(id);
+        std::vector<std::string> L;
+        if (d.xfbBuffer >= 0) L.push_back("xfb_buffer = " + num(d.xfbBuffer));
+        if (d.xfbStride >= 0) L.push_back("xfb_stride = " + num(d.xfbStride));
+        std::string x = L.empty() ? "" : "layout(" + L[0] + (L.size() > 1 ? ", " + L[1] : "") + ") ";
+        x += "out gl_PerVertex {\n";
+        for (uint32_t i = 0; i + 2 < len(st); i++) {
+            const Deco& md = mdeco(st, i);
+            std::string ml = md.offset >= 0 ? "layout(xfb_offset = " + num(md.offset) + ") " : "";
+            x += "    " + ml + decl(in(st)[2 + i], builtinName(md.builtin, StorageClassOutput)) + ";\n";
+        }
+        layouts += x + "};\n";
+    }
     for (auto& [id, d] : deco_)
         if (d.builtin == BuiltInPosition && d.invariant && usedGlobals_.count(id)) layouts += "invariant gl_Position;\n";
     for (auto& [k, d] : mdeco_)
