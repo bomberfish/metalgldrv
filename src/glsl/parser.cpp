@@ -342,6 +342,21 @@ void Parser::finalize() {
             if (st == Stage::TessControl && !in && sh_.outLayout.vertices > 0 && n != sh_.outLayout.vertices)
                 fail("array size of output " + what + " does not match the output patch size", v.line);
         }
+        // GLSL 4.60 4.3.4/4.3.6: fragment shader double inputs must be flat, outputs cannot be double
+        if (st == Stage::Fragment)
+            for (auto& v : sh_.vars) {
+                if (!v.global || v.builtin != BuiltinVar::None || v.param) continue;
+                if (v.q.storage == Storage::Out && v.type.stripArrays().base == BT::Double)
+                    fail("fragment shader output '" + v.name + "' cannot be double-precision", v.line);
+                if (v.q.storage != Storage::In) continue;
+                if (v.block) {
+                    for (auto& m : v.block->members)
+                        if (m.type.stripArrays().base == BT::Double && m.q.interp != Interp::Flat && v.q.interp != Interp::Flat)
+                            fail("double-precision fragment shader input '" + m.name + "' must be flat", v.line);
+                } else if (v.type.stripArrays().base == BT::Double && v.q.interp != Interp::Flat) {
+                    fail("double-precision fragment shader input '" + v.name + "' must be flat", v.line);
+                }
+            }
         if (st == Stage::TessControl && sh_.outLayout.vertices != -1 && (sh_.outLayout.vertices <= 0 || sh_.outLayout.vertices > 32))
             fail("invalid output patch vertex count", 0);
         if (st == Stage::Geometry && sh_.outLayout.maxVertices > 256) fail("max_vertices exceeds gl_MaxGeometryOutputVertices", 0);

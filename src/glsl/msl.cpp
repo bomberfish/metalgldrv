@@ -2314,7 +2314,7 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
             std::string sw = n == 1 ? ".x" : n == 4 ? "" : "." + std::string(kSwz, n);
             if (stageIn) {
                 if (lt.base == BT::Double) {
-                    std::string L1 = std::to_string(loc + 1);
+                    std::string L1 = std::to_string(16 + loc);  // second half: Metal attribute 16 + L
                     if (n <= 2) {
                         inS += "    uint" + std::to_string(2 * n) + " a" + L0 + " [[attribute(" + L0 + ")]];\n";
                         code += "    " + a + " = as_type<" + vecName(BT::Double, n) + ">(in.a" + L0 + ");\n";
@@ -2324,7 +2324,7 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                         inS += "    uint" + std::to_string(2 * (n - 2)) + " a" + L1 + " [[attribute(" + L1 + ")]];\n";
                         code += "    " + a + " = " + vecName(BT::Double, n) + "(as_type<ulong2>(in.a" + L0 + "), as_type<" +
                                 vecName(BT::Double, n - 2) + ">(in.a" + L1 + "));\n";
-                        loc += 2;
+                        loc += 1;
                     }
                     anyIn = true;
                     continue;
@@ -2357,9 +2357,10 @@ std::string Emitter::vsInputs(bool stageIn, std::string& inS, bool& anyIn, const
                 std::string d4 = f.enabled ? (f.isDouble ? "mgl_fetch_d(" + ptr + ", " + std::to_string(f.size) + "u)"
                                                          : "mgl_f64_from_float(mgl_fetch_f(" + ptr + ", " + std::to_string(f.glType) + "u, " +
                                                                std::to_string(f.size) + "u, " + (f.normalized ? "true" : "false") + "))")
-                                           : "mgl_f64_from_float(" + cur + ")";
+                                           : "ulong4(as_type<ulong2>(sys.currentAttribD[2 * " + L0 + "]), as_type<ulong2>(sys.currentAttribD[2 * " + L0 +
+                                                 " + 1]))";
                 val = d4 + sw;
-                loc += n > 2 ? 2 : 1;
+                loc += 1;
             } else if (lt.base == BT::Float) {
                 val = (f.enabled ? "mgl_fetch_f(" + ptr + ", " + std::to_string(f.glType) + "u, " + std::to_string(f.size) + "u, " +
                                        (f.normalized ? "true" : "false") + ")"

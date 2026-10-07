@@ -48,6 +48,8 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
     for (int i = 0; i < kMaxVertexAttribs; i++) {
         currentAttrib[i][0] = currentAttrib[i][1] = currentAttrib[i][2] = 0;
         currentAttrib[i][3] = 1;
+        currentAttribD[i][0] = currentAttribD[i][1] = currentAttribD[i][2] = 0;
+        currentAttribD[i][3] = 1;
         currentAttribType[i] = GL_FLOAT;
     }
     for (int i = 0; i < kNumTexTargets; i++) {
