@@ -52,6 +52,7 @@ const std::vector<std::string>& supportedExtensions() {
         "GL_ARB_shader_subroutine",
         "GL_ARB_shader_precision",
         "GL_EXT_shader_integer_mix",
+        "GL_EXT_texture_shadow_lod",
         "GL_EXT_gpu_shader4",
         "GL_EXT_texture_array",
         "GL_EXT_geometry_shader4",

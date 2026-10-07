@@ -248,10 +248,14 @@ void addTextureFunctions(Ctx& c) {
             // texture
             if (cubeArrShadow) {
                 c.add("texture", F, {T, P, F});
+                c.addBias("texture", F, {T, P, F, F});  // EXT_texture_shadow_lod
+                c.add("textureLod", F, {T, P, F, F});   // EXT_texture_shadow_lod
                 c.add("textureGrad", F, {T, P, F, gradT, gradT});  // nonstandard but harmless
             } else {
                 c.add("texture", ret, {T, P});
-                bool bias = !rect && !(sh && arr && T.dim == Dim::D2);
+                // (sampler2DArrayShadow bias, textureLod on sampler2DArrayShadow / samplerCubeShadow and
+                // textureLodOffset on sampler2DArrayShadow: EXT_texture_shadow_lod)
+                bool bias = !rect;
                 if (bias) c.addBias("texture", ret, {T, P, F});
                 // textureLod
                 if (!rect) c.add("textureLod", ret, {T, P, F});

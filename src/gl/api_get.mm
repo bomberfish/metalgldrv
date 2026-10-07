@@ -57,7 +57,7 @@ const char* kExtensions[] = {
     "GL_EXT_texture_compression_dxt1", "GL_EXT_texture_compression_rgtc", "GL_EXT_texture_compression_s3tc",
     "GL_EXT_texture_edge_clamp", "GL_EXT_texture_filter_anisotropic", "GL_EXT_texture_integer", "GL_EXT_texture_lod_bias",
     "GL_EXT_texture_mirror_clamp", "GL_EXT_texture_rectangle", "GL_EXT_texture_sRGB", "GL_EXT_texture_sRGB_decode",
-    "GL_EXT_texture_shared_exponent", "GL_EXT_texture_snorm", "GL_EXT_texture_swizzle", "GL_EXT_timer_query",
+    "GL_EXT_texture_shadow_lod", "GL_EXT_texture_shared_exponent", "GL_EXT_texture_snorm", "GL_EXT_texture_swizzle", "GL_EXT_timer_query",
     "GL_EXT_transform_feedback", "GL_EXT_vertex_array_bgra", "GL_IBM_texture_mirrored_repeat", "GL_KHR_context_flush_control",
     "GL_KHR_debug", "GL_KHR_no_error", "GL_KHR_parallel_shader_compile", "GL_KHR_robust_buffer_access_behavior",
     "GL_KHR_robustness", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
