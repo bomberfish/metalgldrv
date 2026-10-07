@@ -345,6 +345,7 @@ private:
     bool addressable(const Expr* e);
     bool isBufferRooted(const Expr* e);
     std::pair<std::string, std::string> texRef(const Expr* e);
+    std::string borderRef(const Expr* e);
     std::string withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs, const std::vector<Type>& ptypes,
                          const Type& ret, const std::function<std::string(size_t, const Expr*)>& argFn, const std::string& firstArg = "");
     std::string subroutineDispatchers();
@@ -1067,6 +1068,22 @@ std::string Emitter::withOuts(const std::string& callee, const Expr* e, const st
     return "(" + pre + r + " = " + call + ", " + post + ", " + r + ")";
 }
 
+// Argument slot holding the emulated border color of an integer sampler uniform, or ""
+// (sampler function parameters, dynamically indexed arrays, struct members).
+std::string Emitter::borderRef(const Expr* e) {
+    const Expr* v = e;
+    int idx = 0;
+    if (e->kind == EK::Index) {
+        if (!e->args[1]->cv) return "";
+        idx = (int)e->args[1]->cv->c[0].i;
+        v = e->args[0];
+    }
+    if (v->kind != EK::Var || v->var->param) return "";
+    auto it = P->opaque.find(v->var->name);
+    if (it == P->opaque.end() || it->second.borderSlot < 0 || idx < 0 || idx >= it->second.count) return "";
+    return "A->s" + std::to_string(it->second.borderSlot + idx);
+}
+
 std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
     // opaque members of uniform structs: resolve the constant access path to its binding
     if (e->kind == EK::Field || (e->kind == EK::Index && e->args[0]->kind == EK::Field)) {
@@ -1649,6 +1666,15 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     }
     if (!options.empty()) args += ", " + options;
     if (!offset.empty()) args += ", " + offset;
+    if (!sh && (T.sampled == BT::Int || T.sampled == BT::UInt) && dim != Dim::Cube) {
+        std::string br = borderRef(A[0]);
+        if (!br.empty()) {
+            // Integer textures with GL_CLAMP_TO_BORDER: Metal can only return black/white.
+            std::string c = bind(coord, dim == Dim::D3 ? "float3" : "float2", pre);
+            args = smp + ", " + c + args.substr(smp.size() + 2 + coord.size());
+            return finish("mgl_int_border(" + tex + ".sample(" + args + "), " + c + ", " + br + ")");
+        }
+    }
     return finish(tex + (sh ? ".sample_compare(" : ".sample(") + args + ")");
 }
 

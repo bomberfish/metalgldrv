@@ -879,6 +879,13 @@ void Linker::assignUniforms() {
             ob.samplerSlot = slot;
             for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::Sampler, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
             slot += n;
+            // Metal border colors are limited to black/white: integer samplers that filter
+            // (not buffer / multisample) get their border color emulated in the shader.
+            if ((bt.sampled == BT::Int || bt.sampled == BT::UInt) && !bt.shadow && !bt.ms && bt.dim != Dim::Buffer && bt.dim != Dim::Cube) {
+                ob.borderSlot = slot;
+                for (int i = 0; i < n; i++) refl.slots.push_back({SlotKind::SamplerBorder, (uint32_t)uidx, (uint32_t)i, textureTargetFor(bt)});
+                slot += n;
+            }
         } else if (bt.base == BT::Image) {
             ob.kind = SlotKind::Image;
             ob.slot = slot;

@@ -89,7 +89,8 @@ const std::vector<std::string>& supportedSpirvExtensions();
 //   BufferSize                             : uint64 byte size of the bound SSBO range
 //                                            (for runtime-sized arrays .length())
 enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer,
-                                SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */ };
+                                SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */,
+                                SamplerBorder /* integer samplers: GPU address of int4[2] {border color, clamp-to-border axis mask} */ };
 
 struct Slot {
     SlotKind kind;

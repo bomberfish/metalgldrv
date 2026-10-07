@@ -94,7 +94,22 @@ int textureStorageLevelFor(const Texture* t) {
 
 bool ensureTextureStorage(Context* ctx, Texture* t) {
     if (t->target == GL_TEXTURE_BUFFER) return t->mtl != nil || ensureBufferTexture(ctx, t);
-    if (t->viewParent) return t->mtl != nil;
+    if (t->viewParent) {
+        // A view follows its root's storage, which may have been reallocated (format view /
+        // shader write usage): recreate the Metal view when its parent changed.
+        Texture* root = t->viewParent.get();
+        if (!ensureTextureStorage(ctx, root) || !t->storageFmt) return t->mtl != nil;
+        if (t->mtl && t->mtl.parentTexture == root->mtl) return true;
+        MTLTextureType vt = mtlTextureType(t->target, root->samples);
+        id<MTLTexture> v = [root->mtl newTextureViewWithPixelFormat:t->storageFmt->mtl textureType:vt
+                                                             levels:NSMakeRange(t->viewMinLevel, t->viewNumLevels)
+                                                             slices:NSMakeRange(t->viewMinLayer, vt == MTLTextureType3D ? 1 : t->viewNumLayers)];
+        if (!v) return t->mtl != nil;
+        if (t->mtl) ctx->dev->retainUntil(t->mtl, std::max(t->lastUse, t->lastGpuWrite));
+        t->dropViews();
+        t->mtl = v;
+        return true;
+    }
     if (!t->storageDirty && t->mtl) return true;
     int ref = textureStorageLevelFor(t);
     if (ref < 0) return false;

@@ -47,6 +47,7 @@ struct OpaqueBinding {
     SlotKind kind;   // Texture (sampler uniforms), Image, AtomicCounter
     int slot = -1;   // first texture/image slot
     int samplerSlot = -1;
+    int borderSlot = -1;  // integer samplers: emulated border color (SlotKind::SamplerBorder)
     int count = 1;   // array elements
     bool isArray = false;  // declared as an array (also when count == 1)
     int uniformIndex = -1;

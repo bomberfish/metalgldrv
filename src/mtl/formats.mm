@@ -486,6 +486,27 @@ bool directUploadCompatible(const FormatInfo* f, GLenum format, GLenum type) {
     case MTLPixelFormatDepth16Unorm: return format == GL_DEPTH_COMPONENT && type == GL_UNSIGNED_SHORT;
     case MTLPixelFormatDepth32Float: return format == GL_DEPTH_COMPONENT && type == GL_FLOAT;
     case MTLPixelFormatStencil8: return format == GL_STENCIL_INDEX && type == GL_UNSIGNED_BYTE;
+    default: break;
+    }
+    // Generic: per-channel storage matching the client layout exactly (e.g. RG8_SNORM with
+    // GL_RG/GL_BYTE) is copied as is, which keeps values such as -128 that a round trip
+    // through floats would change.
+    if (f->order[0] != 0 || f->order[1] != 1 || f->order[2] != 2 || f->order[3] != 3) return false;
+    int baseChannels = f->baseFormat == GL_RED ? 1 : f->baseFormat == GL_RG ? 2 : f->baseFormat == GL_RGBA ? 4 : 0;
+    if (baseChannels != f->channels) return false;
+    bool isInt = f->kind == FmtKind::UInt || f->kind == FmtKind::SInt;
+    GLenum want = baseChannels == 1 ? (isInt ? GL_RED_INTEGER : GL_RED) : baseChannels == 2 ? (isInt ? GL_RG_INTEGER : GL_RG)
+                                                                                        : (isInt ? GL_RGBA_INTEGER : GL_RGBA);
+    if (format != want) return false;
+    switch (f->comp) {
+    case Comp::U8: return type == GL_UNSIGNED_BYTE && (f->kind == FmtKind::Unorm || f->kind == FmtKind::UInt);
+    case Comp::S8: return type == GL_BYTE && (f->kind == FmtKind::Snorm || f->kind == FmtKind::SInt);
+    case Comp::U16: return type == GL_UNSIGNED_SHORT && (f->kind == FmtKind::Unorm || f->kind == FmtKind::UInt);
+    case Comp::S16: return type == GL_SHORT && (f->kind == FmtKind::Snorm || f->kind == FmtKind::SInt);
+    case Comp::U32: return type == GL_UNSIGNED_INT && f->kind == FmtKind::UInt;
+    case Comp::S32: return type == GL_INT && f->kind == FmtKind::SInt;
+    case Comp::F16: return type == GL_HALF_FLOAT && f->kind == FmtKind::Float;
+    case Comp::F32: return type == GL_FLOAT && f->kind == FmtKind::Float;
     default: return false;
     }
 }

@@ -176,6 +176,18 @@ std::vector<Chunk> buildChunks() {
     // --- fp64 (soft-float library from the runtime + matrix helpers composed on it) ---------
     // The library is generated from src/glsl/runtime/fp64.metal by the build as a string literal.
     c.push_back({{"mgl_f64_lib"}, kFp64Library});
+    // --- integer border color emulation (b[0] = color, b[1].x = clamp-to-border axis mask) ---
+    c.push_back({{"mgl_int_border"}, R"(template <typename T, typename C>
+inline T mgl_int_border(T v, C c, ulong addr) {
+    constant int4* b = (constant int4*)addr;
+    int m = b[1].x;
+    if (m == 0) return v;
+    bool o = false;
+    for (int i = 0; i < int(sizeof(C) / sizeof(float)); i++)
+        if (((m >> i) & 1) != 0 && (c[i] < 0.0f || c[i] >= 1.0f)) o = true;
+    return o ? T(b[0]) : v;
+}
+)"});
     // --- arrays ---------------------------------------------------------------------
     c.push_back({{"mgl_array"}, R"(template <typename T, int N>
 struct mgl_array {

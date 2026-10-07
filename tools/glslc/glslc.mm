@@ -39,6 +39,7 @@ static const char* slotKindName(SlotKind k) {
         case SlotKind::BufferSize: return "BufferSize";
         case SlotKind::XfbBuffer: return "XfbBuffer";
         case SlotKind::SubroutineIndices: return "SubroutineIndices";
+        case SlotKind::SamplerBorder: return "SamplerBorder";
     }
     return "?";
 }
