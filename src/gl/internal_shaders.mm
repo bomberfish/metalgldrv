@@ -247,6 +247,16 @@ void presentSurface(Context* ctx, Surface* s, id<CAMetalDrawable> drawable) {
     id<MTLTexture> dst = drawable.texture;
     // Resolve MSAA default framebuffer first.
     ctx->endEncoder();
+    if (s->msColor) {
+        MTL4RenderPassDescriptor* rrp = [MTL4RenderPassDescriptor new];
+        rrp.colorAttachments[0].texture = s->msColor;
+        rrp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rrp.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+        rrp.colorAttachments[0].resolveTexture = s->color;
+        id<MTL4RenderCommandEncoder> re = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rrp];
+        [re barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment visibilityOptions:MTL4VisibilityOptionDevice];
+        [re endEncoding];
+    }
     id<MTLTexture> srcTex = s->color;
     if (s->outWidth > s->width && (int)dst.width == s->outWidth && (int)dst.height == s->outHeight) {
         if (id<MTLTexture> up = metalfxUpscale(ctx, s, s->outWidth, s->outHeight)) srcTex = up;

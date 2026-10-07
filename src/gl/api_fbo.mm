@@ -834,7 +834,7 @@ id<MTLTexture> readAttachmentTexture(Context* ctx, Framebuffer* fb, const Format
         Surface* s = fb->surface;
         if (!s || fb->readBuffer == GL_NONE) return nil;
         *f = s->colorFmt ? s->colorFmt : formatInfo(GL_RGBA8);
-        return s->color;
+        return s->msColor ? s->msColor : s->color;  // multisample: draws land in msColor; readers resolve it
     }
     GLenum rb = fb->readBuffer;
     if (rb < GL_COLOR_ATTACHMENT0 || rb >= GL_COLOR_ATTACHMENT0 + kMaxDrawBuffers) return nil;
@@ -1036,9 +1036,7 @@ API void APIENTRY glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fo
         for (auto& a : fb->att)
             if (a.type == GL_RENDERBUFFER && a.rb && a.rb->samples > 1) return ctx->setError(GL_INVALID_OPERATION);
             else if (a.type == GL_TEXTURE && a.tex && a.tex->samples > 1) return ctx->setError(GL_INVALID_OPERATION);
-    } else if (fb->surface && fb->surface->samples > 1) {
-        return ctx->setError(GL_INVALID_OPERATION);
-    }
+    }  // §18.2.1: only a bound framebuffer errors; a multisample default framebuffer is resolved for the read
     if (w == 0 || h == 0) return;
     readFramebufferPixels(ctx, fb, x, y, w, h, format, type, pixels, ctx->pack, -1);
 }
