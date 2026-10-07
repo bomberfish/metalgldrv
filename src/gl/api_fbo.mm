@@ -359,7 +359,9 @@ static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment,
     Attachment a;
     if (texture) {
         Texture* t = ctx->share->textures.get(texture);
-        if (!t) return ctx->setError(GL_INVALID_OPERATION, "texture %u does not exist", texture);
+        // GL 4.6 9.2.8: FramebufferTexture (layered) reports a missing texture as INVALID_VALUE, the
+        // other attachment commands as INVALID_OPERATION
+        if (!t || !t->target) return ctx->setError(layered ? GL_INVALID_VALUE : GL_INVALID_OPERATION, "texture %u does not exist", texture);
         if (level < 0) return ctx->setError(GL_INVALID_VALUE);
         if (t->immutable && level >= t->immutableLevels) return ctx->setError(GL_INVALID_VALUE, "level %d beyond the texture's storage", level);
         if (textarget && textarget != t->target &&
@@ -812,8 +814,11 @@ id<MTLTexture> readDepthStencilTexture(Context* ctx, Framebuffer* fb, bool stenc
 }
 
 // Resolves a multisampled texture region into a temporary single-sample texture.
-static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
+// `slice` selects the layer of a multisample array; the result is a single 2D image (slice 0).
+static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src, int* slice) {
     if (src.sampleCount <= 1) return src;
+    int layer = *slice;
+    *slice = 0;
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
     td.storageMode = MTLStorageModePrivate;
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -825,11 +830,13 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src) {
                  src.pixelFormat == MTLPixelFormatDepth16Unorm;
     if (depth) {
         rp.depthAttachment.texture = src;
+        rp.depthAttachment.slice = layer;
         rp.depthAttachment.loadAction = MTLLoadActionLoad;
         rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
         rp.depthAttachment.resolveTexture = dst;
     } else {
         rp.colorAttachments[0].texture = src;
+        rp.colorAttachments[0].slice = layer;
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
         rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
         rp.colorAttachments[0].resolveTexture = dst;
@@ -873,7 +880,7 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
         }
     }
     ctx->applyClearNow();
-    src = resolveForRead(ctx, src);
+    src = resolveForRead(ctx, src, &slice);
     int lw = std::max(1, (int)src.width >> level), lh = std::max(1, (int)src.height >> level);
     ClientLayout cl = clientLayout(format, type, w, h, ps);
     size_t need = clientImageSize(format, type, w, h, 1, ps);
@@ -998,7 +1005,7 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
     ctx->endEncoder();
     auto blitOne = [&](id<MTLTexture> src, int slevel, int sslice, id<MTLTexture> dst, int dlevel, int dslice, BlitParams::What what, bool linear) {
         if (!src || !dst) return;
-        src = resolveForRead(ctx, src);
+        src = resolveForRead(ctx, src, &sslice);
         BlitParams bp;
         bp.src = src;
         bp.srcLevel = slevel;
