@@ -142,12 +142,12 @@ uint64_t mgl::mglStatsGpuSlot(Context* ctx, bool gs, bool tess) {
     const uint32_t kSlots = 4096, kSlotBytes = 16;
     if (!ctx->statsSlots || ctx->statsNext >= kSlots) {
         ctx->statsSlots = ctx->dev->newBuffer(kSlots * kSlotBytes);
-        memset(ctx->statsSlots.contents, 0, kSlots * kSlotBytes);
+        memset(bufferContents(ctx->statsSlots), 0, kSlots * kSlotBytes);
         ctx->statsNext = 0;
     }
     uint32_t off = ctx->statsNext++ * kSlotBytes;
     id<MTLBuffer> b = ctx->statsSlots;
-    memset((uint8_t*)b.contents + off, 0, kSlotBytes);
+    memset((uint8_t*)bufferContents(b) + off, 0, kSlotBytes);
     // [0] GS primitives emitted, [1] TES invocations, [2] tessellated primitives
     if (gs && gsq) gsq->gpuCounts.push_back({b, off});
     if (tess && tesq) tesq->gpuCounts.push_back({b, off + 4});
@@ -161,12 +161,12 @@ static void attachVisibility(Context* ctx, Query* q) {
     const uint32_t kSlots = 4096;
     if (!ctx->visibilityBuffer || ctx->visibilityNext >= kSlots) {
         ctx->visibilityBuffer = ctx->dev->newBuffer(kSlots * 8);
-        memset(ctx->visibilityBuffer.contents, 0, kSlots * 8);
+        memset(bufferContents(ctx->visibilityBuffer), 0, kSlots * 8);
         ctx->visibilityNext = 0;
     }
     q->resultBuffer = ctx->visibilityBuffer;
     q->resultOffset = ctx->visibilityNext++ * 8;
-    memset((uint8_t*)q->resultBuffer.contents + q->resultOffset, 0, 8);
+    memset((uint8_t*)bufferContents(q->resultBuffer) + q->resultOffset, 0, 8);
     if (ctx->passOpen && ctx->passVisibilityBuffer != ctx->visibilityBuffer) {
         ctx->applyClearNow();
         ctx->endPass();
@@ -332,7 +332,7 @@ static bool resolveQuery(Context* ctx, Query* q, bool wait) {
     switch (q->target) {
     case GL_SAMPLES_PASSED: case GL_ANY_SAMPLES_PASSED: case GL_ANY_SAMPLES_PASSED_CONSERVATIVE: {
         uint64_t v = 0;
-        if (q->resultBuffer) memcpy(&v, (uint8_t*)q->resultBuffer.contents + q->resultOffset, 8);
+        if (q->resultBuffer) memcpy(&v, (uint8_t*)bufferContents(q->resultBuffer) + q->resultOffset, 8);
         q->result = q->target == GL_SAMPLES_PASSED ? v : (v != 0);
         break;
     }
@@ -352,12 +352,12 @@ static bool resolveQuery(Context* ctx, Query* q, bool wait) {
         uint64_t v = q->cpuCount;
         if (q->resultBuffer) {
             uint64_t samples = 0;
-            memcpy(&samples, (uint8_t*)q->resultBuffer.contents + q->resultOffset, 8);
+            memcpy(&samples, (uint8_t*)bufferContents(q->resultBuffer) + q->resultOffset, 8);
             v += samples;
         }
         for (auto& [buf, off] : q->gpuCounts) {
             uint32_t c = 0;
-            memcpy(&c, (uint8_t*)buf.contents + off, 4);
+            memcpy(&c, (uint8_t*)bufferContents(buf) + off, 4);
             v += c;
         }
         q->gpuCounts.clear();

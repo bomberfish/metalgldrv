@@ -30,7 +30,9 @@ void Texture::dropViews() {
     Device* d = Device::get();
     uint64_t s = std::max(lastUse, lastGpuWrite);
     for (auto& [k, v] : views) d->retainUntil(v, s);
-    views.clear();
+    @autoreleasepool {  // views whose last use completed are deallocated here (mtl/device.h)
+        views.clear();
+    }
 }
 
 Renderbuffer::~Renderbuffer() {
@@ -266,9 +268,8 @@ bool ensureBufferTexture(Context* ctx, Texture* t) {
             if (t->bufferExpanded) ctx->dev->releaseAfter(t->bufferExpanded, t->lastUse);
             t->bufferExpanded = ctx->dev->newBuffer(need);
             if (!t->bufferExpanded) return false;
-            MTLTextureDescriptor* td = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:f->mtl width:texels
-                                                                                   resourceOptions:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked
-                                                                                             usage:MTLTextureUsageShaderRead];
+            MTLTextureDescriptor* td = textureBufferDescriptor(f->mtl, texels, MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked,
+                                                               MTLTextureUsageShaderRead);
             id<MTLTexture> nt = [t->bufferExpanded newTextureWithDescriptor:td offset:0 bytesPerRow:need];
             if (!nt) return false;
             if (t->mtl) ctx->dev->retainUntil(t->mtl, t->lastUse);
@@ -290,9 +291,8 @@ bool ensureBufferTexture(Context* ctx, Texture* t) {
             if (t->bufferExpanded) ctx->dev->releaseAfter(t->bufferExpanded, t->lastUse);
             t->bufferExpanded = ctx->dev->newBuffer(need, MTLResourceStorageModePrivate);
             if (!t->bufferExpanded) return false;
-            MTLTextureDescriptor* td = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:f->mtl width:texels
-                                                                                   resourceOptions:MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeUntracked
-                                                                                             usage:MTLTextureUsageShaderRead];
+            MTLTextureDescriptor* td = textureBufferDescriptor(f->mtl, texels, MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeUntracked,
+                                                               MTLTextureUsageShaderRead);
             id<MTLTexture> nt = [t->bufferExpanded newTextureWithDescriptor:td offset:0 bytesPerRow:need];
             if (!nt) return false;
             if (t->mtl) ctx->dev->retainUntil(t->mtl, t->lastUse);
@@ -311,9 +311,8 @@ bool ensureBufferTexture(Context* ctx, Texture* t) {
         t->storageFmt = f;
         return true;
     }
-    MTLTextureDescriptor* td = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:f->mtl width:texels
-                                                                           resourceOptions:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked
-                                                                                     usage:MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite];
+    MTLTextureDescriptor* td = textureBufferDescriptor(f->mtl, texels, MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked,
+                                                       MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
     size_t bpr = texels * f->bytesPerPixel;
     bpr = (bpr + 15) & ~(size_t)15;
     id<MTLTexture> nt = [b->mtl newTextureWithDescriptor:td offset:t->bufferOffset bytesPerRow:bpr];
@@ -588,12 +587,11 @@ id<MTLTexture> dummyTexture(Context* ctx, MTLTextureType type, FmtKind kind) {
     id<MTLTexture> tex;
     if (type == MTLTextureTypeTextureBuffer) {
         id<MTLBuffer> buf = d->newBuffer(64);
-        uint8_t* p = (uint8_t*)buf.contents;
+        uint8_t* p = (uint8_t*)bufferContents(buf);
         memset(p, 0, 64);
         p[3] = kind == FmtKind::Unorm ? 255 : 1;
-        MTLTextureDescriptor* bd = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:pf width:1
-                                                                               resourceOptions:MTLResourceStorageModeShared
-                                                                                         usage:MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite];
+        MTLTextureDescriptor* bd = textureBufferDescriptor(pf, 1, MTLResourceStorageModeShared,
+                                                           MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
         tex = [buf newTextureWithDescriptor:bd offset:0 bytesPerRow:64];
     } else {
         tex = [d->mtl newTextureWithDescriptor:td];
@@ -791,7 +789,7 @@ bool readTextureRegion(Context* ctx, id<MTLTexture> tex, int level, int slice, i
     ctx->finish();
     (void)s;
     out.resize(imgBytes);
-    memcpy(out.data(), buf.contents, imgBytes);
+    memcpy(out.data(), bufferContents(buf), imgBytes);
     ctx->dev->releaseAfter(buf, 0);
     return true;
 }

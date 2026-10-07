@@ -190,10 +190,7 @@ void Device::submit(id<MTL4CommandBuffer> cb, id<MTL4CommandAllocator> alloc, ui
         this->markComplete(serial, fb.error, fb.GPUStartTime, fb.GPUEndTime);
     }];
     std::lock_guard<std::mutex> g(mutex_);
-    if (residencyDirty_) {
-        [residency commit];
-        residencyDirty_ = false;
-    }
+    commitResidencyLocked();
     submitted_.insert(serial);
     if (drawable) [queue waitForDrawable:drawable];
     id<MTL4CommandBuffer> cbs[1] = {cb};
@@ -217,6 +214,15 @@ void Device::submit(id<MTL4CommandBuffer> cb, id<MTL4CommandAllocator> alloc, ui
             [drawable present];
     }
     if (alloc) inflightAllocators_.push_back({serial, alloc});
+}
+
+void Device::commitResidencyLocked() {
+    if (!residencyDirty_) return;
+    // Allocations removed from the set are deallocated here, and their dealloc autoreleases.
+    @autoreleasepool {
+        [residency commit];
+    }
+    residencyDirty_ = false;
 }
 
 void Device::makeResident(id<MTLAllocation> a) {
@@ -251,21 +257,24 @@ void Device::retainSparse(id obj, uint64_t serial) {
 
 void Device::collect() {
     std::lock_guard<std::mutex> g(mutex_);
-    if (!sparseRetired_.empty()) {
-        const double now = CFAbsoluteTimeGetCurrent();
-        while (!sparseRetired_.empty() && sparseRetired_.front().first <= now && isCompleteLocked(sparseRetired_.front().second.serial))
-            sparseRetired_.pop_front();
-    }
-    // deferred_ is not strictly sorted (different contexts), so scan.
-    for (auto it = deferred_.begin(); it != deferred_.end();) {
-        if (isCompleteLocked(it->serial)) {
-            if (it->removeResidency) {
-                [residency removeAllocation:(id<MTLAllocation>)it->obj];
-                residencyDirty_ = true;
+    // Dropping the last reference deallocates, and Metal objects autorelease in dealloc.
+    @autoreleasepool {
+        if (!sparseRetired_.empty()) {
+            const double now = CFAbsoluteTimeGetCurrent();
+            while (!sparseRetired_.empty() && sparseRetired_.front().first <= now && isCompleteLocked(sparseRetired_.front().second.serial))
+                sparseRetired_.pop_front();
+        }
+        // deferred_ is not strictly sorted (different contexts), so scan.
+        for (auto it = deferred_.begin(); it != deferred_.end();) {
+            if (isCompleteLocked(it->serial)) {
+                if (it->removeResidency) {
+                    [residency removeAllocation:(id<MTLAllocation>)it->obj];
+                    residencyDirty_ = true;
+                }
+                it = deferred_.erase(it);
+            } else {
+                ++it;
             }
-            it = deferred_.erase(it);
-        } else {
-            ++it;
         }
     }
 }
@@ -360,10 +369,7 @@ void Device::submitSparseOps(Res res, const std::vector<SparseOp>& ops, Op makeO
         for (size_t i = 0; i < ops.size(); i++) heaps[i] = sparseHeaps_[ops[i].tiles.heap].heap;  // unmaps too: a nil heap leaves later maps of the resource broken
     }
     std::lock_guard<std::mutex> g(mutex_);
-    if (residencyDirty_) {
-        [residency commit];
-        residencyDirty_ = false;
-    }
+    commitResidencyLocked();
     for (const SparseOp& o : ops)
         MGL_DBG("sparse %s level %lu slice %lu tiles (%lu,%lu,%lu)+(%lu,%lu,%lu) -> heap %u tile %u", o.unmap ? "unmap" : "map",
                 (unsigned long)o.level, (unsigned long)o.slice, (unsigned long)o.region.origin.x, (unsigned long)o.region.origin.y,
@@ -411,23 +417,25 @@ id<MTLBuffer> Device::newBuffer(size_t size, MTLResourceOptions opts) {
     return b;
 }
 
-id<MTLLibrary> Device::compileLibrary(NSString* source, NSString** errorOut, bool fastMath) {
-    MTL4LibraryDescriptor* ld = [MTL4LibraryDescriptor new];
-    ld.source = source;
-    MTLCompileOptions* co = [MTLCompileOptions new];
-    co.languageVersion = MTLLanguageVersion4_0;
-    co.mathMode = fastMath ? MTLMathModeFast : MTLMathModeSafe;
-    co.preserveInvariance = YES;
-    // Debugging aid, read per compile: METALGLDRV_MSL_OPTS containing "noinv" and/or "size".
-    if (const char* o = getenv("METALGLDRV_MSL_OPTS")) {
-        if (strstr(o, "noinv")) co.preserveInvariance = NO;
-        if (strstr(o, "size")) co.optimizationLevel = MTLLibraryOptimizationLevelSize;
+id<MTLLibrary> Device::compileLibrary(const std::string& source, std::string* errorOut, bool fastMath) {
+    @autoreleasepool {  // the source string, options and errors autorelease
+        MTL4LibraryDescriptor* ld = [MTL4LibraryDescriptor new];
+        ld.source = @(source.c_str());
+        MTLCompileOptions* co = [MTLCompileOptions new];
+        co.languageVersion = MTLLanguageVersion4_0;
+        co.mathMode = fastMath ? MTLMathModeFast : MTLMathModeSafe;
+        co.preserveInvariance = YES;
+        // Debugging aid, read per compile: METALGLDRV_MSL_OPTS containing "noinv" and/or "size".
+        if (const char* o = getenv("METALGLDRV_MSL_OPTS")) {
+            if (strstr(o, "noinv")) co.preserveInvariance = NO;
+            if (strstr(o, "size")) co.optimizationLevel = MTLLibraryOptimizationLevelSize;
+        }
+        ld.options = co;
+        NSError* err = nil;
+        id<MTLLibrary> lib = [compiler newLibraryWithDescriptor:ld error:&err];
+        if (!lib && errorOut) *errorOut = err ? err.localizedDescription.UTF8String : "MSL compile failed";
+        return lib;
     }
-    ld.options = co;
-    NSError* err = nil;
-    id<MTLLibrary> lib = [compiler newLibraryWithDescriptor:ld error:&err];
-    if (!lib && errorOut) *errorOut = err.localizedDescription;
-    return lib;
 }
 
 }  // namespace mgl

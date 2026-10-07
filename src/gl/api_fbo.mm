@@ -172,7 +172,7 @@ static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples,
     rb->height = h;
     rb->samples = s;
     if (w > 0 && h > 0) {
-        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f->mtl width:w height:h mipmapped:NO];
+        MTLTextureDescriptor* td = texture2DDescriptor(f->mtl, w, h);
         if (s > 1) {
             td.textureType = MTLTextureType2DMultisample;
             td.sampleCount = s;
@@ -875,7 +875,7 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src, int* slic
     const FormatInfo* f = formatInfoForMTL(src.pixelFormat);
     int layer = *slice;
     *slice = 0;
-    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
+    MTLTextureDescriptor* td = texture2DDescriptor(src.pixelFormat, src.width, src.height);
     td.storageMode = MTLStorageModePrivate;
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
                (f && (f->srgb || f->kind == FmtKind::DepthStencil) ? MTLTextureUsagePixelFormatView : 0);
@@ -920,7 +920,7 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src, int* slic
         rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
         rp.colorAttachments[0].resolveTexture = dst;
     }
-    id<MTL4RenderCommandEncoder> e = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rp];
+    id<MTL4RenderCommandEncoder> e = ctx->newRenderEncoder(rp);
     [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment visibilityOptions:MTL4VisibilityOptionDevice];
     [e endEncoding];
     ctx->dev->releaseAfter(dst, ctx->serial());

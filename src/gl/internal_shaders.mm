@@ -131,9 +131,9 @@ kernel void expand_rgb32(device const uint* src [[buffer(0)]], device uint4* dst
 
 id<MTLLibrary> internalLibrary() {
     static id<MTLLibrary> lib = [] {
-        NSString* err = nil;
-        id<MTLLibrary> l = Device::get()->compileLibrary(@(kInternalMSL), &err);
-        if (!l) MGL_ERR("internal shader library failed: %s", err.UTF8String);
+        std::string err;
+        id<MTLLibrary> l = Device::get()->compileLibrary(kInternalMSL, &err);
+        if (!l) MGL_ERR("internal shader library failed: %s", err.c_str());
         return l;
     }();
     return lib;
@@ -240,7 +240,7 @@ static id<MTLTexture> metalfxUpscale(Context* ctx, Surface* s, int outW, int out
             return nil;
         }
         if (s->upscaled) ctx->dev->releaseAfter(s->upscaled, s->lastUse);
-        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:s->color.pixelFormat width:outW height:outH mipmapped:NO];
+        MTLTextureDescriptor* td = texture2DDescriptor(s->color.pixelFormat, outW, outH);
         td.storageMode = MTLStorageModePrivate;
         td.usage = scaler.outputTextureUsage | MTLTextureUsageShaderRead;
         s->upscaled = [ctx->dev->mtl newTextureWithDescriptor:td];
@@ -252,7 +252,7 @@ static id<MTLTexture> metalfxUpscale(Context* ctx, Surface* s, int outW, int out
     }
     // Order the scaler after all rendering: an empty encoder waits on prior work and signals the fence.
     ctx->endEncoder();
-    id<MTL4ComputeCommandEncoder> ce = [ctx->commandBuffer() computeCommandEncoder];
+    id<MTL4ComputeCommandEncoder> ce = ctx->newComputeEncoder();
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
     [ce updateFence:s->upscaleFence afterEncoderStages:MTLStageDispatch];
     [ce endEncoding];
@@ -275,7 +275,7 @@ void presentSurface(Context* ctx, Surface* s, id<CAMetalDrawable> drawable) {
         rrp.colorAttachments[0].loadAction = MTLLoadActionLoad;
         rrp.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
         rrp.colorAttachments[0].resolveTexture = s->color;
-        id<MTL4RenderCommandEncoder> re = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rrp];
+        id<MTL4RenderCommandEncoder> re = ctx->newRenderEncoder(rrp);
         [re barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment visibilityOptions:MTL4VisibilityOptionDevice];
         [re endEncoding];
     }
@@ -287,7 +287,7 @@ void presentSurface(Context* ctx, Surface* s, id<CAMetalDrawable> drawable) {
     rp.colorAttachments[0].texture = dst;
     rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTL4RenderCommandEncoder> e = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rp];
+    id<MTL4RenderCommandEncoder> e = ctx->newRenderEncoder(rp);
     [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment | MTLStageVertex visibilityOptions:MTL4VisibilityOptionDevice];
     [e setArgumentTable:ctx->renderArgTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
     MTLPixelFormat colors[kMaxDrawBuffers] = {dst.pixelFormat};
@@ -349,10 +349,10 @@ void clearWithQuad(Context* ctx, const QuadClear& q) {
             std::string src = std::string(kInternalMSL) + outStruct +
                               "fragment ClearOut clear_fs(QuadOut in [[stage_in]], constant uint4* v [[buffer(1)]]) {\n  ClearOut o;\n" +
                               body + "  return o;\n}\n";
-            NSString* err = nil;
-            lib = Device::get()->compileLibrary(@(src.c_str()), &err);
+            std::string err;
+            lib = Device::get()->compileLibrary(src, &err);
             if (!lib) {
-                MGL_ERR("clear shader failed: %s", err.UTF8String);
+                MGL_ERR("clear shader failed: %s", err.c_str());
                 return;
             }
             libs[libKey] = lib;
@@ -418,7 +418,7 @@ void resolveSample0(Context* ctx, id<MTLTexture> src, id<MTLTexture> dst, bool i
     NSString* fs = isSigned ? @"resolve_fs_int" : @"resolve_fs_uint";
     std::string key = std::string("resolve_") + fs.UTF8String + "_" + std::to_string(colors[0]);
     id<MTLRenderPipelineState> pso = internalPipeline(key, internalLibrary(), @"quad_vs", fs, colors, nullptr, 1);
-    id<MTL4RenderCommandEncoder> e = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rp];
+    id<MTL4RenderCommandEncoder> e = ctx->newRenderEncoder(rp);
     [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment | MTLStageVertex visibilityOptions:MTL4VisibilityOptionDevice];
     if (pso) {
         [e setArgumentTable:ctx->renderArgTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
@@ -498,7 +498,7 @@ void msImageFromShadow(Context* ctx, id<MTLTexture> shadow, id<MTLTexture> ms, i
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         rp.renderTargetWidth = ms.width;
         rp.renderTargetHeight = ms.height;
-        id<MTL4RenderCommandEncoder> e = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rp];
+        id<MTL4RenderCommandEncoder> e = ctx->newRenderEncoder(rp);
         [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment | MTLStageVertex visibilityOptions:MTL4VisibilityOptionDevice];
         [e setArgumentTable:ctx->renderArgTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
         [e setRenderPipelineState:pso];
@@ -550,7 +550,7 @@ void blitToTexture(Context* ctx, const BlitParams& bpIn, id<MTLTexture> dst, int
         // into a temporary single-level 2D texture and sample that instead.
         id<MTLTexture> s = bp.src;
         int lw = std::max(1, (int)(s.width >> bp.srcLevel)), lh = std::max(1, (int)(s.height >> bp.srcLevel));
-        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:s.pixelFormat width:lw height:lh mipmapped:NO];
+        MTLTextureDescriptor* td = texture2DDescriptor(s.pixelFormat, lw, lh);
         td.usage = MTLTextureUsageShaderRead;
         td.storageMode = MTLStorageModePrivate;
         id<MTLTexture> tmp = [ctx->dev->mtl newTextureWithDescriptor:td];
@@ -598,7 +598,7 @@ void blitToTexture(Context* ctx, const BlitParams& bpIn, id<MTLTexture> dst, int
     int dw = std::max(1, (int)(dst.width >> dstLevel)), dh = std::max(1, (int)(dst.height >> dstLevel));
     rp.renderTargetWidth = dw;
     rp.renderTargetHeight = dh;
-    id<MTL4RenderCommandEncoder> e = [ctx->commandBuffer() renderCommandEncoderWithDescriptor:rp];
+    id<MTL4RenderCommandEncoder> e = ctx->newRenderEncoder(rp);
     [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment | MTLStageVertex visibilityOptions:MTL4VisibilityOptionDevice];
     [e setArgumentTable:ctx->renderArgTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
     std::string key = std::string("blit_") + fs.UTF8String + "_" + std::to_string(colors[0]) + "_" + std::to_string(dst.sampleCount);

@@ -327,7 +327,6 @@ struct ProgramVariant;
 
 class ProgramObj : public Object {
 public:
-    ~ProgramObj() override;
     std::vector<Ref<ShaderObj>> attached;
     std::map<std::string, int> attribBindings, fragDataBindings, fragDataIndices;
     std::vector<std::string> xfbVaryings;

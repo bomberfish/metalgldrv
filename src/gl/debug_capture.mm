@@ -36,7 +36,7 @@ static bool writePng(const std::string& path, const uint8_t* rgba, int w, int h)
 static void dumpTexture(Context* ctx, id<MTLTexture> src, const std::string& path, int level = 0) {
     if (!src || src.textureType == MTLTextureType3D || src.sampleCount > 1) return;
     int w = std::max(1, (int)src.width >> level), h = std::max(1, (int)src.height >> level);
-    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+    MTLTextureDescriptor* td = texture2DDescriptor(MTLPixelFormatRGBA8Unorm, w, h);
     td.storageMode = MTLStorageModePrivate;
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     id<MTLTexture> tmp = [ctx->dev->mtl newTextureWithDescriptor:td];
@@ -59,7 +59,7 @@ static void dumpTexture(Context* ctx, id<MTLTexture> src, const std::string& pat
     uint64_t serial = ctx->serial();
     ctx->waitForResource(serial);
     std::vector<uint8_t> img((size_t)w * h * 4);
-    const uint8_t* p = (const uint8_t*)buf.contents;
+    const uint8_t* p = (const uint8_t*)bufferContents(buf);
     for (int y = 0; y < h; y++) memcpy(&img[(size_t)(h - 1 - y) * w * 4], p + (size_t)y * w * 4, (size_t)w * 4);
     if (writePng(path + ".png", img.data(), w, h)) MGL_INFO("captured %dx%d (fmt %d) -> %s.png", w, h, (int)src.pixelFormat, path.c_str());
     for (size_t i = 0; i < img.size(); i += 4) img[i] = img[i + 1] = img[i + 2] = img[i + 3];

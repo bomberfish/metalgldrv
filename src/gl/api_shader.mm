@@ -12,17 +12,6 @@ using namespace mgl;
 #define API extern "C" __attribute__((visibility("default")))
 
 namespace mgl {
-ProgramObj::~ProgramObj() {
-    // Metal 4 command buffers don't retain pipeline states: keep the compute pipelines of a
-    // program deleted right after a dispatch alive until that work has run.
-    Device* d = Device::get();
-    uint64_t s = d->lastReservedSerial();
-    for (auto& [k, v] : variants) {
-        d->retainUntil(v->compute, s);
-        for (auto& [n, p] : v->computeByName) d->retainUntil(p, s);
-    }
-}
-
 static glsl::Stage stageForType(GLenum type, bool* ok) {
     *ok = true;
     switch (type) {

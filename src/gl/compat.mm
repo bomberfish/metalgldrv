@@ -226,6 +226,11 @@ static CompatState* compat(Context* ctx) {
     return ctx->compat;
 }
 
+void mglCompatDestroy(Context* ctx) {
+    delete ctx->compat;
+    ctx->compat = nullptr;
+}
+
 // Display-list recording: returns true if the command was only recorded.
 #define RECORD(...)                                                             \
     do {                                                                        \

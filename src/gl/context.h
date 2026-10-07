@@ -272,6 +272,9 @@ public:
     id<MTL4CommandBuffer> commandBuffer();
     id<MTL4RenderCommandEncoder> renderEncoder();  // ensures a pass for the current draw framebuffer
     id<MTL4ComputeCommandEncoder> computeEncoder(); // ends any render pass
+    // New encoders on the command buffer, created inside an @autoreleasepool (see device.h).
+    id<MTL4RenderCommandEncoder> newRenderEncoder(MTL4RenderPassDescriptor* rp) NS_RETURNS_RETAINED;
+    id<MTL4ComputeCommandEncoder> newComputeEncoder() NS_RETURNS_RETAINED;
     void endEncoder();
     // Submits the command buffer. present: drawable to present after it.
     void flush(id<CAMetalDrawable> present = nil);
@@ -377,6 +380,7 @@ struct DrawStats {
 };
 void mglStatsCountDraw(Context* ctx, const DrawStats& st);
 uint64_t mglStatsGpuSlot(Context* ctx, bool gs, bool tess);
+void releaseDrawCaches(Context* ctx);  // draw.mm: per-context caches, from ~Context
 
 // Extensions advertised only on GPUs that can do them (api_get.mm): GL_EXTENSIONS names, and
 // the GLSL #extension names the shader compiler accepts on this device (CompileOptions).

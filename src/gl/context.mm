@@ -10,6 +10,8 @@
 #include "util/log.h"
 #include "util/stats.h"
 
+void mglCompatDestroy(mgl::Context* ctx);  // compat.mm
+
 namespace mgl {
 
 const GLenum kTexTargets[kNumTexTargets] = {
@@ -87,6 +89,8 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
 
 Context::~Context() {
     if (cb_) flush();
+    releaseDrawCaches(this);
+    mglCompatDestroy(this);
     delete pipelines_;
     for (auto& [s, b] : uploadRetired_) dev->releaseAfter(b, s);
     if (uploadChunk_) dev->releaseAfter(uploadChunk_, serial_);
@@ -288,6 +292,18 @@ id<MTL4CommandBuffer> Context::commandBuffer() {
     return cb_;
 }
 
+id<MTL4RenderCommandEncoder> Context::newRenderEncoder(MTL4RenderPassDescriptor* rp) {
+    @autoreleasepool {
+        return [commandBuffer() renderCommandEncoderWithDescriptor:rp];
+    }
+}
+
+id<MTL4ComputeCommandEncoder> Context::newComputeEncoder() {
+    @autoreleasepool {
+        return [commandBuffer() computeCommandEncoder];
+    }
+}
+
 void Context::endEncoder() {
     if (renderEnc) endPass();
     if (computeEnc) {
@@ -301,7 +317,7 @@ id<MTL4ComputeCommandEncoder> Context::computeEncoder() {
     if (pendingClear.any()) applyClearNow();
     if (renderEnc) endPass();
     if (!computeEnc) {
-        computeEnc = [commandBuffer() computeCommandEncoder];
+        computeEnc = newComputeEncoder();
         // Conservative GL-style ordering against all prior work.
         [computeEnc barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
         [computeEnc setArgumentTable:computeArgTable];
@@ -328,7 +344,7 @@ UploadAlloc Context::upload(size_t size, size_t align) {
         if (!uploadChunk_) uploadChunk_ = dev->newBuffer(want);
         uploadOffset_ = 0;
     }
-    UploadAlloc a{uploadChunk_, (uint8_t*)uploadChunk_.contents + uploadOffset_, uploadChunk_.gpuAddress + uploadOffset_,
+    UploadAlloc a{uploadChunk_, (uint8_t*)bufferContents(uploadChunk_) + uploadOffset_, uploadChunk_.gpuAddress + uploadOffset_,
                   uploadOffset_};
     uploadOffset_ += size;
     return a;
@@ -542,7 +558,7 @@ void Context::beginPass() {
         [computeEnc endEncoding];
         computeEnc = nil;
     }
-    renderEnc = [commandBuffer() renderCommandEncoderWithDescriptor:rp];
+    renderEnc = newRenderEncoder(rp);
     if (!renderEnc) {
         MGL_ERR("failed to create render encoder (%dx%d)", p.width, p.height);
         passOpen = false;
@@ -657,7 +673,7 @@ bool Surface::resize(int w, int h) {
     if (depthStencil) d->releaseAfter(depthStencil, lastUse);
     width = w;
     height = h;
-    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:colorFormat width:w height:h mipmapped:NO];
+    MTLTextureDescriptor* td = texture2DDescriptor(colorFormat, w, h);
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
     td.storageMode = MTLStorageModePrivate;
     td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
@@ -675,7 +691,7 @@ bool Surface::resize(int w, int h) {
     depthStencil = nil;
     if (hasDepth || hasStencil) {
         MTLPixelFormat df = hasStencil ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatDepth32Float;
-        MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:df width:w height:h mipmapped:NO];
+        MTLTextureDescriptor* dd = texture2DDescriptor(df, w, h);
         dd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         dd.storageMode = MTLStorageModePrivate;
         dd.hazardTrackingMode = MTLHazardTrackingModeUntracked;

@@ -6,6 +6,17 @@
 
 namespace mgl {
 
+ProgramVariant::~ProgramVariant() {
+    // Metal 4 command buffers don't retain pipeline states: keep the pipelines of a variant
+    // dropped (program deleted or relinked) right after a draw or dispatch alive until that
+    // work has run.
+    Device* d = Device::get();
+    uint64_t s = d->lastReservedSerial();
+    d->retainUntil(compute, s);
+    for (auto& [n, p] : computeByName) d->retainUntil(p, s);
+    for (auto& [k, p] : renderPipelines) d->retainUntil(p, s);
+}
+
 uint64_t hashBytes(const void* data, size_t n, uint64_t h) {
     const uint8_t* p = (const uint8_t*)data;
     for (size_t i = 0; i < n; i++) {
@@ -61,7 +72,6 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
         if (!v->msl.error.empty()) {
             v->error = v->msl.error;
         } else {
-            NSString* err = nil;
             // Debugging aid: METALGLDRV_MSL_OVERRIDE=<file> applies literal edits to the generated MSL
             // (read at every compile so tests can switch it between programs). The file holds blocks
             // "old\n----\nnew" separated by "\n====\n".
@@ -80,9 +90,8 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
                         v->msl.source.replace(at, from.size(), to);
                 }
             }
-            v->lib = ctx_->dev->compileLibrary(@(v->msl.source.c_str()), &err);
+            v->lib = ctx_->dev->compileLibrary(v->msl.source, &v->error);
             if (!v->lib) {
-                v->error = err ? err.UTF8String : "MSL compile failed";
                 if (g_logLevel >= LOG_DEBUG || envFlag("METALGLDRV_DUMP_FAILED_MSL", true))
                     MGL_ERR("MSL compile failed for program %u:\n%s\n---- source ----\n%s", prog->name, v->error.c_str(),
                             v->msl.source.c_str());
@@ -109,18 +118,7 @@ static MTL4LibraryFunctionDescriptor* fn(id<MTLLibrary> lib, const std::string& 
     return f;
 }
 
-id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey& keyIn) {
-    RenderPipelineKey key = keyIn;
-    key.variantUid = key.variant->uid;
-    const ProgramVariant* vptr = key.variant;
-    const ProgramVariant* fptr = key.fsVariant;
-    key.variant = nullptr;
-    key.fsVariant = nullptr;
-    std::string k((const char*)&key, sizeof key);
-    key.variant = vptr;
-    key.fsVariant = fptr;
-    auto it = render_.find(k);
-    if (it != render_.end()) return it->second;
+static id<MTLRenderPipelineState> newRenderPipeline(Device* dev, const RenderPipelineKey& key) {
     const ProgramVariant* v = key.variant;
     MTL4PipelineDescriptor* desc = nil;
     const glsl::EntryPoint* vs = v->entry(glsl::EntryPoint::Vertex);
@@ -204,33 +202,55 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
     }
     NSError* err = nil;
     MGL_STAT("render-pipeline-create");
-    id<MTLRenderPipelineState> pso = [ctx_->dev->compiler newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:nil error:&err];
+    id<MTLRenderPipelineState> pso = [dev->compiler newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:nil error:&err];
     if (!pso) MGL_ERR("render pipeline creation failed: %s", err.localizedDescription.UTF8String);
-    render_[k] = pso;
+    return pso;
+}
+
+id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey& keyIn) {
+    RenderPipelineKey key = keyIn;
+    key.variantUid = key.variant->uid;
+    const ProgramVariant* vptr = key.variant;
+    const ProgramVariant* fptr = key.fsVariant;
+    key.variant = nullptr;
+    key.fsVariant = nullptr;
+    std::string k((const char*)&key, sizeof key);
+    key.variant = vptr;
+    key.fsVariant = fptr;
+    auto& cache = vptr->renderPipelines;
+    auto it = cache.find(k);
+    if (it != cache.end()) return it->second;
+    id<MTLRenderPipelineState> pso;
+    @autoreleasepool {  // descriptor setup and pipeline compiles autorelease
+        pso = newRenderPipeline(ctx_->dev, key);
+    }
+    cache[k] = pso;
     return pso;
 }
 
 static id<MTLComputePipelineState> newComputePipeline(Device* dev, ProgramVariant* v, const glsl::EntryPoint* cs) {
-    MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
-    d.computeFunctionDescriptor = fn(v->lib, cs->name);
-    MTLSize tg = MTLSizeMake(cs->threadsPerThreadgroup[0], cs->threadsPerThreadgroup[1], cs->threadsPerThreadgroup[2]);
-    d.requiredThreadsPerThreadgroup = tg;
-    NSError* err = nil;
-    id<MTLComputePipelineState> p = [dev->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
-    if (!p) {
-        MGL_ERR("compute pipeline %s creation failed: %s", cs->name.c_str(), err.localizedDescription.UTF8String);
-        return nil;
+    @autoreleasepool {  // function descriptor names and compiler errors autorelease
+        MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
+        d.computeFunctionDescriptor = fn(v->lib, cs->name);
+        MTLSize tg = MTLSizeMake(cs->threadsPerThreadgroup[0], cs->threadsPerThreadgroup[1], cs->threadsPerThreadgroup[2]);
+        d.requiredThreadsPerThreadgroup = tg;
+        NSError* err = nil;
+        id<MTLComputePipelineState> p = [dev->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
+        if (!p) {
+            MGL_ERR("compute pipeline %s creation failed: %s", cs->name.c_str(), err.localizedDescription.UTF8String);
+            return nil;
+        }
+        // Metal's pipeline cache does not key on requiredThreadsPerThreadgroup: a kernel whose AIR
+        // matches one compiled for a smaller threadgroup can come back limited to that size, and
+        // dispatches above the limit are silently dropped. Kernels whose body does not depend on the
+        // threadgroup size carry it as [[max_total_threads_per_threadgroup]] (glsl/msl.cpp).
+        if (p.maxTotalThreadsPerThreadgroup < tg.width * tg.height * tg.depth) {
+            MGL_ERR("compute pipeline %s allows %lu threads per threadgroup, needs %lux%lux%lu", cs->name.c_str(),
+                    (unsigned long)p.maxTotalThreadsPerThreadgroup, (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth);
+            return nil;
+        }
+        return p;
     }
-    // Metal's pipeline cache does not key on requiredThreadsPerThreadgroup: a kernel whose AIR
-    // matches one compiled for a smaller threadgroup can come back limited to that size, and
-    // dispatches above the limit are silently dropped. Kernels whose body does not depend on the
-    // threadgroup size carry it as [[max_total_threads_per_threadgroup]] (glsl/msl.cpp).
-    if (p.maxTotalThreadsPerThreadgroup < tg.width * tg.height * tg.depth) {
-        MGL_ERR("compute pipeline %s allows %lu threads per threadgroup, needs %lux%lux%lu", cs->name.c_str(),
-                (unsigned long)p.maxTotalThreadsPerThreadgroup, (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth);
-        return nil;
-    }
-    return p;
 }
 
 id<MTLComputePipelineState> PipelineCache::computePipeline(ProgramVariant* v, const std::string& name) {

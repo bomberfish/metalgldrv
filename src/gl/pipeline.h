@@ -33,6 +33,10 @@ struct ProgramVariant {
     }
     id<MTLComputePipelineState> compute = nil;
     std::unordered_map<std::string, id<MTLComputePipelineState>> computeByName;  // multi-kernel variants
+    // Render pipelines built from this variant (PipelineCache::renderPipeline), keyed by the
+    // RenderPipelineKey bytes. They live and die with the variant.
+    mutable std::unordered_map<std::string, id<MTLRenderPipelineState>> renderPipelines;
+    ~ProgramVariant();
 };
 
 #pragma pack(push, 1)
@@ -82,7 +86,6 @@ public:
 
 private:
     Context* ctx_;
-    std::unordered_map<std::string, id<MTLRenderPipelineState>> render_;
     std::unordered_map<std::string, id<MTLDepthStencilState>> ds_;
 };
 

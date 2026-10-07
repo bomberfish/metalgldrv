@@ -79,10 +79,12 @@ API void APIENTRY glDeleteTextures(GLsizei n, const GLuint* textures) {
     MGL_CTX();
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
     std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
-    for (int i = 0; i < n; i++) {
-        if (!textures[i]) continue;
-        if (Texture* t = ctx->share->textures.get(textures[i])) ctx->unbindDeletedTexture(t);
-        ctx->share->textures.remove(textures[i]);
+    @autoreleasepool {  // releasing Metal textures autoreleases (mtl/device.h)
+        for (int i = 0; i < n; i++) {
+            if (!textures[i]) continue;
+            if (Texture* t = ctx->share->textures.get(textures[i])) ctx->unbindDeletedTexture(t);
+            ctx->share->textures.remove(textures[i]);
+        }
     }
 }
 
@@ -1194,7 +1196,7 @@ static bool decodeCompressedRegion(Context* ctx, Texture* t, int level, int slic
         ctx->dev->retainUntil(src, ctx->serial());
     }
     int lw = std::max(1, (int)(t->mtl.width >> level)), lh = std::max(1, (int)(t->mtl.height >> level));
-    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:lw height:lh mipmapped:NO];
+    MTLTextureDescriptor* td = texture2DDescriptor(MTLPixelFormatRGBA32Float, lw, lh);
     td.storageMode = MTLStorageModePrivate;
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     id<MTLTexture> tmp = [ctx->dev->mtl newTextureWithDescriptor:td];
@@ -1288,7 +1290,7 @@ static void getTexImage(Context* ctx, Texture* t, GLenum target, GLint level, GL
             [e copyFromTexture:t->mtl sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(x, y, mz) sourceSize:MTLSizeMake(w, h, 1)
                       toBuffer:buf destinationOffset:0 destinationBytesPerRow:rowBytes destinationBytesPerImage:rowBytes * h];
             ctx->finish();
-            convertFromStorage(f, format, type, buf.contents, rowBytes, dst + i * cl.imageStride, cl.rowStride, w, h, ctx->pack.swapBytes);
+            convertFromStorage(f, format, type, bufferContents(buf), rowBytes, dst + i * cl.imageStride, cl.rowStride, w, h, ctx->pack.swapBytes);
             ctx->dev->releaseAfter(buf, 0);
             continue;
         }
@@ -1430,7 +1432,7 @@ static void getCompressedImage(Context* ctx, Texture* t, GLenum target, GLint le
             [e copyFromTexture:t->mtl sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(x, y, z + i) sourceSize:MTLSizeMake(w, h, 1)
                       toBuffer:buf destinationOffset:0 destinationBytesPerRow:bpr destinationBytesPerImage:sliceBytes];
             ctx->finish();
-            memcpy(dst + i * sliceBytes, buf.contents, sliceBytes);
+            memcpy(dst + i * sliceBytes, bufferContents(buf), sliceBytes);
             ctx->dev->releaseAfter(buf, 0);
             continue;
         }

@@ -28,7 +28,7 @@ static bool allocStorage(Buffer* b, GLsizeiptr size) {
         b->size = 0;
         return false;
     }
-    b->cpu = (uint8_t*)b->mtl.contents;
+    b->cpu = (uint8_t*)bufferContents(b->mtl);
     b->size = size;
     b->contentVersion++;
     b->lastUse = 0;
@@ -61,7 +61,7 @@ void writeBuffer(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, cons
         uint64_t oldUse = b->lastUse;
         Device* d = ctx->dev;
         b->mtl = d->newBuffer((size_t)std::max<GLsizeiptr>(b->size, 4));
-        b->cpu = (uint8_t*)b->mtl.contents;
+        b->cpu = (uint8_t*)bufferContents(b->mtl);
         memcpy(b->cpu, oldCpu, b->size);
         memcpy(b->cpu + offset, data, size);
         d->releaseAfter(old, oldUse);
@@ -95,7 +95,7 @@ void readBuffer(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, void*
     [e copyFromBuffer:b->mtl sourceOffset:offset toBuffer:tmp destinationOffset:0 size:size];
     b->lastUse = ctx->serial();
     ctx->finish();
-    memcpy(dst, tmp.contents, size);
+    memcpy(dst, bufferContents(tmp), size);
     ctx->dev->releaseAfter(tmp, 0);
 }
 

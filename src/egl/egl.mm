@@ -396,7 +396,9 @@ EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglDestroySurface(EGLDisplay dpy, EGLSurfac
     EGLSurfaceImpl* s = surfaceFromHandle(surface);
     if (!s) return fail(EGL_BAD_SURFACE, EGL_FALSE);
     g_display.surfaces.erase(s);
-    delete s;  // Surface itself is refcounted; contexts still bound keep it alive
+    @autoreleasepool {  // releasing Metal objects autoreleases (mtl/device.h)
+        delete s;  // Surface itself is refcounted; contexts still bound keep it alive
+    }
     return EGL_TRUE;
 }
 
@@ -518,7 +520,9 @@ EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglDestroyContext(EGLDisplay dpy, EGLContex
         // Stays alive until released by eglMakeCurrent.
         return EGL_TRUE;
     }
-    delete c;
+    @autoreleasepool {  // releasing Metal objects autoreleases (mtl/device.h)
+        delete c;
+    }
     return EGL_TRUE;
 }
 
@@ -554,7 +558,11 @@ EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglMakeCurrent(EGLDisplay dpy, EGLSurface d
             std::lock_guard<std::mutex> g(g_display.mutex);
             orphaned = !g_display.contexts.count(old);
         }
-        if (orphaned) delete old;
+        if (orphaned) {
+            @autoreleasepool {
+                delete old;
+            }
+        }
     }
     t_egl.ctx = c;
     t_egl.draw = d;

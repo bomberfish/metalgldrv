@@ -9,9 +9,41 @@
 #include <mutex>
 #include <map>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace mgl {
+
+// Autorelease pools: GL threads (glcts' main thread, the game's render thread) never drain an
+// autorelease pool, so anything autoreleased there lives until the thread exits. Code that can
+// autorelease (Metal factory methods, encoder creation, submits) runs inside a local
+// @autoreleasepool, and buffer contents are read through bufferContents().
+//
+// MTLBuffer.contents is objc_returns_inner_pointer: on a local or parameter receiver ARC
+// retains and autoreleases the buffer, leaking it (and its GPU memory). A precise-lifetime
+// local is exempt and costs nothing.
+inline void* bufferContents(id<MTLBuffer> b) {
+    __attribute__((objc_precise_lifetime)) id<MTLBuffer> keep = b;
+    return keep.contents;
+}
+// Same as [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:width:height:mipmapped:NO] and
+// textureBufferDescriptorWithPixelFormat:..., which return autoreleased descriptors.
+inline MTLTextureDescriptor* texture2DDescriptor(MTLPixelFormat pf, NSUInteger w, NSUInteger h) {
+    MTLTextureDescriptor* td = [MTLTextureDescriptor new];
+    td.pixelFormat = pf;
+    td.width = w;
+    td.height = h;
+    return td;
+}
+inline MTLTextureDescriptor* textureBufferDescriptor(MTLPixelFormat pf, NSUInteger w, MTLResourceOptions opts, MTLTextureUsage usage) {
+    MTLTextureDescriptor* td = [MTLTextureDescriptor new];
+    td.textureType = MTLTextureTypeTextureBuffer;
+    td.pixelFormat = pf;
+    td.width = w;
+    td.resourceOptions = opts;
+    td.usage = usage;
+    return td;
+}
 
 struct DeviceCaps {
     bool meshShaders = true;
@@ -115,7 +147,7 @@ public:
 
     // --- helpers ------------------------------------------------------------
     id<MTLBuffer> newBuffer(size_t size, MTLResourceOptions opts = MTLResourceStorageModeShared);
-    id<MTLLibrary> compileLibrary(NSString* source, NSString** errorOut, bool fastMath = false);
+    id<MTLLibrary> compileLibrary(const std::string& source, std::string* errorOut, bool fastMath = false);
 
     // Called periodically (e.g. on submit) to reap finished work.
     void collect();
@@ -137,6 +169,7 @@ private:
     std::set<uint64_t> completedAbove_;   // completed serials > watermark_
     std::set<uint64_t> submitted_;        // submitted, not complete
     bool residencyDirty_ = false;
+    void commitResidencyLocked();
     bool isCompleteLocked(uint64_t serial) const {
         return serial <= watermark_ || completedAbove_.count(serial);
     }

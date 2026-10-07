@@ -211,7 +211,7 @@ static id<MTLTexture> imageSliceCopy(Context* ctx, id<MTLTexture> src, MTLPixelF
     NSUInteger w = std::max<NSUInteger>(1, src.width >> level), h = std::max<NSUInteger>(1, src.height >> level);
     NSUInteger depth = std::max<NSUInteger>(1, src.depth >> level);
     if (layer < 0 || (NSUInteger)layer >= depth) return nil;
-    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:w height:h mipmapped:NO];
+    MTLTextureDescriptor* td = texture2DDescriptor(src.pixelFormat, w, h);
     td.storageMode = MTLStorageModePrivate;
     td.usage = src.usage | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     id<MTLTexture> tmp = [ctx->dev->mtl newTextureWithDescriptor:td];
@@ -1623,7 +1623,7 @@ bool mpTessRecords(MPState& s) {
     mpUpload(s);
     if (!mpDispatch(s, "mgl_tes_count", MTLSizeMake(s.itemCount, 1, 1), false)) return false;
     mpWait(s);
-    const uint32_t* c = (const uint32_t*)s.counts.contents;
+    const uint32_t* c = (const uint32_t*)bufferContents(s.counts);
     s.offsets.assign((size_t)s.itemCount * 4, 0);
     uint64_t prims = 0, verts = 0;
     uint32_t maxUnits = 0;
@@ -1783,7 +1783,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         mpUpload(s);
         if (!mpDispatch(s, "mgl_gs_count", MTLSizeMake(s.itemCount, 1, 1), false)) { retire(); return false; }
         mpWait(s);
-        const uint32_t* c = (const uint32_t*)s.counts.contents;
+        const uint32_t* c = (const uint32_t*)bufferContents(s.counts);
         s.offsets.assign((size_t)s.itemCount * 4, 0);
         for (uint32_t i = 0; i < s.itemCount; i++)
             for (int st = 0; st < 4; st++) {
@@ -1846,7 +1846,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         id<MTLBuffer> sb = ctx->dev->newBuffer((size_t)bytes);
         ctx->dev->releaseAfter(sb, ctx->serial());
         id<MTLBuffer> sc = ctx->dev->newBuffer(16);
-        memset(sc.contents, 0, 16);
+        memset(bufferContents(sc), 0, 16);
         ctx->dev->releaseAfter(sc, ctx->serial());
         s.spillBuffer = sb.gpuAddress;
         s.spillCounter = sc.gpuAddress;
@@ -1921,7 +1921,7 @@ static bool rotatedWholeBuffer(Context* ctx, const DrawParams& d, IndexInfo& out
         if (ib->rotated) ctx->dev->releaseAfter(ib->rotated, ib->rotatedLastUse);
         ib->rotated = ctx->dev->newBuffer((size_t)ib->size);
         if (!ib->rotated) return false;
-        uint8_t* dst = (uint8_t*)ib->rotated.contents;
+        uint8_t* dst = (uint8_t*)bufferContents(ib->rotated);
         memcpy(dst, ib->cpu, (size_t)ib->size);
         size_t n = (size_t)ib->size / isz;
         auto rot = [&](auto* v) {
@@ -1953,6 +1953,27 @@ static bool rotatedWholeBuffer(Context* ctx, const DrawParams& d, IndexInfo& out
     return true;
 }
 
+// Rotated index lists for flat shading, cached per context; ~Context drops a context's
+// (releaseDrawCaches) so its buffers don't outlive it.
+struct RotEntry {
+    IndexInfo info;
+    uint32_t minIdx, maxIdx;
+    id<MTLBuffer> buffer;
+};
+struct RotCache {
+    std::unordered_map<std::string, RotEntry> entries;
+    size_t bytes = 0;
+};
+static std::unordered_map<Context*, RotCache> g_rotCaches;
+
+void mgl::releaseDrawCaches(Context* ctx) {
+    auto it = g_rotCaches.find(ctx);
+    if (it == g_rotCaches.end()) return;
+    uint64_t s = ctx->dev->lastReservedSerial();
+    for (auto& [k, e] : it->second.entries) ctx->dev->releaseAfter(e.buffer, s);
+    g_rotCaches.erase(it);
+}
+
 // Builds (or reuses from cache) a rotated 32-bit index list for flat shading.
 static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& out, uint32_t* minIdx, uint32_t* maxIdx) {
     Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
@@ -1973,13 +1994,8 @@ static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& 
     snprintf(key, sizeof key, "%p:%u:%llu:%llu:%zu:%d:%x:%x:%d:%u", (void*)ib, ib ? ib->generation : 0,
              (unsigned long long)(ib ? ib->contentVersion : 0), (unsigned long long)(ib ? ib->lastGpuWrite : 0), (size_t)d.indices,
              d.count, d.indexType, d.mode, d.first, ctx->primitiveRestart || ctx->primitiveRestartFixed ? ctx->primitiveRestartIndex : 0xdead);
-    struct RotEntry {
-        IndexInfo info;
-        uint32_t minIdx, maxIdx;
-        id<MTLBuffer> buffer;
-    };
-    static std::unordered_map<Context*, std::unordered_map<std::string, RotEntry>> caches;
-    auto& cache = caches[ctx];
+    RotCache& rc = g_rotCaches[ctx];
+    auto& cache = rc.entries;
     if (cacheable) {
         auto it = cache.find(key);
         if (it != cache.end()) {
@@ -2022,15 +2038,14 @@ static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& 
     if (ids.empty()) return true;
     if (cacheable) {
         id<MTLBuffer> buf = ctx->dev->newBuffer(ids.size() * 4);
-        memcpy(buf.contents, ids.data(), ids.size() * 4);
+        memcpy(bufferContents(buf), ids.data(), ids.size() * 4);
         out.addr = buf.gpuAddress;
-        static std::unordered_map<Context*, size_t> cacheBytes;
-        if (cache.size() > 512 || cacheBytes[ctx] > (32u << 20)) {
+        if (cache.size() > 512 || rc.bytes > (32u << 20)) {
             for (auto& [k, e] : cache) ctx->dev->releaseAfter(e.buffer, ctx->serial());
             cache.clear();
-            cacheBytes[ctx] = 0;
+            rc.bytes = 0;
         }
-        cacheBytes[ctx] += ids.size() * 4;
+        rc.bytes += ids.size() * 4;
         cache[key] = {out, *minIdx, *maxIdx, buf};
     } else {
         UploadAlloc u = ctx->upload(ids.size() * 4, 16);

@@ -50,6 +50,13 @@ Minecraft launcher (LWJGL via EGL), targeting Sodium and Iris.
   stream order (large buffers). Texture uploads always stage through the upload
   ring and copy in stream order.
 * All resources live in one `MTLResidencySet` attached to the queue.
+* GL threads never drain an autorelease pool (glcts' main thread, the game's
+  render thread), so driver code must not leave autoreleased objects behind:
+  calls that autorelease (encoder creation, residency commits, pipeline and
+  library compiles, object teardown) run in a local `@autoreleasepool`, buffer
+  contents are read with `bufferContents()` (ARC autoreleases the receiver of
+  `MTLBuffer.contents`), and texture descriptors come from
+  `texture2DDescriptor()`/`textureBufferDescriptor()` (`mtl/device.h`).
 * `glClear` is folded into render-pass load actions when nothing has been drawn
   yet; otherwise (scissor/masks/mid-pass) a quad clear is drawn.
 
@@ -67,7 +74,9 @@ attribute values (constant step), 18..21 xfb, 22+ multi-pass scratch.
 `ProgramVariant` = MSL generated for a `glsl::VariantKey` (pipeline kind + data
 the shader must bake in). `RenderPipelineKey` adds vertex formats, attachment
 formats, blend state and sample count; depth/stencil formats are not part of
-Metal 4 pipelines. All compiled through `MTL4Compiler`.
+Metal 4 pipelines. All compiled through `MTL4Compiler`. Render pipelines are cached
+on the variant they were built from, so they go away with the program (deleted
+or relinked).
 
 ## Geometry shaders → mesh shaders (planned)
 `PipelineKind::MeshGeometry`: no object stage; the mesh grid has one threadgroup
