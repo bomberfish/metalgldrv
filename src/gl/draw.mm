@@ -2295,7 +2295,8 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     }
     fillColorKey(ctx, key, frefl);
     key.rasterEnabled = !ctx->rasterizerDiscard;
-    key.topologyClass = (uint8_t)MTLPrimitiveTopologyClassUnspecified;  // point size is always written; only layered rendering needs a class
+    // Point size is always written; only layered rendering (gl_Layer from the vertex shader) needs a class.
+    key.topologyClass = (uint8_t)(refl.writesLayer ? topologyClass(d.mode) : MTLPrimitiveTopologyClassUnspecified);
     if (!setupVertexInput(ctx, prog, key, table, d, minIdx, maxIdx)) return;
     if (ctx->renderEnc != e) {
         // Should not happen (see above); never encode into an ended encoder.

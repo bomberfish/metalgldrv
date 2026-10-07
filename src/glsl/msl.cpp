@@ -2654,7 +2654,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
     r.vertexCopy += "v.mgl_pos = " + g + "bi_gl_Position;\n";
     r.vertexCopy += "if ((" + sys + "flags & 4u) == 0u) v.mgl_pos.y = -v.mgl_pos.y;\n";
     r.vertexCopy += "if (" + sys + "depthMode == 0u) v.mgl_pos.z = (v.mgl_pos.z + v.mgl_pos.w) * 0.5f;\n";
-    if (!mesh || points) {
+    if (points) {
         r.vertexStruct += "    float mgl_psize [[point_size]];\n";
         if (si.bi.count(BuiltinVar::PointSize) && si.bi[BuiltinVar::PointSize]->q.storage == Storage::Out)
             r.vertexCopy += "v.mgl_psize = (" + sys + "flags & 1u) != 0u ? " + g + "bi_gl_PointSize : " + sys + "pointSize;\n";
@@ -2822,7 +2822,12 @@ void Emitter::emitClassicVS(std::string& o) {
     } else {
         copyIn = vsInputs(true, inS, anyIn, "g.");
     }
-    RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, true);
+    // A classic vertex function writes the point size for every topology (one variant) unless it
+    // writes gl_Layer: the pipeline then needs a topology class, which forbids a point size for
+    // lines and triangles. Variants are per primitive mode already.
+    const Variable* layerV = si.bi.count(BuiltinVar::Layer) ? si.bi[BuiltinVar::Layer] : nullptr;
+    bool layered = layerV && layerV->q.storage == Storage::Out && layerV->written;
+    RasterOut ro = rasterOutput(Stage::Vertex, "g.", false, !layered || K.primitive == 0 /* GL_POINTS */);
     o += "struct In {\n" + inS + "};\nstruct Out {\n" + ro.vertexStruct + "};\n}  // namespace vs\n\n";
     if (K.xfbInVertex) {
         // Transform feedback with vertex shader side effects: the vertex shader runs once per
@@ -3562,6 +3567,17 @@ void Emitter::emitTessEvalMesh(std::string& o) {
         ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
         ro.primCopy += "p.mgl_primid = int(pl.patch);\n";
     }
+    // gl_Layer / gl_ViewportIndex (ARB_shader_viewport_layer_array) are per primitive while the TES runs
+    // per vertex: the vertex loop saves them and each primitive takes its first vertex's value.
+    std::string perVertexSave, perVertexDecl;
+    for (const char* bi : {"gl_Layer", "gl_ViewportIndex"}) {
+        std::string src = std::string("g.bi_") + bi, arr = std::string("mgl_pv_") + bi;
+        size_t at = ro.primCopy.find(src);
+        if (at == std::string::npos) continue;
+        ro.primCopy.replace(at, src.size(), arr + "[mgl_idx[k * " + std::to_string(ipp) + "u]]");
+        perVertexDecl += "    threadgroup int " + arr + "[" + std::to_string(MAXV) + "];\n";
+        perVertexSave += arr + "[k] = " + src + ";\n";
+    }
     std::string preG = "struct MV {\n" + ro.vertexStruct + "};\nstruct MP {\n" + ro.primStruct + "};\n";
     preG += "using MeshT = mesh<MV, MP, " + std::to_string(MAXV) + ", " + std::to_string(MAXP) + ", topology::" + topo + ">;\n";
     emitBody(Stage::TessEval, o, preG);
@@ -3580,7 +3596,7 @@ void Emitter::emitTessEvalMesh(std::string& o) {
          "uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
     if (esi.hasShared) e += "    threadgroup tes::MGLShared mgl_sh;\n    threadgroup tes::MGLShared* S = &mgl_sh;\n";
     e += "    threadgroup float3 mgl_co[" + std::to_string(MAXV) + "];\n    threadgroup float mgl_tp[" + std::to_string(MAXV) + "];\n";
-    e += "    threadgroup ushort mgl_idx[" + std::to_string(MAXP * 3) + "];\n    threadgroup uint mgl_cnt[2];\n";
+    e += "    threadgroup ushort mgl_idx[" + std::to_string(MAXP * 3) + "];\n    threadgroup uint mgl_cnt[2];\n" + perVertexDecl;
     e += "    device const float* lv = (device const float*)(D.tcsPatchOut + pl.gp * " + sPB + ");\n";
     e += indentBy(tesLoadControlPoints("pl.gp", "pl.cps", NT), 4);
     e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch(), 8);
@@ -3590,10 +3606,10 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     if (!ro.spill.empty()) e += "    threadgroup uint mgl_svs[" + std::to_string(MAXV) + "];\n";
     e += "    for (uint k = mgl_tid; k < nv; k += " + std::to_string(NT) + "u) {\n";
     e += indentBy(tesRun("mgl_co[k]", "pl.patch", "pl.cps"), 8);
-    e += "        tes::MV v;\n" + indentBy(ro.vertexCopy, 8);
+    e += "        tes::MV v;\n" + indentBy(ro.vertexCopy, 8) + indentBy(perVertexSave, 8);
     e += indentBy(spillVertexCode(ro, "g.", "D.", "mgl_svs[k]"), 8);
     e += "        mgl_mo.set_vertex(k, v);\n    }\n";
-    if (!ro.spill.empty()) e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    if (!ro.spill.empty() || !perVertexSave.empty()) e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
     e += "    for (uint k = mgl_tid; k < np * " + std::to_string(ipp) + "u; k += " + std::to_string(NT) + "u) mgl_mo.set_index(k, mgl_idx[k]);\n";
     std::string sp = spillPrimCode(ro, ipp, [&](int k) {
         return "mgl_svs[mgl_idx[k * " + std::to_string(ipp) + "u + " + std::to_string(k) + "u]]";

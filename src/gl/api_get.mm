@@ -30,7 +30,7 @@ const char* kExtensions[] = {
     "GL_ARB_separate_shader_objects", "GL_ARB_shader_atomic_counter_ops", "GL_ARB_shader_atomic_counters",
     "GL_ARB_shader_bit_encoding", "GL_ARB_shader_draw_parameters", "GL_ARB_shader_group_vote",
     "GL_ARB_shader_image_load_store", "GL_ARB_shader_image_size", "GL_ARB_shader_objects", "GL_ARB_shader_precision",
-    "GL_ARB_shader_storage_buffer_object", "GL_ARB_shader_subroutine", "GL_ARB_shader_texture_image_samples",
+    "GL_ARB_shader_storage_buffer_object", "GL_ARB_shader_subroutine", "GL_ARB_shader_texture_image_samples", "GL_ARB_shader_viewport_layer_array",
     "GL_ARB_shader_texture_lod", "GL_ARB_shading_language_100", "GL_ARB_shading_language_420pack",
     "GL_ARB_shading_language_packing", "GL_ARB_shadow", "GL_ARB_spirv_extensions", "GL_ARB_stencil_texturing", "GL_ARB_sync",
     "GL_ARB_tessellation_shader", "GL_ARB_texture_barrier", "GL_ARB_texture_border_clamp", "GL_ARB_texture_buffer_object",
