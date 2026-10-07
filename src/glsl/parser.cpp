@@ -1049,6 +1049,12 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
         } else if (q.storage == Storage::Const && !preamble_) {
             fail("'" + name + "' : const variables must be initialized");
         }
+        if (global && !preamble_ && sh_.stage == Stage::Fragment && v->type.stripArrays().base == BT::Double) {
+            // GLSL 4.60 4.3.4/4.3.6: double fragment inputs must be flat; outputs can't be double.
+            if (q.storage == Storage::Out) fail("'" + name + "' : fragment shader outputs cannot be double-precision");
+            if (q.storage == Storage::In && q.interp != Interp::Flat)
+                fail("'" + name + "' : double-precision fragment shader inputs must be qualified with flat");
+        }
         if (global && !preamble_ && sh_.stage == Stage::Compute && (q.storage == Storage::In || q.storage == Storage::Out))
             fail("'" + name + "' : compute shaders cannot declare input or output variables");
         if (v->type.stripArrays().base == BT::Image && !preamble_ && q.storage == Storage::Uniform) checkImageDecl(name, v->type, q);
