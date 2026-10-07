@@ -21,6 +21,12 @@ struct DeviceCaps {
     uint32_t maxThreadgroupMemory = 32768;
     bool hasFamilyApple9 = false;
     bool bcCompression = false;
+    bool sparse = false;  // placement sparse textures/buffers (ARB_sparse_texture*, ARB_sparse_buffer)
+};
+
+// A run of consecutive tiles in one of the device's placement heaps (sparse resources).
+struct SparseTiles {
+    uint32_t heap = 0, first = 0, count = 0;
 };
 
 class Device {
@@ -39,6 +45,8 @@ public:
     // in. Completion is reported per serial by commit feedback handlers, so
     // contexts may submit out of order.
     uint64_t reserveSerial();
+    // The most recently reserved serial: work recorded so far completes with it at the latest.
+    uint64_t lastReservedSerial();
     bool isComplete(uint64_t serial);
     void waitFor(uint64_t serial);
     void waitIdle();
@@ -68,6 +76,37 @@ public:
     void releaseAfter(id<MTLAllocation> a, uint64_t serial);
     // Keeps an arbitrary object alive until `serial` completes.
     void retainUntil(id obj, uint64_t serial);
+
+    // --- sparse resources ---------------------------------------------------
+    // Placement sparse textures and buffers are backed by kSparsePageSize tiles taken
+    // from a pool of placement heaps. Mapping updates are queue operations: callers
+    // submit the work that must see the old mapping first; later encoders start with
+    // a queue barrier that covers MTLStageResourceState.
+    static constexpr MTLSparsePageSize kSparsePageSize = MTLSparsePageSize16;
+    size_t sparseTileBytes = 0;  // bytes per tile (0: sparse resources unsupported)
+    std::atomic<int> sparseTextures{0};  // live sparse textures (draws only look for sparse images while > 0)
+    bool allocSparseTiles(uint32_t count, SparseTiles& out);
+    // The tiles may be reused once `serial` (the last work that could reference them) completed.
+    // Tiles unmapped from a live resource are also held back for a while: the GPU keeps using
+    // stale translations of an unmap until it idles, so a quick reuse could alias them.
+    void freeSparseTiles(const SparseTiles& t, uint64_t serial, bool unmapped = false);
+    // One mapping update: `region` (in tiles) of a texture level/slice, or `region.origin.x` /
+    // `region.size.width` tiles of a buffer. Maps `tiles` (walked in x, y, z order) or unmaps
+    // when `unmap` is set (`tiles` then names the tiles being unmapped).
+    struct SparseOp {
+        NSUInteger level = 0, slice = 0;
+        MTLRegion region;
+        SparseTiles tiles;
+        bool unmap = false;
+    };
+    void updateSparseMappings(id<MTLTexture> tex, const std::vector<SparseOp>& ops);
+    // The GPU keeps using stale translations of a sparse resource's address range for a while
+    // after unmaps (until it idles): released sparse resources keep their range for
+    // kSparseSettleTime so a new resource can't be placed there, and a remap of a range unmapped
+    // less than kSparseSettleTime ago waits that out (sparse.mm).
+    static constexpr double kSparseSettleTime = 0.5;
+    void retainSparse(id obj, uint64_t serial);
+    void updateSparseMappings(id<MTLBuffer> buf, const std::vector<SparseOp>& ops);
 
     // --- helpers ------------------------------------------------------------
     id<MTLBuffer> newBuffer(size_t size, MTLResourceOptions opts = MTLResourceStorageModeShared);
@@ -108,6 +147,25 @@ private:
         bool removeResidency;
     };
     std::deque<Deferred> deferred_;
+
+    struct SparseHeap {
+        id<MTLHeap> heap;
+        std::vector<bool> used;  // per tile
+        uint32_t freeCount;
+        uint32_t hint;           // search start for single tiles
+    };
+    void reclaimSparseLocked();
+    template <typename Res, typename Op>
+    void submitSparseOps(Res res, const std::vector<SparseOp>& ops, Op makeOp);
+    std::mutex sparseMutex_;
+    std::vector<SparseHeap> sparseHeaps_;
+    struct PendingTiles {
+        uint64_t serial;
+        double notBefore;  // CFAbsoluteTime
+        SparseTiles tiles;
+    };
+    std::deque<PendingTiles> sparsePendingFree_;
+    std::deque<std::pair<double, Deferred>> sparseRetired_;  // (release not before, object)
 };
 
 }  // namespace mgl

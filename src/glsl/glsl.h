@@ -54,7 +54,10 @@ constexpr int kMaxAtomicCounterBufferBindings = limits_detail::gl_MaxAtomicCount
 struct CompileOptions {
     bool compatibilityProfile = true;  // accept GL compatibility builtins (gl_Vertex, ftransform, ...)
     int maxVersion = 460;
+    bool sparseTexture = false;  // GL_ARB_sparse_texture2 / GL_ARB_sparse_texture_clamp (device supports sparse textures)
 };
+// Shader extensions that exist only when CompileOptions::sparseTexture is set.
+const std::vector<std::string>& sparseTextureExtensions();
 
 CompileResult compile(Stage stage, const std::vector<std::string>& sources, const CompileOptions& opts = {});
 
@@ -311,6 +314,14 @@ struct VariantKey {
     // Fragment: AND the coverage with MGLSys::sampleMask (GL_SAMPLE_MASK) and the
     // GL_SAMPLE_COVERAGE mask derived from MGLSys::sampleCoverage.
     bool sampleMask = false;
+    // Argument slots (< 64) of image uniforms bound to sparse textures: their loads, stores and
+    // atomics check residency, as accesses to uncommitted texels must read zero and change
+    // nothing (ARB_sparse_texture2), but would otherwise hit lines left in the GPU caches.
+    uint64_t sparseImageSlots = 0;
+    // Texture/image slots (< 64) of multisample uniforms bound to sparse multisample textures, which
+    // are stored as 2D arrays with one slice per sample (layer * samples + sample) because Metal
+    // shaders can't write multisample textures; msArray4: those with 4 samples (else 2).
+    uint64_t msArraySlots = 0, msArray4 = 0;
 };
 
 struct EntryPoint {

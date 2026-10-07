@@ -1,5 +1,6 @@
 #import "mtl/device.h"
 #include <TargetConditionals.h>
+#include <type_traits>
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
 #endif
@@ -69,7 +70,12 @@ bool Device::init() {
         caps.bcCompression = mtl.supportsBCTextureCompression;
         caps.maxThreadsPerThreadgroup = (uint32_t)mtl.maxThreadsPerThreadgroup.width;
         caps.maxThreadgroupMemory = (uint32_t)mtl.maxThreadgroupMemoryLength;
-        MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression);
+        if (@available(macOS 26.4, iOS 26.4, *)) {
+            if (mtl.supportsPlacementSparse) sparseTileBytes = [mtl sparseTileSizeInBytesForSparsePageSize:kSparsePageSize];
+        }
+        caps.sparse = sparseTileBytes > 0;
+        MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d, sparse=%d)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression,
+                 caps.sparse);
     }
     return true;
 }
@@ -77,6 +83,11 @@ bool Device::init() {
 uint64_t Device::reserveSerial() {
     std::lock_guard<std::mutex> g(mutex_);
     return nextSerial_++;
+}
+
+uint64_t Device::lastReservedSerial() {
+    std::lock_guard<std::mutex> g(mutex_);
+    return nextSerial_ - 1;
 }
 
 bool Device::gpuTimes(uint64_t serial, double* start, double* end) {
@@ -225,8 +236,19 @@ void Device::retainUntil(id obj, uint64_t serial) {
     deferred_.push_back({serial, obj, false});
 }
 
+void Device::retainSparse(id obj, uint64_t serial) {
+    if (!obj) return;
+    std::lock_guard<std::mutex> g(mutex_);
+    sparseRetired_.push_back({CFAbsoluteTimeGetCurrent() + kSparseSettleTime, {serial, obj, false}});
+}
+
 void Device::collect() {
     std::lock_guard<std::mutex> g(mutex_);
+    if (!sparseRetired_.empty()) {
+        const double now = CFAbsoluteTimeGetCurrent();
+        while (!sparseRetired_.empty() && sparseRetired_.front().first <= now && isCompleteLocked(sparseRetired_.front().second.serial))
+            sparseRetired_.pop_front();
+    }
     // deferred_ is not strictly sorted (different contexts), so scan.
     for (auto it = deferred_.begin(); it != deferred_.end();) {
         if (isCompleteLocked(it->serial)) {
@@ -239,6 +261,139 @@ void Device::collect() {
             ++it;
         }
     }
+}
+
+// --- sparse resources -------------------------------------------------------
+// Returns tiles whose last use completed to their heaps; releases heaps that became empty
+// (keeping one spare) so sparse resources don't pin memory after they are deleted.
+void Device::reclaimSparseLocked() {
+    const double now = CFAbsoluteTimeGetCurrent();
+    for (auto it = sparsePendingFree_.begin(); it != sparsePendingFree_.end();) {
+        if (it->notBefore > now || !isComplete(it->serial)) {
+            ++it;
+            continue;
+        }
+        const SparseTiles& t = it->tiles;
+        SparseHeap& h = sparseHeaps_[t.heap];
+        for (uint32_t i = 0; i < t.count; i++) h.used[t.first + i] = false;
+        h.freeCount += t.count;
+        h.hint = std::min(h.hint, t.first);
+        it = sparsePendingFree_.erase(it);
+    }
+    bool spare = false;
+    for (SparseHeap& h : sparseHeaps_) {
+        if (!h.heap || h.freeCount != h.used.size()) continue;
+        if (!spare) {
+            spare = true;
+            continue;
+        }
+        releaseAfter(h.heap, 0);
+        h = SparseHeap{nil, {}, 0, 0};
+    }
+}
+
+bool Device::allocSparseTiles(uint32_t count, SparseTiles& out) {
+    if (!sparseTileBytes || !count) return false;
+    std::lock_guard<std::mutex> g(sparseMutex_);
+    reclaimSparseLocked();
+    auto take = [&](uint32_t hi) {
+        SparseHeap& h = sparseHeaps_[hi];
+        if (!h.heap || h.freeCount < count) return false;
+        uint32_t n = (uint32_t)h.used.size(), run = 0;
+        for (uint32_t i = count == 1 ? h.hint : 0; i < n; i++) {
+            run = h.used[i] ? 0 : run + 1;
+            if (run < count) continue;
+            uint32_t first = i + 1 - count;
+            for (uint32_t k = first; k <= i; k++) h.used[k] = true;
+            h.freeCount -= count;
+            if (count == 1) h.hint = i + 1;
+            out = {hi, first, count};
+            return true;
+        }
+        return false;
+    };
+    for (uint32_t hi = 0; hi < sparseHeaps_.size(); hi++)
+        if (take(hi)) return true;
+    // New placement heap: 16 MB, or larger for a big contiguous run.
+    const uint32_t tiles = std::max<uint32_t>(count, (uint32_t)((16u << 20) / sparseTileBytes));
+    MTLHeapDescriptor* hd = [MTLHeapDescriptor new];
+    hd.type = MTLHeapTypePlacement;
+    hd.storageMode = MTLStorageModePrivate;
+    hd.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+    hd.size = (NSUInteger)tiles * sparseTileBytes;
+    hd.maxCompatiblePlacementSparsePageSize = kSparsePageSize;
+    id<MTLHeap> heap = [mtl newHeapWithDescriptor:hd];
+    if (!heap) {
+        MGL_ERR("sparse placement heap allocation failed (%u tiles)", tiles);
+        return false;
+    }
+    heap.label = @"metalgldrv sparse tiles";
+    makeResident(heap);
+    uint32_t n = (uint32_t)(heap.size / sparseTileBytes);
+    uint32_t slot = 0;
+    while (slot < sparseHeaps_.size() && sparseHeaps_[slot].heap) slot++;
+    if (slot == sparseHeaps_.size()) sparseHeaps_.emplace_back();
+    sparseHeaps_[slot] = {heap, std::vector<bool>(n, false), n, 0};
+    return take(slot);
+}
+
+void Device::freeSparseTiles(const SparseTiles& t, uint64_t serial, bool unmapped) {
+    if (!t.count) return;
+    std::lock_guard<std::mutex> g(sparseMutex_);
+    sparsePendingFree_.push_back({serial, unmapped ? CFAbsoluteTimeGetCurrent() + kSparseSettleTime : 0.0, t});
+    reclaimSparseLocked();
+}
+
+// Issues the ops as queue mapping updates, one call per run of ops sharing a heap.
+template <typename Res, typename Op>
+void Device::submitSparseOps(Res res, const std::vector<SparseOp>& ops, Op makeOp) {
+    std::vector<id<MTLHeap>> heaps(ops.size());
+    {
+        std::lock_guard<std::mutex> g(sparseMutex_);
+        for (size_t i = 0; i < ops.size(); i++) heaps[i] = sparseHeaps_[ops[i].tiles.heap].heap;  // unmaps too: a nil heap leaves later maps of the resource broken
+    }
+    std::lock_guard<std::mutex> g(mutex_);
+    if (residencyDirty_) {
+        [residency commit];
+        residencyDirty_ = false;
+    }
+    for (const SparseOp& o : ops)
+        MGL_DBG("sparse %s level %lu slice %lu tiles (%lu,%lu,%lu)+(%lu,%lu,%lu) -> heap %u tile %u", o.unmap ? "unmap" : "map",
+                (unsigned long)o.level, (unsigned long)o.slice, (unsigned long)o.region.origin.x, (unsigned long)o.region.origin.y,
+                (unsigned long)o.region.origin.z, (unsigned long)o.region.size.width, (unsigned long)o.region.size.height,
+                (unsigned long)o.region.size.depth, o.tiles.heap, o.tiles.first);
+    for (size_t i = 0; i < ops.size();) {
+        size_t j = i;
+        std::vector<decltype(makeOp(ops[0]))> batch;
+        while (j < ops.size() && heaps[j] == heaps[i]) batch.push_back(makeOp(ops[j++]));
+        if constexpr (std::is_same_v<decltype(makeOp(ops[0])), MTL4UpdateSparseTextureMappingOperation>)
+            [queue updateTextureMappings:res heap:heaps[i] operations:batch.data() count:batch.size()];
+        else
+            [queue updateBufferMappings:res heap:heaps[i] operations:batch.data() count:batch.size()];
+        i = j;
+    }
+}
+
+void Device::updateSparseMappings(id<MTLTexture> tex, const std::vector<SparseOp>& ops) {
+    submitSparseOps(tex, ops, [](const SparseOp& o) {
+        MTL4UpdateSparseTextureMappingOperation m;
+        m.mode = o.unmap ? MTLSparseTextureMappingModeUnmap : MTLSparseTextureMappingModeMap;
+        m.textureRegion = o.region;
+        m.textureLevel = o.level;
+        m.textureSlice = o.slice;
+        m.heapOffset = o.tiles.first;
+        return m;
+    });
+}
+
+void Device::updateSparseMappings(id<MTLBuffer> buf, const std::vector<SparseOp>& ops) {
+    submitSparseOps(buf, ops, [](const SparseOp& o) {
+        MTL4UpdateSparseBufferMappingOperation m;
+        m.mode = o.unmap ? MTLSparseTextureMappingModeUnmap : MTLSparseTextureMappingModeMap;
+        m.bufferRange = NSMakeRange(o.region.origin.x, o.region.size.width);
+        m.heapOffset = o.tiles.first;
+        return m;
+    });
 }
 
 id<MTLBuffer> Device::newBuffer(size_t size, MTLResourceOptions opts) {

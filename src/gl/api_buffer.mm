@@ -1,5 +1,5 @@
 // Buffer objects.
-#import "gl/context.h"
+#import "gl/texture.h"
 #include <cstring>
 #include "util/log.h"
 
@@ -11,6 +11,10 @@ namespace mgl {
 Buffer::~Buffer() {
     if (mtl) Device::get()->releaseAfter(mtl, lastUse);
     if (rotated) Device::get()->releaseAfter(rotated, rotatedLastUse);
+    if (sparse) {
+        releaseSparsePages(this, std::max(lastUse, lastGpuWrite));
+        Device::get()->retainSparse(mtl, std::max(lastUse, lastGpuWrite));
+    }
     free(mapShadow);
 }
 
@@ -44,7 +48,7 @@ void syncBufferForCpuRead(Context* ctx, Buffer* b) {
 void writeBuffer(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, const void* data) {
     if (size <= 0) return;
     b->contentVersion++;
-    if (!busy(ctx, b)) {
+    if (b->cpu && !busy(ctx, b)) {
         memcpy(b->cpu + offset, data, size);
         return;
     }
@@ -73,6 +77,48 @@ void writeBuffer(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, cons
     [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
     b->lastUse = ctx->serial();
     b->lastGpuWrite = b->lastUse;
+}
+
+void readBuffer(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, void* dst) {
+    if (size <= 0) return;
+    if (b->cpu) {
+        syncBufferForCpuRead(ctx, b);
+        memcpy(dst, b->cpu + offset, size);
+        return;
+    }
+    id<MTLBuffer> tmp = ctx->dev->newBuffer((size_t)size);
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    // Writes to uncommitted pages linger in the (virtually tagged) GPU caches until flushed with
+    // ResourceAlias visibility; without it they would read back instead of zeros.
+    [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit
+             visibilityOptions:MTL4VisibilityOptionDevice | MTL4VisibilityOptionResourceAlias];
+    [e copyFromBuffer:b->mtl sourceOffset:offset toBuffer:tmp destinationOffset:0 size:size];
+    b->lastUse = ctx->serial();
+    ctx->finish();
+    memcpy(dst, tmp.contents, size);
+    ctx->dev->releaseAfter(tmp, 0);
+}
+
+const uint8_t* bufferBytes(Context* ctx, Buffer* b, size_t offset, size_t size) {
+    if (b->cpu) return b->cpu + offset;
+    static thread_local std::vector<uint8_t> copy;
+    copy.resize(std::max<size_t>(size, 1));
+    readBuffer(ctx, b, (GLintptr)offset, (GLsizeiptr)size, copy.data());
+    return copy.data();
+}
+
+uint8_t* PackStaging::begin(Context* c, Buffer* b, size_t off, size_t size) {
+    if (b->cpu) return b->cpu + off;
+    ctx = c;
+    buffer = b;
+    offset = off;
+    data.resize(size);
+    readBuffer(c, b, (GLintptr)off, (GLsizeiptr)size, data.data());  // bytes the pack skips keep their contents
+    return data.data();
+}
+
+PackStaging::~PackStaging() {
+    if (buffer && !data.empty()) writeBuffer(ctx, buffer, (GLintptr)offset, (GLsizeiptr)data.size(), data.data());
 }
 
 }  // namespace mgl
@@ -294,14 +340,20 @@ static void bufferData(Context* ctx, Buffer* b, GLsizeiptr size, const void* dat
 
 static void bufferStorage(Context* ctx, Buffer* b, GLsizeiptr size, const void* data, GLbitfield flags) {
     if (size <= 0) return ctx->setError(GL_INVALID_VALUE);
-    const GLbitfield valid = GL_DYNAMIC_STORAGE_BIT | GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT |
-                             GL_MAP_COHERENT_BIT | GL_CLIENT_STORAGE_BIT;
+    GLbitfield valid = GL_DYNAMIC_STORAGE_BIT | GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT |
+                       GL_MAP_COHERENT_BIT | GL_CLIENT_STORAGE_BIT;
+    if (ctx->dev->caps.sparse) valid |= GL_SPARSE_STORAGE_BIT_ARB;
     if (flags & ~valid) return ctx->setError(GL_INVALID_VALUE);
     if ((flags & GL_MAP_PERSISTENT_BIT) && !(flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT))) return ctx->setError(GL_INVALID_VALUE);
     if ((flags & GL_MAP_COHERENT_BIT) && !(flags & GL_MAP_PERSISTENT_BIT)) return ctx->setError(GL_INVALID_VALUE);
     if (b->immutable) return ctx->setError(GL_INVALID_OPERATION);
-    if (!allocStorage(b, size)) return ctx->setError(GL_OUT_OF_MEMORY);
-    if (data) memcpy(b->cpu, data, size);
+    if (flags & GL_SPARSE_STORAGE_BIT_ARB) {
+        // ARB_sparse_buffer: no pages are committed yet, so `data` has nowhere to go.
+        if (!sparseBufferStorage(ctx, b, size, flags)) return;
+    } else {
+        if (!allocStorage(b, size)) return ctx->setError(GL_OUT_OF_MEMORY);
+        if (data) memcpy(b->cpu, data, size);
+    }
     b->immutable = true;
     b->storageFlags = flags;
     b->usage = GL_DYNAMIC_DRAW;
@@ -517,7 +569,7 @@ static void copySubData(Context* ctx, Buffer* src, Buffer* dst, GLintptr ro, GLi
     if (!size) return;
     dst->contentVersion++;
     bool srcGpuWrite = src->lastGpuWrite && !ctx->dev->isComplete(src->lastGpuWrite);
-    if (!srcGpuWrite && !busy(ctx, dst)) {
+    if (src->cpu && dst->cpu && !srcGpuWrite && !busy(ctx, dst)) {
         memcpy(dst->cpu + wo, src->cpu + ro, size);
         return;
     }
@@ -546,8 +598,7 @@ API void APIENTRY glCopyNamedBufferSubData(GLuint rb, GLuint wb, GLintptr ro, GL
 static void getSubData(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, void* data) {
     if (offset < 0 || size < 0 || offset + size > b->size) return ctx->setError(GL_INVALID_VALUE);
     if (b->mapped && !(b->mapAccess & GL_MAP_PERSISTENT_BIT)) return ctx->setError(GL_INVALID_OPERATION);
-    syncBufferForCpuRead(ctx, b);
-    memcpy(data, b->cpu + offset, size);
+    readBuffer(ctx, b, offset, size, data);
 }
 
 API void APIENTRY glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* data) {
@@ -584,6 +635,26 @@ void clearBufferRange(Context* ctx, Buffer* b, GLenum internalformat, GLintptr o
         uint8_t tmp[16] = {};
         convertToStorage(f, format, type, data, 0, 0, tmp, 0, 0, 1, 1, 1, false);
         memcpy(pattern, tmp, std::min(texel, 16));
+    }
+    if (b->sparse) {
+        // Only committed pages hold data (a clear of a mostly uncommitted 1 GB buffer must not
+        // stage 1 GB): clear each committed run of the range.
+        const GLsizeiptr page = (GLsizeiptr)ctx->dev->sparseTileBytes;
+        GLsizeiptr end = offset + size;
+        for (GLsizeiptr p = offset / page * page; p < end;) {
+            if (!b->sparsePages[(size_t)(p / page)].count) {
+                p += page;
+                continue;
+            }
+            GLsizeiptr q = p;
+            while (q < end && b->sparsePages[(size_t)(q / page)].count) q += page;
+            GLsizeiptr a = std::max(p, offset), e = std::min(q, end);
+            std::vector<uint8_t> fill((size_t)(e - a));
+            for (GLsizeiptr i = a; i < e; i++) fill[(size_t)(i - a)] = pattern[(i - offset) % texel];
+            writeBuffer(ctx, b, a, e - a, fill.data());
+            p = q;
+        }
+        return;
     }
     std::vector<uint8_t> fill(size);
     for (GLsizeiptr i = 0; i < size; i += texel) memcpy(fill.data() + i, pattern, texel);

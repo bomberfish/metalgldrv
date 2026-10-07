@@ -206,6 +206,27 @@ inline T mgl_int_border_gather(T v, float2 c, int2 size, int2 off, int comp, ulo
     return v;
 }
 )"});
+    // --- ARB_sparse_texture2: value of a sparse lookup, accumulating its residency ---------------
+    c.push_back({{"mgl_sparse_val"}, R"(template <typename T>
+inline T mgl_sparse_val(sparse_color<T> c, thread bool& resident) {
+    resident = resident && c.resident();
+    return c.value();
+}
+)"});
+    // image loads of sparse textures: uncommitted texels read zero (not what an earlier write left in the caches)
+    c.push_back({{"mgl_sparse_or0", "mgl_sparse_val0"}, R"(template <typename T>
+inline T mgl_sparse_or0(sparse_color<T> c, int alpha1) {
+    if (c.resident()) return c.value();
+    T z = T(0);
+    z.w = alpha1;
+    return z;
+}
+template <typename T>
+inline T mgl_sparse_val0(sparse_color<T> c, int alpha1, thread bool& resident) {
+    resident = resident && c.resident();
+    return mgl_sparse_or0(c, alpha1);
+}
+)"});
     // --- cube maps without TEXTURE_CUBE_MAP_SEAMLESS: keep the filter footprint inside the face ---
     c.push_back({{"mgl_cube_noseam"}, R"(inline float3 mgl_cube_noseam(float3 d, float size, float on) {
     if (on == 0.0f) return d;

@@ -164,7 +164,9 @@ int main(int argc, char** argv) {
             if (sr.status == SpecializeStatus::BadEntryPoint) { fprintf(stderr, "%s: no entry point '%s'\n", path.c_str(), entry.c_str()); return 1; }
             cr = sr.compile;
         } else {
-            cr = compile(st, {ss.str()});
+            CompileOptions co;
+            co.sparseTexture = true;  // the tool validates on a device that has them
+            cr = compile(st, {ss.str()}, co);
         }
         tc += now() - t0;
         if (!cr.infoLog.empty()) fprintf(stderr, "%s: %s", path.c_str(), cr.infoLog.c_str());

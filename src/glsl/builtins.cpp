@@ -397,6 +397,143 @@ void addTextureFunctions(Ctx& c) {
     }
 }
 
+// ARB_sparse_texture2: sparse*ARB lookups return a residency code and write the texel to an out
+// parameter placed before the optional bias / gather component. ARB_sparse_texture_clamp: *ClampARB
+// lookups take a minimum LOD after the regular arguments (before the texel and bias).
+void addSparseTextureFunctions(Ctx& c) {
+    static const char* kSparse2 = "GL_ARB_sparse_texture2";
+    static const char* kClamp = "GL_ARB_sparse_texture_clamp";
+    static const char* samplerNames[] = {
+        "sampler1D", "sampler2D", "sampler3D", "samplerCube", "sampler2DRect", "sampler1DArray", "sampler2DArray", "samplerCubeArray",
+        "sampler2DMS", "sampler2DMSArray", "sampler1DShadow", "sampler2DShadow", "samplerCubeShadow", "sampler2DRectShadow",
+        "sampler1DArrayShadow", "sampler2DArrayShadow", "samplerCubeArrayShadow"};
+    const Type F = Type::scalar(BT::Float), I = Type::scalar(BT::Int);
+    // `outAt`: index of the out texel parameter (-1: none); `bias`: last parameter is an LOD bias.
+    auto add = [&](const char* ext, const char* name, const Type& ret, const std::vector<Type>& ps, int outAt, bool bias) {
+        std::vector<uint8_t> outs(ps.size(), 0);
+        if (outAt >= 0) outs[outAt] = 1;
+        Builtin* b = c.add(name, ret, ps, outs);
+        b->ext = ext;
+        if (bias) b->stageMask = 1u << (int)Stage::Fragment;
+    };
+    for (const char* pfx : {"", "i", "u"}) {
+        for (const char* sn : samplerNames) {
+            const Type* tp = typeKeyword(std::string(pfx) + sn);
+            if (!tp) continue;
+            const Type T = *tp;
+            const Type G4 = Type::vector(T.sampled, 4);
+            const int cd = coordDim(T);
+            const bool rect = T.dim == Dim::Rect, cube = T.dim == Dim::Cube, d1 = T.dim == Dim::D1;
+            const bool ms = T.ms, sh = T.shadow, arr = T.arrayed;
+            const bool cubeArrShadow = sh && cube && arr;
+            int pn = cd + (arr ? 1 : 0) + (sh ? 1 : 0);
+            if (sh && d1) pn = 3;
+            if (cubeArrShadow) pn = 4;
+            const Type P = vecT(BT::Float, pn), gradT = vecT(BT::Float, cd), offT = vecT(BT::Int, cube ? 3 : cd);
+            const Type fetchP = vecT(BT::Int, cd + (arr ? 1 : 0));
+            const Type texel = sh ? F : G4;
+            const bool bias = !rect && !(sh && arr && T.dim == Dim::D2);
+            auto sparse = [&](const char* ext, const char* name, std::vector<Type> ps, bool withBias) {
+                ps.push_back(texel);
+                int at = (int)ps.size() - 1;
+                add(ext, name, I, ps, at, false);
+                if (withBias) {
+                    ps.push_back(F);
+                    add(ext, name, I, ps, at, true);
+                }
+            };
+            auto clamp = [&](const char* name, std::vector<Type> ps, bool withBias) {
+                add(kClamp, name, texel, ps, -1, false);
+                if (withBias) {
+                    ps.push_back(F);
+                    add(kClamp, name, texel, ps, -1, true);
+                }
+            };
+            if (!d1) {  // sparse lookups exist for every non-1D sampler
+                if (ms) {
+                    sparse(kSparse2, "sparseTexelFetchARB", {T, fetchP, I}, false);
+                    continue;
+                }
+                if (cubeArrShadow) {
+                    sparse(kSparse2, "sparseTextureARB", {T, P, F}, false);
+                } else {
+                    sparse(kSparse2, "sparseTextureARB", {T, P}, bias);
+                    if (!rect) sparse(kSparse2, "sparseTextureLodARB", {T, P, F}, false);
+                    sparse(kSparse2, "sparseTextureGradARB", {T, P, gradT, gradT}, false);
+                    if (!cube) {
+                        sparse(kSparse2, "sparseTextureOffsetARB", {T, P, offT}, bias);
+                        if (!rect) sparse(kSparse2, "sparseTextureLodOffsetARB", {T, P, F, offT}, false);
+                        sparse(kSparse2, "sparseTextureGradOffsetARB", {T, P, gradT, gradT, offT}, false);
+                    }
+                }
+                if (!sh && !cube) {
+                    std::vector<Type> fp = rect ? std::vector<Type>{T, fetchP} : std::vector<Type>{T, fetchP, I};
+                    sparse(kSparse2, "sparseTexelFetchARB", fp, false);
+                    fp.push_back(offT);
+                    sparse(kSparse2, "sparseTexelFetchOffsetARB", fp, false);
+                }
+                if (T.dim == Dim::D2 || cube || rect) {
+                    const Type gP = vecT(BT::Float, cd + (arr ? 1 : 0));
+                    const Type gT = sh ? Type::vector(BT::Float, 4) : G4;
+                    const Type o2 = Type::vector(BT::Int, 2);
+                    auto gather = [&](const char* name, std::vector<Type> ps) {
+                        ps.push_back(gT);
+                        int at = (int)ps.size() - 1;
+                        add(kSparse2, name, I, ps, at, false);
+                        if (!sh) {
+                            ps.push_back(I);  // component
+                            add(kSparse2, name, I, ps, at, false);
+                        }
+                    };
+                    std::vector<Type> base = sh ? std::vector<Type>{T, gP, F} : std::vector<Type>{T, gP};
+                    gather("sparseTextureGatherARB", base);
+                    if (!cube) {
+                        auto withOff = base;
+                        withOff.push_back(o2);
+                        gather("sparseTextureGatherOffsetARB", withOff);
+                        auto withOffs = base;
+                        withOffs.push_back(o2.arrayOf(4));
+                        gather("sparseTextureGatherOffsetsARB", withOffs);
+                    }
+                }
+            }
+            if (ms || rect) continue;
+            // ARB_sparse_texture_clamp
+            if (cubeArrShadow) {
+                clamp("textureClampARB", {T, P, F, F}, false);
+                sparse(kClamp, "sparseTextureClampARB", {T, P, F, F}, false);
+                continue;
+            }
+            clamp("textureClampARB", {T, P, F}, bias);
+            clamp("textureGradClampARB", {T, P, gradT, gradT, F}, false);
+            if (!cube) {
+                clamp("textureOffsetClampARB", {T, P, offT, F}, bias);
+                clamp("textureGradOffsetClampARB", {T, P, gradT, gradT, offT, F}, false);
+            }
+            if (d1) continue;
+            sparse(kClamp, "sparseTextureClampARB", {T, P, F}, bias);
+            sparse(kClamp, "sparseTextureGradClampARB", {T, P, gradT, gradT, F}, false);
+            if (!cube) {
+                sparse(kClamp, "sparseTextureOffsetClampARB", {T, P, offT, F}, bias);
+                sparse(kClamp, "sparseTextureGradOffsetClampARB", {T, P, gradT, gradT, offT, F}, false);
+            }
+        }
+    }
+    add(kSparse2, "sparseTexelsResidentARB", Type::scalar(BT::Bool), {I}, -1, false);
+    static const char* imgNames[] = {"image2D", "image3D", "image2DRect", "imageCube", "image2DArray", "imageCubeArray", "image2DMS",
+                                     "image2DMSArray"};
+    for (const char* pfx : {"", "i", "u"}) {
+        for (const char* in : imgNames) {
+            const Type T = *typeKeyword(std::string(pfx) + in);
+            int pn = T.dim == Dim::Cube ? 3 : coordDim(T) + (T.arrayed ? 1 : 0);
+            std::vector<Type> ps = {T, vecT(BT::Int, pn)};
+            if (T.ms) ps.push_back(I);
+            ps.push_back(Type::vector(T.sampled, 4));
+            add(kSparse2, "sparseImageLoadARB", I, ps, (int)ps.size() - 1, false);
+        }
+    }
+}
+
 void addImageFunctions(Ctx& c) {
     static const char* imgNames[] = {"image1D", "image2D", "image3D", "image2DRect", "imageCube", "imageBuffer", "image1DArray",
                                      "image2DArray", "imageCubeArray", "image2DMS", "image2DMSArray"};
@@ -444,6 +581,7 @@ Ctx& ctx() {
         Ctx* c = new Ctx;
         for (const char* s : kSigs) addSig(*c, s);
         addTextureFunctions(*c);
+        addSparseTextureFunctions(*c);
         addImageFunctions(*c);
         addMatrixFunctions(*c);
         return c;

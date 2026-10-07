@@ -1,5 +1,5 @@
 // KHR_debug, object labels, internal format queries, transform feedback objects.
-#import "gl/context.h"
+#import "gl/texture.h"
 #include "util/log.h"
 
 using namespace mgl;
@@ -242,6 +242,14 @@ API void APIENTRY glGetInternalformativ(GLenum target, GLenum internalformat, GL
     case GL_TEXTURE_COMPRESSED_BLOCK_WIDTH: params[0] = f ? f->blockW : 0; return;
     case GL_TEXTURE_COMPRESSED_BLOCK_HEIGHT: params[0] = f ? f->blockH : 0; return;
     case GL_TEXTURE_COMPRESSED_BLOCK_SIZE: params[0] = f && f->comp == Comp::Compressed ? f->bytesPerPixel : 0; return;
+    case GL_NUM_VIRTUAL_PAGE_SIZES_ARB: params[0] = sparseNumPageSizes(target, f); return;
+    case GL_VIRTUAL_PAGE_SIZE_X_ARB: case GL_VIRTUAL_PAGE_SIZE_Y_ARB: case GL_VIRTUAL_PAGE_SIZE_Z_ARB: {
+        // Every target reports the page shape of the format (the standard shapes for the 2D-like ones).
+        int p[3] = {0, 0, 0};
+        if (sparsePageSize(target, f, 0, &p[0], &p[1], &p[2])) params[0] = p[pname - GL_VIRTUAL_PAGE_SIZE_X_ARB];
+        else params[0] = 0;
+        return;
+    }
     default: params[0] = 0; return;
     }
 }

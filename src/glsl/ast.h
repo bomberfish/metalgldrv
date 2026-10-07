@@ -292,6 +292,7 @@ struct Builtin {
     std::vector<Type> params;
     std::vector<uint8_t> paramOut;  // 1 = out, 2 = inout
     uint32_t stageMask = 0xff;
+    const char* ext = nullptr;  // shader extension that must be enabled to call it
 };
 
 // helpers (types.cpp)

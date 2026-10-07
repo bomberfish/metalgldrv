@@ -1,5 +1,5 @@
 // glGet* state queries, glGetString(i).
-#import "gl/context.h"
+#import "gl/texture.h"
 #include <cmath>
 #include "util/log.h"
 
@@ -63,12 +63,27 @@ const char* kExtensions[] = {
     "GL_KHR_robustness", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
     "GL_NV_depth_clamp", "GL_NV_texture_barrier",
 };
-const int kNumExtensions = sizeof(kExtensions) / sizeof(kExtensions[0]);
+// Extensions that depend on the device (inserted in name order).
+const char* kSparseExtensions[] = {"GL_ARB_sparse_buffer", "GL_ARB_sparse_texture", "GL_ARB_sparse_texture2",
+                                   "GL_ARB_sparse_texture_clamp"};
+
+const std::vector<const char*>& extensionList() {
+    static const std::vector<const char*> list = [] {
+        std::vector<const char*> r(std::begin(kExtensions), std::end(kExtensions));
+        Device* d = Device::get();
+        if (d && d->caps.sparse) {
+            auto at = std::find_if(r.begin(), r.end(), [](const char* e) { return strcmp(e, "GL_ARB_sparse_buffer") > 0; });
+            r.insert(at, std::begin(kSparseExtensions), std::end(kSparseExtensions));
+        }
+        return r;
+    }();
+    return list;
+}
 
 std::string& extensionString() {
     static std::string s = [] {
         std::string r;
-        for (auto e : kExtensions) {
+        for (auto e : extensionList()) {
             if (!r.empty()) r += ' ';
             r += e;
         }
@@ -137,7 +152,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
         return true;
     }
     case GL_CONTEXT_PROFILE_MASK: v = I(ctx->coreProfile ? GL_CONTEXT_CORE_PROFILE_BIT : GL_CONTEXT_COMPATIBILITY_PROFILE_BIT); return true;
-    case GL_NUM_EXTENSIONS: v = I(kNumExtensions); return true;
+    case GL_NUM_EXTENSIONS: v = I((int64_t)extensionList().size()); return true;
     case GL_NUM_SHADING_LANGUAGE_VERSIONS: v = I(17); return true;
     case GL_NUM_SPIR_V_EXTENSIONS: v = I((int)glsl::supportedSpirvExtensions().size()); return true;
     case GL_CLAMP_READ_COLOR: v = E(ctx->clampReadColor); return true;
@@ -148,6 +163,11 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
         v = I(16384); return true;
     case GL_MAX_3D_TEXTURE_SIZE: v = I(2048); return true;
     case GL_MAX_ARRAY_TEXTURE_LAYERS: v = I(2048); return true;
+    case GL_MAX_SPARSE_TEXTURE_SIZE_ARB: v = I(kMaxSparseTextureSize); return ctx->dev->caps.sparse;
+    case GL_MAX_SPARSE_3D_TEXTURE_SIZE_ARB: v = I(kMaxSparse3DTextureSize); return ctx->dev->caps.sparse;
+    case GL_MAX_SPARSE_ARRAY_TEXTURE_LAYERS_ARB: v = I(kMaxSparseArrayTextureLayers); return ctx->dev->caps.sparse;
+    case GL_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS_ARB: v = B(true); return ctx->dev->caps.sparse;  // Metal mip tails are per slice
+    case GL_SPARSE_BUFFER_PAGE_SIZE_ARB: v = I((int64_t)ctx->dev->sparseTileBytes); return ctx->dev->caps.sparse;
     case GL_MAX_TEXTURE_BUFFER_SIZE: v = I(1 << 27); return true;
     case GL_MAX_TEXTURE_LOD_BIAS: v = F(16); return true;
     case GL_MAX_TEXTURE_MAX_ANISOTROPY: v = F(16); return true;
@@ -607,11 +627,11 @@ API const GLubyte* APIENTRY glGetStringi(GLenum name, GLuint index) {
     MGL_CTX_RET(nullptr);
     static const char* glslVersions[] = {"460", "450", "440", "430", "420", "410", "400", "330", "150", "140", "130", "120", "110", "100", "300 es", "310 es", ""};
     if (name == GL_EXTENSIONS) {
-        if (index >= (GLuint)kNumExtensions) {
+        if (index >= (GLuint)extensionList().size()) {
             ctx->setError(GL_INVALID_VALUE);
             return nullptr;
         }
-        return (const GLubyte*)kExtensions[index];
+        return (const GLubyte*)extensionList()[index];
     }
     if (name == GL_SHADING_LANGUAGE_VERSION) {
         if (index >= 17) {

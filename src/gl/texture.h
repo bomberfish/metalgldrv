@@ -24,5 +24,35 @@ bool readTextureRegion(Context* ctx, id<MTLTexture> tex, int level, int slice, i
 // buffer helpers (api_buffer.mm)
 void writeBuffer(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, const void* data);
 void syncBufferForCpuRead(Context* ctx, Buffer* b);
+// CPU reads of a buffer's contents. Sparse buffers have no CPU mapping (cpu == nullptr): their
+// data is copied out on the GPU (synchronous).
+void readBuffer(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, void* dst);
+// `size` bytes at `offset` for reading on the CPU: the mapping itself, or a per-thread copy for
+// sparse buffers (valid until the next call). Callers synchronize with GPU writes as for `cpu`.
+const uint8_t* bufferBytes(Context* ctx, Buffer* b, size_t offset, size_t size);
+// Client-memory view of a pixel pack range: the mapping, or for a sparse buffer a staging copy
+// written back to the buffer when the object goes out of scope.
+struct PackStaging {
+    Context* ctx = nullptr;
+    Buffer* buffer = nullptr;
+    size_t offset = 0;
+    std::vector<uint8_t> data;
+    uint8_t* begin(Context* c, Buffer* b, size_t off, size_t size);
+    ~PackStaging();
+};
+
+// sparse textures / buffers (sparse.mm)
+enum { kMaxSparseTextureSize = 16384, kMaxSparse3DTextureSize = 2048, kMaxSparseArrayTextureLayers = 2048 };
+bool sparseTargetSupported(GLenum target);
+// VIRTUAL_PAGE_SIZE_{X,Y,Z}_ARB of page size `index`; false if the format can't be sparse.
+bool sparsePageSize(GLenum target, const FormatInfo* f, int index, int* x, int* y, int* z);
+int sparseNumPageSizes(GLenum target, const FormatInfo* f);
+// TexStorage* checks for a TEXTURE_SPARSE_ARB texture (records the error).
+bool sparseStorageCheck(Context* ctx, Texture* t, const FormatInfo* f, int w, int h, int d);
+MTLTextureUsage sparseTextureUsage(const FormatInfo* f);
+void releaseSparseTiles(Texture* t, uint64_t serial);
+// glBufferStorage(SPARSE_STORAGE_BIT_ARB) (records the error).
+bool sparseBufferStorage(Context* ctx, Buffer* b, GLsizeiptr size, GLbitfield flags);
+void releaseSparsePages(Buffer* b, uint64_t serial);
 
 }  // namespace mgl

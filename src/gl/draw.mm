@@ -307,6 +307,46 @@ static id<MTLTexture> feedbackSnapshot(Context* ctx, Texture* t, id<MTLTexture> 
     return v;
 }
 
+// VariantKey::msArraySlots / msArray4: multisample texture and image slots bound to emulated
+// (2D array) multisample storage.
+static void msArraySlots(Context* ctx, ProgramObj* prog, glsl::VariantKey& vk) {
+    if (!ctx->dev->sparseTextures.load(std::memory_order_relaxed) || prog->composite) return;
+    const auto& slots = prog->refl.slots;
+    for (size_t i = 0; i < slots.size() && i < 64; i++) {
+        const glsl::Slot& s = slots[i];
+        if (s.textureTarget != GL_TEXTURE_2D_MULTISAMPLE && s.textureTarget != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) continue;
+        Texture* t = nullptr;
+        if (s.kind == glsl::SlotKind::Texture) {
+            int ti = texTargetIndex(s.textureTarget);
+            t = ti >= 0 ? ctx->textures[std::clamp(prog->samplerUnits[i], 0, kMaxTextureUnits - 1)][ti].get() : nullptr;
+        } else if (s.kind == glsl::SlotKind::Image) {
+            t = ctx->imageUnits[std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1)].tex.get();
+        }
+        if (t && t->viewParent) t = t->viewParent.get();
+        if (!t || !t->msArray) continue;
+        uint64_t bits = 1ull << i;
+        if (s.element <= i) bits |= 1ull << (i - s.element);  // arrays are declared by their first slot
+        vk.msArraySlots |= bits;
+        if (t->samples == 4) vk.msArray4 |= bits;
+    }
+}
+
+// VariantKey::sparseImageSlots: image slots whose unit holds a sparse texture.
+static uint64_t sparseImageSlots(Context* ctx, ProgramObj* prog) {
+    if (!ctx->dev->sparseTextures.load(std::memory_order_relaxed) || prog->composite) return 0;
+    uint64_t m = 0;
+    const auto& slots = prog->refl.slots;
+    for (size_t i = 0; i < slots.size() && i < 64; i++) {
+        if (slots[i].kind != glsl::SlotKind::Image) continue;
+        Texture* t = ctx->imageUnits[std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1)].tex.get();
+        if (t && t->viewParent) t = t->viewParent.get();
+        if (!t || !t->sparse) continue;
+        m |= 1ull << i;
+        if (slots[i].element <= i) m |= 1ull << (i - slots[i].element);  // arrays are checked by their first slot
+    }
+    return m;
+}
+
 static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) {
     const glsl::Reflection& r = prog->refl;
     size_t nslots = r.slots.size();
@@ -494,7 +534,9 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             int unit = std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1);
             ImageUnit& iu = ctx->imageUnits[unit];
             id<MTLTexture> view = nil;
-            if (iu.tex && imageUnitValid(iu) && ensureTextureStorage(ctx, iu.tex.get())) {
+            // Metal has no color views of depth/stencil storage (GL leaves such image access undefined).
+            if (iu.tex && imageUnitValid(iu) && ensureTextureStorage(ctx, iu.tex.get()) &&
+                !(isDepthOrStencil(iu.tex->storageFmt) && formatInfo(iu.format) && !isDepthOrStencil(formatInfo(iu.format)))) {
                 Texture* t = iu.tex.get();
                 const FormatInfo* f = formatInfo(iu.format);
                 MTLPixelFormat pf = f ? f->mtl : t->mtl.pixelFormat;
@@ -503,13 +545,17 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                     // image stores go to the buffer's memory: CPU access must wait for them
                     if (t->buffer) t->buffer->lastUse = t->buffer->lastGpuWrite = serial;
                 } else {
-                    MTLTextureType vt = mtlTextureType(s.textureTarget, t->samples);
+                    MTLTextureType vt = t->msArray ? MTLTextureType2DArray : mtlTextureType(s.textureTarget, t->samples);
                     // imageCube / imageCubeArray are declared as texture2d_array in MSL.
                     if (vt == MTLTextureTypeCube || vt == MTLTextureTypeCubeArray) vt = MTLTextureType2DArray;
                     NSUInteger slices = t->mtl.arrayLength * (t->mtl.textureType == MTLTextureTypeCube || t->mtl.textureType == MTLTextureTypeCubeArray ? 6 : 1);
                     NSRange sr = NSMakeRange(0, slices);
-                    if (!iu.layered && (t->mtl.textureType == MTLTextureType2DArray || t->mtl.textureType == MTLTextureTypeCube ||
-                                        t->mtl.textureType == MTLTextureTypeCubeArray)) {
+                    if (t->msArray) {
+                        // one layer = `samples` slices; the shader indexes them (VariantKey::msArraySlots)
+                        if (!iu.layered && t->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
+                            sr = NSMakeRange(std::min<NSUInteger>((NSUInteger)iu.layer * t->samples, slices - t->samples), t->samples);
+                    } else if (!iu.layered && (t->mtl.textureType == MTLTextureType2DArray || t->mtl.textureType == MTLTextureTypeCube ||
+                                               t->mtl.textureType == MTLTextureTypeCubeArray)) {
                         sr = NSMakeRange(std::min<NSUInteger>(iu.layer, slices - 1), 1);
                         vt = MTLTextureType2D;
                     }
@@ -518,7 +564,9 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                     if (t->mtl.textureType == MTLTextureType3D && !iu.layered && vt == MTLTextureType2D) {
                         view = imageSliceCopy(ctx, t->mtl, pf, lvl, iu.layer, iu.access != GL_READ_ONLY);
                     } else {
-                        view = [t->mtl newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(lvl, 1) slices:sr];
+                        // read-only images of sparse textures read through the residency-correct twin
+                        id<MTLTexture> base = iu.access == GL_READ_ONLY && t->sparseRead ? t->sparseRead : t->mtl;
+                        view = [base newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(lvl, 1) slices:sr];
                     }
                     ctx->dev->retainUntil(view, serial);
                 }
@@ -882,7 +930,7 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
                 ctx->setError(GL_INVALID_OPERATION, "index range out of bounds");
                 return false;
             }
-            src = ib->cpu + off;
+            src = ib->cpu ? ib->cpu + off : nullptr;  // sparse: fetched below if the CPU needs the indices
         } else {
             src = (const uint8_t*)d.indices;
             if (!src) return false;
@@ -907,6 +955,14 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
     bool convert = d.indexed && (d.indexType == GL_UNSIGNED_BYTE || (restart && restartIdx != allOnes));
     if (d.indexed && ib && (expand || convert || needCpuMinMax) && ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite))
         ctx->waitForResource(ib->lastGpuWrite);
+    // Adjacency topologies without a geometry shader draw their non-adjacent vertices, and list
+    // topologies with primitive restart drop the incomplete primitive before each restart
+    // (Metal only restarts strips): decompose to a plain list on the CPU.
+    bool adjacency = mode == GL_LINES_ADJACENCY || mode == GL_LINE_STRIP_ADJACENCY || mode == GL_TRIANGLES_ADJACENCY ||
+                     mode == GL_TRIANGLE_STRIP_ADJACENCY;
+    bool listRestart = restart && d.indexed && (mode == GL_POINTS || mode == GL_LINES || mode == GL_TRIANGLES);
+    if (d.indexed && ib && !src && (expand || convert || needCpuMinMax || adjacency || listRestart))
+        src = bufferBytes(ctx, ib, (size_t)d.indices, (size_t)d.count * isz);
     *minIdx = 0;
     *maxIdx = d.indexed ? 0 : (uint32_t)(d.first + d.count - 1);
     if (!d.indexed) *minIdx = d.first;
@@ -921,12 +977,6 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
         *minIdx = mn == UINT32_MAX ? 0 : mn + d.baseVertex;
         *maxIdx = mx + d.baseVertex;
     }
-    // Adjacency topologies without a geometry shader draw their non-adjacent vertices, and list
-    // topologies with primitive restart drop the incomplete primitive before each restart
-    // (Metal only restarts strips): decompose to a plain list on the CPU.
-    bool adjacency = mode == GL_LINES_ADJACENCY || mode == GL_LINE_STRIP_ADJACENCY || mode == GL_TRIANGLES_ADJACENCY ||
-                     mode == GL_TRIANGLE_STRIP_ADJACENCY;
-    bool listRestart = restart && d.indexed && (mode == GL_POINTS || mode == GL_LINES || mode == GL_TRIANGLES);
     if (adjacency || listRestart) {
         if (d.indexed && ib && ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
         std::vector<uint32_t> list, idx;
@@ -1542,7 +1592,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     if (d.indexed) {
         if (ib) {
             if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
-            src = ib->cpu + (size_t)d.indices;
+            src = ib->cpu ? ib->cpu + (size_t)d.indices : bufferBytes(ctx, ib, (size_t)d.indices, (size_t)d.count * indexSize(d.indexType));
         } else {
             src = (const uint8_t*)d.indices;
         }
@@ -1752,7 +1802,8 @@ static bool rotatedWholeBuffer(Context* ctx, const DrawParams& d, IndexInfo& out
         ib->rotated = ctx->dev->newBuffer((size_t)ib->size);
         if (!ib->rotated) return false;
         uint8_t* dst = (uint8_t*)ib->rotated.contents;
-        memcpy(dst, ib->cpu, (size_t)ib->size);
+        if (ib->cpu) memcpy(dst, ib->cpu, (size_t)ib->size);
+        else readBuffer(ctx, ib, 0, ib->size, dst);
         size_t n = (size_t)ib->size / isz;
         auto rot = [&](auto* v) {
             for (size_t i = phase; i + vpp <= n; i += vpp) {
@@ -1791,7 +1842,7 @@ static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& 
         if (ib) {
             if (!ib->mtl || (size_t)d.indices + (size_t)d.count * indexSize(d.indexType) > (size_t)ib->size) return false;
             if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
-            src = ib->cpu + (size_t)d.indices;
+            src = ib->cpu ? ib->cpu + (size_t)d.indices : bufferBytes(ctx, ib, (size_t)d.indices, (size_t)d.count * indexSize(d.indexType));
         } else {
             src = (const uint8_t*)d.indices;
         }
@@ -1952,10 +2003,9 @@ static void countDrawStatistics(Context* ctx, const DrawParams& d, const glsl::R
 static bool resolveIndirectDraw(Context* ctx, const DrawParams& d, DrawParams& out) {
     Buffer* b = d.indirect;
     size_t size = d.indexed ? 20 : 16;
-    if (!b || !b->cpu || (size_t)d.indirectOffset + size > (size_t)b->size) return false;
-    if (b->lastGpuWrite && !ctx->dev->isComplete(b->lastGpuWrite)) ctx->waitForResource(b->lastGpuWrite);
+    if (!b || !b->mtl || (size_t)d.indirectOffset + size > (size_t)b->size) return false;
     uint32_t c[5] = {};
-    memcpy(c, b->cpu + d.indirectOffset, size);
+    readBuffer(ctx, b, (GLintptr)d.indirectOffset, (GLsizeiptr)size, c);
     out = d;
     out.indirect = nullptr;
     out.indirectOffset = 0;
@@ -2145,6 +2195,8 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     vk.rasterDiscard = ctx->rasterizerDiscard;
     vk.sampleShading = ctx->sampleShading && ctx->minSampleShading > 0;
     vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
+    vk.sparseImageSlots = sparseImageSlots(ctx, prog);
+    msArraySlots(ctx, prog, vk);
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     bool primQueries = mglQueryPrimitivesActive(ctx);
     if (vk.kind != glsl::PipelineKind::Classic) {
@@ -2598,9 +2650,8 @@ static GLsizei readDrawCount(Context* ctx, GLintptr drawcount, GLsizei maxdrawco
         ctx->setError(GL_INVALID_VALUE);
         return -1;
     }
-    if (pb->lastGpuWrite && !ctx->dev->isComplete(pb->lastGpuWrite)) ctx->waitForResource(pb->lastGpuWrite);
-    uint32_t n;
-    memcpy(&n, pb->cpu + drawcount, 4);
+    uint32_t n = 0;
+    readBuffer(ctx, pb, drawcount, 4, &n);
     return std::min<GLsizei>((GLsizei)n, maxdrawcount);
 }
 
@@ -2637,6 +2688,8 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
     if (!mglCheckDrawConditional(ctx)) return;  // conditional rendering covers compute dispatches too
     glsl::VariantKey vk;
     vk.kind = glsl::PipelineKind::Compute;
+    vk.sparseImageSlots = sparseImageSlots(ctx, prog);
+    msArraySlots(ctx, prog, vk);
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
     if (!var || !var->ok) return;
     id<MTLComputePipelineState> pso = ctx->pipelines_->computePipeline(var);
@@ -2665,7 +2718,9 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
     }
     // GL requires explicit glMemoryBarrier for incoherent accesses, but keep dispatches ordered
     // against each other (cheap within one encoder).
-    [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    // Sparse images may be sampled through another texture aliasing their tiles (Texture::sparseRead).
+    MTL4VisibilityOptions vis = vk.sparseImageSlots ? MTL4VisibilityOptionDevice | MTL4VisibilityOptionResourceAlias : MTL4VisibilityOptionDevice;
+    [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:vis];
     flushImageWritebacks(ctx);
 }
 

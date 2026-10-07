@@ -73,6 +73,11 @@ const std::vector<std::string>& supportedESExtensions() {
     return exts;
 }
 
+const std::vector<std::string>& sparseTextureExtensions() {
+    static const std::vector<std::string> exts = {"GL_ARB_sparse_texture2", "GL_ARB_sparse_texture_clamp"};
+    return exts;
+}
+
 namespace {
 
 struct Line {
@@ -747,6 +752,10 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
                 auto& es = supportedESExtensions();
                 known = std::find(es.begin(), es.end(), name) != es.end();
             }
+            if (!known && opts_.sparseTexture) {
+                auto& sp = sparseTextureExtensions();
+                known = std::find(sp.begin(), sp.end(), name) != sp.end();
+            }
             if (!known && beh == "require") { error(line, "extension '" + name + "' is not supported"); return; }
             if (!known) warn(line, "extension '" + name + "' is not supported");
         }
@@ -804,6 +813,8 @@ PPResult Preprocessor::run(const std::vector<std::string>& sources) {
             // still accept compat if asked: nothing
         }
         for (auto& e : supportedExtensions()) define(e, "1");
+        if (opts_.sparseTexture)
+            for (auto& e : sparseTextureExtensions()) define(e, "1");
         if (res_.es)
             for (auto& e : supportedESExtensions()) define(e, "1");
         (void)stage_;

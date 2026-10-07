@@ -40,6 +40,7 @@ static GLenum attachmentStatus(Context* ctx, const Attachment& a, bool isColor, 
         if (t->target == GL_TEXTURE_3D && !a.layered && a.layer >= L.depth) return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         if ((t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) && !a.layered && a.layer >= L.depth)
             return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        if (t->msArray) return GL_FRAMEBUFFER_UNSUPPORTED;  // emulated multisample storage
         *w = L.width;
         *h = t->target == GL_TEXTURE_1D || t->target == GL_TEXTURE_1D_ARRAY ? 1 : L.height;
         *samples = t->samples;
@@ -964,6 +965,7 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
     ClientLayout cl = clientLayout(format, type, w, h, ps);
     size_t need = clientImageSize(format, type, w, h, 1, ps);
     uint8_t* dst;
+    PackStaging staging;
     if (Buffer* pbo = ctx->pixelPackBuffer.get()) {
         if ((size_t)pixels + need > (size_t)pbo->size) {
             ctx->setError(GL_INVALID_OPERATION);
@@ -974,7 +976,7 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
             return false;
         }
         if (pbo->lastUse && !ctx->dev->isComplete(pbo->lastUse)) ctx->waitForResource(pbo->lastUse);
-        dst = pbo->cpu + (size_t)pixels;
+        dst = staging.begin(ctx, pbo, (size_t)pixels, need);
     } else {
         if (bufSize >= 0 && need > (size_t)bufSize) {
             ctx->setError(GL_INVALID_OPERATION);

@@ -11,6 +11,7 @@
 #include <vector>
 #include "glapi.h"
 #include "glsl/glsl.h"
+#include "mtl/device.h"
 #include "mtl/formats.h"
 
 namespace mgl {
@@ -96,6 +97,11 @@ public:
     id<MTLBuffer> rotated = nil;
     uint64_t rotatedVersion = 0, rotatedGpuWrite = 0, rotatedLastUse = 0;
     uint32_t rotatedLayout = 0;  // index size | vertices per primitive | phase
+    // ARB_sparse_buffer (sparse.mm): `mtl` is a private placement sparse buffer (cpu == nullptr);
+    // committed pages own a device tile each.
+    bool sparse = false;
+    std::vector<SparseTiles> sparsePages;
+    double sparseUnmapTime = 0;  // CFAbsoluteTime of the last decommit
 
     uint64_t gpuAddress() const { return mtl ? mtl.gpuAddress : 0; }
 };
@@ -177,6 +183,20 @@ public:
     bool needsFormatView = false;   // reinterpreted by a texture view
     uint64_t lastUse = 0;
     uint64_t lastGpuWrite = 0;
+
+    // ARB_sparse_texture (sparse.mm). The parameters are settable until the storage is immutable;
+    // sparse storage is a placement sparse texture allocated once with every usage it may need.
+    bool sparse = false;       // TEXTURE_SPARSE_ARB
+    int pageSizeIndex = 0;     // VIRTUAL_PAGE_SIZE_INDEX_ARB
+    int sparseLevels = 0;      // NUM_SPARSE_LEVELS_ARB: levels before the Metal mip tail
+    std::unordered_map<uint64_t, SparseTiles> sparseTiles;  // committed Metal tiles (sparseTileKey)
+    // Read-only alias of `mtl` (same tiles) used for sampling: sparse residency reported for
+    // shader-writable textures with non-square tiles is wrong (Metal), so lookups use this one.
+    id<MTLTexture> sparseRead = nil;
+    // Sparse multisample textures are stored as a 2D array with `samples` slices per layer (Metal
+    // shaders can't write multisample textures); they can't be framebuffer attachments.
+    bool msArray = false;
+    double sparseUnmapTime = 0;  // CFAbsoluteTime of the last decommit
 
     // Cached sampling views keyed by (base,max level, swizzle, format, ds mode)
     struct ViewKey {

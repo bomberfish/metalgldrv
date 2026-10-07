@@ -1142,6 +1142,10 @@ void Decompiler::emitImage(size_t o) {
         return;
     }
     uint32_t rt = w[1], id = w[2];
+    if (opc == OpImageSparseTexelsResident) {
+        set(id, "sparseTexelsResidentARB(" + ex(w[3]) + ")");
+        return;
+    }
     std::string R = typeName(rt);
     std::string s = ex(w[3]);
     uint32_t img = imageOf(typeOf(w[3]));
@@ -1150,7 +1154,7 @@ void Decompiler::emitImage(size_t o) {
     auto res = [&](const std::string& e, const std::string& from) { set(id, from == R ? e : R + "(" + e + ")"); };
     // image operands
     struct Ops {
-        std::string bias, lod, dx, dy, offset, offsets, sample;
+        std::string bias, lod, dx, dy, offset, offsets, sample, minLod;
         bool constOffset = false;
     } ops;
     auto parseOps = [&](uint32_t at) {
@@ -1163,9 +1167,19 @@ void Decompiler::emitImage(size_t o) {
         if (mask & ImageOperandsOffsetMask) ops.offset = ex(w[k++]);
         if (mask & ImageOperandsConstOffsetsMask) ops.offsets = ex(w[k++]);
         if (mask & ImageOperandsSampleMask) ops.sample = "int(" + ex(w[k++]) + ")";
-        if (mask & ImageOperandsMinLodMask) fail("MinLod image operand is not supported");
+        if (mask & ImageOperandsMinLodMask) ops.minLod = ex(w[k++]);
     };
     std::string vt = vecName(in(img)[2], 4);
+    // Sparse variants (GL_ARB_sparse_texture2) return {residency code, texel}: the texel goes to the
+    // out parameter before the bias / gather component, the code to member 0 of the result.
+    const bool sparse = opc >= OpImageSparseSampleImplicitLod && opc <= OpImageSparseRead;
+    const std::string texel = "_" + num(id) + ".m1";
+    auto call = [&](const std::string& fn, const std::string& args, const std::string& tail, const std::string& from) {
+        if (sparse) line("_" + num(id) + ".m0 = " + fn + "(" + args + ", " + texel + tail + ");");
+        else res(fn + "(" + args + tail + ")", from);
+    };
+    // GL_ARB_sparse_texture_clamp: a MinLod operand selects the *ClampARB lookups.
+    auto suffix = [&]() { return std::string(ops.minLod.empty() ? "" : "Clamp") + (sparse || !ops.minLod.empty() ? "ARB" : ""); };
     switch (opc) {
         case OpImageSampleImplicitLod:
         case OpImageSampleExplicitLod:
@@ -1174,11 +1188,16 @@ void Decompiler::emitImage(size_t o) {
         case OpImageSampleDrefImplicitLod:
         case OpImageSampleDrefExplicitLod:
         case OpImageSampleProjDrefImplicitLod:
-        case OpImageSampleProjDrefExplicitLod: {
+        case OpImageSampleProjDrefExplicitLod:
+        case OpImageSparseSampleImplicitLod:
+        case OpImageSparseSampleExplicitLod:
+        case OpImageSparseSampleDrefImplicitLod:
+        case OpImageSparseSampleDrefExplicitLod: {
             bool proj = opc == OpImageSampleProjImplicitLod || opc == OpImageSampleProjExplicitLod || opc == OpImageSampleProjDrefImplicitLod ||
                         opc == OpImageSampleProjDrefExplicitLod;
             bool dref = opc == OpImageSampleDrefImplicitLod || opc == OpImageSampleDrefExplicitLod || opc == OpImageSampleProjDrefImplicitLod ||
-                        opc == OpImageSampleProjDrefExplicitLod;
+                        opc == OpImageSampleProjDrefExplicitLod || opc == OpImageSparseSampleDrefImplicitLod ||
+                        opc == OpImageSparseSampleDrefExplicitLod;
             parseOps(dref ? 6 : 5);
             std::string coord = ex(w[4]);
             uint32_t ct = typeOf(w[4]);
@@ -1198,43 +1217,53 @@ void Decompiler::emitImage(size_t o) {
                     coord = "vec" + num(cn + 1) + "(" + coord + ", " + d + ")";
                 }
             }
-            std::string fn = proj ? "textureProj" : "texture";
+            std::string fn = proj ? "textureProj" : sparse ? "sparseTexture" : "texture";
             std::string args = s + ", " + coord;
             if (!extra.empty()) args += ", " + extra;
             if (!ops.lod.empty()) { fn += "Lod"; args += ", " + ops.lod; }
             if (!ops.dx.empty()) { fn += "Grad"; args += ", " + ops.dx + ", " + ops.dy; }
             if (!ops.offset.empty()) { fn += "Offset"; args += ", " + ops.offset; }
-            if (!ops.bias.empty()) args += ", " + ops.bias;
-            res(fn + "(" + args + ")", dref ? "float" : vt);
+            if (!ops.minLod.empty()) args += ", " + ops.minLod;
+            call(fn + suffix(), args, ops.bias.empty() ? "" : ", " + ops.bias, dref ? "float" : vt);
             return;
         }
-        case OpImageFetch: {
+        case OpImageFetch:
+        case OpImageSparseFetch: {
             parseOps(5);
             std::string args = s + ", " + ex(w[4]);
             if (ms) args += ", " + (ops.sample.empty() ? std::string("0") : ops.sample);
             else if (dim != DimBuffer && dim != DimRect) args += ", " + (ops.lod.empty() ? std::string("0") : "int(" + ops.lod + ")");
-            std::string fn = "texelFetch";
+            std::string fn = sparse ? "sparseTexelFetch" : "texelFetch";
             if (!ops.offset.empty()) { fn += "Offset"; args += ", " + ops.offset; }
-            res(fn + "(" + args + ")", vt);
+            call(fn + suffix(), args, "", vt);
             return;
         }
         case OpImageGather:
-        case OpImageDrefGather: {
+        case OpImageDrefGather:
+        case OpImageSparseGather:
+        case OpImageSparseDrefGather: {
             parseOps(6);
+            const bool drefGather = opc == OpImageDrefGather || opc == OpImageSparseDrefGather;
             std::string args = s + ", " + ex(w[4]);
-            std::string fn = "textureGather";
+            std::string fn = sparse ? "sparseTextureGather" : "textureGather";
             std::string last;
-            if (opc == OpImageDrefGather) last = ex(w[5]);
+            if (drefGather) last = ex(w[5]);
             else {
                 uint64_t c = 0;
                 if (!constBits(w[5], c)) fail("textureGather component must be a constant");
                 if (c) last = num((int)c);
             }
-            if (opc == OpImageDrefGather) args += ", " + last, last.clear();
+            if (drefGather) args += ", " + last, last.clear();
             if (!ops.offset.empty()) { fn += "Offset"; args += ", " + ops.offset; }
             if (!ops.offsets.empty()) { fn += "Offsets"; args += ", " + ops.offsets; }
-            if (!last.empty()) args += ", " + last;
-            res(fn + "(" + args + ")", opc == OpImageDrefGather ? "vec4" : vt);
+            call(fn + suffix(), args, last.empty() ? "" : ", " + last, drefGather ? "vec4" : vt);
+            return;
+        }
+        case OpImageSparseRead: {
+            parseOps(5);
+            std::string args = s + ", " + ex(w[4]);
+            if (!ops.sample.empty()) args += ", " + ops.sample;
+            call("sparseImageLoadARB", args, "", vt);
             return;
         }
         case OpImageRead: {
@@ -1564,7 +1593,16 @@ void Decompiler::emitInsn(size_t o) {
         case OpImageQuerySize:
         case OpImageQueryLod:
         case OpImageQueryLevels:
-        case OpImageQuerySamples: emitImage(o); return;
+        case OpImageQuerySamples:
+        case OpImageSparseSampleImplicitLod:
+        case OpImageSparseSampleExplicitLod:
+        case OpImageSparseSampleDrefImplicitLod:
+        case OpImageSparseSampleDrefExplicitLod:
+        case OpImageSparseFetch:
+        case OpImageSparseGather:
+        case OpImageSparseDrefGather:
+        case OpImageSparseTexelsResident:
+        case OpImageSparseRead: emitImage(o); return;
         case OpAtomicLoad:
         case OpAtomicStore:
         case OpAtomicExchange:
@@ -2212,7 +2250,8 @@ std::string Decompiler::run() {
         CapabilitySampled1D, CapabilityImage1D, CapabilitySampledCubeArray, CapabilitySampledBuffer, CapabilityImageBuffer,
         CapabilityImageMSArray, CapabilityStorageImageExtendedFormats, CapabilityImageQuery, CapabilityDerivativeControl,
         CapabilityInterpolationFunction, CapabilityTransformFeedback, CapabilityGeometryStreams, CapabilityStorageImageReadWithoutFormat,
-        CapabilityStorageImageWriteWithoutFormat, CapabilityMultiViewport, CapabilityDrawParameters};
+        CapabilityStorageImageWriteWithoutFormat, CapabilityMultiViewport, CapabilityDrawParameters,
+        CapabilitySparseResidency, CapabilityMinLod};  // the GLSL compile rejects these without device support
     for (uint32_t c : caps)
         if (!okCaps.count(c)) fail("unsupported capability " + num(c));
     for (auto& e : exts) {
@@ -2383,6 +2422,8 @@ std::string Decompiler::run() {
 
     std::string globals = declareGlobals();
     std::string src = "#version 460 core\n";
+    if (std::count(caps.begin(), caps.end(), CapabilitySparseResidency)) src += "#extension GL_ARB_sparse_texture2 : enable\n";
+    if (std::count(caps.begin(), caps.end(), CapabilityMinLod)) src += "#extension GL_ARB_sparse_texture_clamp : enable\n";
     src += layouts + globals + "\n" + functions;
     return src;
 }

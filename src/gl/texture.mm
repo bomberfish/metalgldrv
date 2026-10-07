@@ -12,6 +12,15 @@ namespace mgl {
 Texture::~Texture() {
     dropViews();
     if (mtl) Device::get()->releaseAfter(mtl, std::max(lastUse, lastGpuWrite));
+    if (sparse && mtl && !viewParent) {
+        Device::get()->sparseTextures--;
+        releaseSparseTiles(this, std::max(lastUse, lastGpuWrite));
+        Device::get()->retainSparse(mtl, std::max(lastUse, lastGpuWrite));
+        if (sparseRead) {
+            Device::get()->releaseAfter(sparseRead, std::max(lastUse, lastGpuWrite));
+            Device::get()->retainSparse(sparseRead, std::max(lastUse, lastGpuWrite));
+        }
+    }
     if (fbSnapshot) Device::get()->releaseAfter(fbSnapshot, std::max(lastUse, lastGpuWrite));
     for (auto& [k, v] : fbSnapshotViews) Device::get()->retainUntil(v, std::max(lastUse, lastGpuWrite));
 }
@@ -95,6 +104,22 @@ int textureStorageLevelFor(const Texture* t) {
     return -1;
 }
 
+// Metal reports wrong residency (sparse_sample().resident()) for shader-writable placement sparse
+// textures whose tiles aren't square (2- and 8-byte texels); the read-only twin of such a texture,
+// mapped to the same tiles (the memory layout is the same), reports it correctly.
+static id<MTLTexture> sparseReadAlias(Context* ctx, MTLTextureDescriptor* td, id<MTLTexture> tex) {
+    if (!(td.usage & MTLTextureUsageShaderWrite)) return nil;
+    MTLSize ts = [ctx->dev->mtl sparseTileSizeWithTextureType:tex.textureType pixelFormat:tex.pixelFormat sampleCount:tex.sampleCount
+                                              sparsePageSize:Device::kSparsePageSize];
+    if (ts.width == ts.height) return nil;
+    MTLTextureDescriptor* rd = [td copy];
+    rd.usage = MTLTextureUsageShaderRead | (td.usage & MTLTextureUsagePixelFormatView);
+    id<MTLTexture> r = [ctx->dev->mtl newTextureWithDescriptor:rd];
+    if (!r || r.firstMipmapInTail != tex.firstMipmapInTail || r.tailSizeInBytes != tex.tailSizeInBytes) return nil;
+    ctx->dev->makeResident(r);
+    return r;
+}
+
 bool ensureTextureStorage(Context* ctx, Texture* t) {
     if (t->target == GL_TEXTURE_BUFFER) return t->mtl != nil || ensureBufferTexture(ctx, t);
     if (t->viewParent) {
@@ -155,6 +180,17 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
         if (fmt->mtl == MTLPixelFormatR32Uint || fmt->mtl == MTLPixelFormatR32Sint) usage |= MTLTextureUsageShaderAtomic;
     }
     if (fmt->srgb || t->needsFormatView || fmt->kind == FmtKind::DepthStencil) usage |= MTLTextureUsagePixelFormatView;
+    const bool sparse = t->sparse && t->immutable && ctx->dev->caps.sparse;
+    if (sparse) {
+        usage |= sparseTextureUsage(fmt);
+        td.placementSparsePageSize = Device::kSparsePageSize;
+        if (t->samples > 0) {
+            td.textureType = MTLTextureType2DArray;
+            td.arrayLength = std::max(1, layers) * t->samples;
+            td.sampleCount = 1;
+            t->msArray = true;
+        }
+    }
     td.usage = usage;
     if (!losslessCompressionSafe(fmt->mtl)) td.allowGPUOptimizedContents = NO;
     id<MTLTexture> nt = [ctx->dev->mtl newTextureWithDescriptor:td];
@@ -191,6 +227,11 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
     t->storageLayers = layers;
     t->storageLevels = levels;
     t->storageDirty = false;
+    if (sparse) {
+        t->sparseLevels = std::min(levels, (int)nt.firstMipmapInTail);
+        if (!old) ctx->dev->sparseTextures++;
+        t->sparseRead = sparseReadAlias(ctx, td, nt);
+    }
     t->dropViews();
     t->lastUse = ctx->serial();
     return true;
@@ -202,11 +243,19 @@ bool ensureBufferTexture(Context* ctx, Texture* t) {
     if (!f) return false;
     Buffer* b = t->buffer.get();
     bool rgb32 = bufferTexelBytes(f) == 12;
+    // Metal can't view a sparse buffer as a texture: sample a copy of its committed part instead
+    // (texels past it read as zero, as uncommitted memory does).
+    bool copied = rgb32 || b->sparse;
     if (t->mtl && t->bufferGeneration == b->generation &&
-        (!rgb32 || (t->expandedVersion == b->contentVersion && t->expandedGpuWrite == b->lastGpuWrite)))
+        (!copied || (t->expandedVersion == b->contentVersion && t->expandedGpuWrite == b->lastGpuWrite)))
         return true;
     GLsizeiptr size = t->bufferSize < 0 ? b->size - t->bufferOffset : t->bufferSize;
     size = std::min<GLsizeiptr>(size, b->size - t->bufferOffset);
+    if (b->sparse) {
+        size_t last = b->sparsePages.size();
+        while (last > 0 && !b->sparsePages[last - 1].count) last--;
+        size = std::min<GLsizeiptr>(size, (GLsizeiptr)(last * ctx->dev->sparseTileBytes) - t->bufferOffset);
+    }
     size_t texels = size > 0 ? size / bufferTexelBytes(f) : 0;
     texels = std::min<size_t>(texels, (size_t)1 << 27);
     if (texels == 0) texels = 1;
@@ -228,6 +277,33 @@ bool ensureBufferTexture(Context* ctx, Texture* t) {
         size_t avail = std::max<GLsizeiptr>(0, size) / 12;
         expandRgb32(ctx, b->gpuAddress() + t->bufferOffset, t->bufferExpanded.gpuAddress, (uint32_t)std::min(avail, texels), one);
         b->lastUse = ctx->serial();
+        t->expandedVersion = b->contentVersion;
+        t->expandedGpuWrite = b->lastGpuWrite;
+        t->bufferGeneration = b->generation;
+        t->storageFmt = f;
+        return true;
+    }
+    if (b->sparse) {
+        size_t need = (texels * f->bytesPerPixel + 15) & ~(size_t)15;
+        if (!t->bufferExpanded || t->bufferExpanded.length < need || t->bufferGeneration != b->generation || !t->mtl) {
+            if (t->bufferExpanded) ctx->dev->releaseAfter(t->bufferExpanded, t->lastUse);
+            t->bufferExpanded = ctx->dev->newBuffer(need, MTLResourceStorageModePrivate);
+            if (!t->bufferExpanded) return false;
+            MTLTextureDescriptor* td = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:f->mtl width:texels
+                                                                                   resourceOptions:MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeUntracked
+                                                                                             usage:MTLTextureUsageShaderRead];
+            id<MTLTexture> nt = [t->bufferExpanded newTextureWithDescriptor:td offset:0 bytesPerRow:need];
+            if (!nt) return false;
+            if (t->mtl) ctx->dev->retainUntil(t->mtl, t->lastUse);
+            t->mtl = nt;
+        }
+        if (size > 0) {
+            id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+            [e copyFromBuffer:b->mtl sourceOffset:t->bufferOffset toBuffer:t->bufferExpanded destinationOffset:0
+                         size:std::min<size_t>((size_t)size, need)];
+            [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+            b->lastUse = ctx->serial();
+        }
         t->expandedVersion = b->contentVersion;
         t->expandedGpuWrite = b->lastGpuWrite;
         t->bufferGeneration = b->generation;
@@ -360,8 +436,9 @@ id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarge
         return t->mtl;
     }
     const FormatInfo* f = t->storageFmt ? t->storageFmt : formatInfo(GL_RGBA8);
+    id<MTLTexture> mt = t->sparseRead ? t->sparseRead : t->mtl;
     MTLTextureSwizzleChannels base = f->swizzle;
-    MTLPixelFormat pf = t->mtl.pixelFormat;
+    MTLPixelFormat pf = mt.pixelFormat;
     bool depthStencilFmt = f->kind == FmtKind::DepthStencil;
     bool sampleStencil = stencilSampling || (depthStencilFmt && t->depthStencilMode == GL_STENCIL_INDEX) || f->kind == FmtKind::Stencil;
     if (sampleStencil) {
@@ -386,23 +463,23 @@ id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarge
     sw.green = glSwizzleToMTL(t->swizzle[1], base);
     sw.blue = glSwizzleToMTL(t->swizzle[2], base);
     sw.alpha = glSwizzleToMTL(t->swizzle[3], base);
-    MTLTextureType vt = viewTypeFor(samplerTarget, t->mtl.textureType);
+    MTLTextureType vt = t->msArray ? MTLTextureType2DArray : viewTypeFor(samplerTarget, mt.textureType);
     int levelStart = first, levelCount = last - first + 1;
-    levelStart = std::min(levelStart, (int)t->mtl.mipmapLevelCount - 1);
-    levelCount = std::max(1, std::min(levelCount, (int)t->mtl.mipmapLevelCount - levelStart));
-    NSUInteger slices = t->mtl.arrayLength;
-    if (t->mtl.textureType == MTLTextureTypeCube) slices = 6;
-    if (t->mtl.textureType == MTLTextureTypeCubeArray) slices = t->mtl.arrayLength * 6;
-    bool identity = pf == t->mtl.pixelFormat && vt == t->mtl.textureType && levelStart == 0 &&
-                    levelCount == (int)t->mtl.mipmapLevelCount && sw.red == MTLTextureSwizzleRed &&
+    levelStart = std::min(levelStart, (int)mt.mipmapLevelCount - 1);
+    levelCount = std::max(1, std::min(levelCount, (int)mt.mipmapLevelCount - levelStart));
+    NSUInteger slices = mt.arrayLength;
+    if (mt.textureType == MTLTextureTypeCube) slices = 6;
+    if (mt.textureType == MTLTextureTypeCubeArray) slices = mt.arrayLength * 6;
+    bool identity = pf == mt.pixelFormat && vt == mt.textureType && levelStart == 0 &&
+                    levelCount == (int)mt.mipmapLevelCount && sw.red == MTLTextureSwizzleRed &&
                     sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
     *complete = true;
-    if (identity) return t->mtl;
+    if (identity) return mt;
     Texture::ViewKey key{(uint64_t)pf | (uint64_t)vt << 16 | (uint64_t)levelStart << 24 | (uint64_t)levelCount << 32,
                          (uint64_t)sw.red | (uint64_t)sw.green << 8 | (uint64_t)sw.blue << 16 | (uint64_t)sw.alpha << 24};
     auto it = t->views.find(key);
     if (it != t->views.end()) return it->second;
-    id<MTLTexture> v = [t->mtl newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(levelStart, levelCount)
+    id<MTLTexture> v = [mt newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(levelStart, levelCount)
                                                      slices:NSMakeRange(0, slices) swizzle:sw];
     if (!v) {
         MGL_ERR("texture view creation failed");
@@ -540,7 +617,7 @@ const void* resolveUnpackSource(Context* ctx, const void* pixels, size_t needed,
             return nullptr;
         }
         if (pbo->lastGpuWrite && !ctx->dev->isComplete(pbo->lastGpuWrite)) ctx->waitForResource(pbo->lastGpuWrite);
-        return pbo->cpu + off;
+        return pbo->cpu ? pbo->cpu + off : bufferBytes(ctx, pbo, off, needed);
     }
     return pixels;
 }
@@ -560,7 +637,8 @@ static void copyStagingToTexture(Context* ctx, Texture* t, const UploadAlloc& up
                     sourceSize:MTLSizeMake(w, h, 1) toTexture:t->mtl destinationSlice:slice + i destinationLevel:level
              destinationOrigin:MTLOriginMake(x, y, 0) options:opt];
     }
-    [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch
+             visibilityOptions:t->sparseRead ? MTL4VisibilityOptionDevice | MTL4VisibilityOptionResourceAlias : MTL4VisibilityOptionDevice];
     t->lastUse = ctx->serial();
     t->lastGpuWrite = t->lastUse;
 }
@@ -692,6 +770,11 @@ bool readTextureRegion(Context* ctx, id<MTLTexture> tex, int level, int slice, i
         slice = 0;
     }
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    // Sparse textures: writes to unmapped tiles linger in the (virtually tagged) GPU caches until
+    // flushed with ResourceAlias visibility (see readBuffer).
+    if (src.isSparse)
+        [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit
+                 visibilityOptions:MTL4VisibilityOptionDevice | MTL4VisibilityOptionResourceAlias];
     [e copyFromTexture:src sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(x, y, z) sourceSize:MTLSizeMake(w, h, 1)
               toBuffer:buf destinationOffset:0 destinationBytesPerRow:rowBytes destinationBytesPerImage:imgBytes options:opt];
     uint64_t s = ctx->serial();

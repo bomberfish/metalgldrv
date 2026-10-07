@@ -6,6 +6,7 @@
 #include <cstring>
 #include <functional>
 #include <unordered_map>
+#include <utility>
 
 #include "glsl/builtins.h"
 #include "glsl/fold.h"
@@ -343,11 +344,25 @@ private:
     std::string callBuiltin(const Expr* e);
     std::string textureFn(const Expr* e, const std::string& name);
     std::string imageFn(const Expr* e, const std::string& name);
+    std::string sparseFn(const Expr* e, const std::string& name);
+    // ARB_sparse_texture2: while sparseRes_ is set (a bool temp), texture reads use the sparse_*
+    // variants and AND their residency into it.
+    std::string sparseRes_;
+    std::string texCall(const std::string& tex, const char* method, const std::string& args) {
+        if (sparseRes_.empty()) return tex + "." + method + "(" + args + ")";
+        return "mgl_sparse_val(" + tex + ".sparse_" + method + "(" + args + "), " + sparseRes_ + ")";
+    }
     std::string atomicPtr(const Expr* e, std::string& pre);
     bool addressable(const Expr* e);
     bool isBufferRooted(const Expr* e);
     std::pair<std::string, std::string> texRef(const Expr* e);
     std::string opaqueIndex(const Expr* e, const Expr*& base);
+    int texSlot_ = -1;     // argument slot of the opaque uniform resolved by the last texRef(), -1 if unknown
+    // Samples of the emulated (2D array) multisample storage behind the last texRef(), 0 if none.
+    int msArraySamples() const {
+        if (texSlot_ < 0 || texSlot_ >= 64 || !((K.msArraySlots >> texSlot_) & 1)) return 0;
+        return ((K.msArray4 >> texSlot_) & 1) ? 4 : 2;
+    }
     std::string texBias_;  // LOD bias (float) of the sampler resolved by the last texRef(), "" for images
     std::string texBorder_;  // emulated integer border (GPU address) of the last texRef(), "" if none
     std::string withOuts(const std::string& callee, const Expr* e, const std::vector<uint8_t>& outs, const std::vector<Type>& ptypes,
@@ -1118,6 +1133,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         auto it = P->opaque.find(p);
         if (it == P->opaque.end()) fail("internal: opaque uniform '" + p + "' has no binding");
         const OpaqueBinding& ob = it->second;
+        texSlot_ = ob.slot;
         std::string t = "A->s" + std::to_string(ob.slot), sm = ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : "";
         texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         texBorder_ = ob.borderSlot >= 0 ? "A->s" + std::to_string(ob.borderSlot) : "";
@@ -1132,6 +1148,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
     if (e->kind == EK::Var) {
         const Variable* v = e->var;
         if (v->param) {
+            texSlot_ = -1;
             std::string n = varName(v);
             texBias_ = v->type.base == BT::Sampler ? n + "_b" : "";
             texBorder_ = "";  // not emulated through function parameters
@@ -1140,6 +1157,7 @@ std::pair<std::string, std::string> Emitter::texRef(const Expr* e) {
         auto it = P->opaque.find(v->name);
         if (it == P->opaque.end()) fail("internal: opaque uniform '" + v->name + "' has no binding");
         const OpaqueBinding& ob = it->second;
+        texSlot_ = ob.slot;
         texBias_ = ob.biasSlot >= 0 ? "A->s" + std::to_string(ob.biasSlot) : "";
         texBorder_ = ob.borderSlot >= 0 ? "A->s" + std::to_string(ob.borderSlot) : "";
         return {"A->s" + std::to_string(ob.slot), ob.samplerSlot >= 0 ? "A->s" + std::to_string(ob.samplerSlot) : ""};
@@ -1246,6 +1264,12 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
 // Builtin functions
 // ---------------------------------------------------------------------------
 std::string Emitter::callBuiltin(const Expr* e) {
+    // A builtin call inside the arguments of a sparse lookup is a plain call.
+    struct Restore {
+        std::string& s;
+        std::string v;
+        ~Restore() { s = std::move(v); }
+    } restoreSparse{sparseRes_, std::exchange(sparseRes_, std::string())};
     const std::string& n = e->fn->name;
     const Builtin* bi = e->fn->builtin;
     const auto& A = e->args;
@@ -1263,6 +1287,7 @@ std::string Emitter::callBuiltin(const Expr* e) {
     };
     if (n.compare(0, 7, "texture") == 0 || n.compare(0, 6, "shadow") == 0 || n.compare(0, 10, "texelFetch") == 0)
         return textureFn(e, n);
+    if (n.compare(0, 6, "sparse") == 0) return sparseFn(e, n);
     bool anyDouble = rt.stripArrays().base == BT::Double;
     for (auto* x : A) anyDouble |= x->type.stripArrays().base == BT::Double;
     if (anyDouble) return builtinF64(e);
@@ -1512,6 +1537,10 @@ static std::pair<std::string, bool> canonicalTexName(const std::string& n) {
 
 std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     auto [name, legacyShadow] = canonicalTexName(rawName);
+    // ARB_sparse_texture_clamp: texture*ClampARB is the base lookup with a minimum LOD argument
+    // after the regular ones.
+    const bool lodClamp = name.size() > 8 && name.compare(name.size() - 8, 8, "ClampARB") == 0;
+    if (lodClamp) name.resize(name.size() - 8);
     const auto& A = e->args;
     const Type T = A[0]->type.stripArrays();
     auto [tex, smp] = texRef(A[0]);
@@ -1530,6 +1559,13 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     };
     auto lodArg = [&](size_t i) { return "uint(" + ex(A[i]) + ")"; };
 
+    const int msN = T.ms ? msArraySamples() : 0;  // emulated multisample storage: slice = layer * msN + sample
+    if (msN && name == "textureSize") {
+        std::string r = "int2(" + tex + ".get_width(), " + tex + ".get_height())";
+        if (arr) r = "int3(" + tex + ".get_width(), " + tex + ".get_height(), int(" + tex + ".get_array_size()) / " + std::to_string(msN) + ")";
+        return finish(r);
+    }
+    if (msN && name == "textureSamples") return finish(std::to_string(msN));
     if (name == "textureSize") {
         std::string lod = (A.size() > 1) ? bind(lodArg(1), "uint", pre) : "";
         std::string w = tex + ".get_width(" + lod + ")", h = tex + ".get_height(" + lod + ")";
@@ -1563,8 +1599,14 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         std::string r;
         if (T.ms) {
             std::string s = "uint(" + ex(A[2]) + ")";
-            if (arr) { P = bind(P, "int3", pre); r = tex + ".read(uint2(" + P + ".xy), uint(" + P + ".z), " + s + ")"; }
-            else r = tex + ".read(uint2(" + P + "), " + s + ")";
+            if (msN) {
+                std::string N = std::to_string(msN) + "u";
+                if (arr) { P = bind(P, "int3", pre); r = texCall(tex, "read", "uint2(" + P + ".xy), uint(" + P + ".z) * " + N + " + " + s); }
+                else r = texCall(tex, "read", "uint2(" + P + "), " + s);
+                return finish(r);
+            }
+            if (arr) { P = bind(P, "int3", pre); r = texCall(tex, "read", "uint2(" + P + ".xy), uint(" + P + ".z), " + s); }
+            else r = texCall(tex, "read", "uint2(" + P + "), " + s);
             return finish(r);
         }
         // Out-of-range texel coordinates or levels read as zero (as robust GL implementations
@@ -1581,24 +1623,24 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         if (dim == Dim::D1) {
             if (arr) {
                 P = bind(P, "int2", pre);
-                r = tex + ".read(uint2(uint(" + P + ".x), 0u), uint(" + P + ".y)" + lod + ")";
+                r = texCall(tex, "read", "uint2(uint(" + P + ".x), 0u), uint(" + P + ".y)" + lod);
                 inb = "uint(" + P + ".x) < " + tex + ".get_width(" + L + ") && uint(" + P + ".y) < " + tex + ".get_array_size()";
             } else {
                 P = bind(P, "int", pre);
-                r = tex + ".read(uint2(uint(" + P + "), 0u)" + lod + ")";
+                r = texCall(tex, "read", "uint2(uint(" + P + "), 0u)" + lod);
                 inb = "uint(" + P + ") < " + tex + ".get_width(" + L + ")";
             }
         } else if (dim == Dim::D3) {
             P = bind(P, "int3", pre);
-            r = tex + ".read(uint3(" + P + ")" + lod + ")";
+            r = texCall(tex, "read", "uint3(" + P + ")" + lod);
             inb = "all(uint3(" + P + ") < uint3(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + "), " + tex + ".get_depth(" + L + ")))";
         } else if (arr) {
             P = bind(P, "int3", pre);
-            r = tex + ".read(uint2(" + P + ".xy), uint(" + P + ".z)" + lod + ")";
+            r = texCall(tex, "read", "uint2(" + P + ".xy), uint(" + P + ".z)" + lod);
             inb = "all(uint3(" + P + ") < uint3(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + "), " + tex + ".get_array_size()))";
         } else {
             P = bind(P, "int2", pre);
-            r = tex + ".read(uint2(" + P + ")" + lod + ")";
+            r = texCall(tex, "read", "uint2(" + P + ")" + lod);
             inb = "all(uint2(" + P + ") < uint2(" + tex + ".get_width(" + L + "), " + tex + ".get_height(" + L + ")))";
         }
         if (hasLod) inb = L + " < " + tex + ".get_num_mip_levels() && " + inb;
@@ -1690,7 +1732,7 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
                     if (sh) args += ", " + ex(A[2]);
                     args += ", " + (direct ? o2 : std::string("int2(0)"));
                     if (!sh) args += std::string(", component::") + kSwz[compIdx2];
-                    std::string g = tex + (sh ? ".gather_compare(" : ".gather(") + args + ")";
+                    std::string g = texCall(tex, sh ? "gather_compare" : "gather", args);
                     r += (k ? ", " : "") + withBorder(g, direct ? coord : shifted(o2), direct ? o2 : std::string("int2(0)"), compIdx2) + ".w";
                 }
                 return finish(r + ")");
@@ -1713,7 +1755,7 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         if (sh) args += ", " + refZ;
         if (dim != Dim::Cube) args += ", " + (offset.empty() ? std::string("int2(0)") : offset);
         if (!sh) args += std::string(", component::") + kSwz[compIdx];
-        return finish(withBorder(tex + (sh ? ".gather_compare(" : ".gather(") + args + ")", coord,
+        return finish(withBorder(texCall(tex, sh ? "gather_compare" : "gather", args), coord,
                                  offset.empty() ? std::string("int2(0)") : offset, compIdx));
     }
     std::string options, offset, shadowBias;
@@ -1739,12 +1781,17 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
         std::string o = ex(A[ai++]);
         offset = dim == Dim::D1 ? "int2(" + o + ", 0)" : o;
     }
+    std::string minLod;
+    if (lodClamp) minLod = bind("float(" + ex(A[ai++]) + ")", "float", pre);
     if (!isLod && !isGrad) {
         std::string b = texBias;
         if (ai < A.size()) b = "(" + ex(A[ai++]) + ") + " + texBias;
-        if (!fragment) options = "level(" + b + ")";  // implicit LOD is 0 outside fragment shaders
-        else if (!sh) options = "bias(" + b + ")";
-        else {
+        if (!fragment) {
+            options = "level(" + (minLod.empty() ? b : "max(" + b + ", " + minLod + ")") + ")";  // implicit LOD is 0 outside fragment shaders
+            minLod.clear();
+        } else if (!sh) {
+            options = "bias(" + b + ")";
+        } else {
             // sample_compare has no bias(): with a nonzero bias, scale the implicit derivatives.
             // The bias is uniform for the draw, so the branch is coherent and bias 0 (nearly every
             // app) pays nothing.
@@ -1758,8 +1805,10 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
     std::string args = smp + ", " + coord;
     if (!layer.empty()) args += ", " + layer;
     if (sh) args += ", " + ref;
-    std::string plainArgs = args + (offset.empty() ? "" : ", " + offset);
+    const std::string clampOpt = minLod.empty() ? "" : ", min_lod_clamp(" + minLod + ")";
+    std::string plainArgs = args + clampOpt + (offset.empty() ? "" : ", " + offset);
     if (!options.empty()) args += ", " + options;
+    args += clampOpt;
     if (!offset.empty()) args += ", " + offset;
     if (shadowBias.empty() && !sh && (T.sampled == BT::Int || T.sampled == BT::UInt) && dim != Dim::Cube) {
         std::string br = texBorder_;
@@ -1767,20 +1816,54 @@ std::string Emitter::textureFn(const Expr* e, const std::string& rawName) {
             // Integer textures with GL_CLAMP_TO_BORDER: Metal can only return black/white.
             std::string c = bind(coord, dim == Dim::D3 ? "float3" : "float2", pre);
             args = smp + ", " + c + args.substr(smp.size() + 2 + coord.size());
-            return finish("mgl_int_border(" + tex + ".sample(" + args + "), " + c + ", " + br + ")");
+            return finish("mgl_int_border(" + texCall(tex, "sample", args) + ", " + c + ", " + br + ")");
         }
     }
     if (!shadowBias.empty())
-        return finish("(" + shadowBias + " == 0.0f ? " + tex + ".sample_compare(" + plainArgs + ") : " + tex + ".sample_compare(" + args + "))");
-    return finish(tex + (sh ? ".sample_compare(" : ".sample(") + args + ")");
+        return finish("(" + shadowBias + " == 0.0f ? " + texCall(tex, "sample_compare", plainArgs) + " : " + texCall(tex, "sample_compare", args) + ")");
+    return finish(texCall(tex, sh ? "sample_compare" : "sample", args));
+}
+
+// ARB_sparse_texture2 lookups: the base lookup without the out texel argument, made with the
+// sparse_* texture functions; returns the residency code (0 = resident, see sparseTexelsResidentARB).
+std::string Emitter::sparseFn(const Expr* e, const std::string& n) {
+    const auto& A = e->args;
+    if (n == "sparseTexelsResidentARB") return "(" + ex(A[0]) + " == 0)";
+    const Builtin* bi = e->fn->builtin;
+    size_t outIdx = 0;
+    while (outIdx < bi->paramOut.size() && !bi->paramOut[outIdx]) outIdx++;
+    if (outIdx >= A.size()) fail("internal: sparse lookup '" + n + "' without a texel argument");
+    // sparseTextureLodARB -> textureLod, sparseTextureClampARB -> textureClampARB
+    std::string base = n.substr(6);
+    base[0] = (char)tolower(base[0]);
+    if (base.compare(base.size() - 8, 8, "ClampARB") != 0) base.resize(base.size() - 3);
+    Expr call = *e;
+    call.args.erase(call.args.begin() + outIdx);
+    std::string res = newTempS("bool");
+    sparseRes_ = res;
+    std::string v = base == "imageLoad" ? imageFn(&call, base) : textureFn(&call, base);
+    sparseRes_.clear();
+    const Expr* out = A[outIdx];
+    const Type& tt = bi->params[outIdx];
+    std::string t = newTemp(tt);
+    std::string stored = out->type == tt ? t : mt(out->type) + "(" + t + ")";
+    return "(" + res + " = true, " + t + " = " + v + ", " + storeTo(out, stored) + ", int(!" + res + "))";
 }
 
 std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     const auto& A = e->args;
     const Type T = A[0]->type.stripArrays();
     std::string tex = texRef(A[0]).first;
+    // image bound to a sparse texture (VariantKey::sparseImageSlots): uncommitted texels read
+    // zero and ignore stores/atomics
+    const bool sparseImg = texSlot_ >= 0 && texSlot_ < 64 && ((K.sparseImageSlots >> texSlot_) & 1);
     std::string pre;
     auto finish = [&](const std::string& r) { return pre.empty() ? r : "(" + pre + r + ")"; };
+    const int msN = T.ms ? msArraySamples() : 0;  // emulated multisample storage: slice = layer * msN + sample
+    if (msN && n == "imageSize")
+        return T.arrayed ? "int3(" + tex + ".get_width(), " + tex + ".get_height(), int(" + tex + ".get_array_size()) / " + std::to_string(msN) + ")"
+                         : "int2(" + tex + ".get_width(), " + tex + ".get_height())";
+    if (msN && n == "imageSamples") return std::to_string(msN);
     if (n == "imageSize") {
         std::string w = tex + ".get_width()", h = tex + ".get_height()";
         std::string r;
@@ -1813,8 +1896,34 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     size_t ai = 2;
     std::string sample;
     if (T.ms) sample = "uint(" + ex(A[ai++]) + ")";
+    if (msN) {
+        // a 2D array image: the sample selects the slice
+        layer = layer.empty() ? sample : "(" + layer + ") * " + std::to_string(msN) + "u + " + sample;
+        sample.clear();
+    }
+    const bool ms = T.ms && !msN;  // a real multisample texture (Metal can't write those)
     std::string loc = coord + (layer.empty() ? "" : ", " + layer);
-    if (n == "imageLoad") return finish(tex + ".read(" + loc + (sample.empty() ? "" : ", " + sample) + ")");
+    std::string resident;  // residency test of the texel for sparse images
+    if (sparseImg && n != "imageLoad" && n != "imageStore") {  // stores to uncommitted texels are dropped
+        if (!sample.empty()) sample = bind(sample, "uint", pre);
+        // the coordinate/layer expressions are evaluated twice: bind them
+        coord = bind(coord, T.dim == Dim::D3 ? "uint3" : (T.dim == Dim::Buffer ? "uint" : "uint2"), pre);
+        if (!layer.empty()) layer = bind(layer, "uint", pre);
+        loc = coord + (layer.empty() ? "" : ", " + layer);
+        resident = tex + ".sparse_read(" + loc + (sample.empty() ? "" : ", " + sample) + ").resident()";
+    }
+    if (n == "imageLoad") {
+        std::string args = loc + (sample.empty() ? "" : ", " + sample);
+        if (!sparseImg) return finish(texCall(tex, "read", args));
+        // uncommitted texels read (0, 0, 0, 1) for formats without alpha, else zero
+        const Expr* root = A[0];
+        while (root->kind == EK::Index) root = root->args[0];
+        const std::string fmt = root->kind == EK::Var ? root->var->q.layout.format : "";
+        const char* alpha1 = fmt.compare(0, 4, "rgba") == 0 || fmt.compare(0, 8, "rgb10_a2") == 0 ? "0" : "1";
+        std::string r = tex + ".sparse_read(" + args + "), " + alpha1;
+        if (sparseRes_.empty()) return finish("mgl_sparse_or0(" + r + ")");
+        return finish("mgl_sparse_val0(" + r + ", " + sparseRes_ + ")");
+    }
     // read_write textures need fence() so the invocation sees its own writes (GLSL guarantees this)
     const Expr* imgRoot = A[0];
     while (imgRoot->kind == EK::Index) imgRoot = imgRoot->args[0];
@@ -1822,7 +1931,7 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     bool rw = !(imgMem & (MemReadOnly | MemWriteOnly));
     if (n == "imageStore") {
         // Metal cannot write multisample textures: the store is dropped (the program still links).
-        if (T.ms) return finish("((void)(" + ex(A[ai]) + "))");
+        if (ms) return finish("((void)(" + ex(A[ai]) + "))");
         std::string w = tex + ".write(" + ex(A[ai]) + ", " + loc + ")";
         if (rw) w = "(" + w + ", " + tex + ".fence())";
         return finish(w);
@@ -1830,7 +1939,14 @@ std::string Emitter::imageFn(const Expr* e, const std::string& n) {
     std::string S = scalarName(T.sampled);
     std::string V = vecName(T.sampled, 4);
     if (T.sampled == BT::Float) fail("float image atomics are not supported by Metal");
-    auto fenced = [&](const std::string& v) {
+    if (ms) {
+        // Metal cannot write multisample textures: like stores, atomics are dropped (and return 0).
+        std::string r = "(";
+        for (size_t i = ai; i < A.size(); i++) r += "(void)(" + ex(A[i]) + "), ";
+        return finish(r + S + "(0))");
+    }
+    auto fenced = [&](std::string v) {
+        if (!resident.empty()) v = "(" + resident + " ? " + v + " : " + S + "(0))";
         if (!rw) return finish(v);
         std::string t = newTempS(S);
         return finish("(" + t + " = " + v + ", " + tex + ".fence(), " + t + ")");
@@ -2193,13 +2309,21 @@ void Emitter::emitArgs(std::string& o) {
             else decl[slot] = type + " s" + std::to_string(slot) + ";";
             for (int i = 1; i < ob.count; i++) skip[slot + i] = true;
         };
+        // multisample uniforms bound to emulated (2D array) multisample storage, see VariantKey::msArraySlots
+        auto msArray = [&](int slot) { return ob.type.ms && slot >= 0 && slot < 64 && ((K.msArraySlots >> slot) & 1); };
+        auto arrayType = [&](uint8_t memory) {
+            Type t = ob.type;
+            t.ms = false;
+            t.arrayed = true;
+            return texType(t, memory);
+        };
         if (ob.kind == SlotKind::Texture) {
-            group(ob.slot, texType(ob.type, 0));
+            group(ob.slot, msArray(ob.slot) ? arrayType(0) : texType(ob.type, 0));
             group(ob.samplerSlot, "sampler");
             if (ob.biasSlot >= 0) group(ob.biasSlot, "float2");
             if (ob.borderSlot >= 0) group(ob.borderSlot, "ulong");
         } else if (ob.kind == SlotKind::Image) {
-            group(ob.slot, texType(ob.type, ob.memory));
+            group(ob.slot, msArray(ob.slot) ? arrayType(ob.memory) : texType(ob.type, ob.memory));
         }
     }
     for (auto& acb : P->refl.atomicCounterBuffers) decl[acb.slot] = "device uchar* s" + std::to_string(acb.slot) + ";";

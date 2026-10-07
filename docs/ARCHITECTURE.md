@@ -88,6 +88,28 @@ primitives with our own GL-rules tessellator (equal / fractional_even /
 fractional_odd spacing, triangles / quads / isolines, point_mode, cw/ccw) and
 run the TES per generated vertex.
 
+## Sparse textures and buffers (ARB_sparse_texture(2), _clamp, ARB_sparse_buffer)
+Advertised when the device supports placement sparse resources (`supportsPlacementSparse`;
+M4 Mac and M5 iPad do). Sparse storage is a placement sparse texture/buffer; committing takes
+16 KB tiles from a pool of placement heaps (`Device::allocSparseTiles`) and maps them with
+`MTL4CommandQueue` mapping updates (`src/gl/sparse.mm`). Virtual pages are the standard 64 KB
+shapes (whole Metal tiles); levels from `firstMipmapInTail` form the per-layer mip tail.
+Sparse lookups use MSL `sparse_*` functions; `*ClampARB` maps to `min_lod_clamp`.
+Metal quirks worked around:
+* Writes to unmapped memory linger in the virtually tagged GPU caches: readbacks of sparse
+  resources and accesses through aliases use `MTL4VisibilityOptionResourceAlias`; image
+  loads/atomics on sparse textures check residency (`VariantKey::sparseImageSlots`).
+* Residency of shader-writable textures with non-square tiles (2/8-byte texels) is wrong;
+  sampling goes through a read-only twin mapped to the same tiles (`Texture::sparseRead`).
+* The GPU keeps stale translations of an unmapped range until it idles (~0.5 s): released sparse
+  resources keep their address range, unmapped tiles are quarantined, and recommitting a range
+  right after decommitting it waits (`Device::kSparseSettleTime`). Decommitted texels may read
+  old data during that window.
+* Metal shaders can't write multisample textures, so sparse multisample textures are 2D arrays
+  with a slice per sample (`VariantKey::msArraySlots`); they can't be framebuffer attachments.
+* Sparse buffers have no CPU mapping: CPU reads (index/indirect data, PBOs) copy through the GPU,
+  buffer textures sample a copy of the committed range.
+
 ## fp64
 GLSL `double`/`dvecN` are `ulong`/`vec<ulong,N>` bit patterns in MSL; all
 arithmetic is via `mgl_f64_*` (correctly rounded add/sub/mul/div/sqrt/fma,

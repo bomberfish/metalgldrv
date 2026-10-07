@@ -520,6 +520,7 @@ static void texStorage(Context* ctx, Texture* t, GLsizei levels, GLenum internal
     if (t->target == GL_TEXTURE_CUBE_MAP_ARRAY && d % 6) return ctx->setError(GL_INVALID_VALUE);
     if (t->target == GL_TEXTURE_3D && !compressedSupports3D(f))
         return ctx->setError(GL_INVALID_OPERATION, "compressed format 0x%x can't be used for 3D textures", internalformat);
+    if (t->sparse && !sparseStorageCheck(ctx, t, f, w, h, d)) return;
     for (int face = 0; face < 6; face++)
         for (int l = 0; l < Texture::kMaxLevels; l++) t->levels[face][l] = TexImageLevel();
     int faces = t->target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
@@ -596,6 +597,7 @@ static void texStorageMS(Context* ctx, Texture* t, GLsizei samples, GLenum inter
     if (w > 16384 || h > 16384 || d > 2048) return ctx->setError(GL_INVALID_VALUE);
     if (samples > 4) return ctx->setError(GL_INVALID_OPERATION);
     if (t->immutable) return ctx->setError(GL_INVALID_OPERATION);
+    if (immutable && t->sparse && !sparseStorageCheck(ctx, t, f, w, h, d)) return;
     // Metal multisample textures need >= 2 samples; GL allows rounding the count up.
     int s = samples <= 2 && [ctx->dev->mtl supportsTextureSampleCount:2] ? 2 : 4;
     t->samples = s;
@@ -769,6 +771,16 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
     case GL_TEXTURE_PRIORITY: case GL_DEPTH_TEXTURE_MODE: case GL_TEXTURE_COMPARE_FAIL_VALUE_ARB:
         if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM);
         break;
+    case GL_TEXTURE_SPARSE_ARB: case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
+        if (!ctx->dev->caps.sparse) return ctx->setError(GL_INVALID_ENUM, "glTexParameter(0x%x)", pname);
+        if (t->immutable) return ctx->setError(GL_INVALID_OPERATION, "sparse parameters of immutable storage");
+        if (pname == GL_VIRTUAL_PAGE_SIZE_INDEX_ARB) {
+            t->pageSizeIndex = (int)v[0];
+        } else {
+            if (v[0] != 0 && !sparseTargetSupported(t->target)) return ctx->setError(GL_INVALID_VALUE, "target 0x%x can't be sparse", t->target);
+            t->sparse = v[0] != 0;
+        }
+        break;
     default: ctx->setError(GL_INVALID_ENUM, "glTexParameter(0x%x)", pname);
     }
 }
@@ -863,6 +875,9 @@ static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int
     case GL_TEXTURE_RESIDENT: out[0] = 1; return !ctx->coreProfile;
     case GL_TEXTURE_PRIORITY: out[0] = 1; return !ctx->coreProfile;
     case GL_DEPTH_TEXTURE_MODE: out[0] = GL_LUMINANCE; return !ctx->coreProfile;
+    case GL_TEXTURE_SPARSE_ARB: out[0] = t->sparse; return ctx->dev->caps.sparse;
+    case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB: out[0] = t->pageSizeIndex; return ctx->dev->caps.sparse;
+    case GL_NUM_SPARSE_LEVELS_ARB: out[0] = t->sparse && t->immutable ? t->sparseLevels : 0; return ctx->dev->caps.sparse;
     default: return false;
     }
 }
@@ -1230,12 +1245,13 @@ static void getTexImage(Context* ctx, Texture* t, GLenum target, GLint level, GL
     const FormatInfo* f = t->storageFmt;
     size_t need = clientImageSize(format, type, w, h, d, ctx->pack);
     uint8_t* dst = (uint8_t*)pixels;
+    PackStaging staging;
     if (Buffer* pbo = ctx->pixelPackBuffer.get()) {
         if (pboOffsetMisaligned(pbo, pixels, type)) return ctx->setError(GL_INVALID_OPERATION, "unaligned PBO offset");
         if (pbo->mapped && !(pbo->mapAccess & GL_MAP_PERSISTENT_BIT)) return ctx->setError(GL_INVALID_OPERATION);
         if ((size_t)pixels + need > (size_t)pbo->size) return ctx->setError(GL_INVALID_OPERATION);
         if (pbo->lastUse && !ctx->dev->isComplete(pbo->lastUse)) ctx->waitForResource(pbo->lastUse);
-        dst = pbo->cpu + (size_t)pixels;
+        dst = staging.begin(ctx, pbo, (size_t)pixels, need);
     } else if (bufSize >= 0 && need > (size_t)bufSize) {
         return ctx->setError(GL_INVALID_OPERATION);
     }
@@ -1260,6 +1276,9 @@ static void getTexImage(Context* ctx, Texture* t, GLenum target, GLint level, GL
             size_t rowBytes = (size_t)w * f->bytesPerPixel;
             id<MTLBuffer> buf = ctx->dev->newBuffer(rowBytes * h);
             id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+            if (t->sparse)  // see readTextureRegion
+                [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit
+                         visibilityOptions:MTL4VisibilityOptionDevice | MTL4VisibilityOptionResourceAlias];
             [e copyFromTexture:t->mtl sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(x, y, mz) sourceSize:MTLSizeMake(w, h, 1)
                       toBuffer:buf destinationOffset:0 destinationBytesPerRow:rowBytes destinationBytesPerImage:rowBytes * h];
             ctx->finish();
@@ -1377,11 +1396,12 @@ static void getCompressedImage(Context* ctx, Texture* t, GLenum target, GLint le
     size_t sliceBytes = storageImageBytes(f, w, h);
     size_t need = sliceBytes * d;
     uint8_t* dst = (uint8_t*)pixels;
+    PackStaging staging;
     if (Buffer* pbo = ctx->pixelPackBuffer.get()) {
         if (pbo->mapped && !(pbo->mapAccess & GL_MAP_PERSISTENT_BIT)) return ctx->setError(GL_INVALID_OPERATION, "pack buffer is mapped");
         if ((size_t)pixels + need > (size_t)pbo->size) return ctx->setError(GL_INVALID_OPERATION, "pack buffer too small");
         if (pbo->lastUse && !ctx->dev->isComplete(pbo->lastUse)) ctx->waitForResource(pbo->lastUse);
-        dst = pbo->cpu + (size_t)pixels;
+        dst = staging.begin(ctx, pbo, (size_t)pixels, need);
         pbo->contentVersion++;
     } else {
         if (bufSize >= 0 && need > (size_t)bufSize) return ctx->setError(GL_INVALID_OPERATION, "bufSize too small");
@@ -2082,7 +2102,7 @@ API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, G
         t->needsShaderWrite = true;
         bool missing = t->mtl && (!(t->mtl.usage & MTLTextureUsageShaderWrite) ||
                                   (needView && !(t->mtl.usage & MTLTextureUsagePixelFormatView)));
-        if (missing && t->target != GL_TEXTURE_BUFFER) {
+        if (missing && t->target != GL_TEXTURE_BUFFER && !t->sparse) {  // sparse storage has every usage it supports
             // Reallocate with write (and format view) usage, copying contents.
             id<MTLTexture> old = t->mtl;
             const FormatInfo* oldFmt = t->storageFmt;
@@ -2090,6 +2110,10 @@ API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, G
             t->storageFmt = nullptr;
             t->storageDirty = true;
             if (ensureTextureStorage(ctx, t) && oldFmt == t->storageFmt) {
+                // A fresh encoder: AGX's compute-based texture copy can crash (null internal
+                // pipeline) when issued in an encoder after some dispatches (seen after an image
+                // store to a multisample texture).
+                ctx->endEncoder();
                 id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
                 [e copyFromTexture:old toTexture:t->mtl];
                 [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];

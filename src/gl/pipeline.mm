@@ -25,6 +25,11 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     h = hashBytes(&key.xfbInVertex, 1, h);
     h = hashBytes(&key.sampleShading, 1, h);
     h = hashBytes(&key.sampleMask, 1, h);
+    if (key.sparseImageSlots) h = hashBytes(&key.sparseImageSlots, sizeof key.sparseImageSlots, h);
+    if (key.msArraySlots) {
+        h = hashBytes(&key.msArraySlots, sizeof key.msArraySlots, h);
+        h = hashBytes(&key.msArray4, sizeof key.msArray4, h);
+    }
     if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch || key.xfbInVertex) {
         // Field by field: VertexFetch has padding bytes with indeterminate contents.
         for (const glsl::VertexFetch& f : key.attribs) {

@@ -12,7 +12,16 @@ using namespace mgl;
 #define API extern "C" __attribute__((visibility("default")))
 
 namespace mgl {
-ProgramObj::~ProgramObj() = default;
+ProgramObj::~ProgramObj() {
+    // Metal 4 command buffers don't retain pipeline states: keep the compute pipelines of a
+    // program deleted right after a dispatch alive until that work has run.
+    Device* d = Device::get();
+    uint64_t s = d->lastReservedSerial();
+    for (auto& [k, v] : variants) {
+        d->retainUntil(v->compute, s);
+        for (auto& [n, p] : v->computeByName) d->retainUntil(p, s);
+    }
+}
 
 static glsl::Stage stageForType(GLenum type, bool* ok) {
     *ok = true;
@@ -173,6 +182,7 @@ API void APIENTRY glCompileShader(GLuint shader) {
     glsl::Stage st = stageForType(s->type, &ok);
     glsl::CompileOptions opts;
     opts.compatibilityProfile = !ctx->coreProfile;
+    opts.sparseTexture = ctx->dev->caps.sparse;
     glsl::CompileResult r = glsl::compile(st, s->sources, opts);
     s->shader = r.shader;
     s->compiled = r.shader != nullptr;
@@ -279,6 +289,7 @@ API void APIENTRY glSpecializeShader(GLuint shader, const GLchar* pEntryPoint, G
     for (GLuint i = 0; i < n; i++) constants.push_back({idx[i], val[i]});
     glsl::CompileOptions opts;
     opts.compatibilityProfile = false;
+    opts.sparseTexture = ctx->dev->caps.sparse;
     glsl::SpecializeResult r = glsl::specializeSpirv(*s->spirvModule, st, pEntryPoint, constants, opts);
     switch (r.status) {
     case glsl::SpecializeStatus::BadEntryPoint: return ctx->setError(GL_INVALID_VALUE, "no SPIR-V entry point '%s' for this stage", pEntryPoint);
