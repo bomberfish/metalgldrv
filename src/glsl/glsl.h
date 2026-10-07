@@ -308,6 +308,7 @@ struct alignas(16) MGLSys {
     float tessDefaultInner[2];             // GL_PATCH_DEFAULT_INNER_LEVEL
     uint32_t pad2[2];
     float currentAttrib[32][4];            // glVertexAttrib* values for disabled arrays
+    double currentAttribD[16][4];          // the same as doubles (glVertexAttribL*; dvec inputs)
 };
 
 // Per-draw description for pipelines without stage_in (PipelineKind::MeshGeometry,

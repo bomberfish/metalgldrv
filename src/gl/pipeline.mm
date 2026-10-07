@@ -150,7 +150,7 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
         if (fs && key.rasterEnabled) d.fragmentFunctionDescriptor = fn(fsLib, fs->name);
         MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
         bool anyAttr = false;
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < 32; i++) {
             const VertexAttribKey& a = key.attribs[i];
             if (!a.format) continue;
             vd.attributes[i].format = (MTLVertexFormat)a.format;

@@ -289,11 +289,11 @@ static bool isCompatAttrib(BuiltinVar b) {
            b == BuiltinVar::MultiTexCoord || b == BuiltinVar::FogCoord;
 }
 
+// Vertex shader inputs: one location per scalar/vector (dvec3/dvec4 included, GLSL 4.60 4.4.1)
+// and per matrix column.
 static int locationsFor(const Type& t) {
-    int per = 1;
     Type b = t.stripArrays();
-    if (b.cols) per = b.cols * ((b.base == BT::Double && b.vec > 2) ? 2 : 1);
-    else if (b.base == BT::Double && b.vec > 2) per = 2;
+    int per = b.cols ? b.cols : 1;
     return per * t.totalArrayElements();
 }
 
