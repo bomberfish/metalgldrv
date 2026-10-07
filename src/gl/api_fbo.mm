@@ -828,12 +828,23 @@ static id<MTLTexture> resolveForRead(Context* ctx, id<MTLTexture> src, int* slic
     MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
     bool depth = src.pixelFormat == MTLPixelFormatDepth32Float || src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
                  src.pixelFormat == MTLPixelFormatDepth16Unorm;
-    if (depth) {
-        rp.depthAttachment.texture = src;
-        rp.depthAttachment.slice = layer;
-        rp.depthAttachment.loadAction = MTLLoadActionLoad;
-        rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
-        rp.depthAttachment.resolveTexture = dst;
+    bool stencil = src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || src.pixelFormat == MTLPixelFormatStencil8;
+    if (depth || stencil) {
+        if (depth) {
+            rp.depthAttachment.texture = src;
+            rp.depthAttachment.slice = layer;
+            rp.depthAttachment.loadAction = MTLLoadActionLoad;
+            rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+            rp.depthAttachment.resolveTexture = dst;
+        }
+        // stencil resolves to sample 0 (GL takes any one sample)
+        if (stencil) {
+            rp.stencilAttachment.texture = src;
+            rp.stencilAttachment.slice = layer;
+            rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+            rp.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
+            rp.stencilAttachment.resolveTexture = dst;
+        }
     } else {
         rp.colorAttachments[0].texture = src;
         rp.colorAttachments[0].slice = layer;
