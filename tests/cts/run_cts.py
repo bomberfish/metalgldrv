@@ -280,6 +280,10 @@ def run_suite(a):
             if inflight is not None:
                 status = "Timeout" if timed_out else "Crash"
                 sig = -rc if rc is not None and rc < 0 else None
+                if a.ios_device:
+                    # ios_run_chunk returns -1 for any app death; devicectl prints the real signal
+                    m = re.search(r"App terminated due to signal (\d+)", open(stdout_path, errors="replace").read())
+                    sig = int(m.group(1)) if m else None
                 detail = (f"process {'killed after %.0fs inactivity' % a.timeout if timed_out else 'died'} (rc={rc}"
                           + (f", signal {signal.Signals(sig).name}" if sig else "") + ")")
                 bt = ""
