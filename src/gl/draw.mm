@@ -1648,7 +1648,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         [e setRenderPipelineState:pso];
         ctx->enc.pipeline = pso;
     }
-    applyDynamicState(ctx, e, refl.gsOutputPrimitive ? refl.gsOutputPrimitive : GL_TRIANGLES, refl.writesViewportIndex);
+    applyDynamicState(ctx, e, hasGS ? refl.gsOutputPrimitive : hasTess ? GL_TRIANGLES : s.listMode, refl.writesViewportIndex);
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
     [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
     [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
@@ -2079,6 +2079,8 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     bool hasTess = refl.stageMask & (1u << (int)glsl::Stage::TessEval);
     glsl::VariantKey vk;
     vk.kind = hasTess ? glsl::PipelineKind::Tessellation : hasGS ? glsl::PipelineKind::MeshGeometry : glsl::PipelineKind::Classic;
+    // more fragment inputs than a classic vertex function can pass: the vertex shader runs on a mesh stage
+    if (vk.kind == glsl::PipelineKind::Classic && refl.vsMeshPassthrough && !d.indirect) vk.kind = glsl::PipelineKind::MeshGeometry;
     vk.primitive = (uint8_t)d.mode;
     vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
     vk.rasterDiscard = ctx->rasterizerDiscard;

@@ -249,6 +249,9 @@ struct Reflection {
     bool usesFp64 = false;
     bool usesFlatShading = false;           // any flat-qualified input reaching the fragment shader
     bool writesLayer = false, writesViewportIndex = false;  // by the last pre-rasterization stage
+    // VS + FS only, but the fragment inputs exceed what a classic Metal vertex function can pass (124 scalars):
+    // draw through PipelineKind::MeshGeometry, which runs the vertex shader in a mesh stage and spills the excess.
+    bool vsMeshPassthrough = false;
     MultiPassInfo multipass;
     std::vector<uint8_t> defaultUniformInit;  // initial contents of the default uniform block (defaultUniformSize bytes)
     StageSubroutines subroutines[(int)Stage::Count];

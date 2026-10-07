@@ -118,8 +118,11 @@ Vertex ids come from the uint32 list `indexBuffer` (+ `baseVertex`).
   (also bound at buffer 22) and interpolates with `[[barycentric_coord, <center|centroid|sample>_<perspective|
   no_perspective>]]` (flat/integer/double inputs take vertex 0). The runtime allocates `spillBuffer` for the worst
   case of the grid (capped at 64 MB; vertices past `spillCapacity` read zeros). Programs within the budgets emit no
-  spill code. This is what lets GL_MAX_FRAGMENT_INPUT_COMPONENTS be 128 (VS outputs stay at 124, so classic
-  VS→FS pipelines never spill). interpolateAt*() on a spilled input is not supported.
+  spill code. This is what lets GL_MAX_FRAGMENT_INPUT_COMPONENTS and GL_MAX_VERTEX_OUTPUT_COMPONENTS be 128: a
+  VS + FS program whose fragment inputs exceed 124 scalars (`Reflection::vsMeshPassthrough`) draws through
+  PipelineKind::MeshGeometry without a GS: `mgl_vsm` (Mesh, one threadgroup per input primitive of the decomposed
+  list, one thread per vertex) runs the vertex shader and emits the primitive with the provoking vertex first.
+  interpolateAt*() on a spilled input is not supported.
 * The tessellator chunk sets `#pragma METAL fp math_mode(safe)` / `fp contract(off)` (shared vertices must be bit-identical); this
   applies to the rest of the generated source.
 

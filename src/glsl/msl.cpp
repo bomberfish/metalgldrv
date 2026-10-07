@@ -437,6 +437,7 @@ private:
     std::string tesLoadPatch();
     std::string tesRun(const std::string& coord, const std::string& patch, const std::string& cps);
     void emitTessEvalMesh(std::string& o);
+    void emitVertexMesh(std::string& o);
     bool fsReadsPrimitiveId() const {
         const StageCode& f = SC(Stage::Fragment);
         return f.main && f.usedNames.count("gl_PrimitiveID");
@@ -3306,6 +3307,62 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
 }
 
 // ---------------------------------------------------------------------------
+// Vertex shader on a mesh stage (no GS/tessellation): used when the fragment inputs do not fit a classic
+// Metal vertex -> fragment interface, so that the excess can be spilled (see rasterOutput). One threadgroup per
+// input primitive of the decomposed list, one thread per vertex.
+// ---------------------------------------------------------------------------
+void Emitter::emitVertexMesh(std::string& o) {
+    uint32_t prim = K.primitive;
+    bool points = prim == gl::POINTS, lines = prim == gl::LINES || prim == gl::LINES_ADJACENCY;
+    bool adj = prim == gl::LINES_ADJACENCY || prim == gl::TRIANGLES_ADJACENCY;
+    if (prim != gl::POINTS && prim != gl::LINES && prim != gl::TRIANGLES && !adj) fail("unsupported primitive for a vertex mesh pipeline");
+    int NV = points ? 1 : lines ? (adj ? 4 : 2) : (adj ? 6 : 3);
+    int ipp = points ? 1 : lines ? 2 : 3;
+    // vertices of the rasterized primitive, provoking vertex first (flat inputs read the first mesh vertex)
+    std::vector<int> used = points ? std::vector<int>{0} : lines ? (adj ? std::vector<int>{1, 2} : std::vector<int>{0, 1})
+                                                                 : (adj ? std::vector<int>{0, 2, 4} : std::vector<int>{0, 1, 2});
+    if (K.flatshadeLastVertex) std::rotate(used.begin(), used.end() - 1, used.end());
+    emitBody(Stage::Vertex, o);
+    o += "}  // namespace vs\n\n";
+    RasterOut ro = rasterOutput(Stage::Vertex, "vg.", true, points, NV, 1, ipp);
+    if (fsReadsPrimitiveId()) {
+        ro.primStruct += "    int mgl_primid [[user(mgl_primid)]];\n";
+        ro.primCopy += "p.mgl_primid = int(mgl_prim);\n";
+    }
+    std::string topo = points ? "point" : lines ? "line" : "triangle";
+    o += "struct mgl_VM_V {\n" + ro.vertexStruct + "};\nstruct mgl_VM_P {\n" + ro.primStruct + "};\n";
+    o += "using mgl_VM_T = mesh<mgl_VM_V, mgl_VM_P, " + std::to_string(NV) + ", 1, topology::" + topo + ">;\n\n";
+    std::string N = std::to_string(NV);
+    std::string e = "[[mesh]] void mgl_vsm(mgl_VM_T mgl_mo, constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], "
+                    "constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], "
+                    "uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
+    e += "    uint mgl_prim = mgl_tg.x, mgl_inst = mgl_tg.y;\n";
+    if (!ro.spill.empty()) e += "    threadgroup uint mgl_svs[" + N + "];\n";
+    e += "    if (mgl_tid < " + N + "u) {\n";
+    e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_tid] + uint(D.baseVertex)", "mgl_inst"), 8);
+    useStage(Stage::Vertex);
+    e += "        mgl_VM_V v;\n" + indentBy(ro.vertexCopy, 8);
+    e += indentBy(spillVertexCode(ro, "vg.", "D.", "mgl_svs[mgl_tid]"), 8);
+    e += "        mgl_mo.set_vertex(mgl_tid, v);\n    }\n";
+    if (!ro.spill.empty()) e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    if (mgl_tid == 0u) {\n";
+    for (int k = 0; k < ipp; k++) e += "        mgl_mo.set_index(" + std::to_string(k) + ", " + std::to_string(used[k]) + ");\n";
+    std::string sp = spillPrimCode(ro, ipp, [&](int k) { return "mgl_svs[" + std::to_string(used[k]) + "]"; });
+    e += "        mgl_VM_P p;\n" + indentBy(ro.primCopy, 8) + indentBy(sp, 8);
+    e += "        mgl_mo.set_primitive(0, p);\n        mgl_mo.set_primitive_count(1);\n    }\n}\n\n";
+    entries_ += e;
+    EntryPoint ep{"mgl_vsm", Stage::Vertex, EntryPoint::Mesh};
+    ep.threadsPerThreadgroup[0] = NV;
+    ep.maxMeshVertices = NV;
+    ep.maxMeshPrimitives = 1;
+    ep.spillRecordBytes = (uint32_t)(16 * ro.spill.size());
+    out_.entryPoints.push_back(ep);
+    noteSpill(ro, ipp);
+    fragInputsAvailable_ = ro.names;
+    haveVsOutputs_ = true;
+}
+
+// ---------------------------------------------------------------------------
 // Tessellation: pass 1 = VS + TCS kernel, pass 2 = object (patch) + mesh (TES), or
 // TES records (mgl_tes_count / mgl_tes_gen) feeding a geometry shader or transform feedback.
 // ---------------------------------------------------------------------------
@@ -3896,9 +3953,9 @@ MSLOutput Emitter::run() {
                 if (SC(Stage::Fragment).main) emitFS(o, false);
                 break;
             case PipelineKind::MeshGeometry:
-                if (!gs) fail("program has no geometry shader");
                 if (tess) fail("tessellation programs need PipelineKind::Tessellation");
-                emitGeometry(o, false);
+                if (gs) emitGeometry(o, false);
+                else emitVertexMesh(o);  // vertex shader outputs past the classic interface limit
                 if (SC(Stage::Fragment).main) emitFS(o, true);
                 else emitNullFS();
                 break;

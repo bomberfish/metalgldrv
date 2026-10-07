@@ -70,6 +70,10 @@ int runPipeline(const PipelineArgs& pa) {
     bool xfbOnly = !pa.xfb.empty() && !tess;  // with a geometry shader: serial capture kernel (mgl_gs_xfb)
     VariantKey key;
     key.kind = tess ? PipelineKind::Tessellation : xfbOnly ? PipelineKind::XfbCapture : gs ? PipelineKind::MeshGeometry : PipelineKind::Classic;
+    if (key.kind == PipelineKind::Classic && r.vsMeshPassthrough) {  // as the runtime: VS on a mesh stage
+        key.kind = PipelineKind::MeshGeometry;
+        key.primitive = pa.vpp == 1 ? 0 : pa.vpp == 2 ? 1 : 4;
+    }
     for (auto& a : r.attributes) {
         VertexFetch& f = key.attribs[a.location];
         f.enabled = true;
