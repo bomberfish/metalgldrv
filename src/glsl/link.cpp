@@ -1062,6 +1062,13 @@ void Linker::checkVaryings() {
         auto arrayedIn = [](Stage s, const Variable* v) { return s != Stage::Vertex && s != Stage::Fragment && !v->q.patch; };
         for (size_t i = 0; i + 1 < chain.size(); i++) {
             Stage ps = chain[i], cs = chain[i + 1];
+            // GLSL 4.60 7.1.1: a built-in block redeclared on both sides of an interface must be redeclared the same way
+            {
+                std::vector<std::string> po, ci;
+                for (auto& sh : prog_->stages[(int)ps].shaders) if (!sh->perVertexOut.empty()) po = sh->perVertexOut;
+                for (auto& sh : prog_->stages[(int)cs].shaders) if (!sh->perVertexIn.empty()) ci = sh->perVertexIn;
+                if (!po.empty() && !ci.empty() && po != ci) error("gl_PerVertex is redeclared differently in consecutive shader stages");
+            }
             std::map<std::string, const Variable*> outs;
             for (auto* v : prog_->stages[(int)ps].globals)
                 if (v->q.storage == Storage::Out && v->builtin == BuiltinVar::None) outs[varyingKey(v, ps)] = v;

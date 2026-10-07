@@ -38,11 +38,18 @@ struct CompileResult {
 };
 
 // Implementation limits the compiler enforces (must match the runtime's GL_MAX_* queries, src/gl/context.h).
-constexpr int kMaxCombinedTextureImageUnits = 96;
-constexpr int kMaxImageUnits = 8;
+namespace limits_detail {
+enum : int {
+#define X(name, glenum, value) name##_v = value,
+#include "glsl/limits.def"
+#undef X
+};
+}  // namespace limits_detail
+constexpr int kMaxCombinedTextureImageUnits = limits_detail::gl_MaxCombinedTextureImageUnits_v;
+constexpr int kMaxImageUnits = limits_detail::gl_MaxImageUnits_v;
 constexpr int kMaxUniformBufferBindings = 84;
 constexpr int kMaxShaderStorageBufferBindings = 16;
-constexpr int kMaxAtomicCounterBufferBindings = 8;
+constexpr int kMaxAtomicCounterBufferBindings = limits_detail::gl_MaxAtomicCounterBindings_v;
 
 struct CompileOptions {
     bool compatibilityProfile = true;  // accept GL compatibility builtins (gl_Vertex, ftransform, ...)
