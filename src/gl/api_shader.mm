@@ -469,6 +469,19 @@ API void APIENTRY glLinkProgram(GLuint program) {
     }
 }
 
+// Subroutine selections are reset to defaults when the program used for a stage changes (GL 4.6 7.10).
+static void resetSubroutineSelection(Context* ctx, int st, ProgramObj* p) {
+    ctx->subroutineSelection[st].clear();
+    if (!p) return;
+    const auto& ss = p->refl.subroutines[st];
+    for (int l = 0; l < ss.numLocations; l++) {
+        uint32_t def = 0;
+        for (auto& u : ss.uniforms)
+            if (l >= u.location && l < u.location + u.arraySize && !u.compatible.empty()) def = u.compatible[0];
+        ctx->subroutineSelection[st].push_back(def);
+    }
+}
+
 API void APIENTRY glUseProgram(GLuint program) {
     MGL_CTX();
     if (ctx->xfb->active && !ctx->xfb->paused) return ctx->setError(GL_INVALID_OPERATION);
@@ -482,17 +495,7 @@ API void APIENTRY glUseProgram(GLuint program) {
     if (!p->linked) return ctx->setError(GL_INVALID_OPERATION, "program not linked");
     if (ctx->program.get() != p) releaseCurrentProgram(ctx);
     ctx->program = p;
-    // Subroutine selections are reset when the current program changes (GL 4.6 §7.10).
-    for (int st = 0; st < (int)glsl::Stage::Count; st++) {
-        const auto& ss = p->refl.subroutines[st];
-        ctx->subroutineSelection[st].clear();
-        for (int l = 0; l < ss.numLocations; l++) {
-            uint32_t def = 0;
-            for (auto& u : ss.uniforms)
-                if (l >= u.location && l < u.location + u.arraySize && !u.compatible.empty()) def = u.compatible[0];
-            ctx->subroutineSelection[st].push_back(def);
-        }
-    }
+    for (int st = 0; st < (int)glsl::Stage::Count; st++) resetSubroutineSelection(ctx, st, p);
 }
 
 API void APIENTRY glValidateProgram(GLuint program) {
@@ -1068,6 +1071,7 @@ static void getUniform(Context* ctx, GLuint program, GLint location, GLsizei buf
     if (ts.base == BaseType::Sampler || ts.base == BaseType::Image) {
         for (size_t s = 0; s < p->refl.slots.size(); s++) {
             const auto& sl = p->refl.slots[s];
+            if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Image) continue;
             if ((int)sl.index == loc.uniform && (int)sl.element == loc.element) {
                 out[0] = (T)p->samplerUnits[s];
                 return;
@@ -1132,6 +1136,7 @@ struct Resource {
     int isRowMajor = 0, bufferBinding = -1, bufferDataSize = 0, atomicIndex = -1, topLevelArraySize = 1, topLevelArrayStride = 0;
     uint32_t stageMask = 0;
     std::vector<int> activeVariables;
+    std::vector<int> compatible;  // subroutine uniforms: compatible subroutine indices
     bool isBlock = false, isPerPatch = false;
 };
 }  // namespace
@@ -1236,11 +1241,30 @@ static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface, bool* ok)
         }
         break;
     case GL_TRANSFORM_FEEDBACK_BUFFER:
-    case GL_VERTEX_SUBROUTINE: case GL_TESS_CONTROL_SUBROUTINE: case GL_TESS_EVALUATION_SUBROUTINE: case GL_GEOMETRY_SUBROUTINE:
-    case GL_FRAGMENT_SUBROUTINE: case GL_COMPUTE_SUBROUTINE: case GL_VERTEX_SUBROUTINE_UNIFORM: case GL_TESS_CONTROL_SUBROUTINE_UNIFORM:
-    case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM: case GL_GEOMETRY_SUBROUTINE_UNIFORM: case GL_FRAGMENT_SUBROUTINE_UNIFORM:
-    case GL_COMPUTE_SUBROUTINE_UNIFORM:
         break;
+    case GL_VERTEX_SUBROUTINE: case GL_TESS_CONTROL_SUBROUTINE: case GL_TESS_EVALUATION_SUBROUTINE: case GL_GEOMETRY_SUBROUTINE:
+    case GL_FRAGMENT_SUBROUTINE: case GL_COMPUTE_SUBROUTINE: {
+        // GL subroutine index == resource index (stage order matches glsl::Stage)
+        for (auto& f : r.subroutines[iface - GL_VERTEX_SUBROUTINE].functions) {
+            Resource x;
+            x.name = f;
+            out.push_back(x);
+        }
+        break;
+    }
+    case GL_VERTEX_SUBROUTINE_UNIFORM: case GL_TESS_CONTROL_SUBROUTINE_UNIFORM:
+    case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM: case GL_GEOMETRY_SUBROUTINE_UNIFORM: case GL_FRAGMENT_SUBROUTINE_UNIFORM:
+    case GL_COMPUTE_SUBROUTINE_UNIFORM: {
+        for (auto& u : r.subroutines[iface - GL_VERTEX_SUBROUTINE_UNIFORM].uniforms) {
+            Resource x;
+            x.name = u.arraySize > 1 ? u.name + "[0]" : u.name;
+            x.arraySize = u.arraySize;
+            x.location = u.location;
+            x.compatible = u.compatible;
+            out.push_back(x);
+        }
+        break;
+    }
     default: *ok = false;
     }
     return out;
@@ -1271,7 +1295,14 @@ API void APIENTRY glGetProgramInterfaceiv(GLuint program, GLenum iface, GLenum p
         *params = m;
         break;
     }
-    case GL_MAX_NUM_COMPATIBLE_SUBROUTINES: *params = 0; break;
+    case GL_MAX_NUM_COMPATIBLE_SUBROUTINES: {
+        if (!(iface >= GL_VERTEX_SUBROUTINE_UNIFORM && iface <= GL_COMPUTE_SUBROUTINE_UNIFORM))
+            return ctx->setError(GL_INVALID_OPERATION);
+        GLint m = 0;
+        for (auto& x : res) m = std::max<GLint>(m, (GLint)x.compatible.size());
+        *params = m;
+        break;
+    }
     default: ctx->setError(GL_INVALID_ENUM);
     }
 }
@@ -1345,6 +1376,8 @@ API void APIENTRY glGetProgramResourceiv(GLuint program, GLenum iface, GLuint in
         case GL_LOCATION_INDEX: vals.push_back(x.locationIndex); break;
         case GL_IS_PER_PATCH: vals.push_back(x.isPerPatch); break;
         case GL_LOCATION_COMPONENT: vals.push_back(0); break;
+        case GL_NUM_COMPATIBLE_SUBROUTINES: vals.push_back((GLint)x.compatible.size()); break;
+        case GL_COMPATIBLE_SUBROUTINES: for (int c : x.compatible) vals.push_back(c); break;
         case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX: vals.push_back(0); break;
         case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE: vals.push_back(0); break;
         default: return ctx->setError(GL_INVALID_ENUM);
@@ -1368,7 +1401,11 @@ API GLint APIENTRY glGetProgramResourceLocation(GLuint program, GLenum iface, co
     case GL_PROGRAM_INPUT: return glGetAttribLocation(program, name);
     case GL_PROGRAM_OUTPUT: return glGetFragDataLocation(program, name);
     default:
-        if (iface >= GL_VERTEX_SUBROUTINE_UNIFORM && iface <= GL_COMPUTE_SUBROUTINE_UNIFORM) return -1;
+        if (iface >= GL_VERTEX_SUBROUTINE_UNIFORM && iface <= GL_COMPUTE_SUBROUTINE_UNIFORM) {
+            static const GLenum kShaderTypes[] = {GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER,
+                                                  GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER, GL_COMPUTE_SHADER};
+            return glGetSubroutineUniformLocation(program, kShaderTypes[iface - GL_VERTEX_SUBROUTINE_UNIFORM], name);
+        }
         ctx->setError(GL_INVALID_ENUM);
         return -1;
     }
@@ -1474,7 +1511,11 @@ API void APIENTRY glBindProgramPipeline(GLuint pipeline) {
         return;
     }
     ProgramPipelineObj* pp = pipelineObj(ctx, pipeline, true);
-    if (pp) ctx->pipeline = pp;
+    if (pp) {
+        ctx->pipeline = pp;
+        if (!ctx->program)
+            for (int st = 0; st < (int)glsl::Stage::Count; st++) resetSubroutineSelection(ctx, st, pp->stages[st].get());
+    }
 }
 
 API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program) {
@@ -1497,6 +1538,7 @@ API void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint 
     for (auto& [bit, st] : map) {
         if (!(stages & bit)) continue;
         pp->stages[(int)st] = (p && (p->refl.stageMask & (1u << (int)st))) ? p : nullptr;
+        if (ctx->pipeline == pp && !ctx->program) resetSubroutineSelection(ctx, (int)st, pp->stages[(int)st].get());
     }
     pp->validated = false;
 }
@@ -1578,12 +1620,29 @@ API GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadert
     MGL_CTX_RET(-1);
     const glsl::StageSubroutines* ss = stageSubs(ctx, program, shadertype, nullptr);
     if (!ss) return -1;
-    std::string n = name, base;
-    int elem;
-    bool had;
-    if (!parseArrayName(n, base, elem, had)) return -1;
-    for (auto& u : ss->uniforms)
-        if (u.name == n || (u.name == base && elem < u.arraySize)) return u.location + (u.name == n ? 0 : elem);
+    // name, name[i], name[i][j]... (arrays of arrays are flattened row-major)
+    std::string n = name;
+    std::vector<int> idx;
+    while (!n.empty() && n.back() == ']') {
+        size_t lb = n.rfind('[');
+        if (lb == std::string::npos || lb + 2 > n.size() - 1) return -1;
+        std::string d = n.substr(lb + 1, n.size() - lb - 2);
+        if (d.empty() || d.find_first_not_of("0123456789") != std::string::npos) return -1;
+        idx.insert(idx.begin(), std::atoi(d.c_str()));
+        n.resize(lb);
+    }
+    for (auto& u : ss->uniforms) {
+        if (u.name != n) continue;
+        if (idx.empty()) return u.location;
+        if (idx.size() > u.dims.size()) return -1;
+        int flat = 0;
+        for (size_t k = 0; k < u.dims.size(); k++) {
+            int i = k < idx.size() ? idx[k] : 0;
+            if (i >= u.dims[k]) return -1;
+            flat = flat * u.dims[k] + i;
+        }
+        return u.location + flat;
+    }
     return -1;
 }
 
@@ -1633,11 +1692,17 @@ API void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, cons
     int st = stageIndexForShaderType(shadertype);
     if (st < 0) return ctx->setError(GL_INVALID_ENUM);
     ProgramObj* p = ctx->activeProgramForStage((glsl::Stage)st);
-    if (!p) return ctx->setError(GL_INVALID_OPERATION);
+    if (!p || !(p->refl.stageMask & (1u << st))) return ctx->setError(GL_INVALID_OPERATION);
     const glsl::StageSubroutines& ss = p->refl.subroutines[st];
     if (count != ss.numLocations) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < count; i++)
         if (indices[i] >= ss.functions.size()) return ctx->setError(GL_INVALID_VALUE);
+    for (auto& u : ss.uniforms)
+        for (int i = 0; i < u.arraySize; i++) {
+            int loc = u.location + i;
+            if (loc < count && std::find(u.compatible.begin(), u.compatible.end(), (int)indices[loc]) == u.compatible.end())
+                return ctx->setError(GL_INVALID_OPERATION);
+        }
     ctx->subroutineSelection[st].assign(indices, indices + count);
 }
 
@@ -1646,7 +1711,7 @@ API void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, G
     int st = stageIndexForShaderType(shadertype);
     if (st < 0) return ctx->setError(GL_INVALID_ENUM);
     ProgramObj* p = ctx->activeProgramForStage((glsl::Stage)st);
-    if (!p) return ctx->setError(GL_INVALID_OPERATION);
+    if (!p || !(p->refl.stageMask & (1u << st))) return ctx->setError(GL_INVALID_OPERATION);
     if (location < 0 || location >= p->refl.subroutines[st].numLocations) return ctx->setError(GL_INVALID_VALUE);
     const auto& sel = ctx->subroutineSelection[st];
     *params = location < (int)sel.size() ? sel[location] : 0;

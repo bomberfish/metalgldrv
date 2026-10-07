@@ -37,6 +37,13 @@ struct CompileResult {
     std::string infoLog;
 };
 
+// Implementation limits the compiler enforces (must match the runtime's GL_MAX_* queries, src/gl/context.h).
+constexpr int kMaxCombinedTextureImageUnits = 96;
+constexpr int kMaxImageUnits = 8;
+constexpr int kMaxUniformBufferBindings = 84;
+constexpr int kMaxShaderStorageBufferBindings = 16;
+constexpr int kMaxAtomicCounterBufferBindings = 8;
+
 struct CompileOptions {
     bool compatibilityProfile = true;  // accept GL compatibility builtins (gl_Vertex, ftransform, ...)
     int maxVersion = 460;
@@ -159,7 +166,8 @@ struct MultiPassInfo {
 struct SubroutineUniform {
     std::string name;
     int location = -1;               // GL subroutine uniform location (per stage); arrays occupy [location, location+arraySize)
-    int arraySize = 1;
+    int arraySize = 1;               // total elements (arrays of arrays are flattened)
+    std::vector<int> dims;           // array dimensions, outermost first (empty: not an array)
     std::vector<int> compatible;     // indices into StageSubroutines::functions
 };
 struct StageSubroutines {

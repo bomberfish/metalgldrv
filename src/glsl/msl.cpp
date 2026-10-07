@@ -98,6 +98,8 @@ private:
     std::map<std::string, std::string> helperByKey_;
     int helperN_ = 0;
     std::vector<std::string> temps_;
+    std::string retWriteback_;  // copy-out of out/inout parameters, emitted before every return
+    const Function* curFn_ = nullptr;
     int tempN_ = 0;
     std::map<const Function*, std::string> fnNames_;
     std::set<std::string> fragInputsAvailable_;  // from the vertex stage
@@ -123,7 +125,11 @@ private:
         if (n == 1) return scalarName(b);
         return scalarName(b) + std::to_string(n);
     }
-    std::string structName(const StructDef* sd) { return (sd->isBlock ? "B_" : "S_") + sd->name; }
+    // in and out blocks of one stage may share a block name (separate interfaces)
+    std::string structName(const StructDef* sd) {
+        if (!sd->isBlock) return "S_" + sd->name;
+        return std::string(sd->blockQ.storage == Storage::In ? "Bi_" : sd->blockQ.storage == Storage::Out ? "Bo_" : "B_") + sd->name;
+    }
     std::string texType(const Type& t, uint8_t memory) {
         std::string T = scalarName(t.sampled == BT::Float ? BT::Float : t.sampled);
         bool image = t.base == BT::Image;
@@ -488,11 +494,12 @@ bool Emitter::bufAccess(const Expr* e, Acc& a) {
             else idx = "uint(" + ex(ie) + ")";
             if (a.blockArray) {
                 a.blockArray = false;
-                a.ptr = "A->s" + std::to_string(a.bb->slot) + "[" + idx + "]";
+                std::string sub = "[" + idx + "]";
+                a.ptr = "A->s" + std::to_string(a.bb->slot) + sub;
                 a.off = "0u";
                 a.type = e->type;
                 a.layout = a.bb->layout;
-                if (a.bb->storage) a.sizeExpr = "A->s" + std::to_string(a.bb->sizeSlot) + "[" + idx + "]";
+                if (a.bb->storage) a.sizeExpr = "A->s" + std::to_string(a.bb->sizeSlot) + sub;
                 return true;
             }
             const Type& bt = a.type;
@@ -1148,6 +1155,13 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
         return "((device atomic_uint*)(A->s" + std::to_string(ob.slot) + " + " + off + "))";
     }
     std::string T = a->type.base == BT::Int ? "atomic_int" : "atomic_uint";
+    if (a->kind == EK::Swizzle && a->nswz == 1) {
+        // one component of a shared-memory vector (MSL cannot take the address of a swizzle)
+        const Expr* r = a->args[0];
+        while (r->kind == EK::Index || r->kind == EK::Field) r = r->args[0];
+        if (r->kind == EK::Var && inThreadgroup(r->var))
+            return "((threadgroup " + T + "*)&(" + ex(a->args[0]) + ") + " + std::to_string(a->swz[0]) + ")";
+    }
     Acc acc;
     if (a->kind == EK::Swizzle && a->nswz == 1 && bufAccess(a->args[0], acc) && acc.type.isVector()) {
         // single component of a buffer vector, e.g. atomicAdd(buf.v.y, 1)
@@ -1800,6 +1814,15 @@ void Emitter::stmt(const Stmt* s, std::string& o, int in) {
         case SK::Break: o += ind(in) + "break;\n"; return;
         case SK::Continue: o += ind(in) + "continue;\n"; return;
         case SK::Return:
+            if (!retWriteback_.empty()) {
+                // out/inout parameters are copied back on return (GLSL value-return semantics)
+                if (s->expr) {
+                    o += ind(in) + "{ " + mt(curFn_->ret) + " mgl_ret = " + ex(s->expr) + "; " + retWriteback_ + "return mgl_ret; }\n";
+                } else {
+                    o += ind(in) + "{ " + retWriteback_ + "return; }\n";
+                }
+                return;
+            }
             o += ind(in) + "return" + (s->expr ? " " + ex(s->expr) : "") + ";\n";
             return;
         case SK::Discard: {
@@ -1874,7 +1897,7 @@ std::string Emitter::fnSignature(const Function* f) {
             continue;
         }
         if (t.isArray() && t.dims[0] == 0) fail("unsized array parameter");
-        if (p->q.storage == Storage::Out || p->q.storage == Storage::InOut) r += "thread " + mt(t) + "& " + n;
+        if (p->q.storage == Storage::Out || p->q.storage == Storage::InOut) r += "thread " + mt(t) + "& " + n + "_ref";
         else r += mt(t) + " " + n;
     }
     return r + ")";
@@ -1882,12 +1905,27 @@ std::string Emitter::fnSignature(const Function* f) {
 
 std::string Emitter::emitFunction(const Function* f) {
     temps_.clear();
+    // out/inout parameters are local copies (copy-in for inout) written back on return, so that a
+    // global passed as an argument is not aliased by the parameter inside the function.
+    std::string prologue;
+    retWriteback_.clear();
+    for (auto* p : f->params) {
+        if (p->type.isOpaque() || !(p->q.storage == Storage::Out || p->q.storage == Storage::InOut)) continue;
+        std::string n = varName(p);
+        prologue += "        " + mt(p->type) + " " + n + (p->q.storage == Storage::InOut ? " = " + n + "_ref;\n" : "{};\n");
+        retWriteback_ += n + "_ref = " + n + "; ";
+    }
+    curFn_ = f;
     std::string bodyText;
     for (auto* s : f->body->body) stmt(s, bodyText, 2);
     std::string r = "    " + fnSignature(f) + " {\n";
+    r += prologue;
     for (auto& t : temps_) r += "        " + t + "\n";
     r += bodyText;
+    if (!retWriteback_.empty() && f->ret.isVoid()) r += "        " + retWriteback_ + "\n";
     r += "    }\n";
+    retWriteback_.clear();
+    curFn_ = nullptr;
     return r;
 }
 
@@ -1995,7 +2033,7 @@ void Emitter::emitArgs(std::string& o) {
     }
     for (auto& [name, ob] : P->opaque) {
         auto group = [&](int slot, const std::string& type) {
-            if (ob.count > 1) decl[slot] = "array<" + type + ", " + std::to_string(ob.count) + "> s" + std::to_string(slot) + ";";
+            if (ob.count > 1 || ob.isArray) decl[slot] = "array<" + type + ", " + std::to_string(ob.count) + "> s" + std::to_string(slot) + ";";
             else decl[slot] = type + " s" + std::to_string(slot) + ";";
             for (int i = 1; i < ob.count; i++) skip[slot + i] = true;
         };

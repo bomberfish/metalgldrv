@@ -101,6 +101,9 @@ private:
     Function* curFn_ = nullptr;
     int loopDepth_ = 0, switchDepth_ = 0;
     int nextId_ = 1;
+    int nonPrecisionQuals_ = 0;
+    std::map<int, int> atomicNextOffset_;  // atomic counter binding -> next default offset
+    std::map<int, std::vector<std::pair<int, int>>> atomicRanges_;  // binding -> [begin, end) byte ranges  // qualifiers other than precision seen by the last parseQualifiers()
     Qualifiers defaultUbo_, defaultSsbo_;
     std::unordered_map<const Builtin*, Function*> builtinFns_;
     std::unordered_map<Variable*, int> maxIndex_;
@@ -220,6 +223,26 @@ private:
         if (baseConvCost(a, b) >= 0) return b;
         if (baseConvCost(b, a) >= 0) return a;
         fail("type mismatch between operands", ln);
+    }
+
+    bool extEnabled(const char* name) const {
+        auto it = sh_.extensions.find(name);
+        return it != sh_.extensions.end() && it->second != "disable";
+    }
+    // binding + array size must stay within the implementation's binding points
+    void checkBinding(const Type& t, int binding, const std::string& name) {
+        BT b = t.stripArrays().base;
+        int n = t.isArray() ? std::max(1, t.totalArrayElements()) : 1;
+        int limit = 0;
+        if (b == BT::Sampler) limit = kMaxCombinedTextureImageUnits;
+        else if (b == BT::Image) limit = kMaxImageUnits;
+        else if (b == BT::AtomicUint) { limit = kMaxAtomicCounterBufferBindings; n = 1; }
+        else return;
+        if (binding + n > limit) fail("'" + name + "' : binding " + std::to_string(binding) + " exceeds the maximum binding point");
+    }
+    void checkArrayOfArrays(const Type& t) {
+        if (t.dims.size() > 1 && !preamble_ && sh_.version < (sh_.es ? 310 : 430) && !extEnabled("GL_ARB_arrays_of_arrays"))
+            fail("arrays of arrays require GLSL 4.30 or GL_ARB_arrays_of_arrays");
     }
 
     // ---- constant expressions ------------------------------------------------------
@@ -496,6 +519,7 @@ bool Parser::isQualifierAt(int k) {
 
 bool Parser::parseQualifiers(Qualifiers& q) {
     bool any = false;
+    nonPrecisionQuals_ = 0;
     for (;;) {
         const auto& t = peek();
         if (!isQualifierAt(0)) break;
@@ -503,6 +527,7 @@ bool Parser::parseQualifiers(Qualifiers& q) {
         const std::string k = t.text;
         p_++;
         any = true;
+        if (k != "lowp" && k != "mediump" && k != "highp") nonPrecisionQuals_++;
         if (k == "const") q.storage = Storage::Const;
         else if (k == "in") q.storage = (q.storage == Storage::Out) ? Storage::InOut : Storage::In;
         else if (k == "out") q.storage = (q.storage == Storage::In) ? Storage::InOut : Storage::Out;
@@ -552,11 +577,19 @@ void Parser::parseLayout(Qualifiers& q) {
         int64_t val = 0;
         bool hasVal = false;
         if (accept("=")) {
+            // Before GLSL 4.40 (ARB_enhanced_layouts) layout values must be integer literals.
+            if (!preamble_ && sh_.version < (sh_.es ? 310 : 440) && !extEnabled("GL_ARB_enhanced_layouts") &&
+                !(peek().kind == PK::Number && (isP(",", 1) || isP(")", 1))))
+                fail("layout qualifier '" + id + "' requires an integer literal before GLSL 4.40");
             Expr* e = parseConditional();
             val = constInt(e, "layout qualifier value");
             hasVal = true;
         }
-        auto need = [&]() { if (!hasVal) fail("layout qualifier '" + id + "' requires a value"); return (int)val; };
+        auto need = [&]() {
+            if (!hasVal) fail("layout qualifier '" + id + "' requires a value");
+            if (val < 0) fail("layout qualifier '" + id + "' cannot be negative");
+            return (int)val;
+        };
         if (lid == "location") L.location = need();
         else if (lid == "component") L.component = need();
         else if (lid == "binding") {
@@ -721,6 +754,7 @@ void Parser::parseArrayDims(Type& t) {
     }
     // appended dims are innermost relative to existing name dims; caller handles order
     t.dims.insert(t.dims.end(), d.begin(), d.end());
+    checkArrayOfArrays(t);
 }
 
 StructDef* Parser::parseStruct() {
@@ -735,6 +769,7 @@ StructDef* Parser::parseStruct() {
     while (!accept("}")) {
         Qualifiers mq;
         parseQualifiers(mq);
+        if (nonPrecisionQuals_ && !preamble_) fail("structure members may only have precision qualifiers");
         Type mt = parseTypeSpecifier();
         do {
             Member m;
@@ -743,7 +778,7 @@ StructDef* Parser::parseStruct() {
             m.type = mt;
             Type nd;
             parseArrayDims(nd);
-            if (!nd.dims.empty()) m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end());
+            if (!nd.dims.empty()) { m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end()); checkArrayOfArrays(m.type); }
             m.q = mq;
             if (sd->findMember(m.name) >= 0) fail("duplicate struct member '" + m.name + "'");
             sd->members.push_back(m);
@@ -864,7 +899,16 @@ void Parser::parseExternal() {
         return;
     }
     Type t = parseTypeSpecifier();
+    if (t.base == BT::AtomicUint && isP(";")) {
+        // "layout(binding = B, offset = O) uniform atomic_uint;" sets the next offset for binding B
+        p_++;
+        if (q.hasLayout && q.layout.offset >= 0) atomicNextOffset_[std::max(0, q.layout.binding)] = q.layout.offset;
+        return;
+    }
     if (accept(";")) return;  // struct declaration
+    if (accept(",")) {
+        // "type , a;" : a declaration list may start with a bare type
+    }
     std::string name = expectIdent();
     if (isP("(")) {
         parseFunction(q, t, name);
@@ -903,7 +947,7 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
             m.type = mt;
             Type nd;
             parseArrayDims(nd);
-            if (!nd.dims.empty()) m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end());
+            if (!nd.dims.empty()) { m.type.dims.insert(m.type.dims.begin(), nd.dims.begin(), nd.dims.end()); checkArrayOfArrays(m.type); }
             m.q = mq;
             if (!m.q.interpExplicit) { m.q.interp = q.interp; m.q.interpExplicit = q.interpExplicit; }
             if (q.centroid) m.q.centroid = true;
@@ -925,12 +969,12 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
         t.dims = nd.dims;
     }
     expect(";");
-    if ((q.storage == Storage::Uniform || q.storage == Storage::Buffer) && q.layout.binding >= 0 && !preamble_) {
-        // binding + array size must fit the binding points (MAX_SHADER_STORAGE_BUFFER_BINDINGS = 16,
-        // MAX_UNIFORM_BUFFER_BINDINGS = 84 in src/gl/context.h)
-        int count = t.dims.empty() ? 1 : std::max(1, t.dims[0]);
-        int maxBindings = q.storage == Storage::Buffer ? 16 : 84;
-        if (q.layout.binding + count > maxBindings) fail("'binding' : exceeds the maximum number of binding points");
+    if (q.hasLayout && q.layout.binding >= 0 && !preamble_) {
+        int n = t.isArray() ? std::max(1, t.totalArrayElements()) : 1;
+        int limit = q.storage == Storage::Uniform ? kMaxUniformBufferBindings
+                  : q.storage == Storage::Buffer ? kMaxShaderStorageBufferBindings : 0;
+        if (!limit) fail("the binding layout qualifier only applies to uniform and buffer blocks");
+        if (q.layout.binding + n > limit) fail("block '" + blockName + "' : binding exceeds the maximum binding point");
     }
     if (!t.dims.empty() && t.dims[0] == 0) {
         if (sh_.stage == Stage::Geometry && q.storage == Storage::In && sh_.inLayout.primitive != Layout::kNoPrimitive)
@@ -1012,12 +1056,18 @@ Expr* Parser::parseInitializer(const Type& t) {
             } else if (isMat) it = t.column();
             else if (isVec) it = t.scalarType();
             else it = t;
-            items.push_back(parseInitializer(it));
+            Expr* item = parseInitializer(it);
+            // initializer-list elements follow assignment conversion rules (no bool -> float etc.)
+            if (!it.isArray() && !item->type.isArray()) item = convert(item, it, "initializer list");
+            items.push_back(item);
             idx++;
         } while (accept(","));
         expect("}");
         Type tt = t;
         if (isArr && tt.dims[0] == 0) tt.dims[0] = (int)items.size();
+        if ((isVec && (int)items.size() != t.vec) || (isMat && (int)items.size() != t.cols) ||
+            (isStruct && items.size() != t.sdef->members.size()) || (isArr && (int)items.size() != tt.dims[0]))
+            fail("initializer list has the wrong number of elements");
         if (!isArr && !isStruct && !isMat && !isVec) {
             if (items.size() != 1) fail("invalid initializer list");
             return convert(items[0], t, "initializer");
@@ -1034,7 +1084,7 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
         Type t = baseT;
         Type nd;
         parseArrayDims(nd);
-        if (!nd.dims.empty()) t.dims.insert(t.dims.begin(), nd.dims.begin(), nd.dims.end());
+        if (!nd.dims.empty()) { t.dims.insert(t.dims.begin(), nd.dims.begin(), nd.dims.end()); checkArrayOfArrays(t); }
         int ln = line();
         if (global && !preamble_ && name.compare(0, 3, "gl_") == 0) {
             if (redeclareBuiltin(q, t, name)) {
@@ -1046,6 +1096,24 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             fail("'" + name + "' : identifiers starting with \"gl_\" are reserved");
         }
         if (t.base == BT::Void) fail("'" + name + "' : illegal use of type 'void'");
+        if (q.hasLayout && q.layout.binding >= 0 && !preamble_) {
+            if (!t.stripArrays().isOpaque()) fail("'" + name + "' : the binding layout qualifier only applies to opaque types and blocks");
+            checkBinding(t, q.layout.binding, name);
+        }
+        if (t.stripArrays().base == BT::AtomicUint && global && !preamble_) {
+            // atomic counter offsets are assigned in declaration order per binding
+            if (q.layout.binding < 0) fail("'" + name + "' : atomic counters require a binding layout qualifier");
+            int b = q.layout.binding;
+            int off = q.layout.offset >= 0 ? q.layout.offset : atomicNextOffset_[b];
+            if (off % 4) fail("'" + name + "' : atomic counter offset must be a multiple of 4");
+            int size = 4 * (t.isArray() ? std::max(1, t.totalArrayElements()) : 1);
+            for (auto& r : atomicRanges_[b])
+                if (off < r.second && r.first < off + size) fail("'" + name + "' : atomic counter overlaps another counter");
+            atomicRanges_[b].push_back({off, off + size});
+            q.hasLayout = true;
+            q.layout.offset = off;
+            atomicNextOffset_[b] = off + size;
+        }
         Variable* v = newVar(name, t, q);
         v->global = global;
         v->line = ln;
@@ -1119,7 +1187,7 @@ std::vector<Variable*> Parser::parseParamList() {
                 pn = expectIdent();
                 Type nd;
                 parseArrayDims(nd);
-                if (!nd.dims.empty()) pt.dims.insert(pt.dims.begin(), nd.dims.begin(), nd.dims.end());
+                if (!nd.dims.empty()) { pt.dims.insert(pt.dims.begin(), nd.dims.begin(), nd.dims.end()); checkArrayOfArrays(pt); }
             }
             Qualifiers vq = pq;
             if (vq.storage == Storage::Const) vq.storage = Storage::In;
@@ -1246,6 +1314,7 @@ Stmt* Parser::parseLocalDeclaration() {
     Type t = parseTypeSpecifier();
     Stmt* s = S(SK::Decl);
     if (accept(";")) return s;  // struct definition
+    accept(",");  // "type , a;" : a declaration list may start with a bare type
     std::string name = expectIdent();
     parseDeclarators(q, t, name, false, &s->vars);
     return s;
@@ -1580,12 +1649,28 @@ Expr* Parser::parsePostfix(Expr* e) {
         if (accept("[")) {
             Expr* i = parseExpression();
             expect("]");
-            if (e->kind == EK::Var && e->type.isArray() && e->type.base == BT::Subroutine && isP("(")) {
-                auto args = parseArgs();
-                e = mkSubroutineCall(e->var, i, args, ln);
-                continue;
-            }
             e = mkIndex(e, i, ln);
+            if (e->type.base == BT::Subroutine && !e->type.isArray() && isP("(")) {
+                // call through an element of a subroutine uniform array (of arrays): flatten the index
+                std::vector<Expr*> idx;
+                Expr* b = e;
+                while (b->kind == EK::Index) { idx.insert(idx.begin(), b->args[1]); b = b->args[0]; }
+                if (b->kind != EK::Var) fail("invalid subroutine call", ln);
+                Expr* flat = nullptr;
+                const std::vector<int>& dims = b->var->type.dims;
+                for (size_t k = 0; k < idx.size(); k++) {
+                    Expr* ik = idx[k]->type.base == BT::Int ? idx[k] : mkCtor(Type::scalar(BT::Int), {idx[k]}, ln);
+                    if (!flat) { flat = ik; continue; }
+                    Expr* d = E(EK::Const, Type::scalar(BT::Int), ln);
+                    d->cv = std::make_shared<ConstVal>();
+                    Scalar sc;
+                    sc.i = dims[k];
+                    d->cv->c.push_back(sc);
+                    flat = mkBinary(Op::Add, mkBinary(Op::Mul, flat, d, ln), ik, ln);
+                }
+                auto args = parseArgs();
+                e = mkSubroutineCall(b->var, flat, args, ln);
+            }
         } else if (accept(".")) {
             std::string f = expectIdent();
             if (f == "length" && isP("(")) {
@@ -2101,6 +2186,7 @@ Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
     }
     if (auto* bl = findBuiltins(name)) {
         for (auto* b : *bl) {
+            if (!(b->stageMask & (1u << (int)sh_.stage))) continue;
             int c = scoreParams(b->params, b->paramOut);
             if (c >= 0) cands.push_back({nullptr, b, c});
         }
@@ -2152,6 +2238,9 @@ Expr* Parser::mkCall(const std::string& name, std::vector<Expr*> args, int ln) {
     e->fn = best.user ? best.user : builtinFn(best.bi);
     if (!best.user) {
         e->cv = foldBuiltin(name, ret, args);
+        if (name == "mix" && !best.bi->params[0].isFloatLike() && sh_.version < (sh_.es ? 310 : 450) &&
+            !extEnabled("GL_EXT_shader_integer_mix"))
+            fail("mix() with integer or boolean operands requires GLSL 4.50 or GL_EXT_shader_integer_mix", ln);
         if (name == "ftransform" && sh_.stage != Stage::Vertex) fail("ftransform() is only available in vertex shaders", ln);
         if (name.compare(0, 6, "atomic") == 0 && name.compare(0, 13, "atomicCounter") != 0) {
             Expr* b = args[0];
