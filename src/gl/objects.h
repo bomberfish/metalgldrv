@@ -209,6 +209,7 @@ public:
     const FormatInfo* fmt = nullptr;
     int width = 0, height = 0, samples = 0;
     id<MTLTexture> mtl = nil;
+    id<MTLTexture> linearView = nil;  // non-sRGB view for rendering with FRAMEBUFFER_SRGB disabled
     uint64_t lastUse = 0;
 };
 
