@@ -38,11 +38,18 @@ struct CompileResult {
 };
 
 // Implementation limits the compiler enforces (must match the runtime's GL_MAX_* queries, src/gl/context.h).
-constexpr int kMaxCombinedTextureImageUnits = 96;
-constexpr int kMaxImageUnits = 16;  // must match mgl::kMaxImageUnits (static_assert in context.mm)
+namespace limits_detail {
+enum : int {
+#define X(name, glenum, value) name##_v = value,
+#include "glsl/limits.def"
+#undef X
+};
+}  // namespace limits_detail
+constexpr int kMaxCombinedTextureImageUnits = limits_detail::gl_MaxCombinedTextureImageUnits_v;
+constexpr int kMaxImageUnits = limits_detail::gl_MaxImageUnits_v;  // must match mgl::kMaxImageUnits (static_assert in context.mm)
 constexpr int kMaxUniformBufferBindings = 84;
 constexpr int kMaxShaderStorageBufferBindings = 16;
-constexpr int kMaxAtomicCounterBufferBindings = 8;
+constexpr int kMaxAtomicCounterBufferBindings = limits_detail::gl_MaxAtomicCounterBindings_v;
 
 struct CompileOptions {
     bool compatibilityProfile = true;  // accept GL compatibility builtins (gl_Vertex, ftransform, ...)
@@ -92,7 +99,8 @@ const std::vector<std::string>& supportedSpirvExtensions();
 //                                            (Metal sampler states carry no bias; shaders add it)
 enum class SlotKind : uint8_t { DefaultUniforms, SystemValues, Ubo, Ssbo, AtomicCounter, Texture, Sampler, Image, BufferSize, XfbBuffer,
                                 SubroutineIndices /* index = Stage: GPU address of uint[numLocations] selected subroutine indices */,
-                                LodBias /* like Sampler: float (low 32 bits) GL_TEXTURE_LOD_BIAS of the unit's effective sampler */ };
+                                LodBias /* like Sampler: float (low 32 bits) GL_TEXTURE_LOD_BIAS of the unit's effective sampler */,
+                                SamplerBorder /* integer samplers: GPU address of int4[2] {border color, clamp-to-border axis mask} */ };
 
 struct Slot {
     SlotKind kind;
@@ -242,6 +250,9 @@ struct Reflection {
     bool usesFp64 = false;
     bool usesFlatShading = false;           // any flat-qualified input reaching the fragment shader
     bool writesLayer = false, writesViewportIndex = false;  // by the last pre-rasterization stage
+    // VS + FS only, but the fragment inputs exceed what a classic Metal vertex function can pass (124 scalars):
+    // draw through PipelineKind::MeshGeometry, which runs the vertex shader in a mesh stage and spills the excess.
+    bool vsMeshPassthrough = false;
     MultiPassInfo multipass;
     std::vector<uint8_t> defaultUniformInit;  // initial contents of the default uniform block (defaultUniformSize bytes)
     StageSubroutines subroutines[(int)Stage::Count];
@@ -309,6 +320,7 @@ struct EntryPoint {
     int threadsPerThreadgroup[3] = {1, 1, 1};
     uint32_t payloadBytes = 0;   // object -> mesh
     uint32_t maxMeshVertices = 0, maxMeshPrimitives = 0;
+    uint32_t spillRecordBytes = 0;  // Mesh: bytes per primitive of spilled varyings (0 = none)
     uint32_t scratchWordsPerItem = 0;  // mgl_gs_copy: size of each item's MGLDrawInfo::gsRecord area
 };
 
@@ -414,6 +426,12 @@ struct alignas(16) MGLDrawInfo {
     uint64_t gsRecord;            // optional: mgl_gs_count stores each item's captured primitives here
                                   // (EntryPoint::scratchWordsPerItem uint32 per item); mgl_gs_copy places them
     uint64_t stats;               // pipeline statistics: uint[3] {GS primitives, TES invocations, tess primitives}, or 0
+    // Varying spill (mesh producers whose fragment inputs exceed Metal's 124 mesh output scalars):
+    // spillBuffer holds EntryPoint::spillRecordBytes per emitted vertex, slots from *spillCounter.
+    uint64_t spillBuffer;
+    uint64_t spillCounter;        // device atomic_uint
+    uint32_t spillCapacity;       // records that fit in spillBuffer
+    uint32_t pad1;
 };
 
 

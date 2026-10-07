@@ -424,6 +424,27 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             memcpy(&v, &rid, 8);
             break;
         }
+        case glsl::SlotKind::SamplerBorder: {
+            // {int4 border color, int4(clamp-to-border axis mask)} for integer textures.
+            int unit = std::clamp(prog->samplerUnits[i], 0, kMaxTextureUnits - 1);
+            int ti = texTargetIndex(s.textureTarget);
+            Texture* t = ti >= 0 ? ctx->textures[unit][ti].get() : nullptr;
+            SamplerState st = t ? t->sampler : SamplerState();
+            if (Sampler* so = ctx->samplers[unit].get()) st = so->state;
+            bool isInt = t && t->storageFmt && (t->storageFmt->kind == FmtKind::UInt || t->storageFmt->kind == FmtKind::SInt);
+            int mask = 0;
+            if (isInt) {
+                mask = (st.wrapS == GL_CLAMP_TO_BORDER ? 1 : 0) | (st.wrapT == GL_CLAMP_TO_BORDER ? 2 : 0) | (st.wrapR == GL_CLAMP_TO_BORDER ? 4 : 0);
+                if (t->target == GL_TEXTURE_1D || t->target == GL_TEXTURE_1D_ARRAY) mask &= 1;
+            }
+            UploadAlloc u = ctx->upload(32, 16);
+            int32_t* d = (int32_t*)u.cpu;
+            for (int k = 0; k < 4; k++) d[k] = (int32_t)(int64_t)st.borderColor[k];
+            d[4] = mask;
+            d[5] = d[6] = d[7] = 0;
+            v = u.gpu;
+            break;
+        }
         case glsl::SlotKind::Sampler: {
             int unit = std::clamp(prog->samplerUnits[i], 0, kMaxTextureUnits - 1);
             int ti = texTargetIndex(s.textureTarget);
@@ -563,6 +584,23 @@ static bool wantManualFetch(Context* ctx) {
         if ((vb.stride & 3) || (vb.offset & 3) || (va.relativeOffset & 3)) unaligned = true;
     }
     return unaligned;
+}
+
+// stage_in carries the upper half of a dvec3/dvec4 in Metal attribute 16 + L, which
+// doesn't exist for L = 15 (Metal has 31 attributes): such programs fetch in the shader.
+static bool wantManualFetch(Context* ctx, ProgramObj* prog) {
+    if (wantManualFetch(ctx)) return true;
+    VertexArray* vao = ctx->vao.get();
+    if (!vao) return false;
+    bool wideAt15 = false;
+    for (const auto& a : prog->refl.attributes) {
+        TypeShape ts = typeShape(a.type);
+        if (ts.base == BaseType::Double && ts.rows > 2 && a.location >= 0 && a.location + std::max(1, a.locationsUsed) > 15) wideAt15 = true;
+    }
+    if (!wideAt15) return false;
+    for (int l = 0; l < kMaxVertexAttribs; l++)
+        if (vao->attribs[l].enabled && vao->attribs[l].clientPointer) return false;
+    return true;
 }
 
 // Builds the render pipeline key & binds vertex buffers. Returns false if the draw must be skipped.
@@ -1266,6 +1304,9 @@ struct MPState {
     uint32_t xfbPrimLimit[4] = {0, 0, 0, 0};
     uint32_t xfbStreamBase[4] = {0, 0, 0, 0};
     bool xfb = false;
+    // varying spill of the mesh pass (EntryPoint::spillRecordBytes)
+    uint64_t spillBuffer = 0, spillCounter = 0;
+    uint32_t spillCapacity = 0;
     // per phase (upload memory is retired by every CPU wait)
     uint64_t infoAddr = 0, argAddr = 0, sysAddr = 0;
 };
@@ -1333,6 +1374,9 @@ void mpUpload(MPState& s) {
     info->itemCount = s.itemCount;
     info->gsRecord = s.gsRec ? s.gsRec.gpuAddress : 0;
     info->tesPrimCount = s.tesPrimCount;
+    info->spillBuffer = s.spillBuffer;
+    info->spillCounter = s.spillCounter;
+    info->spillCapacity = s.spillCapacity;
     if (!s.offsets.empty()) {
         UploadAlloc off = ctx->upload(s.offsets.size() * 4, 16);
         memcpy(off.cpu, s.offsets.data(), s.offsets.size() * 4);
@@ -1607,6 +1651,24 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         return true;
     }
     // --- tessellation pass 1: VS+TCS compute ---
+    // Fragment inputs past Metal's mesh output budget travel through a spill buffer (one record per
+    // emitted vertex). Sized for the worst case of the grid, capped; overflowing vertices read zeros.
+    if (const glsl::EntryPoint* sm = var->entry(glsl::EntryPoint::Mesh); sm && sm->spillRecordBytes) {
+        const uint64_t kCap = 64ull << 20;
+        uint64_t worst = (vk.kind == glsl::PipelineKind::Tessellation)
+                             ? kCap
+                             : (uint64_t)s.prims * d.instances * std::max(1, refl.gsInvocations) * std::max<uint32_t>(1, sm->maxMeshVertices) *
+                                   sm->spillRecordBytes;
+        uint64_t bytes = std::max<uint64_t>(sm->spillRecordBytes, std::min(worst, kCap));
+        id<MTLBuffer> sb = ctx->dev->newBuffer((size_t)bytes);
+        ctx->dev->releaseAfter(sb, ctx->serial());
+        id<MTLBuffer> sc = ctx->dev->newBuffer(16);
+        memset(sc.contents, 0, 16);
+        ctx->dev->releaseAfter(sc, ctx->serial());
+        s.spillBuffer = sb.gpuAddress;
+        s.spillCounter = sc.gpuAddress;
+        s.spillCapacity = (uint32_t)(bytes / sm->spillRecordBytes);
+    }
     if (vk.kind == glsl::PipelineKind::Tessellation) {
         if (!mpTessControl(s)) { retire(); return false; }
         if (hasGS && !mpTessRecords(s)) { retire(); return false; }
@@ -1630,11 +1692,15 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         [e setRenderPipelineState:pso];
         ctx->enc.pipeline = pso;
     }
-    applyDynamicState(ctx, e, refl.gsOutputPrimitive ? refl.gsOutputPrimitive : GL_TRIANGLES, refl.writesViewportIndex);
+    applyDynamicState(ctx, e, hasGS ? refl.gsOutputPrimitive : hasTess ? GL_TRIANGLES : s.listMode, refl.writesViewportIndex);
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
     [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
     [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
     [table setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
+    if (ctx->enc.fsTableSplit) {
+        [e setArgumentTable:table atStages:MTLRenderStageFragment];
+        ctx->enc.fsTableSplit = false;
+    }
     mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts come from counted passes
     MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
     if (os) {
@@ -2057,6 +2123,8 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     bool hasTess = refl.stageMask & (1u << (int)glsl::Stage::TessEval);
     glsl::VariantKey vk;
     vk.kind = hasTess ? glsl::PipelineKind::Tessellation : hasGS ? glsl::PipelineKind::MeshGeometry : glsl::PipelineKind::Classic;
+    // more fragment inputs than a classic vertex function can pass: the vertex shader runs on a mesh stage
+    if (vk.kind == glsl::PipelineKind::Classic && refl.vsMeshPassthrough && !d.indirect) vk.kind = glsl::PipelineKind::MeshGeometry;
     vk.primitive = (uint8_t)d.mode;
     vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
     vk.rasterDiscard = ctx->rasterizerDiscard;
@@ -2118,7 +2186,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
             MGL_INFO("layout prog %u mode %x indexed %d type %x flat %d:%s", prog->name, d.mode, d.indexed, d.indexType,
                      refl.usesFlatShading, desc.c_str());
     }
-    vk.manualFetch = wantManualFetch(ctx);
+    vk.manualFetch = wantManualFetch(ctx, prog);
     if (vk.manualFetch) fillVertexFetch(ctx, prog, vk);
     else vk.attribSignFlip = attribSignFlip(ctx, prog);
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);

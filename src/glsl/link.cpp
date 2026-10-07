@@ -1012,6 +1012,12 @@ void Linker::assignUniforms() {
             pushSlots(SlotKind::Sampler);
             ob.biasSlot = slot;
             pushSlots(SlotKind::LodBias);
+            // Metal border colors are limited to black/white: integer samplers that filter
+            // (not buffer / multisample) get their border color emulated in the shader.
+            if ((bt.sampled == BT::Int || bt.sampled == BT::UInt) && !bt.shadow && !bt.ms && bt.dim != Dim::Buffer && bt.dim != Dim::Cube) {
+                ob.borderSlot = slot;
+                pushSlots(SlotKind::SamplerBorder);
+            }
         } else if (bt.base == BT::Image) {
             ob.kind = SlotKind::Image;
             ob.slot = slot;
@@ -1214,6 +1220,13 @@ void Linker::checkVaryings() {
         auto arrayedIn = [](Stage s, const Variable* v) { return s != Stage::Vertex && s != Stage::Fragment && !v->q.patch; };
         for (size_t i = 0; i + 1 < chain.size(); i++) {
             Stage ps = chain[i], cs = chain[i + 1];
+            // GLSL 4.60 7.1.1: a built-in block redeclared on both sides of an interface must be redeclared the same way
+            {
+                std::vector<std::string> po, ci;
+                for (auto& sh : prog_->stages[(int)ps].shaders) if (!sh->perVertexOut.empty()) po = sh->perVertexOut;
+                for (auto& sh : prog_->stages[(int)cs].shaders) if (!sh->perVertexIn.empty()) ci = sh->perVertexIn;
+                if (!po.empty() && !ci.empty() && po != ci) error("gl_PerVertex is redeclared differently in consecutive shader stages");
+            }
             std::map<std::string, const Variable*> outs;
             for (auto* v : prog_->stages[(int)ps].globals)
                 if (v->q.storage == Storage::Out && v->builtin == BuiltinVar::None) outs[varyingKey(v, ps)] = v;
@@ -1285,6 +1298,30 @@ void Linker::stageMetadata() {
         if (!r.tesPrimitiveMode) error("tessellation evaluation shader does not declare a primitive mode");
     }
     if (auto& fs = prog_->stages[(int)Stage::Fragment]; fs.main) {
+        // Metal passes at most 124 user scalars from a vertex function to a fragment function
+        if (prog_->stages[(int)Stage::Vertex].main && !prog_->stages[(int)Stage::Geometry].main &&
+            !prog_->stages[(int)Stage::TessEval].main) {
+            int scalars = 0;
+            for (auto* v : fs.used) {
+                if (v->q.storage != Storage::In) continue;
+                bool compat = v->builtin == BuiltinVar::FragColorIn || v->builtin == BuiltinVar::SecondaryColorIn ||
+                              v->builtin == BuiltinVar::TexCoord || v->builtin == BuiltinVar::FogFragCoord ||
+                              v->builtin == BuiltinVar::ClipDistance || v->builtin == BuiltinVar::CullDistance;
+                if (v->builtin != BuiltinVar::None && !compat) continue;
+                std::function<int(const Type&)> count = [&](const Type& t) -> int {
+                    int n = std::max(1, t.totalArrayElements());
+                    Type b = t.stripArrays();
+                    if (b.base == BT::Struct) {
+                        int c = 0;
+                        for (auto& m : b.sdef->members) c += count(m.type);
+                        return n * c;
+                    }
+                    return n * b.components() * (b.base == BT::Double ? 2 : 1);
+                };
+                scalars += count(v->type);
+            }
+            r.vsMeshPassthrough = scalars > 124;
+        }
         r.usesFragDepth = fs.writesFragDepth;
         r.earlyFragmentTests = fs.inLayout.earlyFragmentTests;
         r.usesDiscard = fs.usesDiscard;
@@ -1456,7 +1493,8 @@ void Linker::stageMetadata() {
                     if (!t.isArray() || elem >= t.dims[0]) { error("transform feedback varying '" + name + "' index out of range"); continue; }
                     t = t.elem();
                 }
-                if (t.stripArrays().base == BT::Double && (offset & 7)) offset = (offset + 7) & ~7;
+                // glTransformFeedbackVaryings packs tightly, doubles included (only xfb_offset
+                // qualifiers must be 8-byte aligned).
                 XfbVarying x;
                 x.name = name;
                 x.type = glTypeEnum(t);

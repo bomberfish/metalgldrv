@@ -176,6 +176,36 @@ std::vector<Chunk> buildChunks() {
     // --- fp64 (soft-float library from the runtime + matrix helpers composed on it) ---------
     // The library is generated from src/glsl/runtime/fp64.metal by the build as a string literal.
     c.push_back({{"mgl_f64_lib"}, kFp64Library});
+    // --- integer border color emulation (b[0] = color, b[1].x = clamp-to-border axis mask) ---
+    c.push_back({{"mgl_int_border"}, R"(template <typename T, typename C>
+inline T mgl_int_border(T v, C c, ulong addr) {
+    constant int4* b = (constant int4*)addr;
+    int m = b[1].x;
+    if (m == 0) return v;
+    bool o = false;
+    for (int i = 0; i < int(sizeof(C) / sizeof(float)); i++)
+        if (((m >> i) & 1) != 0 && (c[i] < 0.0f || c[i] >= 1.0f)) o = true;
+    return o ? T(b[0]) : v;
+}
+)"});
+    c.push_back({{"mgl_int_border_gather"}, R"(// Gathered texels in GL order: x = (i0,j1), y = (i1,j1), z = (i1,j0), w = (i0,j0).
+inline bool mgl_border_out(int m, int2 p, int2 size) {
+    return ((m & 1) != 0 && (p.x < 0 || p.x >= size.x)) || ((m & 2) != 0 && (p.y < 0 || p.y >= size.y));
+}
+template <typename T>
+inline T mgl_int_border_gather(T v, float2 c, int2 size, int2 off, int comp, ulong addr) {
+    constant int4* b = (constant int4*)addr;
+    int m = b[1].x;
+    if (m == 0) return v;
+    int2 i0 = int2(floor(c * float2(size) - 0.5f)) + off, i1 = i0 + 1;
+    auto bc = b[0][comp];
+    if (mgl_border_out(m, int2(i0.x, i1.y), size)) v.x = bc;
+    if (mgl_border_out(m, int2(i1.x, i1.y), size)) v.y = bc;
+    if (mgl_border_out(m, int2(i1.x, i0.y), size)) v.z = bc;
+    if (mgl_border_out(m, int2(i0.x, i0.y), size)) v.w = bc;
+    return v;
+}
+)"});
     // --- arrays ---------------------------------------------------------------------
     c.push_back({{"mgl_array"}, R"(template <typename T, int N>
 struct mgl_array {

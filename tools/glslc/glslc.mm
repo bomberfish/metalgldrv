@@ -40,6 +40,7 @@ static const char* slotKindName(SlotKind k) {
         case SlotKind::XfbBuffer: return "XfbBuffer";
         case SlotKind::SubroutineIndices: return "SubroutineIndices";
         case SlotKind::LodBias: return "LodBias";
+        case SlotKind::SamplerBorder: return "SamplerBorder";
     }
     return "?";
 }

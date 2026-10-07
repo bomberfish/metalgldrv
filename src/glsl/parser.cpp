@@ -138,6 +138,37 @@ private:
     void expect(const char* s) {
         if (!accept(s)) fail(std::string("syntax error: expected '") + s + "' but found '" + peek().text + "'");
     }
+    // Identifier being declared: keywords and reserved words are not allowed (GLSL 4.60 3.6).
+    std::string expectDeclName() {
+        int ln = line();
+        std::string n = expectIdent();
+        if (!preamble_ && isReservedWord(n)) fail("'" + n + "' : reserved word cannot be used as an identifier", ln);
+        return n;
+    }
+    bool isReservedWord(const std::string& n) const {
+        // reserved for future use in every desktop GLSL version
+        static const std::unordered_set<std::string> always = {
+            "asm", "class", "union", "enum", "typedef", "template", "this", "goto", "inline", "noinline", "public", "static",
+            "extern", "external", "interface", "long", "short", "half", "fixed", "unsigned", "superp", "input", "output",
+            "hvec2", "hvec3", "hvec4", "fvec2", "fvec3", "fvec4", "sampler3DRect", "sizeof", "cast", "namespace", "using"};
+        if (always.count(n)) return true;
+        static const std::unordered_set<std::string> keywords = {
+            "struct", "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "discard",
+            "true", "false", "void", "in", "out", "inout", "const", "uniform"};
+        if (keywords.count(n) || typeKeyword(n)) return true;
+        if (sh_.es) return false;
+        // keywords / reserved words added by later versions (applied from GLSL 4.00 on so older shaders keep working)
+        static const std::unordered_set<std::string> v400 = {
+            "common", "partition", "active", "resource", "filter", "attribute", "varying", "centroid", "flat", "smooth",
+            "noperspective", "patch", "sample", "subroutine", "invariant", "precise", "layout", "lowp", "mediump", "highp",
+            "precision"};
+        static const std::unordered_set<std::string> v420 = {"coherent", "volatile", "restrict", "readonly", "writeonly", "atomic_uint"};
+        static const std::unordered_set<std::string> v430 = {"buffer", "shared"};
+        if (sh_.version >= 400 && v400.count(n)) return true;
+        if (sh_.version >= 420 && v420.count(n)) return true;
+        if (sh_.version >= 430 && v430.count(n)) return true;
+        return false;
+    }
     std::string expectIdent() {
         const auto& t = peek();
         if (t.kind != PK::Ident) fail("syntax error: expected identifier but found '" + t.text + "'");
@@ -555,6 +586,10 @@ bool Parser::isQualifierAt(int k) {
         "sample", "patch", "buffer", "shared", "precise", "coherent", "volatile", "restrict", "readonly", "writeonly",
         "attribute", "varying", "smooth", "flat", "noperspective", "centroid", "invariant"};
     if (!soft.count(t.text)) return true;
+    if (!preamble_ && !sh_.es) {
+        if (t.text == "sample" && sh_.version < 400 && !extEnabled("GL_ARB_gpu_shader5") && !extEnabled("GL_ARB_sample_shading")) return false;
+        if (t.text == "patch" && sh_.version < 400 && !extEnabled("GL_ARB_tessellation_shader")) return false;
+    }
     Sym* s = lookup(t.text);
     if (s && s->var) return false;
     // "<qualifier> <ident>", or a default-layout declaration such as "layout(std430) buffer;"
@@ -810,7 +845,7 @@ void Parser::parseArrayDims(Type& t) {
 StructDef* Parser::parseStruct() {
     // 'struct' consumed
     std::string name;
-    if (peek().kind == PK::Ident && !isP("{")) name = expectIdent();
+    if (peek().kind == PK::Ident && !isP("{")) name = expectDeclName();
     expect("{");
     sh_.sdefs.emplace_back();
     StructDef* sd = &sh_.sdefs.back();
@@ -824,7 +859,7 @@ StructDef* Parser::parseStruct() {
         do {
             Member m;
             m.line = line();
-            m.name = expectIdent();
+            m.name = expectDeclName();
             m.type = mt;
             Type nd;
             parseArrayDims(nd);
@@ -896,14 +931,14 @@ void Parser::parseExternal() {
             Type t;
             t.base = BT::Subroutine;
             t.subr = ts->subrType;
-            std::string name = expectIdent();
+            std::string name = expectDeclName();
             parseDeclarators(q, t, name, true, nullptr);
             return;
         }
         if (q.subroutineTypes.empty()) {
             // subroutine type declaration: subroutine <ret> <name>(<params>);
             Type ret = parseTypeSpecifier();
-            std::string name = expectIdent();
+            std::string name = expectDeclName();
             std::vector<Variable*> params = parseParamList();
             expect(";");
             sh_.funcs.emplace_back();
@@ -918,7 +953,7 @@ void Parser::parseExternal() {
             return;
         }
         Type t = parseTypeSpecifier();
-        std::string name = expectIdent();
+        std::string name = expectDeclName();
         if (!isP("(")) fail("expected a subroutine function definition");
         parseFunction(q, t, name);
         return;
@@ -958,11 +993,17 @@ void Parser::parseExternal() {
         if (q.hasLayout && q.layout.offset >= 0) atomicNextOffset_[std::max(0, q.layout.binding)] = q.layout.offset;
         return;
     }
-    if (accept(";")) return;  // struct declaration
+    if (isP(";")) {
+        // struct declaration; an anonymous struct with storage qualifiers declares nothing (e.g. "buffer struct {...};")
+        if (t.base == BT::Struct && t.sdef->name == "anon_struct" && q.storage != Storage::Temp)
+            fail("syntax error: qualified anonymous structure without a declarator");
+        p_++;
+        return;
+    }
     if (accept(",")) {
         // "type , a;" : a declaration list may start with a bare type
     }
-    std::string name = expectIdent();
+    std::string name = expectDeclName();
     if (isP("(")) {
         parseFunction(q, t, name);
         return;
@@ -971,7 +1012,7 @@ void Parser::parseExternal() {
 }
 
 void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
-    std::string blockName = expectIdent();
+    std::string blockName = expectDeclName();
     expect("{");
     sh_.sdefs.emplace_back();
     StructDef* sd = &sh_.sdefs.back();
@@ -996,7 +1037,7 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
         do {
             Member m;
             m.line = line();
-            m.name = expectIdent();
+            m.name = expectDeclName();
             m.type = mt;
             Type nd;
             parseArrayDims(nd);
@@ -1045,7 +1086,7 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     t.base = BT::Struct;
     t.sdef = sd;
     if (peek().kind == PK::Ident) {
-        inst = expectIdent();
+        inst = expectDeclName();
         Type nd;
         parseArrayDims(nd);
         t.dims = nd.dims;
@@ -1069,6 +1110,11 @@ void Parser::parseBlock(Qualifiers q, std::vector<Stmt*>* out) {
     if (blockName == "gl_PerVertex" && !preamble_) {
         // Redeclaration of a builtin block: members map onto the existing builtins.
         if (!inst.empty() && inst != "gl_in" && inst != "gl_out") fail("invalid gl_PerVertex redeclaration");
+        {
+            auto& rec = q.storage == Storage::In ? sh_.perVertexIn : sh_.perVertexOut;
+            rec.clear();
+            for (auto& m : sd->members) rec.push_back(m.type.str() + " " + m.name);
+        }
         if (q.storage == Storage::Out && inst.empty()) {
             // transform feedback qualifiers (enhanced layouts) apply to the builtin outputs
             int cur = q.layout.xfbOffset;
@@ -1411,12 +1457,20 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
             if (redeclareBuiltin(q, t, name)) {
                 if (accept("=")) fail("cannot initialize builtin redeclaration");
                 if (!accept(",")) break;
-                name = expectIdent();
+                name = expectDeclName();
                 continue;
             }
             fail("'" + name + "' : identifiers starting with \"gl_\" are reserved");
         }
         if (t.base == BT::Void) fail("'" + name + "' : illegal use of type 'void'");
+        if (global && !preamble_ && sh_.stage == Stage::Vertex && q.storage == Storage::In) {
+            // GLSL 4.60 4.3.4: vertex inputs take no auxiliary/interpolation qualifiers and are numeric non-bool, non-struct
+            if (q.centroid || q.sample || q.patch || q.interpExplicit)
+                fail("'" + name + "' : vertex shader inputs cannot have interpolation or auxiliary storage qualifiers");
+            Type bt = t.stripArrays();
+            if (bt.base == BT::Bool || bt.isOpaque() || bt.base == BT::Struct)
+                fail("'" + name + "' : vertex shader inputs cannot be booleans, opaque types or structures");
+        }
         if (q.hasLayout && q.layout.binding >= 0 && !preamble_) {
             if (!t.stripArrays().isOpaque()) fail("'" + name + "' : the binding layout qualifier only applies to opaque types and blocks");
             checkBinding(t, q.layout.binding, name);
@@ -1501,7 +1555,7 @@ void Parser::parseDeclarators(Qualifiers q, const Type& baseT, std::string name,
         }
         if (out) out->push_back(v);
         if (!accept(",")) break;
-        name = expectIdent();
+        name = expectDeclName();
     }
     expect(";");
 }
@@ -1521,7 +1575,7 @@ std::vector<Variable*> Parser::parseParamList() {
             Type pt = parseTypeSpecifier(false);
             std::string pn;
             if (peek().kind == PK::Ident) {
-                pn = expectIdent();
+                pn = expectDeclName();
                 Type nd;
                 parseArrayDims(nd);
                 if (!nd.dims.empty()) { pt.dims.insert(pt.dims.begin(), nd.dims.begin(), nd.dims.end()); checkArrayOfArrays(pt); }
@@ -1652,7 +1706,7 @@ Stmt* Parser::parseLocalDeclaration() {
     Stmt* s = S(SK::Decl);
     if (accept(";")) return s;  // struct definition
     accept(",");  // "type , a;" : a declaration list may start with a bare type
-    std::string name = expectIdent();
+    std::string name = expectDeclName();
     parseDeclarators(q, t, name, false, &s->vars);
     return s;
 }

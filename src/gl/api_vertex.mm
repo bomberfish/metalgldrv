@@ -74,33 +74,41 @@ static VertexArray* namedVao(Context* ctx, GLuint name) {
     return v;
 }
 
-static bool validAttribType(GLenum type, int size, bool integer, bool isLong, bool normalized) {
-    if (isLong) return type == GL_DOUBLE && size >= 1 && size <= 4;
+static bool isPacked1010102(GLenum t) { return t == GL_INT_2_10_10_10_REV || t == GL_UNSIGNED_INT_2_10_10_10_REV; }
+
+// Error checks shared by Vertex{Array}Attrib{,I,L}Format and the *Pointer variants (GL 4.6 10.3.1/10.3.2).
+static GLenum attribFormatError(GLint size, GLenum type, bool normalized, bool integer, bool isLong) {
+    bool bgra = size == GL_BGRA;
+    bool typeOk;
     switch (type) {
     case GL_BYTE: case GL_UNSIGNED_BYTE: case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_INT: case GL_UNSIGNED_INT:
-        return (size >= 1 && size <= 4) || (!integer && size == GL_BGRA && type == GL_UNSIGNED_BYTE && normalized);
-    case GL_FLOAT: case GL_HALF_FLOAT: case GL_DOUBLE: case GL_FIXED:
-        return !integer && size >= 1 && size <= 4;
-    case GL_INT_2_10_10_10_REV: case GL_UNSIGNED_INT_2_10_10_10_REV:
-        return !integer && (size == 4 || size == GL_BGRA);
+        typeOk = !isLong;
+        break;
+    case GL_DOUBLE: typeOk = !integer; break;
+    case GL_FLOAT: case GL_HALF_FLOAT: case GL_FIXED: case GL_INT_2_10_10_10_REV: case GL_UNSIGNED_INT_2_10_10_10_REV:
     case GL_UNSIGNED_INT_10F_11F_11F_REV:
-        return !integer && size == 3;
-    default: return false;
+        typeOk = !integer && !isLong;
+        break;
+    default: typeOk = false; break;
     }
+    if (!typeOk) return GL_INVALID_ENUM;
+    if (integer || isLong) {
+        if (size < 1 || size > 4) return GL_INVALID_VALUE;
+    } else if (!((size >= 1 && size <= 4) || bgra)) {
+        return GL_INVALID_VALUE;
+    }
+    if (bgra && type != GL_UNSIGNED_BYTE && !isPacked1010102(type)) return GL_INVALID_OPERATION;
+    if (bgra && !normalized) return GL_INVALID_OPERATION;
+    if (isPacked1010102(type) && size != 4 && !bgra) return GL_INVALID_OPERATION;
+    if (type == GL_UNSIGNED_INT_10F_11F_11F_REV && size != 3) return GL_INVALID_OPERATION;
+    return GL_NO_ERROR;
 }
 
 static void attribFormat(Context* ctx, VertexArray* v, GLuint index, GLint size, GLenum type, bool normalized, bool integer, bool isLong,
                          GLuint relativeOffset) {
     if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
-    if (!((size >= 1 && size <= 4) || size == GL_BGRA)) return ctx->setError(GL_INVALID_VALUE);
     if (relativeOffset > 2047) return ctx->setError(GL_INVALID_VALUE);
-    if (!validAttribType(type, size, integer, isLong, normalized)) {
-        if (size == GL_BGRA && !normalized) return ctx->setError(GL_INVALID_OPERATION);
-        if ((type == GL_INT_2_10_10_10_REV || type == GL_UNSIGNED_INT_2_10_10_10_REV) && size != 4 && size != GL_BGRA)
-            return ctx->setError(GL_INVALID_OPERATION);
-        if (type == GL_UNSIGNED_INT_10F_11F_11F_REV && size != 3) return ctx->setError(GL_INVALID_OPERATION);
-        return ctx->setError(GL_INVALID_ENUM);
-    }
+    if (GLenum err = attribFormatError(size, type, normalized, integer, isLong)) return ctx->setError(err, "vertex attrib format");
     VertexAttrib& a = v->attribs[index];
     a.size = size;
     a.type = type;
@@ -117,12 +125,13 @@ static void attribPointer(Context* ctx, GLuint index, GLint size, GLenum type, b
     if (!v) return;
     if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
     if (stride < 0 || stride > 2048) return ctx->setError(GL_INVALID_VALUE);
+    if (GLenum err = attribFormatError(size, type, normalized, integer, isLong)) return ctx->setError(err, "vertex attrib pointer format");
     if (!ctx->arrayBuffer && v != ctx->defaultVao.get() && pointer) return ctx->setError(GL_INVALID_OPERATION, "no array buffer bound");
-    GLenum errBefore = ctx->error;
     attribFormat(ctx, v, index, size, type, normalized, integer, isLong, 0);
-    if (ctx->error != errBefore && ctx->error != GL_NO_ERROR) return;
     VertexAttrib& a = v->attribs[index];
     a.binding = index;
+    a.stride = stride;
+    a.pointer = pointer;
     VertexBinding& b = v->bindings[index];
     b.buffer = ctx->arrayBuffer;
     b.offset = (GLintptr)pointer;
@@ -341,7 +350,7 @@ static bool vaoAttribParam(Context* ctx, VertexArray* v, GLuint index, GLenum pn
     switch (pname) {
     case GL_VERTEX_ATTRIB_ARRAY_ENABLED: *out = a.enabled; return true;
     case GL_VERTEX_ATTRIB_ARRAY_SIZE: *out = a.size; return true;
-    case GL_VERTEX_ATTRIB_ARRAY_STRIDE: *out = b.stride; return true;
+    case GL_VERTEX_ATTRIB_ARRAY_STRIDE: *out = a.stride; return true;
     case GL_VERTEX_ATTRIB_ARRAY_TYPE: *out = a.type; return true;
     case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED: *out = a.normalized; return true;
     case GL_VERTEX_ATTRIB_ARRAY_INTEGER: *out = a.integer; return true;
@@ -427,7 +436,7 @@ API void APIENTRY glGetVertexAttribPointerv(GLuint index, GLenum pname, void** p
     VertexArray* v = curVao(ctx);
     if (!v) return;
     const VertexAttrib& a = v->attribs[index];
-    *pointer = a.clientPointer ? (void*)a.clientPointer : (void*)v->bindings[a.binding].offset;
+    *pointer = (void*)a.pointer;
 }
 
 API void APIENTRY glGetVertexArrayiv(GLuint vaobj, GLenum pname, GLint* param) {

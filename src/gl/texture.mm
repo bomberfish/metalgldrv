@@ -1,5 +1,6 @@
 // Texture storage, uploads, views and sampler states.
 #import "gl/texture.h"
+#include "gl/internal_shaders.h"
 #include <cmath>
 #include <mutex>
 #include "mtl/compress.h"
@@ -96,7 +97,22 @@ int textureStorageLevelFor(const Texture* t) {
 
 bool ensureTextureStorage(Context* ctx, Texture* t) {
     if (t->target == GL_TEXTURE_BUFFER) return t->mtl != nil || ensureBufferTexture(ctx, t);
-    if (t->viewParent) return t->mtl != nil;
+    if (t->viewParent) {
+        // A view follows its root's storage, which may have been reallocated (format view /
+        // shader write usage): recreate the Metal view when its parent changed.
+        Texture* root = t->viewParent.get();
+        if (!ensureTextureStorage(ctx, root) || !t->storageFmt) return t->mtl != nil;
+        if (t->mtl && t->mtl.parentTexture == root->mtl) return true;
+        MTLTextureType vt = mtlTextureType(t->target, root->samples);
+        id<MTLTexture> v = [root->mtl newTextureViewWithPixelFormat:t->storageFmt->mtl textureType:vt
+                                                             levels:NSMakeRange(t->viewMinLevel, t->viewNumLevels)
+                                                             slices:NSMakeRange(t->viewMinLayer, vt == MTLTextureType3D ? 1 : t->viewNumLayers)];
+        if (!v) return t->mtl != nil;
+        if (t->mtl) ctx->dev->retainUntil(t->mtl, std::max(t->lastUse, t->lastGpuWrite));
+        t->dropViews();
+        t->mtl = v;
+        return true;
+    }
     if (!t->storageDirty && t->mtl) return true;
     int ref = textureStorageLevelFor(t);
     if (ref < 0) return false;
@@ -185,12 +201,39 @@ bool ensureBufferTexture(Context* ctx, Texture* t) {
     const FormatInfo* f = formatInfo(t->bufferFormat);
     if (!f) return false;
     Buffer* b = t->buffer.get();
-    if (t->mtl && t->bufferGeneration == b->generation) return true;
+    bool rgb32 = bufferTexelBytes(f) == 12;
+    if (t->mtl && t->bufferGeneration == b->generation &&
+        (!rgb32 || (t->expandedVersion == b->contentVersion && t->expandedGpuWrite == b->lastGpuWrite)))
+        return true;
     GLsizeiptr size = t->bufferSize < 0 ? b->size - t->bufferOffset : t->bufferSize;
     size = std::min<GLsizeiptr>(size, b->size - t->bufferOffset);
-    size_t texels = size > 0 ? size / f->bytesPerPixel : 0;
+    size_t texels = size > 0 ? size / bufferTexelBytes(f) : 0;
     texels = std::min<size_t>(texels, (size_t)1 << 27);
     if (texels == 0) texels = 1;
+    if (rgb32) {
+        size_t need = texels * 16;
+        if (!t->bufferExpanded || t->bufferExpanded.length < need || t->bufferGeneration != b->generation || !t->mtl) {
+            if (t->bufferExpanded) ctx->dev->releaseAfter(t->bufferExpanded, t->lastUse);
+            t->bufferExpanded = ctx->dev->newBuffer(need);
+            if (!t->bufferExpanded) return false;
+            MTLTextureDescriptor* td = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:f->mtl width:texels
+                                                                                   resourceOptions:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked
+                                                                                             usage:MTLTextureUsageShaderRead];
+            id<MTLTexture> nt = [t->bufferExpanded newTextureWithDescriptor:td offset:0 bytesPerRow:need];
+            if (!nt) return false;
+            if (t->mtl) ctx->dev->retainUntil(t->mtl, t->lastUse);
+            t->mtl = nt;
+        }
+        uint32_t one = f->kind == FmtKind::Float ? 0x3f800000u : 1u;
+        size_t avail = std::max<GLsizeiptr>(0, size) / 12;
+        expandRgb32(ctx, b->gpuAddress() + t->bufferOffset, t->bufferExpanded.gpuAddress, (uint32_t)std::min(avail, texels), one);
+        b->lastUse = ctx->serial();
+        t->expandedVersion = b->contentVersion;
+        t->expandedGpuWrite = b->lastGpuWrite;
+        t->bufferGeneration = b->generation;
+        t->storageFmt = f;
+        return true;
+    }
     MTLTextureDescriptor* td = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:f->mtl width:texels
                                                                            resourceOptions:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked
                                                                                      usage:MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite];
@@ -312,6 +355,7 @@ id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarge
     if (!textureComplete(t, ss, &first, &last)) return nil;
     if (!ensureTextureStorage(ctx, t)) return nil;
     if (t->target == GL_TEXTURE_BUFFER) {
+        if (!ensureBufferTexture(ctx, t)) return nil;  // follows buffer reallocation / RGB32 refresh
         *complete = true;
         return t->mtl;
     }

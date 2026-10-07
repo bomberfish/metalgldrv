@@ -271,6 +271,8 @@ struct Shader {
     bool xfbMode = false;                // any xfb_* qualifier used
     int xfbStride[4] = {-1, -1, -1, -1}; // explicit xfb_stride per buffer
     bool hasMain = false;
+    // redeclared gl_PerVertex members ("type name" each) for the in / out interface; empty = not redeclared
+    std::vector<std::string> perVertexIn, perVertexOut;
     bool spirv = false;                  // decompiled from a SPIR-V module (interfaces match by location)
     // arenas
     std::deque<Expr> exprs;

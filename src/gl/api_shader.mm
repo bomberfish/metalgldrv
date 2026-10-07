@@ -52,7 +52,8 @@ void setupLinkedProgram(ProgramObj* p) {
     for (size_t s = 0; s < r.slots.size(); s++) {
         const auto& sl = r.slots[s];
         if (sl.kind == glsl::SlotKind::Texture || sl.kind == glsl::SlotKind::Sampler || sl.kind == glsl::SlotKind::Image ||
-            sl.kind == glsl::SlotKind::LodBias) {
+            sl.kind == glsl::SlotKind::LodBias ||
+            sl.kind == glsl::SlotKind::SamplerBorder) {
             if (sl.index < r.uniforms.size()) p->samplerUnits[s] = r.uniforms[sl.index].binding + sl.element;
         }
     }
@@ -982,7 +983,8 @@ static void setUniform(Context* ctx, ProgramObj* p, GLint location, GLsizei coun
             const auto& sl = p->refl.slots[s];
             if ((int)sl.index != loc.uniform) continue;
             if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Sampler && sl.kind != glsl::SlotKind::Image &&
-                sl.kind != glsl::SlotKind::LodBias)
+                sl.kind != glsl::SlotKind::LodBias &&
+                sl.kind != glsl::SlotKind::SamplerBorder)
                 continue;
             int e = (int)sl.element - loc.element;
             if (e >= 0 && e < n) p->samplerUnits[s] = v[e];
@@ -1425,12 +1427,28 @@ static std::vector<Resource> resourcesFor(ProgramObj* p, GLenum iface) {
             }
         } else {
             for (auto& u : ss.uniforms) {
-                Resource x;
-                x.name = u.arraySize > 1 ? u.name + "[0]" : u.name;
-                x.arraySize = u.arraySize;
-                x.location = u.location;
-                x.activeVariables = u.compatible;
-                out.push_back(x);
+                if (u.dims.size() <= 1) {
+                    Resource x;
+                    x.name = u.arraySize > 1 ? u.name + "[0]" : u.name;
+                    x.arraySize = u.arraySize;
+                    x.location = u.location;
+                    x.activeVariables = u.compatible;
+                    out.push_back(x);
+                    continue;
+                }
+                // arrays of arrays: one resource per innermost array, "u[i][j][0]"
+                int inner = u.dims.back();
+                for (int o = 0; o < u.arraySize / inner; o++) {
+                    Resource x;
+                    std::string sub;
+                    for (int k = (int)u.dims.size() - 2, r = o; k >= 0; r /= u.dims[k], k--)
+                        sub = "[" + std::to_string(r % u.dims[k]) + "]" + sub;
+                    x.name = u.name + sub + "[0]";
+                    x.arraySize = inner;
+                    x.location = u.location + o * inner;
+                    x.activeVariables = u.compatible;
+                    out.push_back(x);
+                }
             }
         }
         break;
@@ -1597,6 +1615,12 @@ API GLint APIENTRY glGetProgramResourceLocation(GLuint program, GLenum iface, co
     }
     if (!name) return -1;
     if (iface == GL_UNIFORM) return uniformLocation(p, name);
+    if (isSub) {
+        // subroutine uniform arrays (of arrays) take flattened per-element locations
+        static const GLenum kShaderTypes[] = {GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER,
+                                              GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER, GL_COMPUTE_SHADER};
+        return glGetSubroutineUniformLocation(program, kShaderTypes[subroutineStage(iface, &isSubUniform)], name);
+    }
     const Resource* m;
     return resourceLocation(resourcesFor(p, iface), name, !isSub, &m);
 }

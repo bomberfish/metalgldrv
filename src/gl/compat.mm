@@ -1669,7 +1669,8 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
     // sampler uniforms texN -> unit N
     for (size_t s = 0; s < p->refl.slots.size(); s++) {
         const auto& sl = p->refl.slots[s];
-        if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Sampler && sl.kind != glsl::SlotKind::LodBias) continue;
+        if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Sampler && sl.kind != glsl::SlotKind::LodBias &&
+            sl.kind != glsl::SlotKind::SamplerBorder) continue;
         const std::string& n = p->refl.uniforms[sl.index].name;
         if (n.size() == 4 && n.compare(0, 3, "tex") == 0) p->samplerUnits[s] = n[3] - '0';
     }
