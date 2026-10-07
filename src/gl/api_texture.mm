@@ -706,7 +706,7 @@ static bool samplerParam(Context* ctx, SamplerState& s, GLenum pname, const doub
     }
 }
 
-static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, int count, bool isIntVec, bool isIntegerBorder = false) {
+static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, int count, bool isIntVec, bool isIntegerBorder = false, bool dsa = false) {
     bool rect = t->target == GL_TEXTURE_RECTANGLE;
     bool ms = t->target == GL_TEXTURE_2D_MULTISAMPLE || t->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
     if (ms) {
@@ -715,7 +715,7 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
         case GL_TEXTURE_MIN_FILTER: case GL_TEXTURE_MAG_FILTER: case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T: case GL_TEXTURE_WRAP_R:
         case GL_TEXTURE_MIN_LOD: case GL_TEXTURE_MAX_LOD: case GL_TEXTURE_LOD_BIAS: case GL_TEXTURE_COMPARE_MODE:
         case GL_TEXTURE_COMPARE_FUNC: case GL_TEXTURE_MAX_ANISOTROPY: case GL_TEXTURE_BORDER_COLOR:
-            return ctx->setError(GL_INVALID_OPERATION, "sampler state on a multisample texture");
+            return ctx->setError(dsa ? GL_INVALID_OPERATION : GL_INVALID_ENUM, "sampler state on a multisample texture");
         default: break;
         }
     }
@@ -791,14 +791,14 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
         if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA)         \
             return ctx->setError(GL_INVALID_ENUM);                                        \
         double v[4] = {(double)param, 0, 0, 0};                                           \
-        texParam(ctx, t, pname, v, 1, IsInt);                                             \
+        texParam(ctx, t, pname, v, 1, IsInt, false, true);                                            \
     }
 TEXPARAM_IMPL(f, GLfloat, false, 1)
 TEXPARAM_IMPL(i, GLint, true, 1)
 
-static void texParamVec(Context* ctx, Texture* t, GLenum pname, const double* v, bool isInt, bool integerBorder) {
+static void texParamVec(Context* ctx, Texture* t, GLenum pname, const double* v, bool isInt, bool integerBorder, bool dsa = false) {
     int n = (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) ? 4 : 1;
-    texParam(ctx, t, pname, v, n, isInt, integerBorder);
+    texParam(ctx, t, pname, v, n, isInt, integerBorder, dsa);
 }
 
 #define TEXPARAMV_IMPL(Name, Type, IsInt, Norm, IntBorder)                                          \
@@ -819,7 +819,7 @@ static void texParamVec(Context* ctx, Texture* t, GLenum pname, const double* v,
         double v[4];                                                                                \
         int n = (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) ? 4 : 1;    \
         for (int k = 0; k < n; k++) v[k] = (Norm && pname == GL_TEXTURE_BORDER_COLOR) ? params[k] / 2147483647.0 : (double)params[k]; \
-        texParamVec(ctx, t, pname, v, IsInt, IntBorder);                                            \
+        texParamVec(ctx, t, pname, v, IsInt, IntBorder, true);                                           \
     }
 TEXPARAMV_IMPL(fv, GLfloat, false, false, false)
 TEXPARAMV_IMPL(iv, GLint, true, true, false)
