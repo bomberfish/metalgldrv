@@ -78,6 +78,9 @@ public:
     id<MTLTexture> upscaled = nil;
     id<MTLFence> upscaleFence = nil;
     int outWidth = 0, outHeight = 0; // drawable size
+    // CGL kCGLCPSurfaceBackingSize: render at this size whatever the layer's size
+    // (the layer scales the drawable to its bounds). 0 = follow the layer.
+    int fixedWidth = 0, fixedHeight = 0;
     bool resize(int w, int h);  // (re)allocate images; returns true if changed
     void syncSizeFromLayer();
 };

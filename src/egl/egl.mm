@@ -13,11 +13,9 @@
 #include <set>
 #include <thread>
 #include "gl/context.h"
-#include "gl/internal_shaders.h"
 #include "gl/procs.h"
+#include "gl/winsys.h"
 #include "util/log.h"
-#import <ImageIO/ImageIO.h>
-#include <chrono>
 #include <vector>
 
 #define EGLAPI_EXPORT extern "C" __attribute__((visibility("default")))
@@ -140,51 +138,16 @@ EGLint configAttrib(const Config* c, EGLint attr, bool* ok) {
     }
 }
 
-CAMetalLayer* layerFromNative(void* win) {
-    id obj = (__bridge id)win;
-    if ([obj isKindOfClass:[CAMetalLayer class]]) return (CAMetalLayer*)obj;
-#if TARGET_OS_IPHONE
-    if ([obj isKindOfClass:[UIView class]]) {
-        CALayer* l = ((UIView*)obj).layer;
-        if ([l isKindOfClass:[CAMetalLayer class]]) return (CAMetalLayer*)l;
-    }
-#else
-    if ([obj isKindOfClass:[NSView class]]) {
-        NSView* v = (NSView*)obj;
-        if (![v.layer isKindOfClass:[CAMetalLayer class]]) {
-            v.wantsLayer = YES;
-            v.layer = [CAMetalLayer layer];
-        }
-        return (CAMetalLayer*)v.layer;
-    }
-#endif
-    if ([obj isKindOfClass:[CALayer class]]) {
-        CALayer* parent = (CALayer*)obj;
-        for (CALayer* sub in parent.sublayers)
-            if ([sub isKindOfClass:[CAMetalLayer class]]) return (CAMetalLayer*)sub;
-        CAMetalLayer* ml = [CAMetalLayer layer];
-        ml.frame = parent.bounds;
-        ml.contentsScale = parent.contentsScale;
-        [parent addSublayer:ml];
-        return ml;
-    }
-    return nil;
-}
-
-Surface* newSurface(const Config* c) {
-    Surface* s = new Surface();
-    s->samples = c->samples;
-    s->hasDepth = c->depth > 0;
-    s->hasStencil = c->stencil > 0;
-    s->hasAlpha = c->a > 0;
-    s->colorFormat = MTLPixelFormatRGBA8Unorm;
-    Framebuffer* fb = new Framebuffer();
-    fb->isDefault = true;
-    fb->surface = s;
-    fb->drawBuffers[0] = GL_BACK;
-    fb->readBuffer = GL_BACK;
-    s->fb = fb;
-    return s;
+SurfaceFormat surfaceFormat(const Config* c) {
+    SurfaceFormat f;
+    f.r = c->r;
+    f.g = c->g;
+    f.b = c->b;
+    f.a = c->a;
+    f.depth = c->depth;
+    f.stencil = c->stencil;
+    f.samples = c->samples;
+    return f;
 }
 
 }  // namespace
@@ -234,7 +197,7 @@ EGLAPI_EXPORT const char* EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name
     case EGL_EXTENSIONS:
         return "EGL_KHR_create_context EGL_KHR_create_context_no_error EGL_KHR_surfaceless_context "
                "EGL_KHR_get_all_proc_addresses EGL_KHR_no_config_context EGL_KHR_fence_sync "
-               "EGL_KHR_gl_colorspace EGL_EXT_create_context_robustness";
+               "EGL_KHR_gl_colorspace EGL_EXT_create_context_robustness EGL_KHR_context_flush_control";
     default: return fail(EGL_BAD_PARAMETER, (const char*)nullptr);
     }
 }
@@ -315,22 +278,8 @@ static EGLSurface createWindowSurface(EGLDisplay dpy, EGLConfig config, void* wi
     if ([NSThread isMainThread]) layer = layerFromNative(win);
     else dispatch_sync(dispatch_get_main_queue(), ^{ layer = layerFromNative(win); });
     if (!layer) return fail(EGL_BAD_NATIVE_WINDOW, EGL_NO_SURFACE);
-    Device* d = Device::get();
-    layer.device = d->mtl;
-    layer.pixelFormat = srgb ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
-    layer.framebufferOnly = YES;
-    layer.opaque = c->a == 0 ? YES : layer.opaque;
-    if (layer.drawableSize.width < 1 || layer.drawableSize.height < 1) {
-        CGSize b = layer.bounds.size;
-        CGFloat sc = layer.contentsScale;
-        layer.drawableSize = CGSizeMake(std::max<CGFloat>(1, b.width * sc), std::max<CGFloat>(1, b.height * sc));
-    }
     auto* s = new EGLSurfaceImpl();
-    s->surf = newSurface(c);
-    s->surf->layer = layer;
-    s->surf->srgbCapable = srgb;
-    if (srgb) s->surf->colorFormat = MTLPixelFormatRGBA8Unorm_sRGB;
-    s->surf->syncSizeFromLayer();
+    s->surf = newWindowSurface(surfaceFormat(c), layer, srgb);
     s->config = c;
     s->pbuffer = false;
     std::lock_guard<std::mutex> g(g_display.mutex);
@@ -358,6 +307,11 @@ EGLAPI_EXPORT EGLSurface EGLAPIENTRY eglCreatePlatformWindowSurface(EGLDisplay d
     return createWindowSurface(dpy, config, native_window, srgb);
 }
 
+EGLAPI_EXPORT EGLSurface EGLAPIENTRY eglCreatePlatformWindowSurfaceEXT(EGLDisplay dpy, EGLConfig config, void* native_window,
+                                                                       const EGLint* attrib_list) {
+    return createWindowSurface(dpy, config, native_window, attribSRGB(attrib_list));
+}
+
 EGLAPI_EXPORT EGLSurface EGLAPIENTRY eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config, const EGLint* attrib_list) {
     if (!validDisplay(dpy)) return EGL_NO_SURFACE;
     const Config* c = configFromHandle(config);
@@ -369,7 +323,7 @@ EGLAPI_EXPORT EGLSurface EGLAPIENTRY eglCreatePbufferSurface(EGLDisplay dpy, EGL
     }
     if (w < 0 || h < 0) return fail(EGL_BAD_PARAMETER, EGL_NO_SURFACE);
     auto* s = new EGLSurfaceImpl();
-    s->surf = newSurface(c);
+    s->surf = newDefaultSurface(surfaceFormat(c));
     if (attribSRGB(attrib_list)) {
         s->surf->srgbCapable = true;
         s->surf->colorFormat = MTLPixelFormatRGBA8Unorm_sRGB;
@@ -469,6 +423,7 @@ EGLAPI_EXPORT EGLContext EGLAPIENTRY eglCreateContext(EGLDisplay dpy, EGLConfig 
         case EGL_CONTEXT_OPENGL_NO_ERROR_KHR: noError = a[1]; break;
         case EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY:
         case 0x3138 /* EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT */: loseOnReset = a[1] == EGL_LOSE_CONTEXT_ON_RESET; break;
+        case EGL_CONTEXT_RELEASE_BEHAVIOR_KHR: break;  // KHR_context_flush_control: we always flush on release
         default: return fail(EGL_BAD_ATTRIBUTE, EGL_NO_CONTEXT);
         }
     }
@@ -604,62 +559,6 @@ EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglQueryContext(EGLDisplay dpy, EGLContext 
     return EGL_TRUE;
 }
 
-// METALGLDRV_CAPTURE=<seconds>: periodically saves the default framebuffer to
-// $HOME/Documents/metalgldrv-frame.png (field debugging without screen access).
-static void maybeCaptureFrame(Surface* surf) {
-    static const double every = [] { const char* e = getenv("METALGLDRV_CAPTURE"); return e ? atof(e) : 0.0; }();
-    if (every <= 0) return;
-    static auto last = std::chrono::steady_clock::now();
-    auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration<double>(now - last).count() < every) return;
-    last = now;
-    int w = surf->width, h = surf->height;
-    if (w <= 0 || h <= 0) return;
-    GLint readFb = 0, packBuf = 0, align = 4, rowLen = 0, skipP = 0, skipR = 0;
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFb);
-    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuf);
-    glGetIntegerv(GL_PACK_ALIGNMENT, &align);
-    glGetIntegerv(GL_PACK_ROW_LENGTH, &rowLen);
-    glGetIntegerv(GL_PACK_SKIP_PIXELS, &skipP);
-    glGetIntegerv(GL_PACK_SKIP_ROWS, &skipR);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-    glPixelStorei(GL_PACK_ALIGNMENT, 4);
-    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
-    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
-    std::vector<uint8_t> px((size_t)w * h * 4);
-    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFb);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuf);
-    glPixelStorei(GL_PACK_ALIGNMENT, align);
-    glPixelStorei(GL_PACK_ROW_LENGTH, rowLen);
-    glPixelStorei(GL_PACK_SKIP_PIXELS, skipP);
-    glPixelStorei(GL_PACK_SKIP_ROWS, skipR);
-    // GL rows are bottom-up; flip and force opaque.
-    std::vector<uint8_t> img(px.size());
-    for (int y = 0; y < h; y++) {
-        uint8_t* d = &img[(size_t)(h - 1 - y) * w * 4];
-        memcpy(d, &px[(size_t)y * w * 4], (size_t)w * 4);
-        for (int x = 0; x < w; x++) d[x * 4 + 3] = 255;
-    }
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef bc = CGBitmapContextCreate(img.data(), w, h, 8, (size_t)w * 4, cs, kCGImageAlphaPremultipliedLast);
-    CGImageRef im = bc ? CGBitmapContextCreateImage(bc) : nullptr;
-    std::string path = std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/metalgldrv-frame.png";
-    NSURL* url = [NSURL fileURLWithPath:@(path.c_str())];
-    CGImageDestinationRef dst = im ? CGImageDestinationCreateWithURL((__bridge CFURLRef)url, CFSTR("public.png"), 1, nullptr) : nullptr;
-    if (dst) {
-        CGImageDestinationAddImage(dst, im, nullptr);
-        CGImageDestinationFinalize(dst);
-        CFRelease(dst);
-        MGL_INFO("captured frame %dx%d -> %s", w, h, path.c_str());
-    }
-    if (im) CGImageRelease(im);
-    if (bc) CGContextRelease(bc);
-    CGColorSpaceRelease(cs);
-}
-
 EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     if (!validDisplay(dpy)) return EGL_FALSE;
     EGLSurfaceImpl* s = surfaceFromHandle(surface);
@@ -670,37 +569,14 @@ EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglSwapBuffers(EGLDisplay dpy, EGLSurface s
         ctx->flush();
         return EGL_TRUE;
     }
-    // Don't touch the drawable / GPU while backgrounded.
-    Device::get()->waitForeground();
-    @autoreleasepool {
-        Surface* surf = s->surf.get();
-        maybeCaptureFrame(surf);
-        ctx->applyClearNow();
-        id<CAMetalDrawable> drawable = [surf->layer nextDrawable];
-        if (drawable) {
-            presentSurface(ctx, surf, drawable);
-            ctx->flush(drawable);
-        } else {
-            ctx->flush();
-        }
-        // Pick up layer size / scale changes for the next frame.
-        if (surf->layer) {
-            int ow = surf->width, oh = surf->height;
-            surf->syncSizeFromLayer();
-            if (surf->width != ow || surf->height != oh) ctx->passDirty = true;
-        }
-    }
+    presentWindowSurface(ctx, s->surf.get());
     return EGL_TRUE;
 }
 
 EGLAPI_EXPORT EGLBoolean EGLAPIENTRY eglSwapInterval(EGLDisplay dpy, EGLint interval) {
     if (!validDisplay(dpy)) return EGL_FALSE;
     if (!t_egl.ctx || !t_egl.draw) return fail(EGL_BAD_SURFACE, EGL_FALSE);
-    Surface* s = t_egl.draw->surf.get();
-    s->swapInterval = interval;
-#if !TARGET_OS_IPHONE
-    if (s->layer) s->layer.displaySyncEnabled = interval > 0;
-#endif
+    setSurfaceSwapInterval(t_egl.draw->surf.get(), interval);
     return EGL_TRUE;
 }
 
@@ -786,7 +662,7 @@ struct EGLProc {
 const EGLProc kEGLProcs[] = {
     P(eglGetError), P(eglGetDisplay), P(eglGetPlatformDisplay), P(eglGetPlatformDisplayEXT), P(eglInitialize), P(eglTerminate),
     P(eglQueryString), P(eglGetConfigs), P(eglChooseConfig), P(eglGetConfigAttrib), P(eglCreateWindowSurface),
-    P(eglCreatePlatformWindowSurface), P(eglCreatePbufferSurface), P(eglCreatePixmapSurface), P(eglDestroySurface),
+    P(eglCreatePlatformWindowSurface), P(eglCreatePlatformWindowSurfaceEXT), P(eglCreatePbufferSurface), P(eglCreatePixmapSurface), P(eglDestroySurface),
     P(eglQuerySurface), P(eglSurfaceAttrib), P(eglBindAPI), P(eglQueryAPI), P(eglWaitClient), P(eglWaitGL), P(eglWaitNative),
     P(eglCreateContext), P(eglDestroyContext), P(eglMakeCurrent), P(eglGetCurrentContext), P(eglGetCurrentSurface),
     P(eglGetCurrentDisplay), P(eglQueryContext), P(eglSwapBuffers), P(eglSwapInterval), P(eglReleaseThread),

@@ -518,8 +518,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
         if (idx >= kMaxViewports) return false;
         Value r; r.type = VT::Float; r.n = 4;
         for (int k = 0; k < 4; k++) r.d[k] = ctx->viewport[idx][k];
-        v = r;
-        if (index < 0) v.type = VT::Int;  // glGetIntegerv(GL_VIEWPORT) returns ints; float getters use float
+        v = r;  // convertOut rounds for integer getters; float getters keep fractions
         return true;
     }
     case GL_SCISSOR_BOX: if (idx >= kMaxViewports) return false; v = I4(ctx->scissor[idx][0], ctx->scissor[idx][1], ctx->scissor[idx][2], ctx->scissor[idx][3]); return true;
