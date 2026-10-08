@@ -897,7 +897,7 @@ static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int
         if (!t) return;                                                                      \
         double v[4];                                                                         \
         int n;                                                                               \
-        if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM);       \
+        if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM, "pname 0x%x", pname);       \
         for (int k = 0; k < n; k++) params[k] = (Type)v[k];                                  \
     }                                                                                        \
     API void APIENTRY glGetTextureParameter##Name(GLuint texture, GLenum pname, Type* params) { \
@@ -907,7 +907,7 @@ static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int
         if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);      \
         double v[4];                                                                         \
         int n;                                                                               \
-        if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM);       \
+        if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM, "pname 0x%x", pname);       \
         for (int k = 0; k < n; k++) params[k] = (Type)v[k];                                  \
     }
 GETTEXPARAM_IMPL(fv, GLfloat)
@@ -920,7 +920,7 @@ API void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint* params
     if (!t) return;
     double v[4];
     int n;
-    if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM);
+    if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM, "pname 0x%x", pname);
     for (int k = 0; k < n; k++) params[k] = pname == GL_TEXTURE_BORDER_COLOR ? (GLint)llround(std::clamp(v[k], -1.0, 1.0) * 2147483647.0) : (GLint)lround(v[k]);
 }
 
@@ -931,7 +931,7 @@ API void APIENTRY glGetTextureParameteriv(GLuint texture, GLenum pname, GLint* p
     if (t->target == GL_TEXTURE_BUFFER) return ctx->setError(GL_INVALID_OPERATION);
     double v[4];
     int n;
-    if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM);
+    if (!getTexParam(ctx, t, pname, v, &n)) return ctx->setError(GL_INVALID_ENUM, "pname 0x%x", pname);
     for (int k = 0; k < n; k++) params[k] = pname == GL_TEXTURE_BORDER_COLOR ? (GLint)llround(std::clamp(v[k], -1.0, 1.0) * 2147483647.0) : (GLint)lround(v[k]);
 }
 
@@ -2229,7 +2229,7 @@ static void samplerParamv(Context* ctx, GLuint sampler, GLenum pname, const doub
         s->state.borderIsInt = intBorder;
         return;
     }
-    if (!samplerParam(ctx, s->state, pname, v, false, false)) ctx->setError(GL_INVALID_ENUM);
+    if (!samplerParam(ctx, s->state, pname, v, false, false)) ctx->setError(GL_INVALID_ENUM, "pname 0x%x", pname);
 }
 
 API void APIENTRY glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {

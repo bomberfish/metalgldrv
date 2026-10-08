@@ -37,6 +37,7 @@ struct Shader;  // opaque, immutable after compile
 struct CompileResult {
     std::shared_ptr<const Shader> shader;  // null on failure
     std::string infoLog;
+    std::vector<std::string> unsupportedExtensions;  // #extension names this compiler doesn't support
 };
 
 // Implementation limits the compiler enforces (must match the runtime's GL_MAX_* queries, src/gl/context.h).
@@ -56,6 +57,13 @@ constexpr int kMaxUniformBufferBindings = 84;
 constexpr int kMaxShaderStorageBufferBindings = 16;
 constexpr int kMaxAtomicCounterBufferBindings = limits_detail::gl_MaxAtomicCounterBindings_v;
 
+// Leniency for applications whose shaders break GLSL rules, set by per-application profiles
+// (src/gl/app_profiles.cpp). Names in comments are the Mesa driconf options they mirror. All off by default.
+struct Quirks {
+    bool forceExtensionsWarn = false;  // force_glsl_extensions_warn: "#extension X : require" of an unsupported X only warns
+    bool vsPositionAlwaysInvariant = false;  // vs_position_always_invariant: gl_Position is invariant in every program
+};
+
 struct CompileOptions {
     bool compatibilityProfile = true;  // accept GL compatibility builtins (gl_Vertex, ftransform, ...)
     int maxVersion = 460;
@@ -67,6 +75,10 @@ struct CompileOptions {
     int strictLevel = 0;
     bool strict() const { return strictLevel >= 1; }
     bool superStrict() const { return strictLevel >= 2; }
+    // Extensions an application profile hides (names; a trailing '*' is a prefix): not accepted by
+    // #extension and not predefined as macros.
+    const std::vector<std::string>* hiddenExtensions = nullptr;
+    Quirks quirks;
 };
 // Shader extensions that exist only when CompileOptions::sparseTexture is set.
 const std::vector<std::string>& sparseTextureExtensions();

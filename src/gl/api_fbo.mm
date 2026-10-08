@@ -133,8 +133,8 @@ API GLboolean APIENTRY glIsRenderbuffer(GLuint rb) {
     return rb && ctx->share->renderbuffers.get(rb) != nullptr;
 }
 
-API void APIENTRY glBindRenderbuffer(GLenum target, GLuint rb) {
-    MGL_CTX();
+// ext: the EXT_framebuffer_object entry point, which binds names that were never generated in every profile
+static void bindRenderbuffer(Context* ctx, GLenum target, GLuint rb, bool ext) {
     if (target != GL_RENDERBUFFER) return ctx->setError(GL_INVALID_ENUM);
     if (!rb) {
         ctx->renderbuffer = nullptr;
@@ -142,11 +142,13 @@ API void APIENTRY glBindRenderbuffer(GLenum target, GLuint rb) {
     }
     Renderbuffer* r = ctx->share->renderbuffers.get(rb);
     if (!r) {
-        if (!ctx->share->renderbuffers.isName(rb) && ctx->coreProfile) return ctx->setError(GL_INVALID_OPERATION);
+        if (!ctx->share->renderbuffers.isName(rb) && ctx->coreProfile && !ext) return ctx->setError(GL_INVALID_OPERATION);
         r = ctx->share->renderbuffers.create(rb, new Renderbuffer());
     }
     ctx->renderbuffer = r;
 }
+API void APIENTRY glBindRenderbuffer(GLenum target, GLuint rb) { MGL_CTX(); bindRenderbuffer(ctx, target, rb, false); }
+API void APIENTRY glBindRenderbufferEXT(GLenum target, GLuint rb) { MGL_CTX(); bindRenderbuffer(ctx, target, rb, true); }
 
 static void renderbufferStorage(Context* ctx, Renderbuffer* rb, GLsizei samples, GLenum internalformat, GLsizei w, GLsizei h) {
     const FormatInfo* f = resolveInternalFormat(internalformat, GL_RGBA, GL_UNSIGNED_BYTE);
@@ -294,8 +296,7 @@ API GLboolean APIENTRY glIsFramebuffer(GLuint fb) {
     return fb && ctx->framebuffers.get(fb) != nullptr;
 }
 
-API void APIENTRY glBindFramebuffer(GLenum target, GLuint framebuffer) {
-    MGL_CTX();
+static void bindFramebuffer(Context* ctx, GLenum target, GLuint framebuffer, bool ext) {
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) return ctx->setError(GL_INVALID_ENUM);
     Framebuffer* fb;
     if (!framebuffer) {
@@ -303,7 +304,7 @@ API void APIENTRY glBindFramebuffer(GLenum target, GLuint framebuffer) {
     } else {
         fb = ctx->framebuffers.get(framebuffer);
         if (!fb) {
-            if (!ctx->framebuffers.isName(framebuffer) && ctx->coreProfile) return ctx->setError(GL_INVALID_OPERATION);
+            if (!ctx->framebuffers.isName(framebuffer) && ctx->coreProfile && !ext) return ctx->setError(GL_INVALID_OPERATION);
             fb = ctx->framebuffers.create(framebuffer, new Framebuffer());
         }
     }
@@ -319,6 +320,9 @@ API void APIENTRY glBindFramebuffer(GLenum target, GLuint framebuffer) {
         ctx->readFb = fb ? fb : (ctx->readSurface ? ctx->readSurface->fb.get() : nullptr);
     }
 }
+API void APIENTRY glBindFramebuffer(GLenum target, GLuint framebuffer) { MGL_CTX(); bindFramebuffer(ctx, target, framebuffer, false); }
+// EXT_framebuffer_object (DOOM 2016 binds its framebuffers through this one)
+API void APIENTRY glBindFramebufferEXT(GLenum target, GLuint framebuffer) { MGL_CTX(); bindFramebuffer(ctx, target, framebuffer, true); }
 
 static int attachmentIndex(Context* ctx, GLenum attachment, bool* depthStencil) {
     *depthStencil = false;

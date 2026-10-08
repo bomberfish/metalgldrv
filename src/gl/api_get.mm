@@ -1,6 +1,7 @@
 // glGet* state queries, glGetString(i).
 #import "gl/texture.h"
 #include <cmath>
+#include "gl/app_profile.h"
 #include "util/log.h"
 
 using namespace mgl;
@@ -62,6 +63,7 @@ const char* kExtensions[] = {
     "GL_KHR_debug", "GL_KHR_no_error", "GL_KHR_parallel_shader_compile", "GL_KHR_robust_buffer_access_behavior",
     "GL_KHR_robustness", "GL_KHR_shader_subgroup", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
     "GL_NV_depth_clamp", "GL_NV_shader_subgroup_partitioned", "GL_NV_texture_barrier",
+    "GL_ATI_meminfo", "GL_NVX_gpu_memory_info",
 };
 struct DeviceExtension {
     const char* name;
@@ -91,11 +93,36 @@ struct ExtensionList {
     std::string joined;
 };
 
+// GL_NVX_gpu_memory_info (not in gl.xml)
+constexpr GLenum GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX = 0x9047;
+constexpr GLenum GL_GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX = 0x9048;
+constexpr GLenum GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX = 0x9049;
+constexpr GLenum GL_GPU_MEMORY_INFO_EVICTION_COUNT_NVX = 0x904A;
+constexpr GLenum GL_GPU_MEMORY_INFO_EVICTED_MEMORY_NVX = 0x904B;
+
+// Video memory for GL_NVX_gpu_memory_info / GL_ATI_meminfo, in KiB: Metal's recommended working set
+// (the memory the GPU can use without paging; unified memory has no dedicated pool), capped or replaced
+// by the app profile (vramCapMB / vramMB), and what the device has not allocated of it.
+void videoMemoryKB(Context* ctx, int64_t* total, int64_t* avail) {
+    const AppProfile& app = appProfile();
+    uint64_t bytes = (uint64_t)ctx->dev->mtl.recommendedMaxWorkingSetSize;
+    if (app.vramCapMB) bytes = std::min<uint64_t>(bytes, app.vramCapMB << 20);
+    if (app.vramMB) bytes = app.vramMB << 20;
+    uint64_t used = (uint64_t)ctx->dev->mtl.currentAllocatedSize;
+    *total = (int64_t)std::min<uint64_t>(bytes >> 10, INT32_MAX);
+    *avail = (int64_t)std::min<uint64_t>((bytes > used ? bytes - used : 0) >> 10, INT32_MAX);
+}
+
 const ExtensionList& extensions(Context* ctx) {
     static const ExtensionList l = [ctx] {
         ExtensionList r;
+        const AppProfile& app = appProfile();
         r.names.assign(std::begin(kExtensions), std::end(kExtensions));
         for (const char* e : mglDeviceExtensions(ctx->dev->caps)) r.names.push_back(e);
+        std::erase_if(r.names, [&](const char* e) { return app.hidden(e); });
+        for (const auto& e : app.extraExtensions)
+            if (std::find_if(r.names.begin(), r.names.end(), [&](const char* x) { return e == x; }) == r.names.end())
+                r.names.push_back(e.c_str());
         std::sort(r.names.begin(), r.names.end(), [](const char* a, const char* b) { return strcmp(a, b) < 0; });
         for (auto e : r.names) {
             if (!r.joined.empty()) r.joined += ' ';
@@ -192,6 +219,26 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
                 return true;
             }
     switch (pname) {
+    // --- GL_NVX_gpu_memory_info, GL_ATI_meminfo (KiB) ---
+    case GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX:
+    case GL_GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX:
+    case GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX:
+    case GL_VBO_FREE_MEMORY_ATI:
+    case GL_TEXTURE_FREE_MEMORY_ATI:
+    case GL_RENDERBUFFER_FREE_MEMORY_ATI: {
+        if (index >= 0) return false;
+        int64_t total, avail;
+        videoMemoryKB(ctx, &total, &avail);
+        if (pname == GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX) v = I(avail);
+        else if (pname == GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX || pname == GL_GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX) v = I(total);
+        else v = I4(avail, avail, 0, 0);  // free total, largest free block, free auxiliary (none), largest auxiliary
+        return true;
+    }
+    case GL_GPU_MEMORY_INFO_EVICTION_COUNT_NVX:
+    case GL_GPU_MEMORY_INFO_EVICTED_MEMORY_NVX:
+        if (index >= 0) return false;
+        v = I(0);
+        return true;
     // --- implementation limits ---
     case GL_MAJOR_VERSION: v = I(4); return true;
     case GL_MINOR_VERSION: v = I(6); return true;
@@ -703,11 +750,14 @@ static const char* rendererString() {
 
 API const GLubyte* APIENTRY glGetString(GLenum name) {
     MGL_CTX_RET(nullptr);
+    const AppProfile& app = appProfile();
     switch (name) {
-    case GL_VENDOR: return (const GLubyte*)"metalgldrv";
-    case GL_RENDERER: return (const GLubyte*)rendererString();
-    case GL_VERSION: return (const GLubyte*)(ctx->coreProfile ? "4.6.0 Core Profile metalgldrv 0.1" : "4.6.0 Compatibility Profile metalgldrv 0.1");
-    case GL_SHADING_LANGUAGE_VERSION: return (const GLubyte*)"4.60 metalgldrv";
+    case GL_VENDOR: return (const GLubyte*)(app.vendor.empty() ? "metalgldrv" : app.vendor.c_str());
+    case GL_RENDERER: return (const GLubyte*)(app.renderer.empty() ? rendererString() : app.renderer.c_str());
+    case GL_VERSION:
+        if (!app.version.empty()) return (const GLubyte*)app.version.c_str();
+        return (const GLubyte*)(ctx->coreProfile ? "4.6.0 Core Profile metalgldrv 0.1" : "4.6.0 Compatibility Profile metalgldrv 0.1");
+    case GL_SHADING_LANGUAGE_VERSION: return (const GLubyte*)(app.glslVersion.empty() ? "4.60 metalgldrv" : app.glslVersion.c_str());
     case GL_EXTENSIONS:
         // Removed from core profiles (use glGetStringi). Clients whose GLFW shim still calls this,
         // like Amethyst's, should create a compatibility context.

@@ -1,0 +1,27 @@
+#version 430 core
+// Read-modify-write of buffer memory evaluates the address once (side effects in indices happen
+// once), and scalar swizzles of buffer elements store directly (DOOM 2016's light clustering shader).
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Results { uint res[]; };
+layout(std430, binding = 1) buffer Input { uint seq[]; };
+layout(std430, binding = 2) buffer Data { uint d[16]; uvec2 v[4]; };
+int nchecks = 0;
+void check(bool c) { res[1 + nchecks] = c ? 1u : 0u; nchecks++; res[0] = uint(nchecks); }
+int I(int v) { return v + int(seq[0]); }
+
+void main() {
+    for (int k = 0; k < 16; k++) d[k] = 0u;
+    for (int k = 0; k < 4; k++) v[k] = uvec2(0u);
+    int n = I(0);
+    d[n++].x = 5u;               // scalar swizzle store
+    d[n++] += 7u;                // compound assignment
+    d[n++]++;                    // increment
+    ++d[n++];
+    v[n++ - 4].y = 9u;           // vector swizzle store
+    v[I(1)].xy += uvec2(n);      // n == 5
+    check(n == 5);
+    check(d[0] == 5u && d[1] == 7u && d[2] == 1u && d[3] == 1u && d[4] == 0u);
+    check(v[0] == uvec2(0u, 9u));
+    check(v[1] == uvec2(5u, 5u));
+    check(v[2] == uvec2(0u));
+}

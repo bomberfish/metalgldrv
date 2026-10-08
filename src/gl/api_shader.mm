@@ -5,6 +5,7 @@
 #import "gl/context.h"
 #include <cmath>
 #include "gl/gltypes.h"
+#include "gl/app_profile.h"
 #include "gl/pipeline.h"
 #include "util/log.h"
 
@@ -176,16 +177,26 @@ API void APIENTRY glCompileShader(GLuint shader) {
     opts.sparseTexture = ctx->dev->caps.sparse;
     opts.deviceExtensions = &mglDeviceGlslExtensions(ctx->dev->caps);
     opts.strictLevel = ctx->strictLevel;
+    const AppProfile& app = appProfile();
+    if (!app.hideExtensions.empty()) opts.hiddenExtensions = &app.hideExtensions;
+    opts.quirks = app.glsl;
     glsl::CompileResult r = glsl::compile(st, s->sources, opts);
     s->shader = r.shader;
     s->compiled = r.shader != nullptr;
     s->infoLog = r.infoLog;
+    if (app.logUnsupported)
+        for (const auto& e : r.unsupportedExtensions) logUnsupportedOnce("unsupported GLSL #extension " + e);
     if (!s->compiled) {
         MGL_DBG("shader %u compile failed:\n%s", shader, r.infoLog.c_str());
         if (envFlag("METALGLDRV_DUMP_FAILED_GLSL")) {
             std::string src;
             for (auto& x : s->sources) src += x;
             MGL_ERR("shader %u failed to compile:\n%s\n---- source ----\n%s", shader, r.infoLog.c_str(), src.c_str());
+        }
+        if (app.logUnsupported) {
+            std::string path = dumpFailedShader("compile", shader, s->sources, r.infoLog);
+            MGL_WARN("shader %u (type 0x%x) failed to compile%s%s:\n%s", shader, s->type, path.empty() ? "" : ", source in ",
+                     path.c_str(), r.infoLog.c_str());
         }
     }
 }
@@ -506,6 +517,19 @@ API void APIENTRY glLinkProgram(GLuint program) {
     if (!r.program) {
         p->linked = false;
         MGL_DBG("program %u link failed:\n%s", program, r.infoLog.c_str());
+        if (appProfile().logUnsupported) {
+            std::vector<std::string> srcs;
+            for (auto& sh : p->attached) {
+                srcs.push_back("\n// ==== shader " + std::to_string(sh->name) + " (type 0x" + [&] {
+                    char b[16];
+                    snprintf(b, sizeof b, "%x", sh->type);
+                    return std::string(b);
+                }() + ") ====\n");
+                for (auto& x : sh->sources) srcs.back() += x;
+            }
+            std::string path = dumpFailedShader("link", program, srcs, r.infoLog);
+            MGL_WARN("program %u failed to link%s%s:\n%s", program, path.empty() ? "" : ", sources in ", path.c_str(), r.infoLog.c_str());
+        }
         return;
     }
     p->linked = true;

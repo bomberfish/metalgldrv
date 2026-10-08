@@ -651,6 +651,31 @@ static void copyStagingToTexture(Context* ctx, Texture* t, const UploadAlloc& up
     t->lastGpuWrite = t->lastUse;
 }
 
+// Pixel unpack buffer uploads whose data needs no conversion copy from the buffer on the GPU, in stream
+// order, instead of waiting for the GPU to finish writing it and reading it on the CPU (DOOM 2016 fills
+// PBOs with a transcoding compute shader and uploads compressed pages from them every frame). `off` is the
+// byte offset of the first block/pixel, `rowStride`/`imageStride` the source pitches; `unit` the bytes of
+// one block (compressed) or pixel, which Metal requires offsets and pitches to be multiples of.
+// Returns false (nothing done) when the copy can't be expressed; the caller then takes the CPU path.
+static bool copyFromUnpackBuffer(Context* ctx, Texture* t, size_t off, size_t extent, size_t rowStride, size_t imageStride,
+                                 size_t unit, int level, int slice, int x, int y, int z, int w, int h, int d) {
+    Buffer* pbo = ctx->pixelUnpackBuffer.get();
+    if (!pbo || !pbo->mtl || !pbo->cpu || pbo->sparse || !t->mtl || t->sparse) return false;
+    if (pbo->mapped && !(pbo->mapAccess & GL_MAP_PERSISTENT_BIT)) return false;  // the CPU path reports the error
+    if (off + extent > (size_t)pbo->size || !unit || off % unit || rowStride % unit || imageStride % unit || off % 4 || rowStride % 4 || imageStride % 4)
+        return false;
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    // The buffer may have been written by a dispatch earlier in this encoder (shader storage or image
+    // stores), possibly without the PIXEL_BUFFER_BARRIER_BIT barrier GL asks for.
+    if (pbo->lastGpuWrite == ctx->serial())
+        [e barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    UploadAlloc src{pbo->mtl, pbo->cpu + off, pbo->gpuAddress() + off, off};
+    MGL_TRACE("unpack buffer %u -> texture %u level %d on the GPU (+%zu, %dx%dx%d)", pbo->name, t->name, level, off, w, h, d);
+    copyStagingToTexture(ctx, t, src, rowStride, imageStride, level, slice, x, y, z, w, h, d);
+    pbo->lastUse = ctx->serial();
+    return true;
+}
+
 // Metal slice for (face/layer). For cube maps face is the slice; for arrays z selects slices.
 void uploadTexSubImage(Context* ctx, Texture* t, int level, int face, int x, int y, int z, int w, int h, int d, GLenum format,
                        GLenum type, const void* pixels) {
@@ -671,6 +696,11 @@ void uploadTexSubImage(Context* ctx, Texture* t, int level, int face, int x, int
     if (level >= t->storageLevels) return;
     ClientLayout cl = clientLayout(format, type, w, h, ctx->unpack);
     size_t need = clientImageSize(format, type, w, h, d, ctx->unpack);
+    if (ctx->pixelUnpackBuffer && f->comp != Comp::D32F_S8 && f->comp != Comp::Compressed && !ctx->unpack.swapBytes &&
+        directUploadCompatible(f, format, type) && t->target != GL_TEXTURE_1D_ARRAY && need >= cl.skipBytes &&
+        copyFromUnpackBuffer(ctx, t, (size_t)pixels + cl.skipBytes, need - cl.skipBytes, cl.rowStride, cl.imageStride, f->bytesPerPixel, level,
+                             sliceBase, mx, my, mz, mw, mh, md))
+        return;
     bool err;
     const uint8_t* src = (const uint8_t*)resolveUnpackSource(ctx, pixels, need, &err);
     if (err || !src) return;
@@ -735,6 +765,18 @@ void uploadCompressedSubImage(Context* ctx, Texture* t, int level, int face, int
              : (t->target == GL_TEXTURE_3D || t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) ? 3
                                                                                                                            : 2;
     CompressedLayout cl = compressedLayout(f, w, h, dims, ctx->unpack);
+    int slice = face, mz = z;
+    if (t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+        slice = z;
+        mz = 0;
+    }
+    // Metal requires block-aligned copy sizes clamped to the level size.
+    int lw = std::max(1, t->storageW >> level), lh = std::max(1, t->storageH >> level);
+    int cw = std::min(w, lw - x), ch = std::min(h, lh - y);
+    if (ctx->pixelUnpackBuffer && cl.rowBytes == rowBytes &&
+        copyFromUnpackBuffer(ctx, t, (size_t)data + cl.skipBytes, std::max((size_t)imageSize, cl.extent(d)) - cl.skipBytes, cl.rowStride,
+                             d > 1 ? cl.imageStride : cl.rowStride * cl.rows, storageRowBytes(f, f->blockW), level, slice, x, y, mz, cw, ch, d))
+        return;
     bool err;
     const uint8_t* src = (const uint8_t*)resolveUnpackSource(ctx, data, std::max((size_t)imageSize, cl.extent(d)), &err);
     if (err || !src) return;
@@ -746,14 +788,6 @@ void uploadCompressedSubImage(Context* ctx, Texture* t, int level, int face, int
             for (int r = 0; r < cl.rows; r++)
                 memcpy(up.cpu + k * imgBytes + r * rowBytes, src + cl.skipBytes + k * cl.imageStride + r * cl.rowStride, rowBytes);
     }
-    int slice = face, mz = z;
-    if (t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
-        slice = z;
-        mz = 0;
-    }
-    // Metal requires block-aligned copy sizes clamped to the level size.
-    int lw = std::max(1, t->storageW >> level), lh = std::max(1, t->storageH >> level);
-    int cw = std::min(w, lw - x), ch = std::min(h, lh - y);
     copyStagingToTexture(ctx, t, up, rowBytes, imgBytes, level, slice, x, y, mz, cw, ch, d);
 }
 

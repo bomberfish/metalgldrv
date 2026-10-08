@@ -30,6 +30,7 @@ struct PPResult {
     bool core = false;  // "#version NNN core" or >=150 without profile
     std::map<std::string, std::string> extensions;  // name -> behavior
     std::vector<std::string> pragmas;
+    std::vector<std::string> unsupportedExtensions;  // #extension names not supported (or hidden)
 };
 
 PPResult preprocess(const std::vector<std::string>& sources, Stage stage, const CompileOptions& opts);

@@ -93,6 +93,14 @@ const std::vector<std::string>& sparseTextureExtensions() {
 
 namespace {
 
+bool hiddenExtension(const CompileOptions& o, const std::string& name) {
+    if (!o.hiddenExtensions) return false;
+    for (const auto& h : *o.hiddenExtensions) {
+        if (!h.empty() && h.back() == '*' ? name.compare(0, h.size() - 1, h, 0, h.size() - 1) == 0 : h == name) return true;
+    }
+    return false;
+}
+
 struct Line {
     std::string text;
     int file = 0, line = 1;
@@ -761,6 +769,7 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
         if (name != "all") {
             auto& exts = supportedExtensions();
             bool known = std::find(exts.begin(), exts.end(), name) != exts.end();
+            bool hidden = hiddenExtension(opts_, name);
             if (!known && opts_.deviceExtensions) {
                 auto& dev = *opts_.deviceExtensions;
                 known = std::find(dev.begin(), dev.end(), name) != dev.end();
@@ -773,7 +782,13 @@ void Preprocessor::directive(const Line& ln, std::vector<PPToken>& toks, std::ve
                 auto& sp = sparseTextureExtensions();
                 known = std::find(sp.begin(), sp.end(), name) != sp.end();
             }
-            if (!known && beh == "require") { error(line, "extension '" + name + "' is not supported"); return; }
+            if (hidden) known = false;
+            if (!known && std::find(res_.unsupportedExtensions.begin(), res_.unsupportedExtensions.end(), name) == res_.unsupportedExtensions.end())
+                res_.unsupportedExtensions.push_back(name);
+            if (!known && beh == "require" && !opts_.quirks.forceExtensionsWarn) {
+                error(line, "extension '" + name + "' is not supported");
+                return;
+            }
             if (!known) warn(line, "extension '" + name + "' is not supported");
         }
         res_.extensions[name] = beh;
@@ -829,13 +844,16 @@ PPResult Preprocessor::run(const std::vector<std::string>& sources) {
         if (!res_.es && res_.version >= 150 && res_.core) {
             // still accept compat if asked: nothing
         }
-        for (auto& e : supportedExtensions()) define(e, "1");
+        auto defineExt = [&](const std::string& e) {
+            if (!hiddenExtension(opts_, e)) define(e, "1");
+        };
+        for (auto& e : supportedExtensions()) defineExt(e);
         if (opts_.sparseTexture)
-            for (auto& e : sparseTextureExtensions()) define(e, "1");
+            for (auto& e : sparseTextureExtensions()) defineExt(e);
         if (opts_.deviceExtensions)
-            for (auto& e : *opts_.deviceExtensions) define(e, "1");
+            for (auto& e : *opts_.deviceExtensions) defineExt(e);
         if (res_.es)
-            for (auto& e : supportedESExtensions()) define(e, "1");
+            for (auto& e : supportedESExtensions()) defineExt(e);
         (void)stage_;
     };
 

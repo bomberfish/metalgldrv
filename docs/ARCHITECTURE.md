@@ -187,6 +187,15 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
     budget, which run on the mesh pipeline) get one pre-pass per draw, so their
     primitives don't see each other's depth/stencil writes in the coverage.
 * `METALGLDRV_LOG=<0-4>`, `METALGLDRV_LOG_FILE=<path|documents>` – log level / file.
+* `METALGLDRV_LOG_UNSUPPORTED=1` – warns once per unique unsupported thing: an entry point that
+  is a stub (when called) or unknown (GetProcAddress), an `INVALID_ENUM` (with the entry point
+  and, for most, the enum), any other GL error, a GLSL `#extension` the compiler doesn't support.
+  Failed compiles and links also write their sources and info log to `METALGLDRV_DUMP_DIR`
+  (default `$TMPDIR/metalgldrv-dumps`, one file per failure).
+* Application profiles (next section): `METALGLDRV_APP_PROFILE`, `METALGLDRV_VENDOR`,
+  `METALGLDRV_RENDERER`, `METALGLDRV_VERSION_STRING`, `METALGLDRV_GLSL_VERSION_STRING`,
+  `METALGLDRV_HIDE_EXTENSIONS`, `METALGLDRV_EXTRA_EXTENSIONS`, `METALGLDRV_VRAM_MB`,
+  `METALGLDRV_GLSL_QUIRKS`.
 * `METALGLDRV_STATS=1` – per-function event counters, logged every 5 s.
 * `METALGLDRV_PROFILE=core` – EGL creates core instead of compatibility contexts.
 * `METALGLDRV_DUMP_GLSL`, `METALGLDRV_DUMP_MSL`, `METALGLDRV_DUMP_SPIRV`,
@@ -202,3 +211,29 @@ colors (`mgl_int_border`, texture_border_clamp), feedback-loop snapshots
 (texture_barrier), and the varying spill (> 124 components; it backs the
 128-component GL_MAX_FRAGMENT_INPUT_COMPONENTS minimum and costs nothing below
 that).
+
+## Application profiles
+`src/gl/app_profiles.cpp` holds one table of per-application quirks, matched
+case-insensitively against the executable name. Under Wine the process is the Wine
+loader, so the name is the last path component of the first argv entry ending in
+`.exe` (Wine passes the Windows image path); otherwise it is the process name. The
+first context creation logs one line with the profile in effect, e.g.
+`app profile 'doom2016' (exe DOOMx64.exe), vendor "ATI Technologies Inc.", ...`.
+Without a match (and without the variables below) nothing changes: the default
+profile is the conformant driver.
+
+| Variable | Effect |
+|---|---|
+| `METALGLDRV_APP_PROFILE=<name>` | force a profile by its name or one of its executable names; `none` disables matching |
+| `METALGLDRV_VENDOR`, `METALGLDRV_RENDERER`, `METALGLDRV_VERSION_STRING`, `METALGLDRV_GLSL_VERSION_STRING` | replace `glGetString(GL_VENDOR / GL_RENDERER / GL_VERSION / GL_SHADING_LANGUAGE_VERSION)`; `GL_MAJOR/MINOR_VERSION` and the context stay 4.6 |
+| `METALGLDRV_HIDE_EXTENSIONS="A B C*"` | remove extensions from `GL_EXTENSIONS` / `glGetStringi` and from GLSL (`#extension` rejects them, no predefined macro); a `*` suffix matches a prefix; space, comma or semicolon separated |
+| `METALGLDRV_EXTRA_EXTENSIONS="A B"` | advertise extra names (a testing aid for apps that refuse to start; nothing implements them, their entry points still report unimplemented) |
+| `METALGLDRV_VRAM_MB=<n>` | total video memory reported by `GL_NVX_gpu_memory_info` / `GL_ATI_meminfo` (default: Metal's `recommendedMaxWorkingSetSize`, capped by the profile) |
+| `METALGLDRV_GLSL_QUIRKS="q1,-q2"` | GLSL compiler leniency, Mesa driconf names (`-name` turns off one the profile sets): `force_glsl_extensions_warn` (an unsupported `#extension X : require` only warns), `vs_position_always_invariant` (`gl_Position` is invariant in every program) |
+
+A profile entry sets the same options; environment variables override it.
+`tools/glslc --quirk <name> --hide <ext>` compiles with the GLSL side of them.
+
+| Profile | Executables | Options | Why |
+|---|---|---|---|
+| `doom2016` | `DOOMx64.exe` | vendor `ATI Technologies Inc.`, VRAM at most 8192 MB, `vs_position_always_invariant` | docs/doom2016.md |

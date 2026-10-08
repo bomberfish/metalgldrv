@@ -397,7 +397,7 @@ const std::vector<std::string>& mglDeviceGlslExtensions(const DeviceCaps& caps);
 extern thread_local const char* t_apiName;
 #define MGL_CTX_RET(r)                                                         \
     ::mgl::Context* ctx = ::mgl::currentContext();                         \
-    if (::mgl::g_logLevel >= ::mgl::LOG_DEBUG) ::mgl::t_apiName = __func__; \
+    if (::mgl::g_logLevel >= ::mgl::LOG_DEBUG || ::mgl::g_logUnsupported) ::mgl::t_apiName = __func__; \
     if (!ctx) return r
 #define MGL_CTX() MGL_CTX_RET()
 

@@ -410,6 +410,13 @@ bool Parser::run(const PPResult& pp) {
 }
 
 void Parser::finalize() {
+    // Quirk vs_position_always_invariant: gl_Position is invariant (as if redeclared "invariant gl_Position;"), for
+    // applications that rely on depth passes with separate programs producing identical depth (GL_EQUAL tests)
+    if (!preamble_ && opts_.quirks.vsPositionAlwaysInvariant &&
+        (sh_.stage == Stage::Vertex || sh_.stage == Stage::TessEval || sh_.stage == Stage::Geometry || sh_.stage == Stage::Mesh)) {
+        Sym* s = lookup("gl_Position");
+        if (s && s->var) s->var->q.invariant = true;
+    }
     // GLSL 4.60 4.3.4 / 4.3.6: arrayed interfaces of the geometry and tessellation stages
     if (!preamble_) {
         Stage st = sh_.stage;

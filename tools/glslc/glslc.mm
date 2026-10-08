@@ -114,6 +114,7 @@ int main(int argc, char** argv) {
     bool xfbSeparate = false;
     std::string entry = "main";
     std::string mslOut;
+    std::vector<std::string> quirks, hidden;
     bool validate = true, quiet = false, compileOnly = false, timing = false, xfb = false, capture = false, separable = false;
     auto now = [] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     double t0 = 0, tc = 0;
@@ -144,6 +145,8 @@ int main(int argc, char** argv) {
         } else if (a == "--xfb-separate") xfbSeparate = true;
         else if (a == "--separable") separable = true;
         else if (a == "--capture") capture = true;  // emit the XfbCapture variant even for GS/tess programs
+        else if (a == "--quirk" && i + 1 < argc) quirks.push_back(argv[++i]);  // GLSL quirk (app profiles), Mesa driconf name
+        else if (a == "--hide" && i + 1 < argc) hidden.push_back(argv[++i]);   // extension hidden by an app profile
         else { fprintf(stderr, "usage: glslc -S <stage> <file> ... [--msl out] [--no-validate] [-q]\n"); return 2; }
     }
     LinkInput li;
@@ -169,6 +172,12 @@ int main(int argc, char** argv) {
         } else {
             CompileOptions co;
             co.sparseTexture = true;  // the tool validates on a device that has them
+            for (auto& q : quirks) {
+                if (q == "force_glsl_extensions_warn") co.quirks.forceExtensionsWarn = true;
+                else if (q == "vs_position_always_invariant") co.quirks.vsPositionAlwaysInvariant = true;
+                else { fprintf(stderr, "unknown quirk %s\n", q.c_str()); return 2; }
+            }
+            if (!hidden.empty()) co.hiddenExtensions = &hidden;
             cr = compile(st, {ss.str()}, co);
         }
         tc += now() - t0;

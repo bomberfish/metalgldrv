@@ -1,4 +1,5 @@
 #import "gl/context.h"
+#include "gl/app_profile.h"
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
@@ -41,6 +42,7 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
     : dev(Device::get()), share(sh), majorVersion(major), minorVersion(minor), coreProfile(core), debugContext(debug),
       forwardCompatible(fwd), robustAccess(robust), noErrorMode(noErr), strictLevel(dev ? dev->caps.strictLevel : 0) {
     debugOutput = debug;
+    (void)appProfile();  // resolves the application profile and logs its summary once per process
     for (int i = 0; i < kMaxViewports; i++) {
         viewport[i][0] = viewport[i][1] = viewport[i][2] = viewport[i][3] = 0;
         depthRange[i][0] = 0;
@@ -109,6 +111,13 @@ void Context::setError(GLenum e, const char* fmt, ...) {
         va_end(ap);
     }
     MGL_DBG("GL error 0x%04x in %s: %s", e, t_apiName, buf);
+    if (g_logUnsupported) {
+        // once per entry point and message (the messages of most INVALID_ENUM errors name the enum)
+        char what[640];
+        if (e == GL_INVALID_ENUM) snprintf(what, sizeof what, "unsupported enum in %s%s%s", t_apiName, buf[0] ? ": " : "", buf);
+        else snprintf(what, sizeof what, "GL error 0x%04x in %s%s%s", e, t_apiName, buf[0] ? ": " : "", buf);
+        logUnsupportedOnce(what);
+    }
     if (::mgl::g_logLevel >= ::mgl::LOG_TRACE) {  // METALGLDRV_LOG=4: who raised it
         void* frames[6];
         int n = backtrace(frames, 6);

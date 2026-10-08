@@ -425,3 +425,32 @@ API void APIENTRY glMinSampleShadingARB(GLfloat value) {
     MGL_CTX();
     ctx->minSampleShading = value;
 }
+
+// Extension entry points whose gl.xml signatures differ from the core commands in type names only
+// (so the generated stubs don't forward them): same behavior as the core command.
+API void APIENTRY glBufferDataARB(GLenum target, GLsizeiptrARB size, const void* data, GLenum usage) { glBufferData(target, size, data, usage); }
+API void APIENTRY glBufferSubDataARB(GLenum target, GLintptrARB offset, GLsizeiptrARB size, const void* data) {
+    glBufferSubData(target, offset, size, data);
+}
+API void APIENTRY glGetBufferSubDataARB(GLenum target, GLintptrARB offset, GLsizeiptrARB size, void* data) {
+    glGetBufferSubData(target, offset, size, data);
+}
+API void APIENTRY glGetnUniformfvARB(GLuint p, GLint loc, GLsizei n, GLfloat* v) { glGetnUniformfv(p, loc, n, v); }
+API void APIENTRY glGetnUniformivARB(GLuint p, GLint loc, GLsizei n, GLint* v) { glGetnUniformiv(p, loc, n, v); }
+API void APIENTRY glGetnUniformuivARB(GLuint p, GLint loc, GLsizei n, GLuint* v) { glGetnUniformuiv(p, loc, n, v); }
+API void APIENTRY glGetnUniformdvARB(GLuint p, GLint loc, GLsizei n, GLdouble* v) { glGetnUniformdv(p, loc, n, v); }
+API void APIENTRY glGetnTexImageARB(GLenum target, GLint level, GLenum format, GLenum type, GLsizei n, void* img) {
+    glGetnTexImage(target, level, format, type, n, img);
+}
+API void APIENTRY glGetnCompressedTexImageARB(GLenum target, GLint lod, GLsizei n, void* img) { glGetnCompressedTexImage(target, lod, n, img); }
+API void APIENTRY glTexImage3DEXT(GLenum target, GLint level, GLenum internalformat, GLsizei w, GLsizei h, GLsizei d, GLint border, GLenum format,
+                                  GLenum type, const void* pixels) {
+    glTexImage3D(target, level, (GLint)internalformat, w, h, d, border, format, type, pixels);
+}
+// ARB_geometry_shader4: one face of a cube map
+API void APIENTRY glFramebufferTextureFaceARB(GLenum target, GLenum attachment, GLuint texture, GLint level, GLenum face) {
+    glFramebufferTexture2D(target, attachment, face, texture, level);
+}
+// EXT_texture_integer: the clear color of integer color buffers (cleared like glClearColor's values)
+API void APIENTRY glClearColorIiEXT(GLint r, GLint g, GLint b, GLint a) { glClearColor((float)r, (float)g, (float)b, (float)a); }
+API void APIENTRY glClearColorIuiEXT(GLuint r, GLuint g, GLuint b, GLuint a) { glClearColor((float)r, (float)g, (float)b, (float)a); }

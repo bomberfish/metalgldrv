@@ -402,6 +402,7 @@ private:
     bool isBufferRooted(const Expr* e);
     std::pair<std::string, std::string> texRef(const Expr* e);
     std::string opaqueIndex(const Expr* e, const Expr*& base);
+    bool bufAccessOnce(const Expr* l, Acc& a, std::string& pre);
     int texSlot_ = -1;     // argument slot of the opaque uniform resolved by the last texRef(), -1 if unknown
     // Samples of the emulated (2D array) multisample storage behind the last texRef(), 0 if none.
     int msArraySamples() const {
@@ -859,14 +860,26 @@ static Op compoundBase(Op op) {
     }
 }
 
+// bufAccess() for a read-modify-write: the address is evaluated once into temporaries (`pre`), so
+// side effects in indices (buf[i++] += x) happen once.
+bool Emitter::bufAccessOnce(const Expr* l, Acc& a, std::string& pre) {
+    if (!bufAccess(l, a) || a.blockArray) return false;
+    a.ptr = bind(a.ptr, a.device ? "device uchar*" : "constant uchar*", pre);
+    a.off = bind(a.off, "uint", pre);
+    return true;
+}
+
 std::string Emitter::storeTo(const Expr* l, const std::string& v) {
     Acc a;
     if (bufAccess(l, a)) return storeAcc(a, v);
     if (l->kind == EK::Swizzle && isBufferRooted(l->args[0])) {
         const Expr* base = l->args[0];
+        if (base->type.isScalar()) return storeTo(base, v);  // scalar.x = v
         std::string t = newTemp(base->type);
         std::string sw;
         for (int i = 0; i < l->nswz; i++) sw += kSwz[l->swz[i]];
+        std::string pre;
+        if (bufAccessOnce(base, a, pre)) return "(" + pre + t + " = " + loadAcc(a) + ", " + t + "." + sw + " = " + v + ", " + storeAcc(a, t) + ")";
         return "(" + t + " = " + ex(base) + ", " + t + "." + sw + " = " + v + ", " + storeTo(base, t) + ")";
     }
     if (l->kind == EK::Index && l->args[0]->type.isVector() && isBufferRooted(l->args[0])) {
@@ -899,6 +912,10 @@ std::string Emitter::assign(const Expr* e) {
         return "(" + L + " = " + binary(bop, L, l->type, ex(r), r->type, l->type) + ")";
     }
     std::string t = newTemp(l->type);
+    Acc a;
+    std::string pre;
+    if (bufAccessOnce(l, a, pre))
+        return "(" + pre + t + " = " + binary(bop, loadAcc(a), l->type, ex(r), r->type, l->type) + ", " + storeAcc(a, t) + ", " + t + ")";
     return "(" + t + " = " + binary(bop, ex(l), l->type, ex(r), r->type, l->type) + ", " + storeTo(l, t) + ", " + t + ")";
 }
 
@@ -917,6 +934,12 @@ std::string Emitter::incdec(const Expr* e) {
     std::string t = newTemp(a->type);
     std::string one = mt(a->type) + "(1)";
     std::string opS = inc ? " + " : " - ";
+    Acc acc;
+    std::string hoist;
+    if (bufAccessOnce(a, acc, hoist)) {
+        if (pre) return "(" + hoist + t + " = " + loadAcc(acc) + opS + one + ", " + storeAcc(acc, t) + ", " + t + ")";
+        return "(" + hoist + t + " = " + loadAcc(acc) + ", " + storeAcc(acc, t + opS + one) + ", " + t + ")";
+    }
     if (pre) return "(" + t + " = " + ex(a) + opS + one + ", " + storeTo(a, t) + ", " + t + ")";
     return "(" + t + " = " + ex(a) + ", " + storeTo(a, t + opS + one) + ", " + t + ")";
 }

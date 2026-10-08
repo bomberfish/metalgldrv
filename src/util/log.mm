@@ -10,6 +10,7 @@
 
 namespace mgl {
 int g_logLevel = envInt("METALGLDRV_LOG", LOG_INFO);
+bool g_logUnsupported = envFlag("METALGLDRV_LOG_UNSUPPORTED");
 
 static os_log_t mglLog() {
     static os_log_t l = os_log_create("ca.bomberfish.metalgldrv", "driver");
@@ -66,5 +67,5 @@ extern "C" void mgl_report_unimplemented(const char* name) {
     static std::mutex m;
     static std::unordered_set<std::string> seen;
     std::lock_guard<std::mutex> g(m);
-    if (seen.insert(name).second) MGL_WARN("unimplemented: %s", name);
+    if (seen.insert(name).second) MGL_WARN("unimplemented: %s%s", name, mgl::g_logUnsupported ? " (unsupported entry point called)" : "");
 }

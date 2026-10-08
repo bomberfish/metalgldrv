@@ -120,14 +120,14 @@ API void APIENTRY glEnablei(GLenum cap, GLuint index) {
     MGL_CTX();
     int max = cap == GL_SCISSOR_TEST ? kMaxViewports : kMaxDrawBuffers;
     if (index >= (GLuint)max) return ctx->setError(GL_INVALID_VALUE);
-    if (!setCap(ctx, cap, true, index)) ctx->setError(GL_INVALID_ENUM);
+    if (!setCap(ctx, cap, true, index)) ctx->setError(GL_INVALID_ENUM, "glEnablei(0x%x)", cap);
 }
 
 API void APIENTRY glDisablei(GLenum cap, GLuint index) {
     MGL_CTX();
     int max = cap == GL_SCISSOR_TEST ? kMaxViewports : kMaxDrawBuffers;
     if (index >= (GLuint)max) return ctx->setError(GL_INVALID_VALUE);
-    if (!setCap(ctx, cap, false, index)) ctx->setError(GL_INVALID_ENUM);
+    if (!setCap(ctx, cap, false, index)) ctx->setError(GL_INVALID_ENUM, "glDisablei(0x%x)", cap);
 }
 
 bool mglIsEnabled(Context* ctx, GLenum cap, int index, bool* out) {
@@ -178,7 +178,7 @@ API GLboolean APIENTRY glIsEnabled(GLenum cap) {
     MGL_CTX_RET(GL_FALSE);
     bool v = false;
     if (!mglIsEnabled(ctx, cap, -1, &v)) {
-        ctx->setError(GL_INVALID_ENUM);
+        ctx->setError(GL_INVALID_ENUM, "glIsEnabled(0x%x)", cap);
         return GL_FALSE;
     }
     return v;
@@ -192,7 +192,7 @@ API GLboolean APIENTRY glIsEnabledi(GLenum cap, GLuint index) {
         return GL_FALSE;
     }
     if (!mglIsEnabled(ctx, cap, index, &v)) {
-        ctx->setError(GL_INVALID_ENUM);
+        ctx->setError(GL_INVALID_ENUM, "glIsEnabledi(0x%x)", cap);
         return GL_FALSE;
     }
     return v;
@@ -623,10 +623,10 @@ API void APIENTRY glHint(GLenum target, GLenum mode) {
     case GL_TEXTURE_COMPRESSION_HINT: ctx->hints[2] = mode; break;
     case GL_FRAGMENT_SHADER_DERIVATIVE_HINT: ctx->hints[3] = mode; break;
     case GL_PERSPECTIVE_CORRECTION_HINT: case GL_POINT_SMOOTH_HINT: case GL_FOG_HINT: case GL_GENERATE_MIPMAP_HINT:
-        if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM);
+        if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM, "glHint(0x%x)", target);
         ctx->hints[4] = mode;
         break;
-    default: ctx->setError(GL_INVALID_ENUM);
+    default: ctx->setError(GL_INVALID_ENUM, "glHint(0x%x)", target);
     }
 }
 

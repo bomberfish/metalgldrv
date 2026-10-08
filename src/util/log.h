@@ -5,6 +5,9 @@
 namespace mgl {
 enum LogLevel { LOG_ERROR = 0, LOG_WARN = 1, LOG_INFO = 2, LOG_DEBUG = 3, LOG_TRACE = 4 };
 extern int g_logLevel;
+// METALGLDRV_LOG_UNSUPPORTED (also AppProfile::logUnsupported): log unsupported entry points, enums,
+// #extension requests and GL errors once each.
+extern bool g_logUnsupported;
 void logf(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 // Environment helpers (MGL_* variables)
 bool envFlag(const char* name, bool def = false);

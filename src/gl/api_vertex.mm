@@ -1,5 +1,6 @@
 // Vertex array objects and generic vertex attributes.
 #import "gl/context.h"
+#include <cmath>
 #include "util/log.h"
 
 using namespace mgl;
@@ -583,8 +584,8 @@ VA_I(4usv, GLuint, GL_UNSIGNED_INT, (GLuint i, const GLushort* p), p[0], p[1], p
 
 // Packed attribute setters (GL 3.3)
 static float unpackSnorm10(int v) { return std::max(-1.f, v / 511.f); }
-API void APIENTRY glVertexAttribP4ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
-    MGL_CTX();
+// glVertexAttribP{1,2,3,4}ui: the first n unpacked components, the rest (0, 0, 1).
+static void setAttribP(Context* ctx, GLuint index, int n, GLenum type, GLboolean normalized, GLuint value) {
     float c[4];
     if (type == GL_UNSIGNED_INT_2_10_10_10_REV) {
         uint32_t r = value & 1023, g = (value >> 10) & 1023, b = (value >> 20) & 1023, a = value >> 30;
@@ -601,9 +602,30 @@ API void APIENTRY glVertexAttribP4ui(GLuint index, GLenum type, GLboolean normal
         } else {
             c[0] = r; c[1] = g; c[2] = b; c[3] = a;
         }
+    } else if (type == GL_UNSIGNED_INT_10F_11F_11F_REV && n == 3) {
+        // 11-bit and 10-bit unsigned floats: 5-bit exponent, 6/5-bit mantissa (no sign)
+        auto uf = [](uint32_t v, int mbits) {
+            uint32_t e = v >> mbits, m = v & ((1u << mbits) - 1);
+            if (e == 31) return m ? NAN : INFINITY;
+            if (e == 0) return ldexpf((float)m, -14 - mbits);
+            return ldexpf(1.0f + (float)m / (float)(1u << mbits), (int)e - 15);
+        };
+        c[0] = uf(value & 2047, 6);
+        c[1] = uf((value >> 11) & 2047, 6);
+        c[2] = uf(value >> 22, 5);
+        c[3] = 1;
     } else {
-        return ctx->setError(GL_INVALID_ENUM);
+        return ctx->setError(GL_INVALID_ENUM, "glVertexAttribP%dui(type 0x%x)", n, type);
     }
+    static const float kDefault[4] = {0, 0, 0, 1};
+    for (int k = n; k < 4; k++) c[k] = kDefault[k];
     setAttrib(ctx, index, c[0], c[1], c[2], c[3]);
 }
-API void APIENTRY glVertexAttribP4uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) { glVertexAttribP4ui(index, type, normalized, *value); }
+API void APIENTRY glVertexAttribP1ui(GLuint i, GLenum type, GLboolean norm, GLuint v) { MGL_CTX(); setAttribP(ctx, i, 1, type, norm, v); }
+API void APIENTRY glVertexAttribP2ui(GLuint i, GLenum type, GLboolean norm, GLuint v) { MGL_CTX(); setAttribP(ctx, i, 2, type, norm, v); }
+API void APIENTRY glVertexAttribP3ui(GLuint i, GLenum type, GLboolean norm, GLuint v) { MGL_CTX(); setAttribP(ctx, i, 3, type, norm, v); }
+API void APIENTRY glVertexAttribP4ui(GLuint i, GLenum type, GLboolean norm, GLuint v) { MGL_CTX(); setAttribP(ctx, i, 4, type, norm, v); }
+API void APIENTRY glVertexAttribP1uiv(GLuint i, GLenum type, GLboolean norm, const GLuint* v) { MGL_CTX(); setAttribP(ctx, i, 1, type, norm, *v); }
+API void APIENTRY glVertexAttribP2uiv(GLuint i, GLenum type, GLboolean norm, const GLuint* v) { MGL_CTX(); setAttribP(ctx, i, 2, type, norm, *v); }
+API void APIENTRY glVertexAttribP3uiv(GLuint i, GLenum type, GLboolean norm, const GLuint* v) { MGL_CTX(); setAttribP(ctx, i, 3, type, norm, *v); }
+API void APIENTRY glVertexAttribP4uiv(GLuint i, GLenum type, GLboolean norm, const GLuint* v) { MGL_CTX(); setAttribP(ctx, i, 4, type, norm, *v); }
