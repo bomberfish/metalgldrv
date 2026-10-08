@@ -24,7 +24,9 @@ run() {  # name caselist surface [run.sh options...]
         sleep 30; waited=$((waited + 30))
     done
     rm -rf "tests/cts/results/receipt-$name"
-    tests/cts/run.sh --no-build -l "$list" -s "$surface" "$@" -o "tests/cts/results/receipt-$name" \
+    # The per-case inactivity timeout is a runner safeguard, not a CTS requirement (the Khronos runner has
+    # none); some copy_image/tessellation cases run tens of seconds alone and longer under 10-way load.
+    tests/cts/run.sh --no-build -t "${RECEIPT_TIMEOUT:-300}" -l "$list" -s "$surface" "$@" -o "tests/cts/results/receipt-$name" \
         > "tests/cts/results/receipt-$name.log" 2>&1
     python3 tests/cts/save_report.py "tests/cts/results/receipt-$name" "$name" --surface "$surface $*" || echo "save failed for $name"
 }

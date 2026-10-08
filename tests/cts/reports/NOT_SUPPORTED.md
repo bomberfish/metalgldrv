@@ -1,20 +1,29 @@
 # CTS receipts: run matrix and NotSupported audit
 
-## Current receipts (commit a9bd463)
+## Current receipts (commit 5a97559)
 
-| platform | mode | runs | result |
+Three driver profiles, selected with `METALGLDRV_STRICT` (see docs/ARCHITECTURE.md): default (unset or 0),
+strict (1) and super strict (2, a superset of strict). Each Mac profile runs the full Khronos runner matrix
+(14 runs). Receipt runs use a 300 s per-case inactivity timeout (the Khronos runner has none).
+
+| platform | profile | runs | result |
 |---|---|---|---|
-| macOS 27.0 / Apple M4 Pro | default | 14 (full runner matrix) | 0 Fail/Crash/Timeout. KHR-GL46 18061 pass, 1652 NotSupported (18043/1670 on config 2); KHR-Single-GL46 11340 pass, 8 NotSupported; KHR-NoContext 8/8 |
-| macOS 27.0 / Apple M4 Pro | METALGLDRV_STRICT=1 | 14 (`*-strict`) | 0 Fail/Crash/Timeout. KHR-GL46 18100 pass, 1613 NotSupported (18082/1631 on config 2); Single and NoContext as in default mode |
-| iPadOS 27.0.1 / Apple M5 | default | 3 (`*-ipad`) | 0 Fail/Crash/Timeout. KHR-GL46 18066 pass, 1647 NotSupported; Single 11340/8; NoContext 8/8 |
+| macOS 27.0 / Apple M4 Pro | default | 14 | 0 Fail/Crash/Timeout. KHR-GL46 18061 pass, 1652 NotSupported (18043/1670 on config 2); KHR-Single-GL46 11340 pass, 8 NotSupported; KHR-NoContext 8/8 |
+| macOS 27.0 / Apple M4 Pro | strict | 14 (`*-strict`) | 0 Fail/Crash/Timeout. KHR-GL46 19152 pass, 561 NotSupported (19134/579 on config 2); Single 11340/8; NoContext 8/8 |
+| macOS 27.0 / Apple M4 Pro | super strict | 14 (`*-superstrict`) | 0 Fail/Crash/Timeout. KHR-GL46 19154 pass, 559 NotSupported (19136/577 on config 2); Single 11340/8; NoContext 8/8 |
+| iPadOS 27.0.1 / Apple M5 | default | 3 (`*-ipad`, driver 90f9b17) | 0 Fail/Crash/Timeout. KHR-GL46 18066 pass, 1647 NotSupported; Single 11340/8; NoContext 8/8 |
 
-On the Mac, NotSupported is the iPad breakdown below plus the 5 texture_filter_minmax cases: the M4 Pro (Apple9)
-ignores the sampler reduction mode, so ARB_texture_filter_minmax is only exposed on Apple10 GPUs. Strict mode
-exposes multisample images (GL_MAX_IMAGE_SAMPLES 4), which turns those 39 cases into passes. Config 2 adds the 18
-fragdepth cases that need a depth buffer.
+The profiles differ as follows:
+- **Default:** NotSupported is the iPad breakdown below plus the 5 texture_filter_minmax cases. The M4 Pro (Apple9)
+  ignores the sampler reduction mode, so ARB_texture_filter_minmax is only exposed on Apple10 GPUs.
+- **Strict** adds:
+  - multisample images (39 cases)
+  - EXT_fragment_shading_rate emulation (1052 cases; the remaining 15 need GL_OVR_multiview)
+- **Super strict** adds ARB_post_depth_coverage (2 cases).
+- **Config 2** adds the 18 fragdepth cases that need a depth buffer.
 
 The sections below are the earlier audit for commit 926bb9c, from before the optional extensions, followed by the
-iPad breakdown. That iPad breakdown matches the current receipts.
+iPad breakdown and the per-feature notes.
 
 ## Earlier receipts (commit 926bb9c)
 

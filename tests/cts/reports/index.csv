@@ -72,3 +72,45 @@ date,commit,dirty,caselist,platform,surface,total,pass,fail,not_supported,qualit
 2026-10-07T20:53:24,f4588dc,0,KHR-GL46-cfg6-113x47-strict,macOS 27.0 / Apple GPU,pbuffer -c 6 --width 113 --height 47 --seed 2,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261007-2053-KHR-GL46-cfg6-113x47-strict
 2026-10-07T21:01:38,f4588dc,0,KHR-Single-GL46-strict,macOS 27.0 / Apple GPU,pbuffer ,11348,11340,0,8,0,0,0,0,0,99.93,100.00,reports/20261007-2101-KHR-Single-GL46-strict
 2026-10-07T21:01:39,f4588dc,0,KHR-NoContext-strict,macOS 27.0 / Apple GPU,window ,8,8,0,0,0,0,0,0,0,100.00,100.00,reports/20261007-2101-KHR-NoContext-strict
+2026-10-07T21:28:27,5a97559,0,KHR-GL46,macOS 27.0 / Apple GPU,pbuffer ,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261007-2128-KHR-GL46
+2026-10-07T21:32:29,5a97559,0,KHR-GL46-113x47,macOS 27.0 / Apple GPU,pbuffer --width 113 --height 47 --seed 2,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261007-2132-KHR-GL46-113x47
+2026-10-07T21:37:11,5a97559,0,KHR-GL46-fbo-64xD,macOS 27.0 / Apple GPU,fbo -c rgba8888d24s8 --width 64 --height -1 --seed 3,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261007-2137-KHR-GL46-fbo-64xD
+2026-10-07T21:40:48,5a97559,0,KHR-GL46-fbo-Dx64,macOS 27.0 / Apple GPU,fbo -c rgba8888d24s8 --width -1 --height 64 --seed 3,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261007-2140-KHR-GL46-fbo-Dx64
+2026-10-07T21:45:17,5a97559,0,KHR-GL46-cfg2,macOS 27.0 / Apple GPU,pbuffer -c 2,19714,18043,0,1670,0,1,0,0,0,91.52,99.99,reports/20261007-2145-KHR-GL46-cfg2
+2026-10-07T21:49:05,5a97559,0,KHR-GL46-cfg2-113x47,macOS 27.0 / Apple GPU,pbuffer -c 2 --width 113 --height 47 --seed 2,19714,18043,0,1670,0,1,0,0,0,91.52,99.99,reports/20261007-2149-KHR-GL46-cfg2-113x47
+2026-10-07T21:52:36,5a97559,0,KHR-GL46-cfg3,macOS 27.0 / Apple GPU,pbuffer -c 3,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261007-2152-KHR-GL46-cfg3
+2026-10-07T21:56:01,5a97559,0,KHR-GL46-cfg3-113x47,macOS 27.0 / Apple GPU,pbuffer -c 3 --width 113 --height 47 --seed 2,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261007-2156-KHR-GL46-cfg3-113x47
+2026-10-07T21:59:50,5a97559,0,KHR-GL46-cfg5,macOS 27.0 / Apple GPU,pbuffer -c 5,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261007-2159-KHR-GL46-cfg5
+2026-10-07T22:04:02,5a97559,0,KHR-GL46-cfg5-113x47,macOS 27.0 / Apple GPU,pbuffer -c 5 --width 113 --height 47 --seed 2,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261007-2204-KHR-GL46-cfg5-113x47
+2026-10-07T22:08:40,5a97559,0,KHR-GL46-cfg6,macOS 27.0 / Apple GPU,pbuffer -c 6,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261007-2208-KHR-GL46-cfg6
+2026-10-07T23:04:26,5a97559,0,KHR-Single-GL46,macOS 27.0 / Apple GPU,pbuffer ,11348,11340,0,8,0,0,0,0,0,99.93,100.00,reports/20261007-2304-KHR-Single-GL46
+2026-10-07T23:04:27,5a97559,0,KHR-NoContext,macOS 27.0 / Apple GPU,window ,8,8,0,0,0,0,0,0,0,100.00,100.00,reports/20261007-2304-KHR-NoContext
+2026-10-07T23:49:06,5a97559,0,KHR-GL46-fbo-64xD-strict,macOS 27.0 / Apple GPU,fbo -c rgba8888d24s8 --width 64 --height -1 --seed 3,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261007-2349-KHR-GL46-fbo-64xD-strict
+2026-10-07T23:54:59,5a97559,0,KHR-GL46-fbo-Dx64-strict,macOS 27.0 / Apple GPU,fbo -c rgba8888d24s8 --width -1 --height 64 --seed 3,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261007-2354-KHR-GL46-fbo-Dx64-strict
+2026-10-08T00:01:31,5a97559,0,KHR-GL46-cfg2-strict,macOS 27.0 / Apple GPU,pbuffer -c 2,19714,19134,0,579,0,1,0,0,0,97.06,99.99,reports/20261008-0001-KHR-GL46-cfg2-strict
+2026-10-08T00:07:55,5a97559,0,KHR-GL46-cfg2-113x47-strict,macOS 27.0 / Apple GPU,pbuffer -c 2 --width 113 --height 47 --seed 2,19714,19134,0,579,0,1,0,0,0,97.06,99.99,reports/20261008-0007-KHR-GL46-cfg2-113x47-strict
+2026-10-08T00:13:58,5a97559,0,KHR-GL46-cfg3-strict,macOS 27.0 / Apple GPU,pbuffer -c 3,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261008-0013-KHR-GL46-cfg3-strict
+2026-10-08T00:18:52,5a97559,0,KHR-GL46-cfg3-113x47-strict,macOS 27.0 / Apple GPU,pbuffer -c 3 --width 113 --height 47 --seed 2,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261008-0018-KHR-GL46-cfg3-113x47-strict
+2026-10-08T00:23:17,5a97559,0,KHR-GL46-cfg5-strict,macOS 27.0 / Apple GPU,pbuffer -c 5,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261008-0023-KHR-GL46-cfg5-strict
+2026-10-08T00:27:09,5a97559,0,KHR-GL46-cfg5-113x47-strict,macOS 27.0 / Apple GPU,pbuffer -c 5 --width 113 --height 47 --seed 2,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261008-0027-KHR-GL46-cfg5-113x47-strict
+2026-10-08T00:31:43,5a97559,0,KHR-GL46-cfg6-strict,macOS 27.0 / Apple GPU,pbuffer -c 6,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261008-0031-KHR-GL46-cfg6-strict
+2026-10-08T00:36:21,5a97559,0,KHR-GL46-cfg6-113x47-strict,macOS 27.0 / Apple GPU,pbuffer -c 6 --width 113 --height 47 --seed 2,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261008-0036-KHR-GL46-cfg6-113x47-strict
+2026-10-08T00:46:32,5a97559,0,KHR-Single-GL46-strict,macOS 27.0 / Apple GPU,pbuffer ,11348,11340,0,8,0,0,0,0,0,99.93,100.00,reports/20261008-0046-KHR-Single-GL46-strict
+2026-10-08T00:46:33,5a97559,0,KHR-NoContext-strict,macOS 27.0 / Apple GPU,window ,8,8,0,0,0,0,0,0,0,100.00,100.00,reports/20261008-0046-KHR-NoContext-strict
+2026-10-08T00:51:49,5a97559,0,KHR-GL46-superstrict,macOS 27.0 / Apple GPU,pbuffer ,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0051-KHR-GL46-superstrict
+2026-10-08T00:57:02,5a97559,0,KHR-GL46-113x47-superstrict,macOS 27.0 / Apple GPU,pbuffer --width 113 --height 47 --seed 2,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0057-KHR-GL46-113x47-superstrict
+2026-10-08T01:01:48,5a97559,0,KHR-GL46-fbo-64xD-superstrict,macOS 27.0 / Apple GPU,fbo -c rgba8888d24s8 --width 64 --height -1 --seed 3,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0101-KHR-GL46-fbo-64xD-superstrict
+2026-10-08T01:06:40,5a97559,0,KHR-GL46-fbo-Dx64-superstrict,macOS 27.0 / Apple GPU,fbo -c rgba8888d24s8 --width -1 --height 64 --seed 3,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0106-KHR-GL46-fbo-Dx64-superstrict
+2026-10-08T01:11:31,5a97559,0,KHR-GL46-cfg2-superstrict,macOS 27.0 / Apple GPU,pbuffer -c 2,19714,19136,0,577,0,1,0,0,0,97.07,99.99,reports/20261008-0111-KHR-GL46-cfg2-superstrict
+2026-10-08T01:15:49,5a97559,0,KHR-GL46-cfg2-113x47-superstrict,macOS 27.0 / Apple GPU,pbuffer -c 2 --width 113 --height 47 --seed 2,19714,19136,0,577,0,1,0,0,0,97.07,99.99,reports/20261008-0115-KHR-GL46-cfg2-113x47-superstrict
+2026-10-08T01:20:27,5a97559,0,KHR-GL46-cfg3-superstrict,macOS 27.0 / Apple GPU,pbuffer -c 3,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0120-KHR-GL46-cfg3-superstrict
+2026-10-08T01:25:12,5a97559,0,KHR-GL46-cfg3-113x47-superstrict,macOS 27.0 / Apple GPU,pbuffer -c 3 --width 113 --height 47 --seed 2,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0125-KHR-GL46-cfg3-113x47-superstrict
+2026-10-08T01:29:51,5a97559,0,KHR-GL46-cfg5-superstrict,macOS 27.0 / Apple GPU,pbuffer -c 5,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0129-KHR-GL46-cfg5-superstrict
+2026-10-08T01:35:14,5a97559,0,KHR-GL46-cfg5-113x47-superstrict,macOS 27.0 / Apple GPU,pbuffer -c 5 --width 113 --height 47 --seed 2,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0135-KHR-GL46-cfg5-113x47-superstrict
+2026-10-08T01:41:36,5a97559,0,KHR-GL46-cfg6-superstrict,macOS 27.0 / Apple GPU,pbuffer -c 6,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0141-KHR-GL46-cfg6-superstrict
+2026-10-08T01:46:16,5a97559,0,KHR-GL46-cfg6-113x47-superstrict,macOS 27.0 / Apple GPU,pbuffer -c 6 --width 113 --height 47 --seed 2,19714,19154,0,559,0,1,0,0,0,97.16,99.99,reports/20261008-0146-KHR-GL46-cfg6-113x47-superstrict
+2026-10-08T01:54:45,5a97559,0,KHR-Single-GL46-superstrict,macOS 27.0 / Apple GPU,pbuffer ,11348,11340,0,8,0,0,0,0,0,99.93,100.00,reports/20261008-0154-KHR-Single-GL46-superstrict
+2026-10-08T01:54:46,5a97559,0,KHR-NoContext-superstrict,macOS 27.0 / Apple GPU,window ,8,8,0,0,0,0,0,0,0,100.00,100.00,reports/20261008-0154-KHR-NoContext-superstrict
+2026-10-08T01:59:34,5a97559,0,KHR-GL46-cfg6-113x47,macOS 27.0 / Apple GPU,pbuffer -c 6 --width 113 --height 47 --seed 2,19714,18061,0,1652,0,1,0,0,0,91.62,99.99,reports/20261008-0159-KHR-GL46-cfg6-113x47
+2026-10-08T02:04:16,5a97559,0,KHR-GL46-strict,macOS 27.0 / Apple GPU,pbuffer ,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261008-0204-KHR-GL46-strict
+2026-10-08T02:08:41,5a97559,0,KHR-GL46-113x47-strict,macOS 27.0 / Apple GPU,pbuffer --width 113 --height 47 --seed 2,19714,19152,0,561,0,1,0,0,0,97.15,99.99,reports/20261008-0208-KHR-GL46-113x47-strict

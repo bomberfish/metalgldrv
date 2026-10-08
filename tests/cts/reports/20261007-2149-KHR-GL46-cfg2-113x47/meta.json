@@ -1,0 +1,20 @@
+{
+ "date": "2026-10-07T21:49:05",
+ "commit": "5a97559",
+ "dirty": 0,
+ "caselist": "KHR-GL46-cfg2-113x47",
+ "platform": "macOS 27.0 / Apple GPU",
+ "surface": "pbuffer -c 2 --width 113 --height 47 --seed 2",
+ "total": 19714,
+ "pass": 18043,
+ "fail": 0,
+ "not_supported": 1670,
+ "quality_warning": 0,
+ "compatibility_warning": 1,
+ "crash": 0,
+ "timeout": 0,
+ "other": 0,
+ "pass_pct": "91.52",
+ "pass_or_not_supported_pct": "99.99",
+ "report_dir": "reports/20261007-2149-KHR-GL46-cfg2-113x47"
+}
