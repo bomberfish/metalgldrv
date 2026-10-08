@@ -2,8 +2,8 @@
 # Full conformance receipt run: every mustpass case list, each archived with save_report.py.
 # Usage: tests/cts/run_receipts.sh [run names...]   (logs in tests/cts/results/receipt-*.log)
 #   With names (e.g. KHR-GL46-cfg6 KHR-NoContext), only those runs are done, to resume a stopped matrix.
-#   METALGLDRV_STRICT=1 (strict) / =2 (super strict) in the environment runs the matrix in that accuracy profile;
-#   every run name gets a -strict / -superstrict suffix.
+#   METALGLDRV_STRICT=1 (strict) or 2 (super strict) runs the matrix in that profile; run names get a
+#   -strict or -superstrict suffix (values parsed like the driver, DeviceCaps::strictLevel).
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE/../.."
 only=("$@")
