@@ -109,13 +109,18 @@ didn't happen.
 
 ## DOOM (2016)
 
-* id Tech 6's GL renderer creates a 4.5 core context through
-  `wglCreateContextAttribsARB` (`WGL_CONTEXT_CORE_PROFILE_BIT_ARB`, from
-  `WGL_ARB_create_context_profile`). Wine only allows versions up to what its
-  probe contexts report (`init_gl_info` parses `GL_VERSION` of a
-  `kCGLOGLPVersion_GL4_Core` context: 4.6 here). Some winemac versions refuse
-  compatibility-profile requests above 3.1 (Apple never had them); DOOM asks for
-  core, so that doesn't matter here.
+* id Tech 6's GL renderer asks for a **4.3 compatibility** context through
+  `wglCreateContextAttribsARB` (see docs/doom2016.md). Wine only allows versions
+  up to what its probe contexts report: `init_gl_info` parses `GL_VERSION`,
+  which is 4.6 here.
+* CrossOver Preview 20260821's winemac rejects compatibility requests, and core
+  requests without the forward-compatible bit, only for versions 3.2–4.1. This
+  comes from reading the disassembly of `macdrv_context_create`; it hasn't been
+  run yet.
+  * DOOM's 4.3 request skips that check. winemac passes no profile attribute,
+    so our CGL creates a 4.6 compatibility context.
+  * For core 3.2–4.1 titles, set `CX_FWD_COMPAT_GL_CTX=1` in the bottle.
+  * Compatibility 3.2–4.1 requests remain unsupported under CrossOver.
 * Select OpenGL, not Vulkan, in DOOM's advanced graphics settings (Vulkan would
   go to MoltenVK). It is commonly reported that the `+r_renderAPI 0` launch
   option forces OpenGL.
