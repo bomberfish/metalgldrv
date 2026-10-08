@@ -5,8 +5,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   target_compile_options(mgltest PRIVATE -fobjc-arc)
   set_target_properties(mgltest PROPERTIES INSTALL_RPATH "@executable_path/Frameworks" BUILD_WITH_INSTALL_RPATH ON)
 else()
-  add_executable(mgltest ${TEST_SOURCES} main/main_mac.cpp)
+  # test_macos.mm: the Mach-O rebinding code and the GetProcAddress table are compiled in
+  # (linking the table against the dylib also checks every entry is exported).
+  add_executable(mgltest ${TEST_SOURCES} main/main_mac.cpp ${CMAKE_SOURCE_DIR}/src/macos/macho_rebind.cpp
+                 ${CMAKE_BINARY_DIR}/gen/gl_procs.cpp)
   target_link_libraries(mgltest PRIVATE metalgldrv "-framework Foundation")
+  target_include_directories(mgltest PRIVATE ${CMAKE_SOURCE_DIR}/src)
   set_target_properties(mgltest PROPERTIES BUILD_RPATH "${CMAKE_BINARY_DIR}")
 endif()
 target_include_directories(mgltest PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/gen ${CMAKE_SOURCE_DIR}/tests/host)
@@ -14,4 +18,27 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   add_executable(fp64test fp64/fp64_test.mm)
   target_link_libraries(fp64test PRIVATE "-framework Foundation" "-framework Metal")
   target_compile_options(fp64test PRIVATE -fobjc-arc)
+endif()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # NSOpenGL replacement against real AppKit (turns the hooks on itself; loads the
+  # driver with dlopen so the constructor sees METALGLDRV_HOOK_NSOPENGL=1).
+  add_executable(nsgltest nsgl/nsgl_test.mm)
+  target_link_libraries(nsgltest PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreFoundation")
+  target_compile_options(nsgltest PRIVATE -fno-objc-arc)
+  target_compile_definitions(nsgltest PRIVATE MGL_DYLIB_PATH="$<TARGET_FILE:metalgldrv>")
+  add_dependencies(nsgltest metalgldrv)
+endif()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # Wine mode without Wine: a fake winemac.so linked against the driver.
+  add_library(fake_winemac SHARED nsgl/fake_winemac.mm)
+  target_link_libraries(fake_winemac PRIVATE metalgldrv "-framework AppKit" "-framework CoreGraphics")
+  target_compile_options(fake_winemac PRIVATE -fno-objc-arc)
+  set_target_properties(fake_winemac PROPERTIES OUTPUT_NAME winemac PREFIX "" SUFFIX ".so"
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/fakewine BUILD_RPATH "${CMAKE_BINARY_DIR}")
+  add_executable(winemodetest nsgl/wine_mode_test.mm)
+  target_link_libraries(winemodetest PRIVATE "-framework AppKit")
+  target_compile_options(winemodetest PRIVATE -fno-objc-arc)
+  target_compile_definitions(winemodetest PRIVATE MGL_DYLIB_PATH="$<TARGET_FILE:metalgldrv>"
+    MGL_FAKE_WINEMAC_PATH="$<TARGET_FILE:fake_winemac>")
+  add_dependencies(winemodetest fake_winemac)
 endif()

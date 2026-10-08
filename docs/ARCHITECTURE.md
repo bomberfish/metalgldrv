@@ -16,6 +16,8 @@ Minecraft launcher (LWJGL via EGL), targeting Sodium and Iris.
 |---|---|
 | `scripts/gen_glapi.py` | Generates `glapi.h`, weak stubs for every GL command, and the `*GetProcAddress` table from `registry/gl.xml`. Real implementations override the weak stubs at link time. |
 | `src/egl` | EGL 1.5 over `CAMetalLayer` (window) and offscreen (pbuffer) surfaces. |
+| `src/gl/winsys.*` | Window-system glue shared by EGL and CGL: default-framebuffer surfaces, `CAMetalLayer` setup (incl. the sublayer added over a view's layer), presentation, swap interval. |
+| `src/macos` | macOS only: system-GL replacement. `cgl.mm` implements CGL (Apple's names/signatures, OpenGL.framework never linked); `nsgl.mm` reroutes `NSOpenGLContext` / `NSOpenGLPixelFormat` onto it; `hooks.mm` decides when any of this is active (CrossOver's `winemac.so`, the `Agent_OnLoad` JVMTI agent, `METALGLDRV_HOOK_NSOPENGL=1`) and rebinds imports with `macho_rebind.cpp`. See docs/minecraft-macos.md and docs/crossover.md. |
 | `src/gl` | GL state machine, object model (`objects.h`), entry points (`api_*.mm`), draw path (`draw.mm`), internal shaders (clear/blit/present). |
 | `src/mtl` | Metal 4 device (`device.mm`), GL↔Metal formats and pixel transfer conversion (`formats.mm`). |
 | `src/glsl` | GLSL compiler: preprocessor → parser → semantic analysis → linker → MSL emitter. Public contract in `glsl.h`. |
@@ -23,6 +25,38 @@ Minecraft launcher (LWJGL via EGL), targeting Sodium and Iris.
 | `tests/host` | GL-level tests (run on macOS host and on the iPad through `tools/ios-runner`). |
 | `tests/fp64` | Bit-exact GPU validation of the fp64 library against host IEEE doubles. |
 | `demo/amethyst` | Patch set + build script for the Amethyst demo (Amethyst source lives outside the repo). |
+
+## macOS system-GL replacement (src/macos)
+libmetalgldrv.dylib exports, besides EGL and every GL entry point in the
+`*GetProcAddress` table (so `dlsym` on our handle resolves them all), CGL under
+Apple's names and `gluCheckExtension`, plus `Agent_OnLoad`. None of the hooks run
+unless activated:
+
+* **Wine mode**: `scripts/crossover-install.sh` rewrites CrossOver's `winemac.so`
+  to link libmetalgldrv in place of OpenGL.framework (CGL binds to us); when
+  `winemac.so` loads, `hooks.mm` rebinds its `dlopen` import so
+  `dlopen(".../OpenGL.framework/OpenGL")` returns our handle, and installs the
+  NSOpenGL hooks (`WineOpenGLContext` subclasses `NSOpenGLContext`).
+* **Replacement mode** (`java -agentpath:libmetalgldrv.dylib`, or
+  `METALGLDRV_HOOK_NSOPENGL=1` with the dylib already loaded, e.g. via
+  `DYLD_INSERT_LIBRARIES` in a non-hardened app): NSOpenGL hooks, plus in every
+  non-system image (loaded now or later) OpenGL.framework imports, `dlopen` of
+  OpenGL.framework and `CFBundleGetFunctionPointerForName` on `com.apple.opengl`
+  resolve to libmetalgldrv. The JVMTI agent also sets `org.lwjgl.opengl.libname`
+  to our path at VMInit unless already set (`=nolibname` option disables).
+
+CGL model: one accelerated renderer (RGB888/ARGB8888, depth 0/16/24/32, stencil
+0/8, 2x/4x MSAA), every context GL 4.6 (core for `kCGLOGLPVersion_3_2_Core` /
+`GL4_Core` pixel formats, forward-compatible; compatibility otherwise). A
+context's drawable is a window surface or a pbuffer surface; changes requested
+from another thread (AppKit's main thread) take effect at the context's next
+make-current / flush / update on its own thread. `kCGLCPSurfaceBackingSize`
+fixes the render size (`Surface::fixedWidth/Height`); the layer scales it.
+NSOpenGL view surfaces are a `CAMetalLayer` sublayer of the view's layer, one per
+view, shared by the contexts attached to it; window default framebuffers are
+sRGB-capable. Not supported: accumulation/aux/stereo/float pixel formats,
+`kCGLCPSurfaceOrder` below the window, rendering into pbuffer mip levels > 0,
+`NSOpenGLPixelBuffer`, `CAOpenGLLayer` / `NSOpenGLLayer`.
 
 ## Coordinate conventions
 * Every texture/renderbuffer stores GL row 0 in Metal row 0 (no data flipping
@@ -133,6 +167,20 @@ emulation on the integer ALUs. Planned: move heavy ops into an
 * `scripts/ios-run.sh [filter]` – same suite on the connected iPad (builds,
   signs with the wildcard dev profile, installs, streams console output).
 * `./build/tests/fp64test` – fp64 bit-exactness.
+* `tests/host/test_macos.mm` (`mgltest cgl`, `mgltest macho`, `mgltest gl_exports`)
+  – CGL, import rebinding and GL exports. The universal build runs them on the
+  x86_64 slice too: `arch -x86_64 ./build-universal/tests/mgltest` (configure it
+  with `-DMGL_BUILD_TESTS=ON`).
+* `./build/tests/nsgltest` – replacement mode against real AppKit (it turns the
+  hooks on itself): NSOpenGL pixel formats / contexts / a subclass like Wine's,
+  view layer and Retina scale, resize, backing size, swap interval, GL lookups
+  through `CFBundle` and `dlopen` of OpenGL.framework, and `Agent_OnLoad` with fake
+  JVMTI/JNI tables. `./build/tests/winemodetest` – Wine mode: a fake `winemac.so`
+  linked against the driver (dlopen redirect, `-initWithCGLContextObj:`, setView
+  from another thread). Neither shows a window. Both also run as
+  `arch -x86_64 ./build-universal/tests/...`.
+* Universal (arm64 + x86_64, for CrossOver/Rosetta) driver:
+  `cmake -G Ninja -B build-universal -DMGL_UNIVERSAL=ON -DMGL_BUILD_TESTS=OFF && ninja -C build-universal metalgldrv`.
 * `tools/glslc` / `tests/glsl` – compiler tests and real-world shader corpus.
 * `METALGLDRV_STRICT=1 ./build/tests/mgltest`, `METALGLDRV_STRICT=2 ./build/tests/mgltest`
   – the same suite in strict and super strict mode (`tests/host/test_strict.cpp`
@@ -197,7 +245,9 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   `METALGLDRV_HIDE_EXTENSIONS`, `METALGLDRV_EXTRA_EXTENSIONS`, `METALGLDRV_VRAM_MB`,
   `METALGLDRV_GLSL_QUIRKS`.
 * `METALGLDRV_STATS=1` – per-function event counters, logged every 5 s.
-* `METALGLDRV_PROFILE=core` – EGL creates core instead of compatibility contexts.
+* `METALGLDRV_PROFILE=core` – EGL and CGL create core instead of compatibility contexts.
+* `METALGLDRV_HOOK_NSOPENGL=1` – macOS replacement mode (NSOpenGL hooks + import
+  rebinding, see above) without the JVMTI agent.
 * `METALGLDRV_DUMP_GLSL`, `METALGLDRV_DUMP_MSL`, `METALGLDRV_DUMP_SPIRV`,
   `METALGLDRV_DUMP_FAILED_GLSL`, `METALGLDRV_DUMP_FAILED_MSL` – shader dumps.
 * `METALGLDRV_MAX_FPS`, `METALGLDRV_UPSCALER=metalfx`, `METALGLDRV_CAPTURE*`,
