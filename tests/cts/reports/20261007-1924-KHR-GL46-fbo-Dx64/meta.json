@@ -1,0 +1,20 @@
+{
+ "date": "2026-10-07T19:24:35",
+ "commit": "f4588dc",
+ "dirty": 0,
+ "caselist": "KHR-GL46-fbo-Dx64",
+ "platform": "macOS 27.0 / Apple GPU",
+ "surface": "fbo -c rgba8888d24s8 --width -1 --height 64 --seed 3",
+ "total": 19714,
+ "pass": 18061,
+ "fail": 0,
+ "not_supported": 1652,
+ "quality_warning": 0,
+ "compatibility_warning": 1,
+ "crash": 0,
+ "timeout": 0,
+ "other": 0,
+ "pass_pct": "91.62",
+ "pass_or_not_supported_pct": "99.99",
+ "report_dir": "reports/20261007-1924-KHR-GL46-fbo-Dx64"
+}

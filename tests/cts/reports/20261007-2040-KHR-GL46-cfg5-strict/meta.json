@@ -1,0 +1,20 @@
+{
+ "date": "2026-10-07T20:40:24",
+ "commit": "f4588dc",
+ "dirty": 0,
+ "caselist": "KHR-GL46-cfg5-strict",
+ "platform": "macOS 27.0 / Apple GPU",
+ "surface": "pbuffer -c 5",
+ "total": 19714,
+ "pass": 19152,
+ "fail": 0,
+ "not_supported": 561,
+ "quality_warning": 0,
+ "compatibility_warning": 1,
+ "crash": 0,
+ "timeout": 0,
+ "other": 0,
+ "pass_pct": "97.15",
+ "pass_or_not_supported_pct": "99.99",
+ "report_dir": "reports/20261007-2040-KHR-GL46-cfg5-strict"
+}
