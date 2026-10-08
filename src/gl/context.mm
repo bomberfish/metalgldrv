@@ -39,7 +39,7 @@ bool PassDesc::operator==(const PassDesc& o) const {
 
 Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug, bool fwd, bool robust, bool noErr)
     : dev(Device::get()), share(sh), majorVersion(major), minorVersion(minor), coreProfile(core), debugContext(debug),
-      forwardCompatible(fwd), robustAccess(robust), noErrorMode(noErr), strict(dev && dev->caps.strict) {
+      forwardCompatible(fwd), robustAccess(robust), noErrorMode(noErr), strictLevel(dev ? dev->caps.strictLevel : 0) {
     debugOutput = debug;
     for (int i = 0; i < kMaxViewports; i++) {
         viewport[i][0] = viewport[i][1] = viewport[i][2] = viewport[i][3] = 0;

@@ -134,16 +134,26 @@ emulation on the integer ALUs. Planned: move heavy ops into an
   signs with the wildcard dev profile, installs, streams console output).
 * `./build/tests/fp64test` – fp64 bit-exactness.
 * `tools/glslc` / `tests/glsl` – compiler tests and real-world shader corpus.
-* `METALGLDRV_STRICT=1 ./build/tests/mgltest` – the same suite in strict mode
-  (`tests/host/test_strict.cpp` and `test_fsr.cpp` cover the strict-only paths).
+* `METALGLDRV_STRICT=1 ./build/tests/mgltest`, `METALGLDRV_STRICT=2 ./build/tests/mgltest`
+  – the same suite in strict and super strict mode (`tests/host/test_strict.cpp`
+  and `test_fsr.cpp` cover the strict-only paths, `test_pdc.cpp` the super
+  strict ones).
 
 ## Environment variables
 Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `getenv`).
 
-* `METALGLDRV_STRICT=1` – accuracy features that are possible but cost
-  performance, and that conformance doesn't need. Read once at device creation
-  (`DeviceCaps::strict`, copied to `Context::strict`). The default mode stays
-  conformant (KHR-GL46 and KHR-Single-GL46 pass in both modes). Strict adds:
+* `METALGLDRV_STRICT=<level>` – the accuracy profile: accuracy features that
+  are possible but cost performance, and that conformance doesn't need. Read
+  once at device creation (`DeviceCaps::strictLevel`, copied to
+  `Context::strictLevel`; `strict()` is level >= 1, `superStrict()` level >= 2;
+  the compiler gets it through `CompileOptions` / `LinkInput::strictLevel`).
+  * unset, `0` (or `false` / `no`) – default.
+  * `1` (or `strict`, or any other value) – strict.
+  * `2` (or `super`, `superstrict`) – super strict: strict plus the most
+    expensive emulations.
+
+  The default mode stays conformant (the public KHR lists pass at every
+  level). Strict adds:
   * `texelFetch` outside the texture or mip range returns zero in every
     context. By default only robust-access contexts pay for the size checks
     (GL leaves these reads undefined otherwise); they cost ~35% on a
@@ -159,6 +169,23 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
     one layer, not on the default framebuffer. Draws whose rate can only be 1x1
     use the regular pipeline; coarse draws shade every pixel lane anyway (no
     speedup), so the feature is about semantics, not performance.
+
+  Super strict adds:
+  * ARB_post_depth_coverage: `layout(post_depth_coverage) in;` (implies early
+    fragment tests) makes `gl_SampleMaskIn` hold only the samples that passed
+    the depth/stencil tests. Metal's `[[sample_mask]]` input doesn't reflect
+    them, so draws whose fragment shader reads `gl_SampleMaskIn` with a depth or
+    stencil test in effect first render a pre-pass (same vertex function with an
+    invariant position, same rasterizer and depth/stencil tests, writes off) into
+    a transient R8 coverage attachment, then the draw ANDs `gl_SampleMaskIn` with
+    its pixel's marked samples (`draw.mm` executePdc, `VariantKey::pdc`). Draws
+    that write depth or stencil are split into a pre-pass + draw per primitive
+    and instance (GL order, two render passes each). Pre-passes don't count for
+    queries / transform feedback and run the vertex stages on copies of their
+    writable storage. Indirect draws are read back on the CPU. Limitation:
+    geometry/tessellation draws (and vertex shaders past the classic varying
+    budget, which run on the mesh pipeline) get one pre-pass per draw, so their
+    primitives don't see each other's depth/stencil writes in the coverage.
 * `METALGLDRV_LOG=<0-4>`, `METALGLDRV_LOG_FILE=<path|documents>` – log level / file.
 * `METALGLDRV_STATS=1` – per-function event counters, logged every 5 s.
 * `METALGLDRV_PROFILE=core` – EGL creates core instead of compatibility contexts.

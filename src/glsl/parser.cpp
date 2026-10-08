@@ -386,7 +386,7 @@ bool Parser::run(const PPResult& pp) {
         preamble_ = true;
         {
             CompileOptions o;
-            PPResult pre = preprocess({builtinPreamble(sh_.stage, opts_.strict)}, sh_.stage, o);
+            PPResult pre = preprocess({builtinPreamble(sh_.stage, opts_.strict())}, sh_.stage, o);
             parseTokens(pre.tokens);
         }
         preamble_ = false;
@@ -758,6 +758,13 @@ void Parser::parseLayout(Qualifiers& q) {
         else if (lid == "origin_upper_left") L.originUpperLeft = true;
         else if (lid == "pixel_center_integer") L.pixelCenterInteger = true;
         else if (lid == "early_fragment_tests") L.earlyFragmentTests = true;
+        else if (lid == "post_depth_coverage" && opts_.superStrict()) {
+            // ARB_post_depth_coverage is advertised in super strict mode only; elsewhere the qualifier stays an
+            // unknown (ignored) one
+            if (!extEnabled("GL_ARB_post_depth_coverage"))
+                fail("layout qualifier 'post_depth_coverage' requires the GL_ARB_post_depth_coverage extension");
+            L.postDepthCoverage = true;
+        }
         else if (lid == "depth_any") L.depthLayout = 1;
         else if (lid == "depth_greater") L.depthLayout = 2;
         else if (lid == "depth_less") L.depthLayout = 3;
@@ -828,6 +835,11 @@ void Parser::applyStageLayout(const Qualifiers& q) {
     if (L.order) T.order = L.order;
     if (L.pointMode) T.pointMode = true;
     if (L.earlyFragmentTests) T.earlyFragmentTests = true;
+    if (L.postDepthCoverage) {
+        if (sh_.stage != Stage::Fragment || q.storage != Storage::In)
+            fail("post_depth_coverage is only allowed on fragment shader inputs ('layout(post_depth_coverage) in;')");
+        T.postDepthCoverage = true;
+    }
     if (L.blendSupport) {
         if (sh_.stage != Stage::Fragment || q.storage != Storage::Out)
             fail("blend_support qualifiers are only allowed on fragment shader outputs ('layout(...) out;')");

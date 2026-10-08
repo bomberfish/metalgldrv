@@ -3040,7 +3040,8 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
     StageInfo& si = si_[(int)st];
     const Variable* posV = si.bi.count(BuiltinVar::Position) ? si.bi[BuiltinVar::Position] : nullptr;
     std::string sys = g + "sys->";
-    r.vertexStruct += std::string("    float4 mgl_pos [[position") + (posV && posV->q.invariant ? ", invariant" : "") + "]];\n";
+    // VariantKey::pdc: the pre-pass and the main pass (different fragment functions) rasterize the same samples
+    r.vertexStruct += std::string("    float4 mgl_pos [[position") + ((posV && posV->q.invariant) || K.pdc ? ", invariant" : "") + "]];\n";
     r.vertexCopy += "v.mgl_pos = " + g + "bi_gl_Position;\n";
     r.vertexCopy += "if ((" + sys + "flags & 4u) == 0u) v.mgl_pos.y = -v.mgl_pos.y;\n";
     r.vertexCopy += "if (" + sys + "depthMode == 0u) v.mgl_pos.z = (v.mgl_pos.z + v.mgl_pos.w) * 0.5f;\n";
@@ -3248,10 +3249,13 @@ void Emitter::emitClassicVS(std::string& o) {
     std::string e = K.rasterDiscard ? "vertex void mgl_vs(" : "vertex vs::Out mgl_vs(";
     if (anyIn) e += "vs::In in [[stage_in]], ";
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], uint mgl_vid [[vertex_id]], uint mgl_iid [[instance_id]]";
-    e += ", uint mgl_bi [[base_instance]]";
+    // VariantKey::pdc: draws split per instance pass the instance as Metal's base instance (per-instance
+    // attributes), so gl_InstanceID / gl_BaseInstance count from the draw's base instance in MGLSys
+    if (!K.pdc) e += ", uint mgl_bi [[base_instance]]";
     if (K.manualFetch) e += ", constant MGLDrawInfo& D [[buffer(22)]]";
     if (si.bi.count(BuiltinVar::BaseVertex)) e += ", uint mgl_bv [[base_vertex]]";
     e += ") {\n    vs::G g;\n    g.mgl_zero();\n    g.A = " + argsOf(Stage::Vertex) + ";\n    g.sys = &sys;\n";
+    if (K.pdc) e += "    uint mgl_bi = uint(sys.baseInstance);\n";
     e += copyIn;
     for (auto* v : si.builtins) {
         if (v->builtin == BuiltinVar::VertexID) e += "    g.bi_" + v->name + " = int(mgl_vid);\n";
@@ -3448,6 +3452,7 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             anyIn = true;
         }
     }
+    bool pdcMask = false, pdcPrim = false;  // VariantKey::pdc: gl_SampleMaskIn / gl_PrimitiveID read MGLPdc
     bool haveFc = false;
     auto needFc = [&]() {
         if (!haveFc) params += ", float4 mgl_fc [[position]]";
@@ -3491,7 +3496,18 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
             case BuiltinVar::SampleMaskIn:
                 params += ", uint mgl_smi [[sample_mask]]";
                 // With per-sample shading each invocation covers only its own sample.
-                if (fsr_) {
+                if (K.pdc) {
+                    // ARB_post_depth_coverage: only the samples that passed the depth/stencil tests (marked by the
+                    // pre-pass in the coverage attachment)
+                    needFc();
+                    pdcMask = true;
+                    std::string m = "mgl_smi & mgl_pdc_mask(mgl_P, mgl_fc, mgl_P.layered != 0u ? mgl_layer : 0u)";
+                    if (perSample) {
+                        needSid();
+                        m += " & (1u << mgl_sid)";
+                    }
+                    copyIn += "    g.bi_" + v->name + "[0] = int(" + m + ");\n";
+                } else if (fsr_) {
                     fsrPost += "    g.bi_" + v->name + "[0] = int(g.mgl_fsr_smask(mgl_smi));\n";  // all pixels of the coarse fragment
                 } else if (perSample) {
                     needSid();
@@ -3507,7 +3523,9 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
                     anyIn = true;
                 } else {
                     params += ", uint mgl_pid [[primitive_id]]";
-                    copyIn += "    g.bi_" + v->name + " = int(mgl_pid);\n";
+                    // ARB_post_depth_coverage draws split per primitive count from MGLPdc::primBase
+                    copyIn += "    g.bi_" + v->name + " = int(mgl_pid" + (K.pdc ? " + mgl_P.primBase" : "") + ");\n";
+                    pdcPrim = K.pdc;
                 }
                 break;
             case BuiltinVar::Layer:
@@ -3547,6 +3565,25 @@ void Emitter::emitFS(std::string& o, bool meshInput) {
         }
     }
     if (K.sampleShading) needSid();
+    if (pdcMask || pdcPrim) {
+        params += ", constant fs::MGLPdc& mgl_P [[buffer(" + std::to_string(kBufPdc) + ")]]";
+        if (pdcMask && !biByKind.count(BuiltinVar::Layer)) params += ", uint mgl_layer [[render_target_array_index]]";
+        inS = R"(struct MGLPdc {
+    texture2d_ms_array<float> covMS;
+    texture2d_array<float> cov;
+    uint primBase, layered;
+};
+// ARB_post_depth_coverage: the samples of this pixel that the pre-pass marked (passed the depth/stencil tests)
+inline uint mgl_pdc_mask(constant MGLPdc& P, float4 fc, uint layer) {
+    uint2 p = uint2(fc.xy);
+    uint n = get_num_samples(), m = 0u;
+    if (n <= 1u) return P.cov.read(p, layer).x > 0.5f ? 1u : 0u;
+    for (uint s = 0u; s < n; s++)
+        if (P.covMS.read(p, layer, s).x > 0.5f) m |= 1u << s;
+    return m;
+}
+)" + inS;
+    }
     bool fragDepth = biByKind.count(BuiltinVar::FragDepth) && sc_->writesFragDepth;
     if (fragDepth) needFc();
     if (fragDepth) copyIn += "    g.bi_gl_FragDepth = mgl_fc.z;\n";
@@ -3809,7 +3846,8 @@ inline uint2 mgl_fsr_comb(uint2 a, uint2 b, uint op) {
     }
     o += outS + "}  // namespace fs\n\n";
     std::string e;
-    if (sc_->inLayout.earlyFragmentTests) e += "[[early_fragment_tests]]\n";
+    // ARB_post_depth_coverage implies early fragment tests
+    if (sc_->inLayout.earlyFragmentTests || sc_->inLayout.postDepthCoverage) e += "[[early_fragment_tests]]\n";
     e += std::string("fragment ") + (anyOut ? "fs::Out" : "void") + " mgl_fs(";
     if (anyIn) e += "fs::In in [[stage_in]], ";
     e += "constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]]" + params + ") {\n";
@@ -3828,6 +3866,11 @@ inline uint2 mgl_fsr_comb(uint2 a, uint2 b, uint op) {
     e += "}\n\n";
     entries_ += e;
     out_.entryPoints.push_back({"mgl_fs", Stage::Fragment, EntryPoint::Fragment});
+    if (K.pdc) {
+        // ARB_post_depth_coverage pre-pass: marks the samples that pass the depth/stencil tests (writes disabled)
+        entries_ += "[[early_fragment_tests]]\nfragment float4 mgl_fs_pdc() {\n    return float4(1.0f);\n}\n\n";
+        out_.entryPoints.push_back({"mgl_fs_pdc", Stage::Fragment, EntryPoint::Fragment});
+    }
     fsr_ = false;
 }
 

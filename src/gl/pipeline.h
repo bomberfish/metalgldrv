@@ -67,7 +67,9 @@ struct RenderPipelineKey {
     VertexAttribKey attribs[32];  // GL location L; 16..30 = second halves of dvec3/dvec4 (glsl::secondHalfAttribute)
     VertexBufferKey buffers[32];
     uint8_t sampleCount = 1, alphaToCoverage = 0, alphaToOne = 0, rasterEnabled = 1;
-    uint8_t topologyClass = 0, logicOp = 0, pad[2] = {};
+    uint8_t topologyClass = 0, logicOp = 0;
+    uint8_t pdcPrepass = 0;  // ARB_post_depth_coverage pre-pass: fragment function mgl_fs_pdc of a VariantKey::pdc variant
+    uint8_t pad = 0;
 };
 struct DepthStencilKey {
     uint8_t depthFunc = 0, depthWrite = 0, stencilEnabled = 0, pad = 0;

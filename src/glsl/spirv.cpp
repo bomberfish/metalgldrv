@@ -2382,6 +2382,7 @@ std::string Decompiler::run() {
 
     // ---- stage layout ----
     std::string layouts;
+    bool postDepthCoverage = false;  // SPV_KHR_post_depth_coverage
     int localSize[3] = {1, 1, 1};
     bool hasLocal = false;
     std::vector<std::string> inL, outL;
@@ -2428,6 +2429,10 @@ std::string Decompiler::run() {
             case ExecutionModeOriginLowerLeft: break;
             case ExecutionModePixelCenterInteger: pixelInteger = true; break;
             case ExecutionModeEarlyFragmentTests: layouts += "layout(early_fragment_tests) in;\n"; break;
+            case ExecutionModePostDepthCoverage:
+                layouts += "layout(post_depth_coverage) in;\n";
+                postDepthCoverage = true;
+                break;
             case ExecutionModeDepthGreater: depthLayout = "depth_greater"; break;
             case ExecutionModeDepthLess: depthLayout = "depth_less"; break;
             case ExecutionModeDepthUnchanged: depthLayout = "depth_unchanged"; break;
@@ -2522,6 +2527,7 @@ std::string Decompiler::run() {
     if (std::count(caps.begin(), caps.end(), CapabilitySparseResidency)) src += "#extension GL_ARB_sparse_texture2 : enable\n";
     if (std::count(caps.begin(), caps.end(), CapabilityMinLod)) src += "#extension GL_ARB_sparse_texture_clamp : enable\n";
     if (usesInt64_) src += "#extension GL_ARB_gpu_shader_int64 : enable\n";
+    if (postDepthCoverage) src += "#extension GL_ARB_post_depth_coverage : enable\n";
     src += layouts + globals + "\n" + functions;
     return src;
 }

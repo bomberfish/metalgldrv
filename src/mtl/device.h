@@ -56,10 +56,17 @@ struct DeviceCaps {
     bool samplerReduction = false;  // MTLSamplerDescriptor.reductionMode honored (ARB_texture_filter_minmax)
     bool programmableBlending = false;  // fragment functions read color attachments (KHR_blend_equation_advanced)
     bool sparse = false;  // placement sparse textures/buffers (ARB_sparse_texture*, ARB_sparse_buffer)
-    // METALGLDRV_STRICT=1, read once at startup: accuracy features that cost performance and
-    // aren't needed for conformance (docs/ARCHITECTURE.md, "Environment variables").
-    bool strict = false;
+    // METALGLDRV_STRICT, read once at startup: the accuracy profile, 0 default, 1 strict (accuracy features
+    // that cost performance and aren't needed for conformance), 2 super strict (strict plus the most
+    // expensive emulations). See docs/ARCHITECTURE.md, "Environment variables".
+    int strictLevel = 0;
+    bool strict() const { return strictLevel >= 1; }
+    bool superStrict() const { return strictLevel >= 2; }
 };
+
+// METALGLDRV_STRICT value -> DeviceCaps::strictLevel: unset/"0"/"false"/"no" 0, "2"/"super"/"superstrict" 2,
+// anything else ("1", "strict", ...) 1.
+int parseStrictLevel(const char* v);
 
 // A run of consecutive tiles in one of the device's placement heaps (sparse resources).
 struct SparseTiles {

@@ -81,7 +81,8 @@ inline uint32_t readIndex(const uint8_t* p, GLenum type, size_t i) {
 // ---------------------------------------------------------------------------
 // state application
 // ---------------------------------------------------------------------------
-static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLenum mode, bool viewportArray = false) {
+// noWrites: depth and stencil writes off (ARB_post_depth_coverage pre-passes)
+static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLenum mode, bool viewportArray = false, bool noWrites = false) {
     auto& es = ctx->enc;
     const PassDesc& p = ctx->curPass;
     // Viewport 0, or all of them when the last pre-rasterization stage writes gl_ViewportIndex
@@ -168,7 +169,7 @@ static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLen
     DepthStencilKey dk;
     bool hasDepth = p.depth.tex != nil, hasStencil = p.stencil.tex != nil;
     dk.depthFunc = (ctx->depthTest && hasDepth) ? compareFunc(ctx->depthFunc) : MTLCompareFunctionAlways;
-    dk.depthWrite = ctx->depthTest && hasDepth && ctx->depthWrite;
+    dk.depthWrite = ctx->depthTest && hasDepth && ctx->depthWrite && !noWrites;
     dk.stencilEnabled = ctx->stencilTest && hasStencil;
     if (dk.stencilEnabled) {
         for (int f = 0; f < 2; f++) {
@@ -178,7 +179,7 @@ static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLen
             dk.face[f].dpfail = stencilOp(s.dpfail);
             dk.face[f].dppass = stencilOp(s.dppass);
             dk.face[f].readMask = s.valueMask & 0xff;
-            dk.face[f].writeMask = s.writeMask & 0xff;
+            dk.face[f].writeMask = noWrites ? 0 : s.writeMask & 0xff;
         }
         // Metal's front/back follow the (flipped) winding we configured, so GL front == Metal front.
     }
@@ -397,8 +398,51 @@ static uint64_t sparseImageSlots(Context* ctx, ProgramObj* prog) {
     return m;
 }
 
-static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) {
+// ARB_post_depth_coverage pre-passes (`inert` arguments): a private copy of a buffer range that the
+// pre-rasterization stages may write, so that re-running them leaves no side effects.
+static uint64_t inertBufferCopy(Context* ctx, Buffer* b, size_t offset, size_t size) {
+    size = std::min(size, offset < (size_t)b->size ? (size_t)b->size - offset : 0);
+    id<MTLBuffer> c = ctx->dev->newBuffer(std::max<size_t>(size, 64), MTLResourceStorageModePrivate);
+    if (!c) return 0;
+    ctx->dev->releaseAfter(c, ctx->serial());
+    if (size) {
+        id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+        [e copyFromBuffer:b->mtl sourceOffset:offset toBuffer:c destinationOffset:0 size:size];
+        [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    }
+    b->lastUse = ctx->serial();
+    return c.gpuAddress;
+}
+
+// The same for an image view (one level).
+static id<MTLTexture> inertTextureCopy(Context* ctx, id<MTLTexture> v) {
+    MTLTextureDescriptor* td = [MTLTextureDescriptor new];
+    td.textureType = v.textureType;
+    td.pixelFormat = v.pixelFormat;
+    td.width = v.width;
+    td.height = v.height;
+    td.depth = v.depth;
+    td.arrayLength = v.arrayLength;
+    td.sampleCount = v.sampleCount;
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    if (v.pixelFormat == MTLPixelFormatR32Uint || v.pixelFormat == MTLPixelFormatR32Sint) td.usage |= MTLTextureUsageShaderAtomic;
+    id<MTLTexture> c = [ctx->dev->mtl newTextureWithDescriptor:td];
+    if (!c) return nil;
+    ctx->dev->makeResident(c);
+    ctx->dev->releaseAfter(c, ctx->serial());
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    [e copyFromTexture:v toTexture:c];
+    [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    return c;
+}
+
+// `inert` (ARB_post_depth_coverage pre-passes): storage buffers, atomic counter buffers and writable images that
+// the pre-rasterization stages use are bound as copies, so the pre-pass vertex processing reads the same data as the
+// real draw but its writes are discarded.
+static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute, bool inert = false) {
     const glsl::Reflection& r = prog->refl;
+    const uint32_t preRaster = r.stageMask & ~(1u << (int)glsl::Stage::Fragment);
     size_t nslots = r.slots.size();
     if (nslots == 0) return 0;
     UploadAlloc args = ctx->upload(nslots * 8, 16);
@@ -439,6 +483,8 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             const IndexedBufferBinding& b = ctx->storageBuffers[binding];
             if (s.kind == glsl::SlotKind::BufferSize) {
                 v = b.buffer ? (b.size ? b.size : b.buffer->size - b.offset) : 0;
+            } else if (inert && b.buffer && b.buffer->mtl && s.index < r.storageBlocks.size() && (r.storageBlocks[s.index].stageMask & preRaster)) {
+                v = inertBufferCopy(ctx, b.buffer.get(), b.offset, b.size ? b.size : b.buffer->size - b.offset);
             } else if (b.buffer && b.buffer->mtl) {
                 v = b.buffer->gpuAddress() + b.offset;
                 b.buffer->lastUse = serial;
@@ -457,7 +503,9 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
         case glsl::SlotKind::AtomicCounter: {
             int binding = s.index < r.atomicCounterBuffers.size() ? r.atomicCounterBuffers[s.index].binding : 0;
             const IndexedBufferBinding& b = ctx->atomicCounterBuffers[std::min(binding, kMaxAtomicCounterBindings - 1)];
-            if (b.buffer && b.buffer->mtl) {
+            if (inert && b.buffer && b.buffer->mtl && s.index < r.atomicCounterBuffers.size() && (r.atomicCounterBuffers[s.index].stageMask & preRaster)) {
+                v = inertBufferCopy(ctx, b.buffer.get(), b.offset, b.buffer->size - b.offset);
+            } else if (b.buffer && b.buffer->mtl) {
                 v = b.buffer->gpuAddress() + b.offset;
                 b.buffer->lastUse = b.buffer->lastGpuWrite = serial;
             } else {
@@ -584,6 +632,15 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             int unit = std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1);
             ImageUnit& iu = ctx->imageUnits[unit];
             id<MTLTexture> view = nil;
+            // inert: a writable image of a pre-rasterization stage binds a copy (none for buffer and multisample images)
+            bool inertImage = inert && iu.access != GL_READ_ONLY && s.index < r.uniforms.size() && (r.uniforms[s.index].stageMask & preRaster);
+            if (inertImage && iu.tex && (iu.tex->target == GL_TEXTURE_BUFFER || (iu.tex->mtl && iu.tex->mtl.sampleCount > 1))) {
+                static bool warned = false;
+                if (!warned) MGL_WARN("post_depth_coverage pre-pass: buffer/multisample images of pre-rasterization stages read as zero");
+                warned = true;
+                v = 0;
+                break;
+            }
             // Metal has no color views of depth/stencil storage (GL leaves such image access undefined).
             if (iu.tex && imageUnitValid(iu) && ensureTextureStorage(ctx, iu.tex.get()) &&
                 !(isDepthOrStencil(iu.tex->storageFmt) && formatInfo(iu.format) && !isDepthOrStencil(formatInfo(iu.format)))) {
@@ -596,7 +653,7 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                     if (t->buffer) t->buffer->lastUse = t->buffer->lastGpuWrite = serial;
                 } else if (t->mtl.sampleCount > 1) {
                     if (pf != t->mtl.pixelFormat && !(t->mtl.usage & MTLTextureUsagePixelFormatView)) pf = t->mtl.pixelFormat;
-                    if (ctx->strict) view = msImageShadow(ctx, t, iu, pf, f);
+                    if (ctx->strict()) view = msImageShadow(ctx, t, iu, pf, f);
                 } else {
                     MTLTextureType vt = t->msArray ? MTLTextureType2DArray : mtlTextureType(s.textureTarget, t->samples);
                     // imageCube / imageCubeArray are declared as texture2d_array in MSL.
@@ -615,15 +672,17 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
                     if (pf != t->mtl.pixelFormat && !(t->mtl.usage & MTLTextureUsagePixelFormatView)) pf = t->mtl.pixelFormat;
                     NSUInteger lvl = std::min(iu.level, t->storageLevels - 1);
                     if (t->mtl.textureType == MTLTextureType3D && !iu.layered && vt == MTLTextureType2D) {
-                        view = imageSliceCopy(ctx, t->mtl, pf, lvl, iu.layer, iu.access != GL_READ_ONLY);
+                        view = imageSliceCopy(ctx, t->mtl, pf, lvl, iu.layer, iu.access != GL_READ_ONLY && !inertImage);
                     } else {
                         // read-only images of sparse textures read through the residency-correct twin
                         id<MTLTexture> base = iu.access == GL_READ_ONLY && t->sparseRead ? t->sparseRead : t->mtl;
                         view = [base newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(lvl, 1) slices:sr];
+                        if (view && inertImage) view = inertTextureCopy(ctx, view);
                     }
                     ctx->dev->retainUntil(view, serial);
                 }
-                t->lastUse = t->lastGpuWrite = serial;
+                t->lastUse = serial;
+                if (!inertImage) t->lastGpuWrite = serial;
             }
             // Invalid image units (GL 4.6 §8.26) get a null texture: loads return zero and
             // stores are dropped.
@@ -640,7 +699,7 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute) 
             const ImageUnit& iu = ctx->imageUnits[std::clamp(prog->samplerUnits[i], 0, kMaxImageUnits - 1)];
             // (sparse multisample textures are stored in that layout and bound directly)
             if (iu.tex && iu.tex->msArray) v = iu.tex->samples;
-            else v = ctx->strict && iu.tex && iu.tex->mtl ? iu.tex->mtl.sampleCount : 0;
+            else v = ctx->strict() && iu.tex && iu.tex->mtl ? iu.tex->mtl.sampleCount : 0;
             break;
         }
         case glsl::SlotKind::SubroutineIndices: {
@@ -971,7 +1030,7 @@ static Texture* shadingRateAttachment(Context* ctx) {
 // effective rate is 1x1 with sample shading, a SAMPLE_MASK_VALUE without all bits set, or a fragment
 // shader that forces it (Reflection::fsrForce1x1).
 static bool fsrWanted(Context* ctx, bool primRate, const glsl::Reflection* fs) {
-    if (!ctx->strict || !fs || !(fs->stageMask & (1u << (int)glsl::Stage::Fragment)) || fs->fsrForce1x1) return false;
+    if (!ctx->strict() || !fs || !(fs->stageMask & (1u << (int)glsl::Stage::Fragment)) || fs->fsrForce1x1) return false;
     if (ctx->sampleShading || ctx->sampleMaskValue != ~0u) return false;
     auto comb = [](uint32_t a, uint32_t b, GLenum op) {
         uint32_t ax = a >> 2, ay = a & 3, bx = b >> 2, by = b & 3, x = ax, y = ay;
@@ -1282,6 +1341,348 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
 }
 
 // ---------------------------------------------------------------------------
+// ARB_post_depth_coverage (super strict)
+// ---------------------------------------------------------------------------
+// Metal's [[sample_mask]] input doesn't reflect the depth/stencil tests, even with early fragment tests. A draw
+// whose fragment shader declares post_depth_coverage and reads gl_SampleMaskIn (Reflection::postDepthCoverage),
+// with a depth or stencil test in effect, first renders the same geometry into a transient coverage attachment
+// (R8, cleared to 0) with the draw's depth/stencil tests, depth/stencil writes off and a fragment function that
+// writes 1 (mgl_fs_pdc): exactly the samples that pass are marked. The draw itself (VariantKey::pdc) then ANDs
+// gl_SampleMaskIn with the marked samples of its pixel. Both passes use the same vertex function (invariant
+// position) and the same rasterizer and depth/stencil state, so they rasterize and test the same samples.
+// When the draw writes depth or stencil, its primitives affect each other in order: it is split into a pre-pass
+// and a draw per primitive and instance, in GL order. Pre-passes don't count for queries or transform feedback,
+// and bind copies of the storage the pre-rasterization stages may write (buildArguments `inert`).
+namespace {
+
+struct PdcInfo {
+    bool tests = false;   // a depth or stencil test is in effect: pre-pass + coverage-reading draw (VariantKey::pdc)
+    bool writes = false;  // ... that may write depth or stencil: split per primitive and instance
+};
+
+PdcInfo pdcInfo(Context* ctx) {
+    PdcInfo r;
+    PassDesc p;
+    if (!ctx->resolvePass(p)) return r;
+    bool depth = ctx->depthTest && p.depth.tex, stencil = ctx->stencilTest && p.stencil.tex;
+    r.tests = depth || stencil;
+    r.writes = depth && ctx->depthWrite;
+    if (stencil)
+        for (int f = 0; f < 2; f++) {
+            const StencilFace& s = ctx->stencil[f];
+            if ((s.writeMask & 0xff) && (s.sfail != GL_KEEP || s.dpfail != GL_KEEP || s.dppass != GL_KEEP)) r.writes = true;
+        }
+    return r;
+}
+
+// Per-instance attributes with a divisor above 1 can't be fetched by Metal for one instance of a split draw (the
+// instance is passed as the base instance): such draws fetch in the shader (VariantKey::manualFetch).
+bool pdcNeedsManualFetch(Context* ctx) {
+    VertexArray* vao = ctx->vao.get();
+    if (!vao) return false;
+    bool divisor = false, client = false;
+    for (int l = 0; l < kMaxVertexAttribs; l++) {
+        const VertexAttrib& va = vao->attribs[l];
+        if (!va.enabled) continue;
+        if (va.clientPointer) client = true;
+        if (vao->bindings[va.binding].divisor > 1) divisor = true;
+    }
+    if (divisor && client) {
+        static bool warned = false;
+        if (!warned) MGL_WARN("post_depth_coverage: instanced client arrays with a divisor above 1 fetch the wrong instance");
+        warned = true;
+    }
+    return divisor && !client;
+}
+
+std::unordered_map<Context*, id<MTLTexture>> g_pdcCoverage;  // per context, released by releaseDrawCaches
+
+// The coverage attachment for a pass (2D multisample array / 2D array with the pass's layers).
+id<MTLTexture> pdcCoverage(Context* ctx, const PassDesc& p) {
+    __strong id<MTLTexture>& c = g_pdcCoverage[ctx];
+    NSUInteger layers = std::max(1, p.layers), samples = std::max(1, p.samples);
+    if (c && c.width == (NSUInteger)p.width && c.height == (NSUInteger)p.height && c.arrayLength == layers && c.sampleCount == samples)
+        return c;
+    if (c) ctx->dev->releaseAfter(c, ctx->serial());
+    MTLTextureDescriptor* td = [MTLTextureDescriptor new];
+    td.textureType = samples > 1 ? MTLTextureType2DMultisampleArray : MTLTextureType2DArray;
+    td.pixelFormat = MTLPixelFormatR8Unorm;
+    td.width = std::max(1, p.width);
+    td.height = std::max(1, p.height);
+    td.arrayLength = layers;
+    td.sampleCount = samples;
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    c = [ctx->dev->mtl newTextureWithDescriptor:td];
+    if (c) ctx->dev->makeResident(c);
+    return c;
+}
+
+// Ends the open pass and begins a pre-pass of `main`: the coverage attachment (cleared) and main's depth/stencil.
+id<MTL4RenderCommandEncoder> pdcBeginPrepass(Context* ctx, const PassDesc& main, id<MTLTexture> cov) {
+    ctx->endPass();
+    MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
+    MTLRenderPassColorAttachmentDescriptor* c = rp.colorAttachments[0];
+    c.texture = cov;
+    c.loadAction = MTLLoadActionClear;
+    c.clearColor = MTLClearColorMake(0, 0, 0, 0);
+    c.storeAction = MTLStoreActionStore;
+    if (main.depth.tex) {
+        MTLRenderPassDepthAttachmentDescriptor* d = rp.depthAttachment;
+        d.texture = main.depth.tex;
+        d.level = main.depth.level;
+        d.slice = main.depth.slice;
+        d.loadAction = MTLLoadActionLoad;
+        d.storeAction = MTLStoreActionStore;
+    }
+    if (main.stencil.tex) {
+        MTLRenderPassStencilAttachmentDescriptor* s = rp.stencilAttachment;
+        s.texture = main.stencil.tex;
+        s.level = main.stencil.level;
+        s.slice = main.stencil.slice;
+        s.loadAction = MTLLoadActionLoad;
+        s.storeAction = MTLStoreActionStore;
+    }
+    rp.renderTargetWidth = main.width;
+    rp.renderTargetHeight = main.height;
+    if (main.layers > 1) rp.renderTargetArrayLength = main.layers;
+    rp.defaultRasterSampleCount = main.samples;
+    if (ctx->computeEnc) {
+        [ctx->computeEnc endEncoding];
+        ctx->computeEnc = nil;
+    }
+    id<MTL4RenderCommandEncoder> e = ctx->newRenderEncoder(rp);
+    if (!e) return nil;
+    MGL_STAT("pdc-prepass");
+    [e barrierAfterQueueStages:MTLStageAll
+                  beforeStages:MTLStageVertex | MTLStageFragment | MTLStageObject | MTLStageMesh
+             visibilityOptions:MTL4VisibilityOptionDevice];
+    [e setArgumentTable:ctx->renderArgTable atStages:MTLRenderStageVertex | MTLRenderStageFragment | MTLRenderStageObject | MTLRenderStageMesh];
+    PassDesc p;
+    p.color[0].tex = cov;
+    p.depth = main.depth;
+    p.stencil = main.stencil;
+    p.width = main.width;
+    p.height = main.height;
+    p.layers = main.layers;
+    p.samples = main.samples;
+    ctx->renderEnc = e;
+    ctx->curPass = p;
+    ctx->passOpen = true;
+    ctx->passDirty = true;  // not the draw framebuffer's pass
+    ctx->passVisibilityBuffer = nil;
+    ctx->encVisibilityOffset = -1;  // no occlusion counting
+    ctx->enc.reset();
+    return e;
+}
+
+// The pre-pass pipeline key of a draw's key: one R8 attachment, no blending / alpha to coverage, mgl_fs_pdc.
+RenderPipelineKey pdcPrepassKey(const RenderPipelineKey& key) {
+    RenderPipelineKey pk = key;
+    for (int i = 0; i < 8; i++) {
+        pk.colorFormats[i] = MTLPixelFormatInvalid;
+        pk.blend[i] = BlendKey();
+    }
+    pk.colorFormats[0] = MTLPixelFormatR8Unorm;
+    pk.blend[0].writeMask = 0xf;
+    pk.alphaToCoverage = pk.alphaToOne = 0;
+    pk.logicOp = 0;
+    pk.pdcPrepass = 1;
+    return pk;
+}
+
+// glsl::MGLPdc for the draw after a pre-pass.
+uint64_t pdcUpload(Context* ctx, id<MTLTexture> cov, uint32_t primBase, bool layered) {
+    UploadAlloc u = ctx->upload(sizeof(glsl::MGLPdc), 16);
+    glsl::MGLPdc* p = (glsl::MGLPdc*)u.cpu;
+    memset(p, 0, sizeof *p);
+    MTLResourceID rid = cov.gpuResourceID;
+    memcpy(cov.sampleCount > 1 ? &p->coverageMS : &p->coverage, &rid, 8);
+    p->primBase = primBase;
+    p->layered = layered && cov.arrayLength > 1;
+    return u.gpu;
+}
+
+// The primitives of a split draw as vertex tuples in GL order (strip parity, fans, loops, adjacency without a
+// geometry shader, restart), each rotated (which keeps its winding) so that Metal's provoking vertex, the first,
+// is GL's. ids: draw-relative vertex ids (index values for indexed draws, base vertex not applied); prim: the
+// gl_PrimitiveID of each tuple; vpp: vertices per tuple (1, 2, 3).
+bool pdcPrimitives(Context* ctx, const DrawParams& d, std::vector<uint32_t>& ids, std::vector<uint32_t>& prim, int& vpp) {
+    const uint8_t* src = nullptr;
+    if (d.indexed) {
+        Buffer* ib = ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
+        if (ib) {
+            if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+            src = ib->cpu ? ib->cpu + (size_t)d.indices : bufferBytes(ctx, ib, (size_t)d.indices, (size_t)d.count * indexSize(d.indexType));
+        } else {
+            src = (const uint8_t*)d.indices;
+        }
+        if (!src) return false;
+    }
+    std::vector<uint32_t> list;
+    decomposeToList(ctx, d, src, list);
+    GLenum lm = listModeFor(d.mode);
+    if (lm == GL_LINES_ADJACENCY || lm == GL_TRIANGLES_ADJACENCY) lm = dropAdjacency(lm, list);
+    vpp = lm == GL_POINTS ? 1 : lm == GL_LINES ? 2 : 3;
+    // Strip triangles alternate their first-convention provoking vertex (decomposeToList swaps the first two
+    // vertices of odd triangles): parity within each restart-delimited run.
+    std::vector<uint8_t> odd;
+    if (d.mode == GL_TRIANGLE_STRIP || d.mode == GL_TRIANGLE_STRIP_ADJACENCY) {
+        bool restart = src && (ctx->primitiveRestart || ctx->primitiveRestartFixed);
+        uint32_t restartIdx = ctx->primitiveRestartFixed ? (d.indexType == GL_UNSIGNED_BYTE ? 0xff : d.indexType == GL_UNSIGNED_SHORT ? 0xffff : 0xffffffffu)
+                                                          : ctx->primitiveRestartIndex;
+        auto run = [&](size_t n) {
+            size_t tris = d.mode == GL_TRIANGLE_STRIP ? (n > 2 ? n - 2 : 0) : (n >= 6 ? (n - 4) / 2 : 0);
+            for (size_t i = 0; i < tris; i++) odd.push_back(i & 1);
+        };
+        size_t n = 0;
+        for (size_t i = 0; i < (size_t)d.count; i++) {
+            if (restart && readIndex(src, d.indexType, i) == restartIdx) {
+                run(n);
+                n = 0;
+            } else {
+                n++;
+            }
+        }
+        run(n);
+    }
+    bool last = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
+    size_t n = list.size() / vpp;
+    ids.resize(n * vpp);
+    prim.resize(n);
+    for (size_t k = 0; k < n; k++) {
+        int pv;  // position of GL's provoking vertex in the tuple
+        uint32_t id = (uint32_t)k;
+        switch (d.mode) {
+        case GL_QUADS: pv = 2; id = (uint32_t)(k / 2); break;  // compatibility: the quad's last vertex
+        case GL_QUAD_STRIP: pv = (k & 1) ? 1 : 2; id = (uint32_t)(k / 2); break;
+        case GL_POLYGON: pv = 0; id = 0; break;
+        case GL_TRIANGLE_FAN: pv = last ? 2 : 1; break;
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_STRIP_ADJACENCY: pv = last ? 2 : (k < odd.size() && odd[k]) ? 1 : 0; break;
+        default: pv = last ? vpp - 1 : 0; break;
+        }
+        for (int j = 0; j < vpp; j++) ids[k * vpp + j] = list[k * vpp + (pv + j) % vpp];
+        prim[k] = id;
+    }
+    return true;
+}
+
+}  // namespace
+
+// The primitives of a draw split per primitive (pdcPrimitives). They are read before the draw's uploads: reading
+// the indices may wait for the GPU, which retires upload memory.
+struct PdcSplit {
+    std::vector<uint32_t> ids, prims;
+    int vpp = 0;
+};
+
+// Executes a VariantKey::pdc draw on the classic pipeline: pre-pass(es) and the draw (see above), split per
+// primitive and instance if `split`. argAddr / fsArgAddr: the draw's arguments, built before any encoder (shared by
+// the passes of a split draw).
+static void executePdc(Context* ctx, ProgramObj* prog, ProgramVariant* var, ProgramObj* fsProg, ProgramVariant* fsVar, bool mixedFs,
+                       const glsl::Reflection& frefl, const DrawParams& d, const IndexInfo& ii, uint32_t minIdx, uint32_t maxIdx,
+                       uint64_t argAddr, uint64_t fsArgAddr, const PdcSplit* split) {
+    const glsl::Reflection& refl = prog->refl;
+    int vpp = split ? split->vpp : 0;
+    uint64_t idsAddr = 0;
+    if (split) {
+        const std::vector<uint32_t>& ids = split->ids;
+        if (split->prims.empty()) return;
+        UploadAlloc u = ctx->upload(ids.size() * 4, 16);
+        memcpy(u.cpu, ids.data(), ids.size() * 4);
+        idsAddr = u.gpu;
+        if (d.indexed) {  // the vertex range of CPU-side vertex copies
+            uint32_t mn = UINT32_MAX, mx = 0;
+            for (uint32_t v : ids) {
+                mn = std::min(mn, v);
+                mx = std::max(mx, v);
+            }
+            minIdx = mn + d.baseVertex;
+            maxIdx = mx + d.baseVertex;
+        }
+    }
+    uint64_t preArgAddr = buildArguments(ctx, prog, false, true);
+    // The draw framebuffer's pass (applies pending clears) defines the attachments.
+    id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
+    if (!e) return;
+    PassDesc mainPass = ctx->curPass;
+    id<MTLTexture> cov = pdcCoverage(ctx, mainPass);
+    if (!cov) return;
+    id<MTL4ArgumentTable> table = ctx->renderArgTable;
+    RenderPipelineKey key;
+    key.variant = var;
+    if (mixedFs) {
+        key.fsVariant = fsVar;
+        key.fsVariantUid = fsVar ? fsVar->uid : ~0ull;
+    }
+    fillColorKey(ctx, key, frefl);
+    key.rasterEnabled = true;
+    key.topologyClass = (uint8_t)(refl.writesLayer ? topologyClass(d.mode) : MTLPrimitiveTopologyClassUnspecified);
+    if (!setupVertexInput(ctx, prog, key, table, d, minIdx, maxIdx)) return;
+    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    id<MTLRenderPipelineState> prePso = ctx->pipelines_->renderPipeline(pdcPrepassKey(key));
+    if (!pso || !prePso) return;
+    uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first, d.indexed);
+    uint64_t fsSysAddr = mixedFs && fsProg ? buildSys(ctx, fsProg, d.drawID, d.baseVertex, d.baseInstance, d.first, d.indexed) : sysAddr;
+    MTLPrimitiveType listPrim = vpp == 1 ? MTLPrimitiveTypePoint : vpp == 2 ? MTLPrimitiveTypeLine : MTLPrimitiveTypeTriangle;
+    // k < 0: the whole draw, else primitive k of instance `inst`
+    auto encodeDraw = [&](id<MTL4RenderCommandEncoder> enc, long k, int inst) {
+        if (k >= 0) {
+            [enc drawIndexedPrimitives:listPrim indexCount:vpp indexType:MTLIndexTypeUInt32 indexBuffer:idsAddr + (uint64_t)k * vpp * 4
+                     indexBufferLength:(NSUInteger)vpp * 4 instanceCount:1 baseVertex:d.indexed ? d.baseVertex : 0
+                          baseInstance:d.baseInstance + inst];
+        } else if (d.indexed || ii.generated) {
+            [enc drawIndexedPrimitives:ii.prim indexCount:ii.count indexType:ii.type indexBuffer:ii.addr indexBufferLength:ii.length
+                         instanceCount:d.instances baseVertex:d.indexed ? d.baseVertex : 0 baseInstance:d.baseInstance];
+        } else {
+            [enc drawPrimitives:ii.prim vertexStart:d.first vertexCount:d.count instanceCount:d.instances baseInstance:d.baseInstance];
+        }
+    };
+    auto prepass = [&](long k, int inst) {
+        id<MTL4RenderCommandEncoder> pe = pdcBeginPrepass(ctx, mainPass, cov);
+        if (!pe) return false;
+        [pe setRenderPipelineState:prePso];
+        ctx->enc.pipeline = prePso;
+        applyDynamicState(ctx, pe, d.mode, refl.writesViewportIndex, true);
+        [table setAddress:preArgAddr ? preArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+        [table setAddress:sysAddr atIndex:glsl::kBufSys];
+        encodeDraw(pe, k, inst);
+        ctx->endPass();
+        return true;
+    };
+    auto draw = [&](long k, int inst) {
+        id<MTL4RenderCommandEncoder> me = ctx->renderEncoder();
+        if (!me || !(ctx->curPass == mainPass)) return false;
+        [me setRenderPipelineState:pso];
+        ctx->enc.pipeline = pso;
+        applyDynamicState(ctx, me, d.mode, refl.writesViewportIndex);
+        [table setAddress:argAddr ? argAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+        [table setAddress:sysAddr atIndex:glsl::kBufSys];
+        id<MTL4ArgumentTable> fsTable = table;
+        if (mixedFs) {
+            [me setArgumentTable:ctx->renderArgTableFS atStages:MTLRenderStageFragment];
+            ctx->enc.fsTableSplit = true;
+            [ctx->renderArgTableFS setAddress:fsArgAddr ? fsArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+            [ctx->renderArgTableFS setAddress:fsSysAddr atIndex:glsl::kBufSys];
+            fsTable = ctx->renderArgTableFS;
+        }
+        [fsTable setAddress:pdcUpload(ctx, cov, k >= 0 ? split->prims[k] : 0, refl.writesLayer) atIndex:glsl::kBufPdc];
+        mglQueryNotifyDraw(ctx, d.mode, d.count, d.instances);
+        encodeDraw(me, k, inst);
+        return true;
+    };
+    if (!split) {
+        if (prepass(-1, 0)) draw(-1, 0);
+        return;
+    }
+    // GL order: instance by instance, primitive by primitive
+    for (int inst = 0; inst < d.instances; inst++)
+        for (size_t k = 0; k < split->prims.size(); k++)
+            if (!prepass((long)k, inst) || !draw((long)k, inst)) return;
+}
+
+// ---------------------------------------------------------------------------
 // multi-pass pipelines (GS-on-mesh, tessellation, transform feedback capture)
 // ---------------------------------------------------------------------------
 namespace {
@@ -1512,15 +1913,15 @@ ProgramObj* mglPipelineDrawProgram(Context* ctx) {
 }
 
 // Argument buffer address for a draw: a composite program gets a table of per-stage buffers.
-static uint64_t drawArguments(Context* ctx, ProgramObj* prog) {
-    if (!prog->composite) return buildArguments(ctx, prog, false);
+static uint64_t drawArguments(Context* ctx, ProgramObj* prog, bool inert = false) {
+    if (!prog->composite) return buildArguments(ctx, prog, false, inert);
     uint64_t addr[(int)glsl::Stage::Count] = {};
     for (int s = 0; s < (int)glsl::Stage::Count; s++) {
         ProgramObj* p = prog->stagePrograms[s].get();
         if (!p) continue;
         for (int o = 0; o < s; o++)
             if (prog->stagePrograms[o].get() == p) addr[s] = addr[o];
-        if (!addr[s]) addr[s] = buildArguments(ctx, p, false);
+        if (!addr[s]) addr[s] = buildArguments(ctx, p, false, inert);
         if (!addr[s]) addr[s] = ctx->upload(16).gpu;
     }
     UploadAlloc t = ctx->upload(sizeof addr, 16);
@@ -1554,8 +1955,11 @@ struct MPState {
     uint32_t xfbPrimLimit[4] = {0, 0, 0, 0};
     uint32_t xfbStreamBase[4] = {0, 0, 0, 0};
     bool xfb = false;
+    bool inert = false;  // pre-rasterization storage bound as copies (buildArguments `inert`)
+    bool noStats = false;  // no pipeline statistics (ARB_post_depth_coverage pre-pass)
     // varying spill of the mesh pass (EntryPoint::spillRecordBytes)
     uint64_t spillBuffer = 0, spillCounter = 0;
+    id<MTLBuffer> spillCounterBuffer = nil;
     uint32_t spillCapacity = 0;
     // per phase (upload memory is retired by every CPU wait)
     uint64_t infoAddr = 0, argAddr = 0, sysAddr = 0;
@@ -1614,7 +2018,7 @@ void mpUpload(MPState& s) {
     UploadAlloc counters = ctx->upload(64, 16);
     memset(counters.cpu, 0, 64);
     info->counters = counters.gpu;
-    if (ctx->statsQueriesActive)
+    if (ctx->statsQueriesActive && !s.noStats)
         info->stats = mglStatsGpuSlot(ctx, refl.stageMask & (1u << (int)glsl::Stage::Geometry), refl.stageMask & (1u << (int)glsl::Stage::TessEval));
     info->tcsVertexOut = s.tcsV ? s.tcsV.gpuAddress : 0;
     info->tcsPatchOut = s.tcsP ? s.tcsP.gpuAddress : 0;
@@ -1633,7 +2037,7 @@ void mpUpload(MPState& s) {
         info->itemOffsets = off.gpu;
     }
     s.infoAddr = di.gpu;
-    s.argAddr = drawArguments(ctx, s.prog);
+    s.argAddr = drawArguments(ctx, s.prog, s.inert);
     if (!s.argAddr) s.argAddr = ctx->upload(16).gpu;
     s.sysAddr = buildSys(ctx, s.prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
 }
@@ -1758,7 +2162,10 @@ void mpFinishCounts(MPState& s, const uint64_t generated[4], int outVpp, bool co
 //   MeshGeometry        : VS + GS on a mesh pipeline
 //   Tessellation        : VS+TCS kernel, then TES on object+mesh (or TES records + GS on mesh)
 //   XfbCapture          : counted capture/count passes for transform feedback and primitive queries
-static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d, glsl::VariantKey vk, bool xfbCapture) {
+//   inertArgs: the stages' storage writes go to copies (ARB_post_depth_coverage: the draw's own vertex
+//   processing has the side effects)
+static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d, glsl::VariantKey vk, bool xfbCapture,
+                             bool inertArgs = false) {
     const glsl::Reflection& refl = prog->refl;
     if (d.indirect) {
         static bool warned = false;
@@ -1771,6 +2178,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     s.prog = prog;
     s.d = &d;
     s.xfb = xfbCapture;
+    s.inert = inertArgs;
     // --- primitive list ---
     Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
     const uint8_t* src = nullptr;
@@ -1919,6 +2327,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         ctx->dev->releaseAfter(sc, ctx->serial());
         s.spillBuffer = sb.gpuAddress;
         s.spillCounter = sc.gpuAddress;
+        s.spillCounterBuffer = sc;
         s.spillCapacity = (uint32_t)(bytes / sm->spillRecordBytes);
     }
     if (vk.kind == glsl::PipelineKind::Tessellation) {
@@ -1932,6 +2341,17 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     const glsl::EntryPoint* os = var->entry(glsl::EntryPoint::Object);
     if (!ms) { retire(); return false; }
     if (hasTess && hasGS && s.tesPrimCount == 0) { retire(); return true; }
+    // ARB_post_depth_coverage (VariantKey::pdc, executePdc): one pre-pass for the whole draw. The rasterized
+    // primitives come from the GPU here, so a draw that writes depth/stencil isn't split per primitive.
+    bool pdc = vk.pdc && !ctx->rasterizerDiscard;
+    uint64_t preInfoAddr = 0, preArgAddr = 0;
+    if (pdc) {  // the pre-pass's draw description: storage copies, no statistics (before any encoder)
+        MPState pre = s;
+        pre.inert = pre.noStats = true;
+        mpUpload(pre);
+        preInfoAddr = pre.infoAddr;
+        preArgAddr = pre.argAddr;
+    }
     id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
     if (!e) { retire(); return true; }
     RenderPipelineKey key;
@@ -1940,12 +2360,48 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     key.rasterEnabled = !ctx->rasterizerDiscard;
     id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
     if (!pso) { retire(); return true; }
+    GLenum rasterMode = hasGS ? refl.gsOutputPrimitive : hasTess ? GL_TRIANGLES : s.listMode;
+    id<MTL4ArgumentTable> table = ctx->renderArgTable;
+    MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
+    auto drawMesh = [&](id<MTL4RenderCommandEncoder> enc) {
+        if (os) {
+            MTLSize objTG = MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2]);
+            [enc drawMeshThreadgroups:MTLSizeMake(s.prims, d.instances, 1) threadsPerObjectThreadgroup:objTG threadsPerMeshThreadgroup:meshTG];
+        } else {
+            int invocations = std::max(1, refl.gsInvocations);
+            MTLSize grid = hasTess ? MTLSizeMake(s.tesPrimCount, 1, invocations) : MTLSizeMake(s.prims, d.instances, invocations);
+            [enc drawMeshThreadgroups:grid threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:meshTG];
+        }
+    };
+    id<MTLTexture> cov = nil;
+    if (pdc) {
+        PassDesc mainPass = ctx->curPass;
+        cov = pdcCoverage(ctx, mainPass);
+        id<MTLRenderPipelineState> prePso = ctx->pipelines_->renderPipeline(pdcPrepassKey(key));
+        if (!cov || !prePso) { retire(); return true; }
+        id<MTL4RenderCommandEncoder> pe = pdcBeginPrepass(ctx, mainPass, cov);
+        if (!pe) { retire(); return true; }
+        [pe setRenderPipelineState:prePso];
+        ctx->enc.pipeline = prePso;
+        applyDynamicState(ctx, pe, rasterMode, refl.writesViewportIndex, true);
+        [table setAddress:preArgAddr ? preArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
+        [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
+        [table setAddress:preInfoAddr atIndex:glsl::kBufStageIO];
+        drawMesh(pe);
+        ctx->endPass();
+        if (s.spillCounterBuffer) {  // the draw's vertices spill from the start again
+            id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
+            [ce fillBuffer:s.spillCounterBuffer range:NSMakeRange(0, 16) value:0];
+            ctx->endEncoder();
+        }
+        e = ctx->renderEncoder();
+        if (!e || !(ctx->curPass == mainPass)) { retire(); return true; }
+    }
     if (ctx->enc.pipeline != pso) {
         [e setRenderPipelineState:pso];
         ctx->enc.pipeline = pso;
     }
-    applyDynamicState(ctx, e, hasGS ? refl.gsOutputPrimitive : hasTess ? GL_TRIANGLES : s.listMode, refl.writesViewportIndex);
-    id<MTL4ArgumentTable> table = ctx->renderArgTable;
+    applyDynamicState(ctx, e, rasterMode, refl.writesViewportIndex);
     [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
     [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
     [table setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
@@ -1954,16 +2410,9 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         ctx->enc.fsTableSplit = false;
     }
     if (fsrAddr) [table setAddress:fsrAddr atIndex:glsl::kBufFsr];
+    if (pdc) [table setAddress:pdcUpload(ctx, cov, 0, refl.writesLayer) atIndex:glsl::kBufPdc];
     mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts come from counted passes
-    MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
-    if (os) {
-        MTLSize objTG = MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2]);
-        [e drawMeshThreadgroups:MTLSizeMake(s.prims, d.instances, 1) threadsPerObjectThreadgroup:objTG threadsPerMeshThreadgroup:meshTG];
-    } else {
-        int invocations = std::max(1, refl.gsInvocations);
-        MTLSize grid = hasTess ? MTLSizeMake(s.tesPrimCount, 1, invocations) : MTLSizeMake(s.prims, d.instances, invocations);
-        [e drawMeshThreadgroups:grid threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:meshTG];
-    }
+    drawMesh(e);
     retire();
     return true;
 }
@@ -2037,6 +2486,10 @@ struct RotCache {
 static std::unordered_map<Context*, RotCache> g_rotCaches;
 
 void mgl::releaseDrawCaches(Context* ctx) {
+    if (auto c = g_pdcCoverage.find(ctx); c != g_pdcCoverage.end()) {
+        if (c->second) ctx->dev->releaseAfter(c->second, ctx->dev->lastReservedSerial());
+        g_pdcCoverage.erase(c);
+    }
     auto it = g_rotCaches.find(ctx);
     if (it == g_rotCaches.end()) return;
     uint64_t s = ctx->dev->lastReservedSerial();
@@ -2247,6 +2700,8 @@ static bool indirectNeedsCpu(Context* ctx, const DrawParams& d, ProgramObj* prog
     ProgramObj* f = ctx->activeProgramForStage(glsl::Stage::Fragment);
     const glsl::Reflection& fr = f ? f->refl : r;
     if (fr.usesFlatShading && ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION && d.mode != GL_POINTS) return true;
+    // ARB_post_depth_coverage pre-passes (executePdc) and draws split per primitive
+    if (ctx->superStrict() && fr.postDepthCoverage) return true;
     return false;
 }
 
@@ -2412,10 +2867,17 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     vk.sparseImageSlots = sparseImageSlots(ctx, prog);
     msArraySlots(ctx, prog, vk);
     vk.advancedBlend = advancedBlendKey(ctx);
-    if (ctx->strict) {
+    if (ctx->strict()) {
         ProgramObj* f = ctx->pipeline && !ctx->program ? ctx->pipeline->stages[(int)glsl::Stage::Fragment].get() : prog;
         vk.fsr = fsrWanted(ctx, refl.writesPrimitiveShadingRate, f ? &f->refl : nullptr);
     }
+    // ARB_post_depth_coverage (super strict): a depth/stencil pre-pass for the coverage (executePdc)
+    PdcInfo pdc;
+    if (ctx->superStrict() && !ctx->rasterizerDiscard) {
+        ProgramObj* f = ctx->pipeline && !ctx->program ? ctx->pipeline->stages[(int)glsl::Stage::Fragment].get() : prog;
+        if (f && f->refl.postDepthCoverage) pdc = pdcInfo(ctx);
+    }
+    vk.pdc = pdc.tests;
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     bool primQueries = mglQueryPrimitivesActive(ctx);
     if (vk.kind != glsl::PipelineKind::Classic) {
@@ -2426,6 +2888,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
             glsl::VariantKey xk = vk;
             xk.kind = glsl::PipelineKind::XfbCapture;
             xk.fsr = false;
+            xk.pdc = false;
             captured = executeMultiPass(ctx, prog, d, xk, xfbActive);
         }
         // With rasterizer discard the mesh pass only matters for shader side effects, which the
@@ -2437,7 +2900,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
         uint64_t n = d.count;
         mglQueryAddPrimitives(ctx, 0, mglPrimitivesFor(d.mode, n) * (uint64_t)std::max(0, d.instances), 0, false, false);
     }
-    if (xfbActive && !ctx->rasterizerDiscard && !d.indirect && vertexSideEffects(refl)) {
+    if (xfbActive && !ctx->rasterizerDiscard && !d.indirect && vertexSideEffects(refl) && !vk.pdc) {
         // Capture from the rasterizing vertex shader so its side effects happen once.
         glsl::VariantKey xk = vk;
         xk.xfbInVertex = true;
@@ -2448,7 +2911,9 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
         glsl::VariantKey xk = vk;
         xk.kind = glsl::PipelineKind::XfbCapture;
         xk.fsr = false;
-        executeMultiPass(ctx, prog, d, xk, true);
+        xk.pdc = false;
+        // with a pre-pass, the draw's own vertex shader has the side effects
+        executeMultiPass(ctx, prog, d, xk, true, vk.pdc && vertexSideEffects(refl));
         // the capture kernel already ran the vertex shader once per vertex (side effects included)
         if (ctx->rasterizerDiscard) return;
     }
@@ -2475,6 +2940,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
                      refl.usesFlatShading, desc.c_str());
     }
     vk.manualFetch = wantManualFetch(ctx, prog);
+    if (vk.pdc && pdc.writes && d.instances > 1 && !vk.manualFetch && pdcNeedsManualFetch(ctx)) vk.manualFetch = true;
     if (vk.manualFetch) fillVertexFetch(ctx, prog, vk);
     else vk.attribSignFlip = attribSignFlip(ctx, prog);
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
@@ -2495,6 +2961,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
                 fk.flatshadeLastVertex = vk.flatshadeLastVertex;
                 fk.advancedBlend = vk.advancedBlend;
                 fk.fsr = vk.fsr;
+                fk.pdc = vk.pdc;
                 fsVar = ctx->pipelines_->variant(f, fk);
                 if (!fsVar || !fsVar->ok) return;
             }
@@ -2542,6 +3009,9 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     }
     if (!d.indirect && (d.indexed || ii.generated) && ii.count == 0) return;
 
+    // ARB_post_depth_coverage draws that write depth/stencil are split per primitive (executePdc)
+    PdcSplit pdcSplit;
+    if (vk.pdc && pdc.writes && !pdcPrimitives(ctx, d, pdcSplit.ids, pdcSplit.prims, pdcSplit.vpp)) return;
     // Vertex data read on the CPU (client arrays, Metal-incompatible layouts that get
     // repacked) must be synchronized *before* encoding starts: a GPU wait flushes the
     // command buffer, which would end the render encoder and retire upload memory.
@@ -2560,6 +3030,10 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
     uint64_t argAddr = buildArguments(ctx, prog, false);
     uint64_t fsArgAddr = mixedFs && fsProg ? buildArguments(ctx, fsProg, false) : 0;
     uint64_t fsrAddr = vk.fsr ? fsrUpload(ctx) : 0;
+    if (vk.pdc) {
+        executePdc(ctx, prog, var, fsProg, fsVar, mixedFs, frefl, d, ii, minIdx, maxIdx, argAddr, fsArgAddr, pdc.writes ? &pdcSplit : nullptr);
+        return;
+    }
     id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
     if (!e) return;
     id<MTL4ArgumentTable> table = ctx->renderArgTable;

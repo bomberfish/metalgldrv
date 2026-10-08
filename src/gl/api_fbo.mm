@@ -404,7 +404,7 @@ static void framebufferTexture(Context* ctx, Framebuffer* fb, GLenum attachment,
 API void APIENTRY glFramebufferShadingRateEXT(GLenum target, GLenum attachment, GLuint texture, GLint baseLayer, GLsizei numLayers,
                                               GLsizei texelWidth, GLsizei texelHeight) {
     MGL_CTX();
-    if (!ctx->strict) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
+    if (!ctx->strict()) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) return ctx->setError(GL_INVALID_ENUM);
     if (attachment != GL_SHADING_RATE_ATTACHMENT_EXT) return ctx->setError(GL_INVALID_ENUM);
     Framebuffer* fb = ctx->fbForTarget(target);
@@ -555,7 +555,7 @@ static void fbAttachmentParam(Context* ctx, Framebuffer* fb, GLenum attachment, 
         default: return ctx->setError(GL_INVALID_ENUM);
         }
     }
-    if (attachment == GL_SHADING_RATE_ATTACHMENT_EXT && ctx->strict) {
+    if (attachment == GL_SHADING_RATE_ATTACHMENT_EXT && ctx->strict()) {
         Texture* t = fb->shadingRateTex.get();
         switch (pname) {
         case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE: *params = t ? GL_TEXTURE : GL_NONE; return;

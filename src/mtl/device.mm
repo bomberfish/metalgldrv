@@ -1,5 +1,8 @@
 #import "mtl/device.h"
 #include <TargetConditionals.h>
+#include <strings.h>
+#include <cstdlib>
+#include <cstring>
 #include <type_traits>
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
@@ -80,11 +83,18 @@ bool Device::init() {
             if (mtl.supportsPlacementSparse) sparseTileBytes = [mtl sparseTileSizeInBytesForSparsePageSize:kSparsePageSize];
         }
         caps.sparse = sparseTileBytes > 0;
-        caps.strict = envFlag("METALGLDRV_STRICT", false);
+        caps.strictLevel = parseStrictLevel(getenv("METALGLDRV_STRICT"));
         MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d, sparse=%d%s)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression,
-                 caps.sparse, caps.strict ? ", strict" : "");
+                 caps.sparse, caps.superStrict() ? ", super strict" : caps.strict() ? ", strict" : "");
     }
     return true;
+}
+
+int parseStrictLevel(const char* v) {
+    if (!v || !*v || !strcmp(v, "0") || !strcasecmp(v, "false") || !strcasecmp(v, "no")) return 0;
+    if (!strcasecmp(v, "super") || !strcasecmp(v, "superstrict") || !strcasecmp(v, "super-strict")) return 2;
+    int n = atoi(v);
+    return n >= 2 ? 2 : 1;
 }
 
 uint64_t Device::reserveSerial() {

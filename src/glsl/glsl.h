@@ -62,7 +62,11 @@ struct CompileOptions {
     bool sparseTexture = false;  // GL_ARB_sparse_texture2 / GL_ARB_sparse_texture_clamp (device supports sparse textures)
     // Extensions this device supports beyond supportedExtensions() (#extension and predefined macros).
     const std::vector<std::string>* deviceExtensions = nullptr;
-    bool strict = false;  // METALGLDRV_STRICT (limits that differ, e.g. gl_MaxImageSamples)
+    // METALGLDRV_STRICT level (DeviceCaps::strictLevel): strict() limits that differ (gl_MaxImageSamples) and
+    // strict-only extensions; superStrict() the extensions of the most expensive emulations.
+    int strictLevel = 0;
+    bool strict() const { return strictLevel >= 1; }
+    bool superStrict() const { return strictLevel >= 2; }
 };
 // Shader extensions that exist only when CompileOptions::sparseTexture is set.
 const std::vector<std::string>& sparseTextureExtensions();
@@ -217,9 +221,11 @@ struct LinkInput {
     std::vector<std::string> xfbVaryings;         // glTransformFeedbackVaryings
     bool xfbInterleaved = true;
     bool separable = false;
-    // METALGLDRV_STRICT: emit the accuracy features that cost performance and aren't needed for
-    // conformance (integer border colors, ...).
-    bool strict = false;
+    // METALGLDRV_STRICT level: strict() emits the accuracy features that cost performance and aren't
+    // needed for conformance (integer border colors, ...); superStrict() the most expensive ones.
+    int strictLevel = 0;
+    bool strict() const { return strictLevel >= 1; }
+    bool superStrict() const { return strictLevel >= 2; }
     // texelFetch outside the texture / mip range returns zero (robust access; on under strict).
     bool robustTexelFetch = false;
 };
@@ -278,6 +284,9 @@ struct Reflection {
     int meshMaxVertices = 0, meshMaxPrimitives = 0;
     uint32_t meshOutputPrimitive = 0;  // GL_POINTS / GL_LINES / GL_TRIANGLES
     bool usesFragDepth = false, earlyFragmentTests = false, usesDiscard = false;
+    // ARB_post_depth_coverage (super strict): the fragment shader declares post_depth_coverage and reads
+    // gl_SampleMaskIn, which must hold only the samples that passed the early depth/stencil tests (VariantKey::pdc).
+    bool postDepthCoverage = false;
     uint16_t blendSupport = 0;              // fragment shader blend_support_* qualifiers (KHR_blend_equation_advanced)
     bool usesFp64 = false;
     bool usesFlatShading = false;           // any flat-qualified input reaching the fragment shader
@@ -365,6 +374,11 @@ struct VariantKey {
     // emitFS); the last pre-rasterization stage passes gl_PrimitiveShadingRateEXT (0 if it doesn't write
     // it) as the flat varying psr_0.
     bool fsr = false;
+    // ARB_post_depth_coverage (super strict, Reflection::postDepthCoverage): the fragment shader ANDs gl_SampleMaskIn
+    // with the samples a pre-pass marked in a coverage attachment (MGLPdc at kBufPdc) and adds MGLPdc::primBase to
+    // gl_PrimitiveID; the variant also has the pre-pass fragment function mgl_fs_pdc (writes 1 to color 0), and the
+    // vertex position is invariant so that both passes rasterize the same samples.
+    bool pdc = false;
 };
 
 struct EntryPoint {
@@ -403,6 +417,19 @@ enum : uint32_t {
     kBufXfb0 = 18,        // transform feedback buffers 0..3
     kBufStageIO = 22,     // scratch buffers for multi-pass pipelines (GS/tess)
     kBufFsr = 23,         // MGLFsr (fragment stage of VariantKey::fsr pipelines)
+    kBufPdc = 24,         // MGLPdc (fragment stage of VariantKey::pdc pipelines)
+};
+
+// ARB_post_depth_coverage state of a VariantKey::pdc draw: the MTLResourceIDs of the pre-pass coverage attachment
+// (R8Unorm, 1 where a sample passed the depth/stencil tests) as a 2D multisample array (sampled framebuffers) or a
+// 2D array (single-sampled), the other one null; primBase is added to gl_PrimitiveID (draws split per primitive);
+// layered: the pass is layered and the last pre-rasterization stage writes gl_Layer (else the coverage is layer 0).
+struct alignas(16) MGLPdc {
+    uint64_t coverageMS;
+    uint64_t coverage;
+    uint32_t primBase;
+    uint32_t layered;
+    uint32_t pad[2];
 };
 
 // EXT_fragment_shading_rate state of a draw (VariantKey::fsr). `state` packs the draw rate

@@ -299,6 +299,7 @@ void Linker::collectStage(Stage s) {
             if (l.order) d.order = l.order;
             if (l.pointMode) d.pointMode = true;
             if (l.earlyFragmentTests) d.earlyFragmentTests = true;
+            if (l.postDepthCoverage) d.postDepthCoverage = true;
             d.blendSupport |= l.blendSupport;
         };
         const Layout& l = sh->inLayout;
@@ -1381,10 +1382,14 @@ void Linker::stageMetadata() {
             r.vsMeshPassthrough = scalars > 124;
         }
         r.usesFragDepth = fs.writesFragDepth;
-        r.earlyFragmentTests = fs.inLayout.earlyFragmentTests;
+        // ARB_post_depth_coverage implicitly enables early fragment tests
+        r.earlyFragmentTests = fs.inLayout.earlyFragmentTests || fs.inLayout.postDepthCoverage;
+        if (fs.inLayout.postDepthCoverage)
+            for (auto* v : fs.used)
+                if (v->builtin == BuiltinVar::SampleMaskIn) r.postDepthCoverage = true;
         r.blendSupport = fs.outLayout.blendSupport;
         r.usesDiscard = fs.usesDiscard;
-        if (prog_->strict) {
+        if (prog_->strict()) {
             // EXT_fragment_shading_rate: the effective rate must be 1x1 for shaders that write depth or the sample
             // mask (FRAGMENT_SHADING_RATE_WITH_SHADER_DEPTH_STENCIL_WRITES / _WITH_SAMPLE_MASK are FALSE), shade
             // per sample, or read gl_FragCoord without enabling the extension.
@@ -1404,7 +1409,8 @@ void Linker::stageMetadata() {
                     for (auto& m : v->block->members) sample |= m.q.sample;
                 if (sample) force = true;
             }
-            r.fsrForce1x1 = force;
+            // ARB_post_depth_coverage: the coverage is read per pixel (VariantKey::pdc)
+            r.fsrForce1x1 = force || fs.inLayout.postDepthCoverage;
         }
     }
     // fp64 usage
@@ -1613,7 +1619,7 @@ void Linker::stageMetadata() {
             if (v->builtin == BuiltinVar::Layer && v->q.storage == Storage::Out && v->written) r.writesLayer = true;
             if (v->builtin == BuiltinVar::ViewportIndex && v->q.storage == Storage::Out && v->written) r.writesViewportIndex = true;
             // EXT_fragment_shading_rate: the primitive's rate, from its provoking vertex (VariantKey::fsr pipelines)
-            if (prog_->strict && v->builtin == BuiltinVar::PrimitiveShadingRate && v->q.storage == Storage::Out && v->written &&
+            if (prog_->strict() && v->builtin == BuiltinVar::PrimitiveShadingRate && v->q.storage == Storage::Out && v->written &&
                 (pre == Stage::Vertex || pre == Stage::Geometry))
                 r.writesPrimitiveShadingRate = true;
         }
@@ -1683,8 +1689,8 @@ void Linker::checkBlockInterfaces() {
 LinkResult Linker::run() {
     prog_ = std::make_shared<LinkedProgram>();
     prog_->separable = in_.separable;
-    prog_->strict = in_.strict;
-    prog_->robustTexelFetch = in_.robustTexelFetch || in_.strict;
+    prog_->strictLevel = in_.strictLevel;
+    prog_->robustTexelFetch = in_.robustTexelFetch || in_.strict();
     for (auto& sh : in_.shaders) {
         if (!sh) { error("attempt to link an uncompiled shader"); continue; }
         prog_->stages[(int)sh->stage].shaders.push_back(sh);

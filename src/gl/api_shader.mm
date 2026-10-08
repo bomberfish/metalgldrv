@@ -175,7 +175,7 @@ API void APIENTRY glCompileShader(GLuint shader) {
     opts.compatibilityProfile = !ctx->coreProfile;
     opts.sparseTexture = ctx->dev->caps.sparse;
     opts.deviceExtensions = &mglDeviceGlslExtensions(ctx->dev->caps);
-    opts.strict = ctx->strict;
+    opts.strictLevel = ctx->strictLevel;
     glsl::CompileResult r = glsl::compile(st, s->sources, opts);
     s->shader = r.shader;
     s->compiled = r.shader != nullptr;
@@ -283,7 +283,7 @@ API void APIENTRY glSpecializeShader(GLuint shader, const GLchar* pEntryPoint, G
     glsl::CompileOptions opts;
     opts.compatibilityProfile = false;
     opts.sparseTexture = ctx->dev->caps.sparse;
-    opts.strict = ctx->strict;
+    opts.strictLevel = ctx->strictLevel;
     glsl::SpecializeResult r = glsl::specializeSpirv(*s->spirvModule, st, pEntryPoint, constants, opts);
     switch (r.status) {
     case glsl::SpecializeStatus::BadEntryPoint: return ctx->setError(GL_INVALID_VALUE, "no SPIR-V entry point '%s' for this stage", pEntryPoint);
@@ -490,7 +490,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
     in.xfbVaryings = p->xfbVaryings;
     in.xfbInterleaved = p->xfbBufferMode == GL_INTERLEAVED_ATTRIBS;
     in.separable = p->separable;
-    in.strict = ctx->strict;
+    in.strictLevel = ctx->strictLevel;
     in.robustTexelFetch = ctx->robustAccess;
     p->linkGeneration++;
     // A failed (re)link keeps the previous executable (p->program, refl, variants): GL keeps

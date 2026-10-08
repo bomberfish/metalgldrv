@@ -548,6 +548,7 @@ enum ExecutionMode : uint32_t {
     ExecutionModeSubgroupsPerWorkgroupId = 37,
     ExecutionModeLocalSizeId = 38,
     ExecutionModeLocalSizeHintId = 39,
+    ExecutionModePostDepthCoverage = 4446,
 };
 
 enum ExecutionModel : uint32_t {

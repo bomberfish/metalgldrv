@@ -56,7 +56,7 @@ functionality, for limits above the spec minimum, or where the test itself doesn
 | texture_filter_minmax_tests | 5 | ARB_texture_filter_minmax is optional |
 | ext_texture_shadow_lod | 15 | EXT_texture_shadow_lod is optional |
 | shader_ballot_tests | 4 | ARB_shader_ballot is optional |
-| post_depth_coverage_tests | 2 | ARB_post_depth_coverage is optional |
+| post_depth_coverage_tests | 2 | ARB_post_depth_coverage is optional; it is emulated and exposed with METALGLDRV_STRICT=2 (super strict), where both pass (see "ARB_post_depth_coverage" below) |
 | shader_viewport_layer_array | 3 | ARB_shader_viewport_layer_array is optional |
 | shaders.shader_integer_mix.prototypes | 1 | EXT_shader_integer_mix is optional |
 | sample_variables, es_31_compatibility.sample_variables | 76 | 8-sample variants; GL_MAX_SAMPLES is 4, the GL 4.6 minimum (the GPU supports 1/2/4). 8x emulation was evaluated and rejected, see "8x MSAA" below |
@@ -101,7 +101,7 @@ renderable RGB9_E5, METALGLDRV_STRICT, and fixes for several Metal resource leak
 | shader_image_size, shader_image_load_store, shader_texture_image_samples_tests (multisample) | 39 | GL_MAX_IMAGE_SAMPLES is 0 in the default mode; all pass with METALGLDRV_STRICT=1 |
 | cull_distance item 8 | 16 | test design (see above) |
 | texture_query_lod | 3 | viewport too small at 64x64 |
-| post_depth_coverage_tests | 2 | not implementable on Metal: the fragment sample-mask input doesn't reflect depth/stencil results |
+| post_depth_coverage_tests | 2 | ARB_post_depth_coverage is optional. Metal's sample-mask input doesn't reflect depth/stencil results, so it is emulated with depth/stencil pre-passes, exposed in super strict mode only (METALGLDRV_STRICT=2); feasible, not exposed by default because of its cost |
 | texture_cube_map_array (2), draw_elements_base_vertex_tests (1) | 3 | ES-only tests |
 | shaders.shader_integer_mix.prototypes | 1 | the test skips GLSL < 4.50 by design |
 
@@ -190,3 +190,32 @@ views, clears, invalidation, readback, sparse multisample storage, internalforma
 A version without the fixes in 1 and 2 deviates in ways GL forbids, and the full version means capturing
 GS/mesh output and replaying render passes across the whole draw path, for the 76 cases above. GL_MAX_SAMPLES
 therefore stays 4, the GL 4.6 minimum, which is conformant.
+
+# ARB_post_depth_coverage (METALGLDRV_STRICT=2, super strict)
+
+Metal's `[[sample_mask]]` fragment input doesn't reflect the depth/stencil tests, even with
+`[[early_fragment_tests]]` (probed on the M4 Pro and the M5), so the extension is emulated, and exposed only in
+super strict mode because of its cost. `layout(post_depth_coverage) in;` implies early fragment tests. A draw whose
+fragment shader reads gl_SampleMaskIn, with a depth or stencil test in effect, first renders a pre-pass: the same
+vertex function (invariant position), rasterizer and depth/stencil tests, with depth/stencil writes off, into a
+transient R8 coverage attachment that a fragment function sets to 1. The draw then ANDs gl_SampleMaskIn with its
+pixel's marked samples, which are exactly the samples that pass the early tests. Without depth/stencil writes one
+pre-pass per draw is exact. With writes, primitives of the draw affect each other in order, so the draw is split
+into a pre-pass and a draw per primitive and instance, in GL order (strips, fans, loops, adjacency and primitive
+restart decomposed on the CPU, provoking vertices kept, gl_PrimitiveID / gl_InstanceID / per-instance attributes
+preserved). That costs two render passes per primitive. Pre-passes don't count for occlusion or primitive queries
+or transform feedback, and bind copies of the storage buffers, atomic counters and writable images that the
+pre-rasterization stages use, so their side effects happen once. Indirect draws are read back on the CPU.
+Single-sampled targets get the same logic with a one-bit mask. `tests/host/test_pdc.cpp` covers occluded samples,
+intra-draw occlusion (depth and stencil), restart strips/fans, instancing, 1/2/4 samples, layered targets, a
+geometry shader and the side-effect copies.
+
+Limitations: geometry/tessellation draws, and vertex shaders that run on the mesh pipeline because their outputs
+exceed the classic varying budget, get one pre-pass per draw. Their rasterized primitives are produced on the GPU,
+so the CPU can't split the draw per primitive. When such a draw writes depth or stencil and its own primitives
+overlap, the later ones' masks include samples that an earlier primitive of the same draw occluded. Vertex
+processing whose positions depend on atomic results can differ between the pre-pass and the draw.
+
+`KHR-GL46.post_depth_coverage_tests.*`: both pass in super strict mode (previously NotSupported). Full KHR-GL46
+runs on the M4 Pro (64x64, config 1) with this change, 0 Fail/Crash/Timeout: super strict 19154 pass / 559
+NotSupported / 1 CompatibilityWarning, strict 19152 / 561 / 1 and default 18061 / 1652 / 1 (both unchanged). `tests/host` passes at all three levels.

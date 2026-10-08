@@ -92,9 +92,7 @@ void resetFsr() {
 }  // namespace
 
 TEST(fsr_extension_strict_only) {
-    const char* s = getenv("METALGLDRV_STRICT");
-    bool strict = s && atoi(s) != 0;
-    CHECK_EQ(hasFsr(), strict);
+    CHECK_EQ(hasFsr(), strictLevelFromEnv() >= 1);
     if (!hasFsr()) return;
     GLenum rates[16];
     GLsizei n = -1;

@@ -2,14 +2,19 @@
 # Full conformance receipt run: every mustpass case list, each archived with save_report.py.
 # Usage: tests/cts/run_receipts.sh [run names...]   (logs in tests/cts/results/receipt-*.log)
 #   With names (e.g. KHR-GL46-cfg6 KHR-NoContext), only those runs are done, to resume a stopped matrix.
-#   METALGLDRV_STRICT=1 in the environment runs the matrix in strict mode; every run name gets a -strict suffix.
+#   METALGLDRV_STRICT=1 (strict) / =2 (super strict) in the environment runs the matrix in that accuracy profile;
+#   every run name gets a -strict / -superstrict suffix.
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE/../.."
 only=("$@")
 wired_gb() { vm_stat | awk '/wired/ {printf "%d", $4*16384/1e9}'; }
 run() {  # name caselist surface [run.sh options...]
     local name=$1 list=$2 surface=$3; shift 3
-    [ "${METALGLDRV_STRICT:-0}" = 1 ] && name="$name-strict"
+    case "${METALGLDRV_STRICT:-0}" in
+        0|false|FALSE|no|NO) ;;
+        2|super|superstrict|super-strict) name="$name-superstrict" ;;
+        *) name="$name-strict" ;;
+    esac
     if [ ${#only[@]} -gt 0 ] && [[ ! " ${only[*]} " =~ " $name " ]]; then return; fi
     # A run once left the Mac with ~48 GB wired and the session was killed for low memory: wait for
     # wired memory to settle below 40 GB (of 48) before each run, and stop the matrix if it doesn't.

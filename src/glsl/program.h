@@ -88,7 +88,9 @@ struct LinkedProgram {
     StageCode stages[(int)Stage::Count];
     uint32_t stageMask = 0;
     bool separable = false;
-    bool strict = false;            // LinkInput::strict
+    int strictLevel = 0;            // LinkInput::strictLevel
+    bool strict() const { return strictLevel >= 1; }
+    bool superStrict() const { return strictLevel >= 2; }
     bool robustTexelFetch = false;  // LinkInput::robustTexelFetch
     Reflection refl;
     std::map<std::string, uint32_t> defaultOffsets;        // default-block uniform var name -> byte offset

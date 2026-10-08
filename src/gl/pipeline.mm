@@ -43,6 +43,7 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     }
     h = hashBytes(&key.advancedBlend, 1, h);
     if (key.fsr) h = hashBytes(&key.fsr, 1, h);
+    if (key.pdc) h = hashBytes(&key.pdc, 1, h);
     if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch || key.xfbInVertex) {
         // Field by field: VertexFetch has padding bytes with indeterminate contents.
         for (const glsl::VertexFetch& f : key.attribs) {
@@ -128,6 +129,11 @@ static id<MTLRenderPipelineState> newRenderPipeline(Device* dev, const RenderPip
     if (key.fsVariantUid) {  // program pipeline: fragment stage from another program (or none)
         fs = key.fsVariant ? key.fsVariant->entry(glsl::EntryPoint::Fragment) : nullptr;
         fsLib = key.fsVariant ? key.fsVariant->lib : nil;
+    }
+    if (key.pdcPrepass) {
+        const ProgramVariant* fv = key.fsVariantUid ? key.fsVariant : v;
+        fs = fv ? fv->entry("mgl_fs_pdc") : nullptr;
+        if (!fs) return nil;
     }
     const glsl::EntryPoint* ms = v->entry(glsl::EntryPoint::Mesh);
     const glsl::EntryPoint* os = v->entry(glsl::EntryPoint::Object);

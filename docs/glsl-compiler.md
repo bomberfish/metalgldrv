@@ -195,6 +195,19 @@ Fragment shaders that write gl_FragDepth / gl_SampleMask, shade per sample or re
 extension (`Reflection::fsrForce1x1`), and draws with sample shading or a partial SAMPLE_MASK_VALUE use the regular
 variant (rate 1x1), as do draws whose rate can only be 1x1 (`fsrWanted`).
 
+### Post-depth coverage (ARB_post_depth_coverage, VariantKey::pdc, METALGLDRV_STRICT=2)
+`layout(post_depth_coverage) in;` is parsed in super strict mode only (elsewhere it stays an unknown, ignored
+qualifier) and implies `[[early_fragment_tests]]`. `Reflection::postDepthCoverage` is set when the shader also reads
+gl_SampleMaskIn; such draws with a depth/stencil test get a `pdc` variant (runtime: draw.mm, executePdc):
+* gl_SampleMaskIn = `[[sample_mask]]` & `mgl_pdc_mask`: the samples of the pixel (`[[position]]`, and
+  `[[render_target_array_index]]` when `MGLPdc::layered`) that the pre-pass marked in the coverage attachment
+  (`MGLPdc` at buffer(24): `texture2d_ms_array<float>` or, single-sampled, `texture2d_array<float>`);
+* gl_PrimitiveID (classic) adds `MGLPdc::primBase`, since draws that write depth/stencil are split per primitive;
+* the extra fragment function `mgl_fs_pdc` (writes 1, early tests) is the pre-pass's;
+* the vertex position is `[[invariant]]` so that both pipelines rasterize the same samples, and the classic vertex
+  function takes gl_BaseInstance from `MGLSys` instead of `[[base_instance]]` (split draws pass the instance as
+  Metal's base instance). Fragment shaders that declare the qualifier force the 1x1 shading rate.
+
 ## Not yet supported
 Mesh pipelines (GS / tessellation rasterization) carry at most 124 output scalars per vertex (including gl_Position and
 point size), below GL's 128 MAX_GEOMETRY_OUTPUT_COMPONENTS. gl_CullDistance is emulated with extra clip distances (-1 when

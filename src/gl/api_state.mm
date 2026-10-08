@@ -570,14 +570,14 @@ static bool validShadingRate(GLenum r) {
 
 API void APIENTRY glShadingRateEXT(GLenum rate) {
     MGL_CTX();
-    if (!ctx->strict) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
+    if (!ctx->strict()) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
     if (!validShadingRate(rate)) return ctx->setError(GL_INVALID_ENUM);
     ctx->shadingRate = rate;
 }
 
 API void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1) {
     MGL_CTX();
-    if (!ctx->strict) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
+    if (!ctx->strict()) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
     auto valid = [](GLenum op) { return op >= GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT && op <= GL_FRAGMENT_SHADING_RATE_COMBINER_OP_MUL_EXT; };
     if (!valid(combinerOp0) || !valid(combinerOp1)) return ctx->setError(GL_INVALID_ENUM);
     // non-trivial combiners, the primitive and the attachment rate are all supported
@@ -589,7 +589,7 @@ API void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combine
 // fragment must fit in a 2x2 quad (see glsl msl.cpp, mgl_fsr_setup).
 API void APIENTRY glGetFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCount, GLsizei* count, GLenum* shadingRates) {
     MGL_CTX();
-    if (!ctx->strict) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
+    if (!ctx->strict()) return ctx->setError(GL_INVALID_OPERATION, "EXT_fragment_shading_rate needs METALGLDRV_STRICT=1");
     if (maxCount < 0) return ctx->setError(GL_INVALID_VALUE);
     static const GLenum kRates[] = {GL_SHADING_RATE_2X2_PIXELS_EXT, GL_SHADING_RATE_2X1_PIXELS_EXT, GL_SHADING_RATE_1X2_PIXELS_EXT,
                                     GL_SHADING_RATE_1X1_PIXELS_EXT};

@@ -137,7 +137,9 @@ public:
     Ref<ShareGroup> share;
     int majorVersion, minorVersion;
     bool coreProfile, debugContext, forwardCompatible, robustAccess, noErrorMode;
-    bool strict;  // dev->caps.strict (METALGLDRV_STRICT)
+    int strictLevel;  // dev->caps.strictLevel (METALGLDRV_STRICT)
+    bool strict() const { return strictLevel >= 1; }
+    bool superStrict() const { return strictLevel >= 2; }
     bool loseContextOnReset = false;
     GLenum clampReadColor = GL_FIXED_ONLY;  // glClampColor(GL_CLAMP_READ_COLOR)  // RESET_NOTIFICATION_STRATEGY requested at creation
     bool everCurrent = false;
