@@ -499,12 +499,29 @@ private:
         size_t VB = 16, PB = 32;
         std::map<std::string, size_t> vslot, pslot;
         std::string cps, setup;
+        // VS + TCS run in the TES pipeline's object stage and pass the patch through the payload
+        // (no compute pass): payload records rec[cpsMax * VB/16 + PB/16], patch record after the control points.
+        bool inObject = false;
+        int cpsMax = 0, threads = 0;
+        std::string objBody;  // object function body (VS + TCS for patch mgl_patch of sub-draw mgl_sd)
     } ts_;
+    // Address space of G::S (shared per-patch state of the TCS / TES): thread in fused variants.
+    std::string sharedSpace_ = "threadgroup";
+    // rasterOutput of a classic vertex function passes only the varyings the fragment shader reads (as for mesh outputs)
+    bool filterOutputs_ = false;
+    // gl_BaseVertex / gl_DrawID of the vertex shader run by runVS (tessellation: from the sub-draw)
+    std::string vsBaseVertex_ = "D.baseVertex", vsDrawID_ = "sys.drawID";
+    // VS + TCS for one patch (tessellation pass 1), recordsTo: "device" (MGLDrawInfo::tcsVertexOut /
+    // tcsPatchOut) or "object_data" (the object stage's payload).
+    std::string tessControlBody(const std::vector<Field>& vf, const std::vector<Field>& recV, const std::vector<Field>& recP,
+                                const std::string& recordsTo);
+    void emitTessFused(std::string& o);
     std::vector<Field> tesRec_;  // TES output record layout (tessellation feeding GS / xfb)
     int tesRB_ = 16, tesIpp_ = 3;
     void emitTessControlPass(std::string& o);
-    std::string tesLoadControlPoints(const std::string& gp, const std::string& cps, int NT);
-    std::string tesLoadPatch();
+    std::string tesDeviceRecord(const std::string& gp, const std::string& cps);
+    std::string tesLoadControlPoints(const std::string& rec, const std::string& cps, int NT);
+    std::string tesLoadPatch(const std::string& space = "device");
     std::string tesRun(const std::string& coord, const std::string& patch, const std::string& cps);
     void emitTessEvalMesh(std::string& o);
     void emitVertexMesh(std::string& o);
@@ -989,7 +1006,7 @@ std::string Emitter::ex(const Expr* e) {
             if (b->type.isVector() && !b->type.isArray() && rootInThreadgroup(b)) {
                 // Address the component as a scalar so concurrent invocations writing different
                 // components of one shared vector don't race through a whole-vector store.
-                return "((threadgroup " + scalarName(b->type.base) + "*)&(" + ex(b) + "))[" + idx + "]";
+                return "((" + sharedSpace_ + " " + scalarName(b->type.base) + "*)&(" + ex(b) + "))[" + idx + "]";
             }
             return ex(b) + "[" + idx + "]";
         }
@@ -1333,7 +1350,7 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
         const Expr* r = a->args[0];
         while (r->kind == EK::Index || r->kind == EK::Field) r = r->args[0];
         if (r->kind == EK::Var && inThreadgroup(r->var))
-            return "((threadgroup " + T + "*)&(" + ex(a->args[0]) + ") + " + std::to_string(a->swz[0]) + ")";
+            return "((" + sharedSpace_ + " " + T + "*)&(" + ex(a->args[0]) + ") + " + std::to_string(a->swz[0]) + ")";
     }
     Acc acc;
     if (a->kind == EK::Swizzle && a->nswz == 1 && bufAccess(a->args[0], acc) && acc.type.isVector()) {
@@ -1349,7 +1366,7 @@ std::string Emitter::atomicPtr(const Expr* a, std::string& pre) {
     }
     const Expr* r = a;
     while (r->kind == EK::Index || r->kind == EK::Field || r->kind == EK::Swizzle) r = r->args[0];
-    if (r->kind == EK::Var && inThreadgroup(r->var)) return "((threadgroup " + T + "*)&(" + ex(a) + "))";
+    if (r->kind == EK::Var && inThreadgroup(r->var)) return "((" + sharedSpace_ + " " + T + "*)&(" + ex(a) + "))";
     fail("atomic operation requires a buffer or shared variable");
 }
 
@@ -2715,7 +2732,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     }
     if (s == Stage::Mesh) sharedDecl += "    uint mgl_nv, mgl_np;\n";  // SetMeshOutputsEXT()
     si.hasShared = hasShared_ = !sharedDecl.empty();
-    if (hasShared_) members += "    threadgroup MGLShared* S;\n";
+    if (hasShared_) members += "    " + sharedSpace_ + " MGLShared* S;\n";
     si.hasPayload = !payloadDecl.empty();
     if (si.hasPayload) members += "    " + payloadSpace_ + " MGLPayload* PL;\n";
 
@@ -3042,9 +3059,9 @@ std::string Emitter::runVS(const std::string& gv, const std::string& vid, const 
         switch (v->builtin) {
             case BuiltinVar::VertexID: c += "    " + m + " = int(mgl_vid);\n"; break;
             case BuiltinVar::InstanceID: c += "    " + m + " = int(mgl_vinst);\n"; break;
-            case BuiltinVar::BaseVertex: c += "    " + m + " = D.baseVertex;\n"; break;
+            case BuiltinVar::BaseVertex: c += "    " + m + " = " + vsBaseVertex_ + ";\n"; break;
             case BuiltinVar::BaseInstance: c += "    " + m + " = int(D.baseInstance);\n"; break;
-            case BuiltinVar::DrawID: c += "    " + m + " = sys.drawID;\n"; break;
+            case BuiltinVar::DrawID: c += "    " + m + " = " + vsDrawID_ + ";\n"; break;
             case BuiltinVar::PointSize: c += "    " + m + " = sys.pointSize;\n"; break;
             default: break;
         }
@@ -3122,7 +3139,7 @@ Emitter::RasterOut Emitter::rasterOutput(Stage st, const std::string& g, bool me
     bool fsCull = fsc.main && fsc.usedNames.count("gl_CullDistance");
     // Mesh vertex outputs are limited (124 scalars): only pass varyings the fragment shader reads.
     std::set<std::string> fsNames;
-    bool filter = mesh && fsc.main;
+    bool filter = (mesh || filterOutputs_) && fsc.main;
     if (filter) {
         Stage keep = stage_;
         useStage(Stage::Fragment);
@@ -4435,9 +4452,82 @@ std::set<std::string> Emitter::fragmentInputNames() {
 }
 
 // ---------------------------------------------------------------------------
-// Tessellation: pass 1 = VS + TCS kernel, pass 2 = object (patch) + mesh (TES), or
-// TES records (mgl_tes_count / mgl_tes_gen) feeding a geometry shader or transform feedback.
+// Tessellation: pass 1 = VS + TCS (in the object stage of pass 2, or the mgl_tcs kernel), pass 2 =
+// object (patch) + mesh (TES), or TES records (mgl_tes_count / mgl_tes_gen) feeding a geometry shader or
+// transform feedback. Patches come from the sub-draw table (MGLDrawInfo::subDraws). emitTessFused: the
+// fast path's single vertex function.
 // ---------------------------------------------------------------------------
+// VS + TCS for patch mgl_patch of sub-draw mgl_sd (grid patch mgl_gp, instance mgl_inst), as thread mgl_tid of
+// ts_.threads: writes the control point records and the patch record (levels first: outer[4], inner[2]) to the
+// device scratch (recordsTo "device": MGLDrawInfo::tcsVertexOut / tcsPatchOut) or to the payload ("object_data":
+// pl.rec, the patch record after ts_.cpsMax control points).
+std::string Emitter::tessControlBody(const std::vector<Field>& vf, const std::vector<Field>& recV, const std::vector<Field>& recP,
+                                     const std::string& to) {
+    bool dev = to == "device";
+    std::string ns = std::to_string(ts_.VB / 16) + "u";
+    auto cpRec = [&](const std::string& cp) {
+        return dev ? "device uint4* r = (device uint4*)(D.tcsVertexOut + (mgl_gp * " + ts_.cps + " + " + cp + ") * " + std::to_string(ts_.VB) + "u);\n"
+                   : "object_data uint4* r = pl.rec + " + cp + " * " + ns + ";\n";
+    };
+    std::string lvDecl = dev ? "device float* lv = (device float*)(D.tcsPatchOut + mgl_gp * " + std::to_string(ts_.PB) + "u);\n"
+                             : "object_data float* lv = (object_data float*)(pl.rec + " + std::to_string(ts_.cpsMax) + "u * " + ns + ");\n";
+    std::string prDecl = to + " uint4* pr = (" + to + " uint4*)((" + to + " uchar*)lv + 32u);\n";
+    vsBaseVertex_ = "mgl_sd.baseVertex";
+    vsDrawID_ = "int(mgl_sd.drawID)";
+    std::string vsRun = runVS("vg", "mgl_sd_vertex(D, mgl_sd, mgl_patch * mgl_pv + mgl_cp)", "mgl_inst");
+    vsBaseVertex_ = "D.baseVertex";
+    vsDrawID_ = "sys.drawID";
+    std::string e;
+    if (!ts_.hasTCS) {
+        e += "    uint mgl_cp = mgl_tid;\n    if (mgl_cp < mgl_pv) {\n" + indentBy(vsRun, 8);
+        useStage(Stage::Vertex);
+        e += "        " + cpRec("mgl_cp");
+        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "vg.")) + ";\n";
+        e += "    }\n    if (mgl_tid == 0u) {\n        " + lvDecl;
+        e += "        for (int i = 0; i < 4; i++) lv[i] = sys.tessDefaultOuter[i];\n        lv[4] = sys.tessDefaultInner[0];\n"
+             "        lv[5] = sys.tessDefaultInner[1];\n    }\n";
+        return e;
+    }
+    int OUTV = ts_.OUTV;
+    StageInfo& tsi = si_[(int)Stage::TessControl];
+    if (tsi.hasShared) e += "    threadgroup tcs::MGLShared mgl_sh;\n    threadgroup tcs::MGLShared* S = &mgl_sh;\n";
+    auto tin = arrayedFields(Stage::TessControl, Storage::In);
+    std::map<std::string, size_t> vsIdx;
+    for (size_t i = 0; i < vf.size(); i++) vsIdx[vf[i].name] = i;
+    e += "    for (uint mgl_cp = mgl_tid; mgl_cp < mgl_pv; mgl_cp += " + std::to_string(OUTV) + "u) {\n";
+    e += indentBy(vsRun, 8);
+    for (auto& f : tin) {
+        auto it = vsIdx.find(f.name);
+        if (it == vsIdx.end()) continue;
+        useStage(Stage::Vertex);
+        std::string src = acc(vf[it->second], "vg.");
+        useStage(Stage::TessControl);
+        e += "        " + acc(f, "", "mgl_cp") + " = " + src + ";\n";
+    }
+    e += "    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    tcs::G g = {};\n    g.A = " + argsOf(Stage::TessControl) + ";\n    g.sys = &sys;\n";
+    if (tsi.hasShared) e += "    g.S = S;\n";
+    for (auto* v : tsi.builtins) {
+        if (v->builtin == BuiltinVar::InvocationID) e += "    g.bi_" + v->name + " = int(mgl_tid);\n";
+        if (v->builtin == BuiltinVar::PrimitiveID) e += "    g.bi_" + v->name + " = int(mgl_patch);\n";
+        if (v->builtin == BuiltinVar::PatchVerticesIn) e += "    g.bi_" + v->name + " = int(mgl_pv);\n";
+    }
+    e += "    g.mgl_init();\n    g." + tsi.mainName + "();\n";
+    e += "    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);\n";
+    useStage(Stage::TessControl);
+    e += "    {\n        " + cpRec("mgl_tid");
+    for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "", "mgl_tid")) + ";\n";
+    e += "    }\n    if (mgl_tid == 0u) {\n        " + lvDecl;
+    const Variable* lo = tsi.bi.count(BuiltinVar::TessLevelOuter) ? tsi.bi[BuiltinVar::TessLevelOuter] : nullptr;
+    const Variable* li = tsi.bi.count(BuiltinVar::TessLevelInner) ? tsi.bi[BuiltinVar::TessLevelInner] : nullptr;
+    for (int i = 0; i < 4; i++) e += "        lv[" + std::to_string(i) + "] = " + (lo ? varName(lo) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
+    for (int i = 0; i < 2; i++) e += "        lv[" + std::to_string(4 + i) + "] = " + (li ? varName(li) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
+    e += "        " + prDecl;
+    for (size_t i = 0; i < recP.size(); i++) e += "        pr[" + std::to_string(i) + "] = " + pk(recP[i], acc(recP[i], "")) + ";\n";
+    e += "    }\n";
+    return e;
+}
+
 void Emitter::emitTessControlPass(std::string& o) {
     const Reflection& R = RF(Stage::TessEval);
     ts_.hasTCS = SC(Stage::TessControl).main != nullptr;
@@ -4460,71 +4550,33 @@ void Emitter::emitTessControlPass(std::string& o) {
     }
     ts_.VB = 16 * std::max<size_t>(1, recV.size());
     ts_.PB = 32 + 16 * recP.size();
-    std::string sVB = std::to_string(ts_.VB) + "u", sPB = std::to_string(ts_.PB) + "u";
     ts_.vslot.clear();
     ts_.pslot.clear();
     for (size_t i = 0; i < recV.size(); i++) ts_.vslot[recV[i].name] = i;
     for (size_t i = 0; i < recP.size(); i++) ts_.pslot[recP[i].name] = i;
     ts_.cps = ts_.hasTCS ? std::to_string(OUTV) + "u" : "D.patchVertices";
-
-    std::string e = "kernel void mgl_tcs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
-                    "uint3 mgl_tg [[threadgroup_position_in_grid]], uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
-    e += "    uint mgl_patch = mgl_tg.x, mgl_inst = mgl_tg.y, mgl_gp = mgl_inst * D.primitiveCount + mgl_patch, mgl_pv = D.patchVertices;\n";
-    e += "    device uchar* mgl_pout = D.tcsPatchOut + mgl_gp * " + sPB + ";\n";
-    std::string vsRun = runVS("vg", "D.indexBuffer[mgl_patch * mgl_pv + mgl_cp] + uint(D.baseVertex)", "mgl_inst");
-    int threads1;
-    if (ts_.hasTCS) {
-        StageInfo& tsi = si_[(int)Stage::TessControl];
-        threads1 = OUTV;
-        if (tsi.hasShared) e += "    threadgroup tcs::MGLShared mgl_sh;\n    threadgroup tcs::MGLShared* S = &mgl_sh;\n";
-        auto tin = arrayedFields(Stage::TessControl, Storage::In);
-        std::map<std::string, size_t> vsIdx;
-        for (size_t i = 0; i < vf.size(); i++) vsIdx[vf[i].name] = i;
-        e += "    for (uint mgl_cp = mgl_tid; mgl_cp < mgl_pv; mgl_cp += " + std::to_string(OUTV) + "u) {\n";
-        e += indentBy(vsRun, 8);
-        for (auto& f : tin) {
-            auto it = vsIdx.find(f.name);
-            if (it == vsIdx.end()) continue;
-            useStage(Stage::Vertex);
-            std::string src = acc(vf[it->second], "vg.");
-            useStage(Stage::TessControl);
-            e += "        " + acc(f, "", "mgl_cp") + " = " + src + ";\n";
-        }
-        e += "    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
-        e += "    tcs::G g = {};\n    g.A = " + argsOf(Stage::TessControl) + ";\n    g.sys = &sys;\n";
-        if (tsi.hasShared) e += "    g.S = S;\n";
-        for (auto* v : tsi.builtins) {
-            if (v->builtin == BuiltinVar::InvocationID) e += "    g.bi_" + v->name + " = int(mgl_tid);\n";
-            if (v->builtin == BuiltinVar::PrimitiveID) e += "    g.bi_" + v->name + " = int(mgl_patch);\n";
-            if (v->builtin == BuiltinVar::PatchVerticesIn) e += "    g.bi_" + v->name + " = int(mgl_pv);\n";
-        }
-        e += "    g.mgl_init();\n    g." + tsi.mainName + "();\n";
-        e += "    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);\n";
-        useStage(Stage::TessControl);
-        e += "    {\n        device uint4* r = (device uint4*)(D.tcsVertexOut + (mgl_gp * " + std::to_string(OUTV) + "u + mgl_tid) * " + sVB + ");\n";
-        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "", "mgl_tid")) + ";\n";
-        e += "    }\n    if (mgl_tid == 0u) {\n        device float* lv = (device float*)mgl_pout;\n";
-        const Variable* lo = tsi.bi.count(BuiltinVar::TessLevelOuter) ? tsi.bi[BuiltinVar::TessLevelOuter] : nullptr;
-        const Variable* li = tsi.bi.count(BuiltinVar::TessLevelInner) ? tsi.bi[BuiltinVar::TessLevelInner] : nullptr;
-        for (int i = 0; i < 4; i++) e += "        lv[" + std::to_string(i) + "] = " + (lo ? varName(lo) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
-        for (int i = 0; i < 2; i++) e += "        lv[" + std::to_string(4 + i) + "] = " + (li ? varName(li) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
-        e += "        device uint4* pr = (device uint4*)(mgl_pout + 32u);\n";
-        for (size_t i = 0; i < recP.size(); i++) e += "        pr[" + std::to_string(i) + "] = " + pk(recP[i], acc(recP[i], "")) + ";\n";
-        e += "    }\n}\n\n";
+    ts_.threads = ts_.hasTCS ? OUTV : 32;
+    ts_.cpsMax = ts_.hasTCS ? OUTV : 32;  // gl_MaxPatchVertices
+    // Rasterized tessellation runs VS + TCS in the object stage of the TES pipeline when the patch fits the
+    // payload (Metal: 16 KB), so the draw stays in the render pass; otherwise (and for the counted passes of
+    // geometry shaders / transform feedback) pass 1 is the mgl_tcs kernel.
+    bool gs = stageMask_ & (1u << (int)Stage::Geometry);
+    size_t payload = 128 + (size_t)ts_.cpsMax * ts_.VB + ts_.PB;
+    ts_.inObject = K.kind == PipelineKind::Tessellation && !gs && !K.tessComputePass && payload <= 16384;
+    std::string prefix = "    uint mgl_gpatch = mgl_tg.x, mgl_inst = mgl_tg.y, mgl_gp = mgl_inst * D.primitiveCount + mgl_gpatch, mgl_pv = D.patchVertices;\n"
+                         "    device const MGLSubDraw& mgl_sd = D.subDraws[mgl_sd_find(D, mgl_gpatch)];\n"
+                         "    uint mgl_patch = mgl_gpatch - mgl_sd.firstPatch;\n";
+    if (ts_.inObject) {
+        ts_.objBody = prefix + tessControlBody(vf, recV, recP, "object_data");
     } else {
-        threads1 = 32;
-        e += "    uint mgl_cp = mgl_tid;\n    if (mgl_cp < mgl_pv) {\n" + indentBy(vsRun, 8);
-        useStage(Stage::Vertex);
-        e += "        device uint4* r = (device uint4*)(D.tcsVertexOut + (mgl_gp * mgl_pv + mgl_cp) * " + sVB + ");\n";
-        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "vg.")) + ";\n";
-        e += "    }\n    if (mgl_tid == 0u) {\n        device float* lv = (device float*)mgl_pout;\n";
-        e += "        for (int i = 0; i < 4; i++) lv[i] = sys.tessDefaultOuter[i];\n        lv[4] = sys.tessDefaultInner[0];\n"
-             "        lv[5] = sys.tessDefaultInner[1];\n    }\n}\n\n";
+        std::string e = "kernel void mgl_tcs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
+                        "uint3 mgl_tg [[threadgroup_position_in_grid]], uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
+        e += prefix + tessControlBody(vf, recV, recP, "device") + "}\n\n";
+        entries_ += e;
+        EntryPoint k1{"mgl_tcs", Stage::TessControl, EntryPoint::Kernel};
+        k1.threadsPerThreadgroup[0] = ts_.threads;
+        out_.entryPoints.push_back(k1);
     }
-    entries_ += e;
-    EntryPoint k1{"mgl_tcs", Stage::TessControl, EntryPoint::Kernel};
-    k1.threadsPerThreadgroup[0] = threads1;
-    out_.entryPoints.push_back(k1);
     // tessellator configuration shared by the TES passes
     uint32_t pm = R.tesPrimitiveMode;
     uint32_t domain = pm == gl::TRIANGLES ? 0 : pm == gl::QUADS ? 1 : 2;
@@ -4534,13 +4586,18 @@ void Emitter::emitTessControlPass(std::string& o) {
     tesIpp_ = R.tesPointMode ? 1 : domain == 2 ? 2 : 3;
 }
 
-// TES input loading. Control points: loop over j (threads of the threadgroup); patch data and
-// levels: statements for one thread (expects `lv` = the patch record).
-std::string Emitter::tesLoadControlPoints(const std::string& gp, const std::string& cps, int NT) {
+// TES input loading. Control points: loop over j (threads of the threadgroup), `rec` declares `r`,
+// the records of control point j; patch data and levels: statements for one thread (expects `lv` =
+// the patch record in address space `space`).
+std::string Emitter::tesDeviceRecord(const std::string& gp, const std::string& cps) {
+    return "device const uint4* r = (device const uint4*)(D.tcsVertexOut + (" + gp + " * " + cps + " + j) * " + std::to_string(ts_.VB) + "u);\n";
+}
+
+std::string Emitter::tesLoadControlPoints(const std::string& rec, const std::string& cps, int NT) {
     useStage(Stage::TessEval);
     auto ein = arrayedFields(Stage::TessEval, Storage::In);
     std::string e = "for (uint j = mgl_tid; j < " + cps + "; j += " + std::to_string(NT) + "u) {\n";
-    e += "    device const uint4* r = (device const uint4*)(D.tcsVertexOut + (" + gp + " * " + cps + " + j) * " + std::to_string(ts_.VB) + "u);\n";
+    e += "    " + rec;
     for (auto& f : ein) {
         auto it = ts_.vslot.find(f.name);
         if (it == ts_.vslot.end()) continue;
@@ -4549,7 +4606,7 @@ std::string Emitter::tesLoadControlPoints(const std::string& gp, const std::stri
     return e + "}\n";
 }
 
-std::string Emitter::tesLoadPatch() {
+std::string Emitter::tesLoadPatch(const std::string& space) {
     useStage(Stage::TessEval);
     StageInfo& esi = si_[(int)Stage::TessEval];
     std::string e;
@@ -4558,7 +4615,7 @@ std::string Emitter::tesLoadPatch() {
     if (esi.bi.count(BuiltinVar::TessLevelInner))
         for (int i = 0; i < 2; i++) e += varName(esi.bi[BuiltinVar::TessLevelInner]) + "[" + std::to_string(i) + "] = lv[" + std::to_string(4 + i) + "];\n";
     auto epin = patchFields(Stage::TessEval, Storage::In);
-    e += "device const uint4* pr = (device const uint4*)((device const uchar*)lv + 32u);\n";
+    e += space + " const uint4* pr = (" + space + " const uint4*)((" + space + " const uchar*)lv + 32u);\n";
     for (auto& f : epin) {
         auto it = ts_.pslot.find(f.name);
         if (it == ts_.pslot.end()) continue;
@@ -4611,13 +4668,27 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     preG += "using MeshT = mesh<MV, MP, " + std::to_string(MAXV) + ", " + std::to_string(MAXP) + ", topology::" + topo + ">;\n";
     emitBody(Stage::TessEval, o, preG);
     o += "}  // namespace tes\n\n";
-    o += "struct mgl_TPayload {\n    uint gp, patch, inst, cps;\n    mgl_tess T;\n};\n\n";
-    std::string e = "[[object]] void mgl_tes_obj(object_data mgl_TPayload& pl [[payload]], mesh_grid_properties mgp, constant MGLSys& sys [[buffer(1)]], "
-                    "constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
-    e += "    if (mgl_tid != 0u) return;\n";
-    e += "    uint gp = mgl_tg.y * D.primitiveCount + mgl_tg.x;\n";
-    e += "    device const float* lv = (device const float*)(D.tcsPatchOut + gp * " + sPB + ");\n";
-    e += "    pl.gp = gp;\n    pl.patch = mgl_tg.x;\n    pl.inst = mgl_tg.y;\n    pl.cps = " + ts_.cps + ";\n";
+    // Object stage: one threadgroup per patch. With ts_.inObject it runs VS + TCS and passes the control
+    // points and the patch record in the payload; otherwise they come from the mgl_tcs kernel's records.
+    std::string ns = std::to_string(ts_.VB / 16) + "u";
+    size_t nrec = (size_t)ts_.cpsMax * (ts_.VB / 16) + ts_.PB / 16;
+    o += "struct mgl_TPayload {\n    uint gp, patch, inst, cps;\n    mgl_tess T;\n";
+    if (ts_.inObject) o += "    uint4 rec[" + std::to_string(nrec) + "];\n";
+    o += "};\n\n";
+    std::string e = "[[object]] void mgl_tes_obj(object_data mgl_TPayload& pl [[payload]], mesh_grid_properties mgp, ";
+    if (ts_.inObject) e += "constant MGLArgs& A [[buffer(0)]], ";
+    e += "constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], "
+         "uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
+    if (ts_.inObject) {
+        e += ts_.objBody + "    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_object_data);\n    if (mgl_tid != 0u) return;\n";
+        e += "    object_data const float* lv = (object_data const float*)(pl.rec + " + std::to_string(ts_.cpsMax) + "u * " + ns + ");\n";
+        e += "    pl.gp = mgl_gp;\n    pl.patch = mgl_patch;\n    pl.inst = mgl_inst;\n    pl.cps = " + (ts_.hasTCS ? ts_.cps : std::string("mgl_pv")) + ";\n";
+    } else {
+        e += "    if (mgl_tid != 0u) return;\n";
+        e += "    uint gp = mgl_tg.y * D.primitiveCount + mgl_tg.x;\n";
+        e += "    device const float* lv = (device const float*)(D.tcsPatchOut + gp * " + sPB + ");\n";
+        e += "    pl.gp = gp;\n    pl.patch = mgl_tg.x - D.subDraws[mgl_sd_find(D, mgl_tg.x)].firstPatch;\n    pl.inst = mgl_tg.y;\n    pl.cps = " + ts_.cps + ";\n";
+    }
     e += "    pl.T = " + ts_.setup + ";\n";
     e += "    mgp.set_threadgroups_per_grid(uint3(pl.T.units, 1u, 1u));\n}\n\n";
     e += "[[mesh]] void mgl_tes(tes::MeshT mgl_mo, const object_data mgl_TPayload& pl [[payload]], constant MGLArgs& A [[buffer(0)]], "
@@ -4626,9 +4697,15 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     if (esi.hasShared) e += "    threadgroup tes::MGLShared mgl_sh;\n    threadgroup tes::MGLShared* S = &mgl_sh;\n";
     e += "    threadgroup float3 mgl_co[" + std::to_string(MAXV) + "];\n    threadgroup float mgl_tp[" + std::to_string(MAXV) + "];\n";
     e += "    threadgroup ushort mgl_idx[" + std::to_string(MAXP * 3) + "];\n    threadgroup uint mgl_cnt[2];\n" + perVertexDecl;
-    e += "    device const float* lv = (device const float*)(D.tcsPatchOut + pl.gp * " + sPB + ");\n";
-    e += indentBy(tesLoadControlPoints("pl.gp", "pl.cps", NT), 4);
-    e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch(), 8);
+    if (ts_.inObject) {
+        e += "    object_data const float* lv = (object_data const float*)(pl.rec + " + std::to_string(ts_.cpsMax) + "u * " + ns + ");\n";
+        e += indentBy(tesLoadControlPoints("object_data const uint4* r = pl.rec + j * " + ns + ";\n", "pl.cps", NT), 4);
+        e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch("object_data"), 8);
+    } else {
+        e += "    device const float* lv = (device const float*)(D.tcsPatchOut + pl.gp * " + sPB + ");\n";
+        e += indentBy(tesLoadControlPoints(tesDeviceRecord("pl.gp", "pl.cps"), "pl.cps", NT), 4);
+        e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch(), 8);
+    }
     e += "        mgl_tess T = pl.T;\n        uint nv, np;\n        mgl_tess_unit(T, mgl_tg.x, mgl_co, mgl_tp, mgl_idx, nv, np);\n";
     e += "        mgl_cnt[0] = nv;\n        mgl_cnt[1] = np;\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
     e += "    uint nv = mgl_cnt[0], np = mgl_cnt[1];\n";
@@ -4651,7 +4728,8 @@ void Emitter::emitTessEvalMesh(std::string& o) {
          "            atomic_fetch_add_explicit(D.stats + 2, np, memory_order_relaxed);\n        }\n    }\n}\n\n";
     entries_ += e;
     EntryPoint obj{"mgl_tes_obj", Stage::TessEval, EntryPoint::Object};
-    obj.payloadBytes = 128;
+    obj.payloadBytes = (uint32_t)(128 + (ts_.inObject ? 16 * nrec : 0));
+    if (ts_.inObject) obj.threadsPerThreadgroup[0] = ts_.threads;
     out_.entryPoints.push_back(obj);
     EntryPoint ms{"mgl_tes", Stage::TessEval, EntryPoint::Mesh};
     ms.threadsPerThreadgroup[0] = NT;
@@ -4662,6 +4740,149 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     noteSpill(ro, ipp);
     fragInputsAvailable_ = ro.names;
     haveVsOutputs_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Tessellation fast path (VariantKey::tessFused, Reflection::tessFusable): the draw's levels make every
+// patch exactly one primitive at the domain corners (triangles: one triangle, quads: two), so the stages run
+// fused in a classic vertex function over a non-indexed list of 3 (quads: 6) vertices per patch. Each output
+// vertex runs the VS for the patch's K.tessFused input vertices, the TCS invocations one after another (the
+// TCS has no barrier()), and the TES at its domain corner; TCS outputs reach the TES through the same packed
+// records as in the emulation. Vertices come in the emulation's order (mgl_tess_unit's special cases), so
+// winding and the provoking vertex (the first) match it.
+// ---------------------------------------------------------------------------
+void Emitter::emitTessFused(std::string& o) {
+    const Reflection& R = RF(Stage::TessEval);
+    // the emulation's stages all follow the tessellator chunk's pragmas: the same arithmetic here
+    o += "#pragma METAL fp math_mode(safe)\n#pragma METAL fp contract(off)\n";
+    sharedSpace_ = "thread";
+    ts_.hasTCS = SC(Stage::TessControl).main != nullptr;
+    int PV = K.tessFused;
+    int OUTV = ts_.hasTCS ? RF(Stage::TessControl).tcsOutputVertices : PV;
+    ts_.OUTV = OUTV;
+    if (OUTV < 1 || OUTV > 32 || PV < 1 || PV > 32) fail("invalid tessellation patch size");
+    emitBody(Stage::Vertex, o);
+    auto vf = producerFields(Stage::Vertex);
+    o += "}  // namespace vs\n\n";
+    std::vector<Field> recV, recP;
+    if (ts_.hasTCS) {
+        emitBody(Stage::TessControl, o);
+        o += "}  // namespace tcs\n\n";
+        recV = arrayedFields(Stage::TessControl, Storage::Out);
+        recP = patchFields(Stage::TessControl, Storage::Out);
+    } else {
+        recV = vf;
+    }
+    ts_.VB = 16 * std::max<size_t>(1, recV.size());
+    ts_.PB = 32 + 16 * recP.size();
+    ts_.vslot.clear();
+    ts_.pslot.clear();
+    for (size_t i = 0; i < recV.size(); i++) ts_.vslot[recV[i].name] = i;
+    for (size_t i = 0; i < recP.size(); i++) ts_.pslot[recP[i].name] = i;
+    ts_.cpsMax = OUTV;
+    std::string ns = std::to_string(ts_.VB / 16) + "u";
+    size_t nrec = (size_t)OUTV * (ts_.VB / 16) + ts_.PB / 16;
+    // TES with classic outputs (only the varyings the fragment shader reads)
+    prepareStage(Stage::TessEval);
+    filterOutputs_ = true;
+    RasterOut ro = rasterOutput(Stage::TessEval, "g.", false, false);
+    filterOutputs_ = false;
+    emitBody(Stage::TessEval, o);
+    o += "struct Out {\n" + ro.vertexStruct + "};\n}  // namespace tes\n\n";
+
+    bool quads = R.tesPrimitiveMode == gl::QUADS, cw = R.tesOrder == gl::CW;
+    int vpp = quads ? 6 : 3;
+    // corners in mgl_tess_unit's order: triangles (0,0,1) (1,0,0) (0,1,0), quads (0,0) (1,0) (1,1) (0,1)
+    // as triangles (0,1,2) (0,2,3); cw swaps the last two vertices of each triangle
+    std::string corners;
+    if (quads) corners = cw ? "float3(0, 0, 0), float3(1, 1, 0), float3(1, 0, 0), float3(0, 0, 0), float3(0, 1, 0), float3(1, 1, 0)"
+                            : "float3(0, 0, 0), float3(1, 0, 0), float3(1, 1, 0), float3(0, 0, 0), float3(1, 1, 0), float3(0, 1, 0)";
+    else corners = cw ? "float3(0, 0, 1), float3(0, 1, 0), float3(1, 0, 0)" : "float3(0, 0, 1), float3(1, 0, 0), float3(0, 1, 0)";
+
+    std::string e = "vertex tes::Out mgl_vs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], "
+                    "constant MGLDrawInfo& D [[buffer(22)]], uint mgl_v [[vertex_id]], uint mgl_inst [[instance_id]]) {\n";
+    e += "    const float3 mgl_corner[" + std::to_string(vpp) + "] = {" + corners + "};\n";
+    e += "    uint mgl_gpatch = mgl_v / " + std::to_string(vpp) + "u, mgl_pv = " + std::to_string(PV) + "u;\n";
+    e += "    device const MGLSubDraw& mgl_sd = D.subDraws[mgl_sd_find(D, mgl_gpatch)];\n";
+    e += "    uint mgl_patch = mgl_gpatch - mgl_sd.firstPatch;\n";
+    e += "    uint4 mgl_rec[" + std::to_string(nrec) + "];\n";
+    e += "    thread float* lv = (thread float*)(mgl_rec + " + std::to_string(OUTV) + "u * " + ns + ");\n";
+    vsBaseVertex_ = "mgl_sd.baseVertex";
+    vsDrawID_ = "int(mgl_sd.drawID)";
+    auto vsRun = [&](int cp) {
+        return "{\n    const uint mgl_cp = " + std::to_string(cp) + "u;\n" +
+               indentBy(runVS("vg", "mgl_sd_vertex(D, mgl_sd, mgl_patch * mgl_pv + mgl_cp)", "mgl_inst"), 4);
+    };
+    if (!ts_.hasTCS) {
+        for (int cp = 0; cp < PV; cp++) {
+            e += indentBy(vsRun(cp), 4);
+            useStage(Stage::Vertex);
+            e += "        thread uint4* r = mgl_rec + mgl_cp * " + ns + ";\n";
+            for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "vg.")) + ";\n";
+            e += "    }\n";
+        }
+        e += "    for (int i = 0; i < 4; i++) lv[i] = sys.tessDefaultOuter[i];\n    lv[4] = sys.tessDefaultInner[0];\n"
+             "    lv[5] = sys.tessDefaultInner[1];\n";
+    } else {
+        StageInfo& tsi = si_[(int)Stage::TessControl];
+        e += "    {\n";
+        // Not zero-initialized (neither is the emulation's threadgroup memory): zeroing these structs (TCS
+        // inputs are gl_MaxPatchVertices long) keeps the compiler from promoting them to registers.
+        if (tsi.hasShared) e += "        tcs::MGLShared mgl_sh;\n        thread tcs::MGLShared* S = &mgl_sh;\n";
+        auto tin = arrayedFields(Stage::TessControl, Storage::In);
+        std::map<std::string, size_t> vsIdx;
+        for (size_t i = 0; i < vf.size(); i++) vsIdx[vf[i].name] = i;
+        for (int cp = 0; cp < PV; cp++) {
+            e += indentBy(vsRun(cp), 8);
+            for (auto& f : tin) {
+                auto it = vsIdx.find(f.name);
+                if (it == vsIdx.end()) continue;
+                useStage(Stage::Vertex);
+                std::string src = acc(vf[it->second], "vg.");
+                useStage(Stage::TessControl);
+                e += "            " + acc(f, "", "mgl_cp") + " = " + src + ";\n";
+            }
+            e += "        }\n";
+        }
+        for (int iv = 0; iv < OUTV; iv++) {
+            e += "        {\n            tcs::G g = {};\n            g.A = " + argsOf(Stage::TessControl) + ";\n            g.sys = &sys;\n";
+            if (tsi.hasShared) e += "            g.S = S;\n";
+            for (auto* v : tsi.builtins) {
+                if (v->builtin == BuiltinVar::InvocationID) e += "            g.bi_" + v->name + " = " + std::to_string(iv) + ";\n";
+                if (v->builtin == BuiltinVar::PrimitiveID) e += "            g.bi_" + v->name + " = int(mgl_patch);\n";
+                if (v->builtin == BuiltinVar::PatchVerticesIn) e += "            g.bi_" + v->name + " = int(mgl_pv);\n";
+            }
+            e += "            g.mgl_init();\n            g." + tsi.mainName + "();\n        }\n";
+        }
+        useStage(Stage::TessControl);
+        for (int iv = 0; iv < OUTV; iv++) {
+            std::string j = std::to_string(iv);
+            e += "        {\n            thread uint4* r = mgl_rec + " + j + "u * " + ns + ";\n";
+            for (size_t i = 0; i < recV.size(); i++) e += "            r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "", j)) + ";\n";
+            e += "        }\n";
+        }
+        const Variable* lo = tsi.bi.count(BuiltinVar::TessLevelOuter) ? tsi.bi[BuiltinVar::TessLevelOuter] : nullptr;
+        const Variable* li = tsi.bi.count(BuiltinVar::TessLevelInner) ? tsi.bi[BuiltinVar::TessLevelInner] : nullptr;
+        for (int i = 0; i < 4; i++) e += "        lv[" + std::to_string(i) + "] = " + (lo ? varName(lo) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
+        for (int i = 0; i < 2; i++) e += "        lv[" + std::to_string(4 + i) + "] = " + (li ? varName(li) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
+        e += "        thread uint4* pr = (thread uint4*)((thread uchar*)lv + 32u);\n";
+        for (size_t i = 0; i < recP.size(); i++) e += "        pr[" + std::to_string(i) + "] = " + pk(recP[i], acc(recP[i], "")) + ";\n";
+        e += "    }\n";
+    }
+    vsBaseVertex_ = "D.baseVertex";
+    vsDrawID_ = "sys.drawID";
+    // TES at the corner
+    StageInfo& esi = si_[(int)Stage::TessEval];
+    if (esi.hasShared) e += "    tes::MGLShared mgl_sh;\n    thread tes::MGLShared* S = &mgl_sh;\n";
+    e += "    const uint mgl_tid = 0u;\n";
+    e += indentBy(tesLoadControlPoints("thread const uint4* r = mgl_rec + j * " + ns + ";\n", std::to_string(OUTV) + "u", 1), 4);
+    e += indentBy(tesLoadPatch("thread"), 4);
+    e += indentBy(tesRun("mgl_corner[mgl_v % " + std::to_string(vpp) + "u]", "mgl_patch", std::to_string(OUTV) + "u"), 4);
+    e += "    tes::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
+    entries_ += e;
+    fragInputsAvailable_ = ro.names;
+    haveVsOutputs_ = true;
+    out_.entryPoints.push_back({"mgl_vs", Stage::TessEval, EntryPoint::Vertex});
 }
 
 // TES output written to records (one per generated domain point of each unit) plus a primitive
@@ -4693,8 +4914,8 @@ void Emitter::emitTessEvalRecords(std::string& o) {
     e += "    uint gp = mgl_tg.x, unit = mgl_tg.y;\n    if (gp >= D.itemCount) return;\n";
     e += "    device const float* lv = (device const float*)(D.tcsPatchOut + gp * " + sPB + ");\n";
     e += "    mgl_tess T = " + ts_.setup + ";\n    if (unit >= T.units) return;\n";
-    e += "    uint cps = " + ts_.cps + ", patch = gp % D.primitiveCount;\n";
-    e += indentBy(tesLoadControlPoints("gp", "cps", NT), 4);
+    e += "    uint cps = " + ts_.cps + ", patch = gp % D.primitiveCount;\n    patch -= D.subDraws[mgl_sd_find(D, patch)].firstPatch;\n";
+    e += indentBy(tesLoadControlPoints(tesDeviceRecord("gp", "cps"), "cps", NT), 4);
     e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch(), 8);
     e += "        uint4 off = D.itemOffsets[gp];\n        uint vo = off.y, po = off.x;\n";
     e += "        for (uint u = 0; u < unit; u++) {\n            uint2 sz = mgl_tess_unit_size(T, u);\n            vo += sz.x;\n            po += sz.y;\n        }\n";
@@ -5044,6 +5265,12 @@ MSLOutput Emitter::run() {
                 break;
             case PipelineKind::Tessellation:
                 if (!tess) fail("program has no tessellation evaluation shader");
+                if (K.tessFused) {
+                    if (gs) fail("the tessellation fast path has no geometry shader stage");
+                    emitTessFused(o);
+                    if (SC(Stage::Fragment).main) emitFS(o, false);
+                    break;
+                }
                 emitTessControlPass(o);
                 if (gs) {
                     emitTessEvalRecords(o);

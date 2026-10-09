@@ -44,6 +44,8 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     h = hashBytes(&key.advancedBlend, 1, h);
     if (key.fsr) h = hashBytes(&key.fsr, 1, h);
     if (key.pdc) h = hashBytes(&key.pdc, 1, h);
+    if (key.tessComputePass) h = hashBytes("tcp", 3, h);
+    if (key.tessFused) h = hashBytes(&key.tessFused, 1, h ^ 0x7f);
     if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch || key.xfbInVertex) {
         // Field by field: VertexFetch has padding bytes with indeterminate contents.
         for (const glsl::VertexFetch& f : key.attribs) {

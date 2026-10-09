@@ -121,15 +121,40 @@ appending to the mesh output (≤256 vertices / 512 primitives per threadgroup,
 which matches GL's limits); strips are converted to lists on the fly.
 `gl_Layer` and `gl_ViewportIndex` map to per-primitive mesh outputs.
 
-## Tessellation (planned, MoltenVK-style split without fixed function)
+## Tessellation (object + mesh emulation, fused fast path)
 Metal 4 dropped `drawPatches`, so the fixed-function tessellator isn't
-available. Following MoltenVK's stage decomposition: pass 1 is a compute kernel
-running VS + TCS per patch, writing control points, patch constants and tess
-levels to scratch buffers. Pass 2 is an object+mesh pipeline: the object stage
-reads levels and sizes the work; mesh threadgroups generate domain points and
-primitives with our own GL-rules tessellator (equal / fractional_even /
-fractional_odd spacing, triangles / quads / isolines, point_mode, cw/ccw) and
-run the TES per generated vertex.
+available. The emulation runs VS + TCS per patch, then an object+mesh pipeline:
+the object stage reads the levels and sizes the work; mesh
+threadgroups generate domain points and primitives with our own GL-rules
+tessellator (equal / fractional_even / fractional_odd spacing, triangles / quads
+/ isolines, point_mode, cw/ccw) and run the TES per generated vertex.
+* **Pass 1 (VS + TCS)** runs in the object stage itself (one threadgroup per
+  patch, control points and patch data passed in the payload), so tessellated
+  draws stay inside the render pass. Patches too big for Metal's 16 KB payload,
+  and the counted paths (geometry shader after tessellation, transform feedback,
+  primitive queries), run it as the `mgl_tcs` compute kernel instead, which ends
+  the render pass. `METALGLDRV_TESS_PASS1=compute` forces the kernel.
+* **Multi-draws** (`glMultiDraw*`, also with `METALGLDRV_IMPLICIT_PATCHES`) run
+  all their sub-draws in one emulation pass: a sub-draw table
+  (`MGLDrawInfo::subDraws`) gives each patch its gl_DrawID, gl_BaseVertex and
+  draw-relative gl_PrimitiveID. Not with a geometry shader, transform feedback,
+  primitive queries or post-depth-coverage pre-passes (`tessBatchable`).
+  `METALGLDRV_TESS_BATCH=0` draws the sub-draws one by one. Indexed patch lists
+  read the GL index buffer on the GPU (16/32-bit, no primitive restart);
+  otherwise the CPU decomposes them.
+* **Fast path** (`VariantKey::tessFused`): when the levels make every patch
+  exactly one primitive at the domain corners (triangles or quads; outer levels
+  in (0, 1], inner levels <= 1; equal or fractional_odd spacing; no point_mode),
+  a classic vertex function runs, per output vertex, the VS for the patch's
+  vertices, the TCS invocations in sequence and the TES at its corner, in the
+  emulation's vertex order (same winding and provoking vertex). The linker
+  decides whether a program qualifies and how the TCS computes its levels from
+  constants and default-block uniforms (`Reflection::tessFusable`,
+  `tessLevels`); the draw evaluates them with the current uniform values (or the
+  GL_PATCH_DEFAULT_* levels without a TCS). Shader packs that tessellate every
+  terrain draw with levels 1 (Shrimple) render at close to the cost of no
+  tessellation. `METALGLDRV_TESS_FAST=0` disables it. Conditions in
+  docs/glsl-compiler.md.
 
 ## Sparse textures and buffers (ARB_sparse_texture(2), _clamp, ARB_sparse_buffer)
 Advertised when the device supports placement sparse resources (`supportsPlacementSparse`;
@@ -182,6 +207,9 @@ emulation on the integer ALUs. Planned: move heavy ops into an
 * Universal (arm64 + x86_64, for CrossOver/Rosetta) driver:
   `cmake -G Ninja -B build-universal -DMGL_UNIVERSAL=ON -DMGL_BUILD_TESTS=OFF && ninja -C build-universal metalgldrv`.
 * `tools/glslc` / `tests/glsl` – compiler tests and real-world shader corpus.
+* `./build/tests/tessbench` – benchmark of Sodium + Iris terrain with a tessellating shader pack
+  (multi-draws of tessellated triangles; `--level`, `--notess`, `--single`, see the file header).
+  Not part of mgltest.
 * `METALGLDRV_STRICT=1 ./build/tests/mgltest`, `METALGLDRV_STRICT=2 ./build/tests/mgltest`
   – the same suite in strict and super strict mode (`tests/host/test_strict.cpp`
   and `test_fsr.cpp` cover the strict-only paths, `test_pdc.cpp` the super
@@ -245,6 +273,11 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   `METALGLDRV_HIDE_EXTENSIONS`, `METALGLDRV_EXTRA_EXTENSIONS`, `METALGLDRV_VRAM_MB`,
   `METALGLDRV_GLSL_QUIRKS`.
 * `METALGLDRV_STATS=1` – per-function event counters, logged every 5 s.
+* `METALGLDRV_IMPLICIT_PATCHES=1` – draws whose primitives have GL_PATCH_VERTICES vertices run as
+  patches while tessellation is active (Iris + Sodium; set by the Fabric mod).
+* `METALGLDRV_TESS_FAST=0`, `METALGLDRV_TESS_BATCH=0`, `METALGLDRV_TESS_PASS1=compute` – turn off
+  the tessellation fast path or multi-draw batching, or run tessellation pass 1 as a compute kernel
+  (see Tessellation; for comparisons and debugging).
 * `METALGLDRV_PROFILE=core` – EGL and CGL create core instead of compatibility contexts.
 * `METALGLDRV_HOOK_NSOPENGL=1` – macOS replacement mode (NSOpenGL hooks + import
   rebinding, see above) without the JVMTI agent.

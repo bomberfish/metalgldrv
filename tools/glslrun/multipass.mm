@@ -40,6 +40,7 @@ struct PipelineArgs {
     bool dump = false;
     int expectPrims = -1;
     uint32_t xfbCapacity = 4096;
+    bool tessCompute = false;  // --tess-compute: tessellation pass 1 as the mgl_tcs kernel (VariantKey::tessComputePass)
 };
 
 static id<MTLDevice> gDev;
@@ -70,6 +71,7 @@ int runPipeline(const PipelineArgs& pa) {
     bool xfbOnly = !pa.xfb.empty() && !tess;  // with a geometry shader: serial capture kernel (mgl_gs_xfb)
     VariantKey key;
     key.kind = tess ? PipelineKind::Tessellation : xfbOnly ? PipelineKind::XfbCapture : gs ? PipelineKind::MeshGeometry : PipelineKind::Classic;
+    key.tessComputePass = pa.tessCompute;
     if (key.kind == PipelineKind::Classic && r.vsMeshPassthrough) {  // as the runtime: VS on a mesh stage
         key.kind = PipelineKind::MeshGeometry;
         key.primitive = pa.vpp == 1 ? 0 : pa.vpp == 2 ? 1 : 4;
@@ -131,6 +133,12 @@ int runPipeline(const PipelineArgs& pa) {
         info.tcsVertexOut = vout.gpuAddress;
         info.tcsPatchOut = pout.gpuAddress;
         info.counters = counters.gpuAddress;
+        // one sub-draw: the decomposed list in indexBuffer
+        MGLSubDraw sd{};
+        id<MTLBuffer> sdBuf = [dev newBufferWithBytes:&sd length:sizeof sd options:MTLResourceStorageModeShared];
+        info.subDraws = sdBuf.gpuAddress;
+        info.subDrawCount = 1;
+        info.subDrawIndexType = 0;
         for (int b = 0; b < 4; b++) {
             info.xfbBuffer[b] = xfbBuf[b].gpuAddress;
             info.xfbStride[b] = r.multipass.xfbStride[b];
@@ -161,7 +169,7 @@ int runPipeline(const PipelineArgs& pa) {
         for (int i = 0; i < 4; i++) sys.tessDefaultOuter[i] = pa.defaultOuter[i];
         for (int i = 0; i < 2; i++) sys.tessDefaultInner[i] = pa.defaultInner[i];
         id<MTLBuffer> sysBuf = [dev newBufferWithBytes:&sys length:sizeof sys options:MTLResourceStorageModeShared];
-        NSArray* resources = @[ vb, ib, vout, pout, counters, xfbBuf[0], xfbBuf[1], xfbBuf[2], xfbBuf[3], defaults, spillBuf, spillCnt ];
+        NSArray* resources = @[ vb, ib, vout, pout, counters, xfbBuf[0], xfbBuf[1], xfbBuf[2], xfbBuf[3], defaults, spillBuf, spillCnt, sdBuf ];
         id<MTLCommandQueue> q = [dev newCommandQueue];
         id<MTLCommandBuffer> cb = [q commandBuffer];
         auto computePass = [&](const EntryPoint* k, MTLSize grid, bool threads) -> bool {
@@ -232,7 +240,8 @@ int runPipeline(const PipelineArgs& pa) {
             if (pa.expectPrims >= 0 && (int)written != pa.expectPrims) return 7;
             return 0;
         }
-        if (tess && !computePass(entry(EntryPoint::Kernel), MTLSizeMake(prims, pa.instances, 1), false)) return 5;
+        // pass 1 as a kernel, unless the variant runs VS + TCS in the object stage
+        if (tess && entry(EntryPoint::Kernel) && !computePass(entry(EntryPoint::Kernel), MTLSizeMake(prims, pa.instances, 1), false)) return 5;
         MTLMeshRenderPipelineDescriptor* md = [MTLMeshRenderPipelineDescriptor new];
         const EntryPoint* ms = entry(EntryPoint::Mesh);
         const EntryPoint* os = entry(EntryPoint::Object);
@@ -241,6 +250,7 @@ int runPipeline(const PipelineArgs& pa) {
         md.fragmentFunction = [lib newFunctionWithName:@"mgl_fs"];
         md.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA32Float;
         if (os) md.payloadMemoryLength = os->payloadBytes;
+        if (os) md.maxTotalThreadsPerObjectThreadgroup = os->threadsPerThreadgroup[0];
         id<MTLRenderPipelineState> pso = [dev newRenderPipelineStateWithMeshDescriptor:md options:0 reflection:nil error:&err];
         if (!check(pso, err, "mesh pipeline")) return 5;
         MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:W height:H mipmapped:NO];

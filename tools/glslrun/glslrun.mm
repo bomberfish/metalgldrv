@@ -138,6 +138,7 @@ struct PipelineArgs {
     bool dump = false;
     int expectPrims = -1;
     uint32_t xfbCapacity = 4096;
+    bool tessCompute = false;  // --tess-compute: tessellation pass 1 as the mgl_tcs kernel (VariantKey::tessComputePass)
 };
 int runPipeline(const PipelineArgs& pa);
 int runTessCheck(bool verbose);
@@ -289,6 +290,7 @@ int main(int argc, char** argv) {
             else if (a == "--expect-prims") pa.expectPrims = std::stoi(next());
             else if (a == "--xfb-capacity") pa.xfbCapacity = (uint32_t)std::stoi(next());
             else if (a == "--dump") pa.dump = true;
+            else if (a == "--tess-compute") pa.tessCompute = true;
             else {
                 std::string ext = a.substr(a.rfind('.') + 1);
                 Stage st = ext == "vert" ? Stage::Vertex : ext == "tesc" ? Stage::TessControl : ext == "tese" ? Stage::TessEval

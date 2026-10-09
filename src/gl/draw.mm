@@ -1950,6 +1950,7 @@ struct MPState {
     uint32_t prims;
     // persistent scratch (survives the CPU waits between passes)
     id<MTLBuffer> tcsV = nil, tcsP = nil, counts = nil, tesV = nil, tesP = nil, gsRec = nil;
+    uint64_t tcsVAddr = 0, tcsPAddr = 0;  // pass 1 records in upload memory (mpTessControl `transient`)
     uint32_t itemCount = 0, tesPrimCount = 0;
     std::vector<uint32_t> offsets;  // uint4 per item, uploaded with the draw info
     uint32_t xfbPrimLimit[4] = {0, 0, 0, 0};
@@ -1957,6 +1958,9 @@ struct MPState {
     bool xfb = false;
     bool inert = false;  // pre-rasterization storage bound as copies (buildArguments `inert`)
     bool noStats = false;  // no pipeline statistics (ARB_post_depth_coverage pre-pass)
+    // tessellation: the sub-draws (MGLDrawInfo::subDraws); empty: the draw `d` alone, its list in `ids`
+    std::vector<glsl::MGLSubDraw> subDraws;
+    uint32_t subDrawIndexType = 0;
     // varying spill of the mesh pass (EntryPoint::spillRecordBytes)
     uint64_t spillBuffer = 0, spillCounter = 0;
     id<MTLBuffer> spillCounterBuffer = nil;
@@ -2020,8 +2024,8 @@ void mpUpload(MPState& s) {
     info->counters = counters.gpu;
     if (ctx->statsQueriesActive && !s.noStats)
         info->stats = mglStatsGpuSlot(ctx, refl.stageMask & (1u << (int)glsl::Stage::Geometry), refl.stageMask & (1u << (int)glsl::Stage::TessEval));
-    info->tcsVertexOut = s.tcsV ? s.tcsV.gpuAddress : 0;
-    info->tcsPatchOut = s.tcsP ? s.tcsP.gpuAddress : 0;
+    info->tcsVertexOut = s.tcsV ? s.tcsV.gpuAddress : s.tcsVAddr;
+    info->tcsPatchOut = s.tcsP ? s.tcsP.gpuAddress : s.tcsPAddr;
     info->itemCounts = s.counts ? s.counts.gpuAddress : 0;
     info->tesVertexOut = s.tesV ? s.tesV.gpuAddress : 0;
     info->tesPrimOut = s.tesP ? s.tesP.gpuAddress : 0;
@@ -2035,6 +2039,18 @@ void mpUpload(MPState& s) {
         UploadAlloc off = ctx->upload(s.offsets.size() * 4, 16);
         memcpy(off.cpu, s.offsets.data(), s.offsets.size() * 4);
         info->itemOffsets = off.gpu;
+    }
+    if (refl.stageMask & (1u << (int)glsl::Stage::TessEval)) {
+        glsl::MGLSubDraw one = {};
+        one.drawID = (uint32_t)d.drawID;
+        one.baseVertex = d.indexed ? d.baseVertex : 0;
+        const glsl::MGLSubDraw* sd = s.subDraws.empty() ? &one : s.subDraws.data();
+        size_t n = s.subDraws.empty() ? 1 : s.subDraws.size();
+        UploadAlloc t = ctx->upload(n * sizeof(glsl::MGLSubDraw), 16);
+        memcpy(t.cpu, sd, n * sizeof(glsl::MGLSubDraw));
+        info->subDraws = t.gpu;
+        info->subDrawCount = (uint32_t)n;
+        info->subDrawIndexType = s.subDraws.empty() ? 0 : s.subDrawIndexType;
     }
     s.infoAddr = di.gpu;
     s.argAddr = drawArguments(ctx, s.prog, s.inert);
@@ -2073,16 +2089,83 @@ id<MTLBuffer> mpScratch(MPState& s, size_t bytes) {
     return b;
 }
 
-// Pass 1 of tessellation: VS + TCS for every patch.
-bool mpTessControl(MPState& s) {
+// Pass 1 of tessellation: VS + TCS for every patch. `transient`: no CPU wait follows before the
+// records are consumed, so they live in upload memory (retired with the command buffer).
+bool mpTessControl(MPState& s, bool transient = false) {
     const glsl::Reflection& refl = s.prog->refl;
     const DrawParams& d = *s.d;
     int cpts = refl.multipass.tcsOutputVertices ? (int)refl.multipass.tcsOutputVertices : s.ctx->patchVertices;
     size_t patches = (size_t)s.prims * d.instances;
-    s.tcsV = mpScratch(s, patches * std::max(1, cpts) * std::max<uint32_t>(16, refl.multipass.tcsVertexOutBytes) + 16);
-    s.tcsP = mpScratch(s, patches * std::max<uint32_t>(32, refl.multipass.tcsPatchOutBytes) + 16);
+    size_t vBytes = patches * std::max(1, cpts) * std::max<uint32_t>(16, refl.multipass.tcsVertexOutBytes) + 16;
+    size_t pBytes = patches * std::max<uint32_t>(32, refl.multipass.tcsPatchOutBytes) + 16;
+    if (transient) {
+        s.tcsVAddr = s.ctx->upload(vBytes, 16).gpu;
+        s.tcsPAddr = s.ctx->upload(pBytes, 16).gpu;
+    } else {
+        s.tcsV = mpScratch(s, vBytes);
+        s.tcsP = mpScratch(s, pBytes);
+    }
     mpUpload(s);
     return mpDispatch(s, "mgl_tcs", MTLSizeMake(s.prims, d.instances, 1), true);
+}
+
+// The patches of a tessellation draw, or of all sub-draws of a multi-draw (one emulation pass), as
+// MGLDrawInfo::subDraws. Indexed draws read the GL index buffer on the GPU when they can (no primitive
+// restart, 16/32-bit indices in range); otherwise the CPU decomposes the lists into `ids`.
+void tessSubDraws(MPState& s, const DrawParams* ds, int n) {
+    Context* ctx = s.ctx;
+    int pv = std::max(1, ctx->patchVertices);
+    s.listMode = GL_PATCHES;
+    s.vpp = pv;
+    Buffer* ib = ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
+    const DrawParams& d0 = ds[0];
+    uint32_t type = 1;  // non-indexed
+    if (d0.indexed) {
+        type = 0;
+        bool restart = ctx->primitiveRestart || ctx->primitiveRestartFixed;
+        if (ib && ib->mtl && !restart && (d0.indexType == GL_UNSIGNED_SHORT || d0.indexType == GL_UNSIGNED_INT)) {
+            size_t isz = indexSize(d0.indexType);
+            type = (uint32_t)isz;
+            for (int i = 0; i < n && type; i++) {
+                size_t off = (size_t)ds[i].indices;
+                if (off % isz || off + (size_t)std::max(0, ds[i].count) * isz > (size_t)ib->size) type = 0;
+            }
+        }
+    }
+    uint64_t ibAddr = type >= 2 ? ib->gpuAddress() : 0;
+    uint32_t total = 0;
+    for (int i = 0; i < n; i++) {
+        const DrawParams& d = ds[i];
+        if (d.count <= 0) continue;
+        glsl::MGLSubDraw sd = {};
+        sd.drawID = (uint32_t)d.drawID;
+        sd.baseVertex = d.indexed ? d.baseVertex : 0;
+        uint32_t patches = (uint32_t)(d.count / pv);
+        if (type == 0) {
+            const uint8_t* src = nullptr;
+            if (ib) {
+                if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+                src = ib->cpu ? ib->cpu + (size_t)d.indices : bufferBytes(ctx, ib, (size_t)d.indices, (size_t)d.count * indexSize(d.indexType));
+            } else {
+                src = (const uint8_t*)d.indices;
+            }
+            size_t at = s.ids.size();
+            decomposeToList(ctx, d, src, s.ids);
+            patches = (uint32_t)((s.ids.size() - at) / pv);
+            sd.first = (uint32_t)at;
+        } else if (type == 1) {
+            sd.first = (uint32_t)d.first;
+        } else {
+            sd.indices = ibAddr + (uint64_t)(size_t)d.indices;
+        }
+        if (!patches) continue;
+        sd.firstPatch = total;
+        total += patches;
+        s.subDraws.push_back(sd);
+    }
+    if (type >= 2) ib->lastUse = ctx->serial();
+    s.subDrawIndexType = type;
+    s.prims = total;
 }
 
 // TES output records: count (+wait) and generate. Leaves tesPrimCount set.
@@ -2157,6 +2240,16 @@ void mpFinishCounts(MPState& s, const uint64_t generated[4], int outVpp, bool co
 
 }  // namespace
 
+// Tessellation emulation passes and fused fast-path draws so far (mglTestTessCounters).
+static uint64_t g_tessPasses = 0, g_tessFusedDraws = 0;
+
+// Test hook: the number of rasterizing tessellation passes (one per draw, or per batched multi-draw)
+// and how many of them took the fused fast path.
+extern "C" __attribute__((visibility("default"))) void mglTestTessCounters(uint64_t* passes, uint64_t* fused) {
+    *passes = g_tessPasses;
+    *fused = g_tessFusedDraws;
+}
+
 // Runs a draw through a multi-pass pipeline. Returns false if unsupported.
 //   Classic + capture   : VS transform feedback kernel (rasterization is done by the caller)
 //   MeshGeometry        : VS + GS on a mesh pipeline
@@ -2164,8 +2257,10 @@ void mpFinishCounts(MPState& s, const uint64_t generated[4], int outVpp, bool co
 //   XfbCapture          : counted capture/count passes for transform feedback and primitive queries
 //   inertArgs: the stages' storage writes go to copies (ARB_post_depth_coverage: the draw's own vertex
 //   processing has the side effects)
+//   batch: the sub-draws of a multi-draw (tessellation without a geometry shader, nothing counted):
+//   all of them in one emulation pass (`d` is the first)
 static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d, glsl::VariantKey vk, bool xfbCapture,
-                             bool inertArgs = false) {
+                             bool inertArgs = false, const DrawParams* batch = nullptr, int batchCount = 0) {
     const glsl::Reflection& refl = prog->refl;
     if (d.indirect) {
         static bool warned = false;
@@ -2179,31 +2274,35 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     s.d = &d;
     s.xfb = xfbCapture;
     s.inert = inertArgs;
+    bool hasGS = refl.stageMask & (1u << (int)glsl::Stage::Geometry);
+    bool hasTess = refl.stageMask & (1u << (int)glsl::Stage::TessEval);
     // --- primitive list ---
-    Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
-    const uint8_t* src = nullptr;
-    if (d.indexed) {
-        if (ib) {
-            if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
-            src = ib->cpu ? ib->cpu + (size_t)d.indices : bufferBytes(ctx, ib, (size_t)d.indices, (size_t)d.count * indexSize(d.indexType));
-        } else {
-            src = (const uint8_t*)d.indices;
+    if (vk.kind == glsl::PipelineKind::Tessellation && !hasGS) {
+        tessSubDraws(s, batch ? batch : &d, batch ? batchCount : 1);
+    } else {
+        Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
+        const uint8_t* src = nullptr;
+        if (d.indexed) {
+            if (ib) {
+                if (ib->lastGpuWrite && !ctx->dev->isComplete(ib->lastGpuWrite)) ctx->waitForResource(ib->lastGpuWrite);
+                src = ib->cpu ? ib->cpu + (size_t)d.indices : bufferBytes(ctx, ib, (size_t)d.indices, (size_t)d.count * indexSize(d.indexType));
+            } else {
+                src = (const uint8_t*)d.indices;
+            }
         }
+        s.listMode = listModeFor(d.mode);
+        s.vpp = listVerts(s.listMode, ctx->patchVertices);
+        decomposeToList(ctx, d, src, s.ids);
+        s.prims = (uint32_t)(s.ids.size() / std::max(1, s.vpp));
     }
-    s.listMode = listModeFor(d.mode);
-    s.vpp = listVerts(s.listMode, ctx->patchVertices);
-    decomposeToList(ctx, d, src, s.ids);
-    s.prims = (uint32_t)(s.ids.size() / std::max(1, s.vpp));
     if (!s.prims) return true;
 
     fillVertexFetch(ctx, prog, vk);
     vk.primitive = (uint8_t)s.listMode;
     s.var = ctx->pipelines_->variant(prog, vk);
-    if (!s.var || !s.var->ok) return true;
+    if (!s.var || !s.var->ok) return !vk.tessFused;
     ProgramVariant* var = s.var;
     uint64_t fsrAddr = vk.fsr ? fsrUpload(ctx) : 0;  // before any encoder
-    bool hasGS = refl.stageMask & (1u << (int)glsl::Stage::Geometry);
-    bool hasTess = refl.stageMask & (1u << (int)glsl::Stage::TessEval);
     uint64_t serialStart = ctx->serial();
     auto retire = [&]() {
         uint64_t sr = ctx->serial();
@@ -2211,6 +2310,39 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
             if (b) ctx->dev->releaseAfter(b, sr);
         (void)serialStart;
     };
+
+    // --- tessellation fast path: VS + TCS + TES fused in a classic vertex function, 3 (quads: 6)
+    // vertices per patch (VariantKey::tessFused) ---
+    if (vk.tessFused) {
+        mpUpload(s);
+        id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
+        if (!e) return true;
+        RenderPipelineKey key;
+        key.variant = var;
+        fillColorKey(ctx, key, refl);
+        key.rasterEnabled = true;
+        id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+        if (!pso) return true;
+        if (ctx->enc.pipeline != pso) {
+            [e setRenderPipelineState:pso];
+            ctx->enc.pipeline = pso;
+        }
+        applyDynamicState(ctx, e, GL_TRIANGLES, refl.writesViewportIndex);
+        id<MTL4ArgumentTable> table = ctx->renderArgTable;
+        [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
+        [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
+        [table setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
+        if (ctx->enc.fsTableSplit) {
+            [e setArgumentTable:table atStages:MTLRenderStageFragment];
+            ctx->enc.fsTableSplit = false;
+        }
+        mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only (no primitive queries on this path)
+        g_tessPasses++;
+        g_tessFusedDraws++;
+        NSUInteger vpp = refl.tesPrimitiveMode == GL_QUADS ? 6 : 3;
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)s.prims * vpp instanceCount:d.instances baseInstance:0];
+        return true;
+    }
 
     // --- counted capture (transform feedback / primitive queries) ---
     if (vk.kind == glsl::PipelineKind::XfbCapture) {
@@ -2330,8 +2462,9 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         s.spillCounterBuffer = sc;
         s.spillCapacity = (uint32_t)(bytes / sm->spillRecordBytes);
     }
-    if (vk.kind == glsl::PipelineKind::Tessellation) {
-        if (!mpTessControl(s)) { retire(); return false; }
+    if (vk.kind == glsl::PipelineKind::Tessellation && var->entry("mgl_tcs")) {
+        // pass 1 as a compute kernel (otherwise VS + TCS run in the object stage of the TES pipeline)
+        if (!mpTessControl(s, !hasGS)) { retire(); return false; }
         if (hasGS && !mpTessRecords(s)) { retire(); return false; }
     } else {
         mpUpload(s);
@@ -2412,6 +2545,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     if (fsrAddr) [table setAddress:fsrAddr atIndex:glsl::kBufFsr];
     if (pdc) [table setAddress:pdcUpload(ctx, cov, 0, refl.writesLayer) atIndex:glsl::kBufPdc];
     mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts come from counted passes
+    if (hasTess) g_tessPasses++;
     drawMesh(e);
     retire();
     return true;
@@ -2845,13 +2979,99 @@ static bool programHasSideEffects(const glsl::Reflection& r) {
     return false;
 }
 
-static void executeDrawImpl(Context* ctx, const DrawParams& d);
-static void executeDraw(Context* ctx, const DrawParams& d) {
-    executeDrawImpl(ctx, d);
+// batch: all sub-draws of a multi-draw that tessBatchable() accepted (`d` is the first), drawn
+// in one emulation pass.
+static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams* batch, int batchCount);
+static void executeDraw(Context* ctx, const DrawParams& d, const DrawParams* batch = nullptr, int batchCount = 0) {
+    executeDrawImpl(ctx, d, batch, batchCount);
     flushImageWritebacks(ctx);
 }
 
-static void executeDrawImpl(Context* ctx, const DrawParams& d) {
+// The draw's tessellation levels (as Reflection::tessLevels computes them from the current uniform
+// values, or the patch defaults without a TCS) make every patch exactly one primitive at the domain
+// corners, as mgl_tess_setup's `special` case: the outer levels the domain uses in (0, 1] (not culled,
+// one segment with equal and fractional_odd spacing) and its inner levels <= 1 (fractional_even, whose
+// levels clamp to 2, never qualifies). Evaluated in float like the TCS.
+static bool tessLevelsTrivial(Context* ctx, ProgramObj* prog) {
+    const glsl::Reflection& r = prog->refl;
+    bool tri = r.tesPrimitiveMode == GL_TRIANGLES;
+    int nOuter = tri ? 3 : 4, nInner = tri ? 1 : 2;
+    float lv[6];
+    if (r.stageMask & (1u << (int)glsl::Stage::TessControl)) {
+        const std::vector<uint8_t>& u = prog->uniformData;
+        auto load = [&](uint32_t off, void* dst) {
+            if ((size_t)off + 4 > u.size()) return false;
+            memcpy(dst, u.data() + off, 4);
+            return true;
+        };
+        for (int i = 0; i < 6; i++) {
+            if ((i < 4 && i >= nOuter) || (i >= 4 && i - 4 >= nInner)) continue;
+            float st[16];
+            int n = 0;
+            for (const glsl::TessLevelOp& op : r.tessLevels[i]) {
+                using K = glsl::TessLevelOp;
+                int need = op.kind == K::Clamp ? 3 : op.kind >= K::Add ? 2 : op.kind == K::Neg ? 1 : 0;
+                if (n < need || (need == 0 && n >= 16)) return false;
+                switch (op.kind) {
+                case K::Const: st[n++] = op.value; break;
+                case K::Float: if (!load(op.offset, &st[n++])) return false; break;
+                case K::Int: { int32_t v; if (!load(op.offset, &v)) return false; st[n++] = (float)v; break; }
+                case K::UInt: { uint32_t v; if (!load(op.offset, &v)) return false; st[n++] = (float)v; break; }
+                case K::Neg: st[n - 1] = -st[n - 1]; break;
+                case K::Add: st[n - 2] = st[n - 2] + st[n - 1]; n--; break;
+                case K::Sub: st[n - 2] = st[n - 2] - st[n - 1]; n--; break;
+                case K::Mul: st[n - 2] = st[n - 2] * st[n - 1]; n--; break;
+                case K::Div: st[n - 2] = st[n - 2] / st[n - 1]; n--; break;
+                case K::Min: st[n - 2] = fminf(st[n - 2], st[n - 1]); n--; break;
+                case K::Max: st[n - 2] = fmaxf(st[n - 2], st[n - 1]); n--; break;
+                case K::Clamp: st[n - 3] = fminf(fmaxf(st[n - 3], st[n - 2]), st[n - 1]); n -= 2; break;
+                }
+            }
+            if (n != 1) return false;
+            lv[i] = st[0];
+        }
+    } else {
+        memcpy(lv, ctx->patchDefaultOuter, 4 * sizeof(float));
+        memcpy(lv + 4, ctx->patchDefaultInner, 2 * sizeof(float));
+    }
+    for (int i = 0; i < nOuter; i++)
+        if (!(lv[i] > 0.0f && lv[i] <= 1.0f)) return false;
+    for (int i = 0; i < nInner; i++)
+        if (!(lv[4 + i] <= 1.0f)) return false;
+    return true;
+}
+
+// Whether a tessellation draw takes the fused fast path (VariantKey::tessFused): the program qualifies
+// (Reflection::tessFusable; not a program pipeline composite), patches of at most 4 vertices, nothing that
+// needs the emulation's per-primitive work (pipeline statistics, rasterizer discard, coarse shading,
+// post-depth-coverage pre-passes) and trivial levels. METALGLDRV_TESS_FAST=0 disables it.
+static bool tessFusedWanted(Context* ctx, ProgramObj* prog, const glsl::VariantKey& vk) {
+    const glsl::Reflection& r = prog->refl;
+    if (!r.tessFusable || prog->composite || ctx->patchVertices < 1 || ctx->patchVertices > 4) return false;
+    if (vk.pdc || vk.fsr || ctx->rasterizerDiscard || ctx->statsQueriesActive) return false;
+    return tessLevelsTrivial(ctx, prog) && envFlag("METALGLDRV_TESS_FAST", true);
+}
+
+// Whether the sub-draws of a multi-draw can share one emulation pass: tessellation without a geometry
+// shader, with nothing counted per draw (transform feedback, primitive queries) and no
+// ARB_post_depth_coverage pre-passes (super strict). GL runs the sub-draws with the same program and state, and their
+// patches are independent; gl_DrawID, gl_BaseVertex and gl_PrimitiveID come from the sub-draw table.
+// METALGLDRV_TESS_BATCH=0 draws them one by one.
+static bool tessBatchable(Context* ctx) {
+    ProgramObj* prog = mglPipelineDrawProgram(ctx);
+    if (!prog || !prog->program) return false;
+    uint32_t m = prog->refl.stageMask;
+    if (!(m & (1u << (int)glsl::Stage::TessEval)) || (m & (1u << (int)glsl::Stage::Geometry))) return false;
+    if (ctx->xfb && ctx->xfb->active && !ctx->xfb->paused) return false;
+    if (mglQueryPrimitivesActive(ctx)) return false;
+    if (ctx->superStrict()) {
+        ProgramObj* f = ctx->pipeline && !ctx->program ? ctx->pipeline->stages[(int)glsl::Stage::Fragment].get() : prog;
+        if (f && f->refl.postDepthCoverage) return false;
+    }
+    return envFlag("METALGLDRV_TESS_BATCH", true);
+}
+
+static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams* batch, int batchCount) {
     MGL_STAT("draw");
     ProgramObj* prog = mglPipelineDrawProgram(ctx);
     // Compatibility profile: fixed-function emulation (prog == null) and gl_* state uniforms.
@@ -2865,10 +3085,13 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
         if (resolveIndirectDraw(ctx, d, direct)) executeDraw(ctx, direct);
         return;
     }
-    if (d.count <= 0 && !d.indirect) return;
+    if (d.count <= 0 && !d.indirect && !batch) return;
     if (d.instances <= 0 && !d.indirect) return;
     const glsl::Reflection& refl = prog->refl;
-    if (ctx->statsQueriesActive && !d.indirect) countDrawStatistics(ctx, d, refl);
+    if (ctx->statsQueriesActive && !d.indirect) {
+        if (batch) for (int i = 0; i < batchCount; i++) countDrawStatistics(ctx, batch[i], refl);
+        else countDrawStatistics(ctx, d, refl);
+    }
     bool hasGS = refl.stageMask & (1u << (int)glsl::Stage::Geometry);
     bool hasTess = refl.stageMask & (1u << (int)glsl::Stage::TessEval);
     glsl::VariantKey vk;
@@ -2894,6 +3117,10 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
         if (f && f->refl.postDepthCoverage) pdc = pdcInfo(ctx);
     }
     vk.pdc = pdc.tests;
+    if (hasTess) {  // METALGLDRV_TESS_PASS1=compute: VS + TCS in a compute pass even when the object stage could run them
+        const char* p1 = getenv("METALGLDRV_TESS_PASS1");
+        vk.tessComputePass = p1 && !strcmp(p1, "compute");
+    }
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     bool primQueries = mglQueryPrimitivesActive(ctx);
     if (vk.kind != glsl::PipelineKind::Classic) {
@@ -2907,9 +3134,16 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
             xk.pdc = false;
             captured = executeMultiPass(ctx, prog, d, xk, xfbActive);
         }
+        // Tessellation that makes every patch one primitive at the domain corners: the fused vertex
+        // pipeline (falls back to the emulation if its variant doesn't build).
+        if (vk.kind == glsl::PipelineKind::Tessellation && !xfbActive && !primQueries && tessFusedWanted(ctx, prog, vk)) {
+            glsl::VariantKey fk = vk;
+            fk.tessFused = (uint8_t)ctx->patchVertices;
+            if (executeMultiPass(ctx, prog, d, fk, false, false, batch, batchCount)) return;
+        }
         // With rasterizer discard the mesh pass only matters for shader side effects, which the
         // capture pass already produced; otherwise it runs with rasterization disabled.
-        if (!(ctx->rasterizerDiscard && captured && xfbActive)) executeMultiPass(ctx, prog, d, vk, false);
+        if (!(ctx->rasterizerDiscard && captured && xfbActive)) executeMultiPass(ctx, prog, d, vk, false, false, batch, batchCount);
         return;
     }
     if (primQueries && !d.indirect) {
@@ -3261,6 +3495,18 @@ API void APIENTRY glMultiDrawArrays(GLenum mode, const GLint* first, const GLsiz
     MGL_CTX();
     if (drawcount < 0) return ctx->setError(GL_INVALID_VALUE);
     if (!validateDraw(ctx, mode)) return;
+    if (drawcount > 1 && tessBatchable(ctx)) {
+        std::vector<DrawParams> ds(drawcount);
+        for (int i = 0; i < drawcount; i++) {
+            if (count[i] < 0) return ctx->setError(GL_INVALID_VALUE);
+            ds[i].mode = mode;
+            ds[i].first = first[i];
+            ds[i].count = count[i];
+            ds[i].drawID = i;
+        }
+        executeDraw(ctx, ds[0], ds.data(), drawcount);
+        return;
+    }
     for (int i = 0; i < drawcount; i++) {
         if (count[i] < 0) return ctx->setError(GL_INVALID_VALUE);
         DrawParams d;
@@ -3278,6 +3524,21 @@ API void APIENTRY glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* coun
     if (drawcount < 0) return ctx->setError(GL_INVALID_VALUE);
     if (!validIndexType(type)) return ctx->setError(GL_INVALID_ENUM);
     if (!validateDraw(ctx, mode)) return;
+    if (drawcount > 1 && tessBatchable(ctx)) {
+        std::vector<DrawParams> ds(drawcount);
+        for (int i = 0; i < drawcount; i++) {
+            if (count[i] < 0) return ctx->setError(GL_INVALID_VALUE);
+            ds[i].mode = mode;
+            ds[i].count = count[i];
+            ds[i].indexed = true;
+            ds[i].indexType = type;
+            ds[i].indices = indices[i];
+            ds[i].baseVertex = basevertex ? basevertex[i] : 0;
+            ds[i].drawID = i;
+        }
+        executeDraw(ctx, ds[0], ds.data(), drawcount);
+        return;
+    }
     for (int i = 0; i < drawcount; i++) {
         if (count[i] < 0) return ctx->setError(GL_INVALID_VALUE);
         DrawParams d;

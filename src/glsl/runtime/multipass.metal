@@ -3,7 +3,15 @@
 // with a "//@chunk <symbols...>" line naming the identifiers that pull it in.
 
 //@chunk MGLDrawInfo mgl_vptr
-// Mirrors glsl::MGLDrawInfo (glsl.h); GPU addresses are typed pointers here.
+// Mirrors glsl::MGLSubDraw / glsl::MGLDrawInfo (glsl.h); GPU addresses are typed pointers here.
+struct MGLSubDraw {
+    uint firstPatch;
+    uint drawID;
+    int baseVertex;
+    uint first;
+    device const uchar* indices;
+    uint pad0, pad1;
+};
 struct MGLDrawInfo {
     device const uchar* vertexBuffer[16];
     uint vertexStride[16];
@@ -42,6 +50,9 @@ struct MGLDrawInfo {
     device atomic_uint* spillCounter;
     uint spillCapacity;
     uint pad1;
+    device const MGLSubDraw* subDraws;
+    uint subDrawCount;
+    uint subDrawIndexType;
 };
 inline device const uchar* mgl_vptr(constant MGLDrawInfo& D, uint b, uint off, uint vid, uint inst) {
     device const uchar* p = D.vertexBuffer[b];
@@ -49,6 +60,27 @@ inline device const uchar* mgl_vptr(constant MGLDrawInfo& D, uint b, uint off, u
     uint d = D.vertexDivisor[b];
     uint idx = d != 0u ? inst / d + D.baseInstance : vid;
     return p + idx * D.vertexStride[b] + off;
+}
+
+//@chunk mgl_sd_find mgl_sd_vertex
+// Tessellation draws (one or all sub-draws of a multi-draw): the sub-draw holding patch `gp`
+// (patch index counted over all sub-draws) and the vertex id of list position i of a sub-draw.
+inline uint mgl_sd_find(constant MGLDrawInfo& D, uint gp) {
+    uint lo = 0u, hi = D.subDrawCount;
+    while (hi - lo > 1u) {
+        uint mid = (lo + hi) / 2u;
+        if (D.subDraws[mid].firstPatch <= gp) lo = mid;
+        else hi = mid;
+    }
+    return lo;
+}
+inline uint mgl_sd_vertex(constant MGLDrawInfo& D, device const MGLSubDraw& s, uint i) {
+    switch (D.subDrawIndexType) {
+        case 1u: return s.first + i;  // non-indexed
+        case 2u: return uint(((device const ushort*)s.indices)[i]) + uint(s.baseVertex);
+        case 4u: return ((device const uint*)s.indices)[i] + uint(s.baseVertex);
+        default: return D.indexBuffer[s.first + i] + uint(s.baseVertex);  // decomposed list
+    }
 }
 
 //@chunk mgl_fetch_f mgl_fetch_i mgl_fetch_d

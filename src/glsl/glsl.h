@@ -255,6 +255,18 @@ struct MultiPassInfo {
     uint32_t tesVertexOutBytes = 0;   // bytes per TES output record (tessellation feeding a GS or transform feedback)
 };
 
+// A tessellation level the TCS writes as a function of constants and default-block uniforms, as a
+// postfix program over floats the runtime evaluates at draw time (Reflection::tessLevels).
+struct TessLevelOp {
+    enum Kind : uint8_t {
+        Const,              // push value
+        Float, Int, UInt,   // push the default-block uniform at `offset` (integers converted to float)
+        Neg, Add, Sub, Mul, Div, Min, Max, Clamp,
+    } kind = Const;
+    uint32_t offset = 0;
+    float value = 0;
+};
+
 // ARB_shader_subroutine (per stage)
 struct SubroutineUniform {
     std::string name;
@@ -291,6 +303,16 @@ struct Reflection {
     int tcsOutputVertices = 0;
     uint32_t tesPrimitiveMode = 0, tesSpacing = 0, tesOrder = 0;
     bool tesPointMode = false;
+    // Tessellation fast path (VariantKey::tessFused) when the levels make every patch one primitive at
+    // the domain corners. tessFusable: everything else allows it (VS + TES, no GS; triangles or quads,
+    // not point_mode or fractional_even; no TCS barrier(); at most 4 TCS output vertices; no memory
+    // writes or subgroup operations before rasterization; the TES doesn't write gl_Layer /
+    // gl_ViewportIndex; the fragment shader doesn't read gl_PrimitiveID and its inputs fit a classic
+    // vertex function). tessLevels: gl_TessLevelOuter[0..3] (0-3) and gl_TessLevelInner[0..1] (4, 5) as
+    // the TCS writes them; the ones the domain uses are set (without a TCS the levels are
+    // GL_PATCH_DEFAULT_OUTER/INNER_LEVEL).
+    bool tessFusable = false;
+    std::vector<TessLevelOp> tessLevels[6];
     // mesh shaders (EXT_mesh_shader)
     int taskLocalSize[3] = {1, 1, 1}, meshLocalSize[3] = {1, 1, 1};
     int meshMaxVertices = 0, meshMaxPrimitives = 0;
@@ -391,6 +413,13 @@ struct VariantKey {
     // gl_PrimitiveID; the variant also has the pre-pass fragment function mgl_fs_pdc (writes 1 to color 0), and the
     // vertex position is invariant so that both passes rasterize the same samples.
     bool pdc = false;
+    // Tessellation: run pass 1 (VS + TCS) as the mgl_tcs compute kernel even when the patch fits the
+    // object stage's payload (METALGLDRV_TESS_PASS1=compute; the counted paths always use the kernel).
+    bool tessComputePass = false;
+    // Tessellation fast path (Reflection::tessFused, the draw's levels make every patch exactly one
+    // primitive at the domain corners): a classic vertex function runs, per output vertex, the VS for
+    // the patch's `tessFused` input vertices, the TCS for all its invocations and the TES at the corner.
+    uint8_t tessFused = 0;
 };
 
 struct EntryPoint {
@@ -537,6 +566,24 @@ struct alignas(16) MGLDrawInfo {
     uint64_t spillCounter;        // device atomic_uint
     uint32_t spillCapacity;       // records that fit in spillBuffer
     uint32_t pad1;
+    // Tessellation: the sub-draws of the draw (all of a multi-draw's, or one), sorted by firstPatch.
+    // Patch p of the grid (primitiveCount patches over all sub-draws) belongs to the last sub-draw
+    // with firstPatch <= p; control point j of its patch q = p - firstPatch is list position
+    // q * patchVertices + j of the sub-draw, read as subDrawIndexType says.
+    uint64_t subDraws;            // MGLSubDraw[subDrawCount]
+    uint32_t subDrawCount;
+    uint32_t subDrawIndexType;    // 0: indexBuffer[first + i] (decomposed list), 1: first + i (non-indexed),
+                                  // 2 / 4: uint16 / uint32 index i at `indices` (the GL index buffer); base vertex added
+};
+
+// One sub-draw of a tessellation draw (MGLDrawInfo::subDraws).
+struct alignas(16) MGLSubDraw {
+    uint32_t firstPatch;          // first patch of the sub-draw in the grid
+    uint32_t drawID;              // gl_DrawID
+    int32_t baseVertex;           // gl_BaseVertex (0 for non-indexed draws)
+    uint32_t first;               // subDrawIndexType 0: offset into indexBuffer; 1: first vertex
+    uint64_t indices;             // subDrawIndexType 2 / 4: GPU address of the sub-draw's first index
+    uint32_t pad[2];
 };
 
 

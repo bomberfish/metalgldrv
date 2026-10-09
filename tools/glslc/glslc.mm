@@ -78,6 +78,26 @@ static void printReflection(const Reflection& r) {
            r.multipass.xfbStride[2], r.multipass.xfbStride[3], r.multipass.xfbBufferMask, r.usesFlatShading, r.writesLayer,
            r.writesViewportIndex);
     for (auto& x : r.xfbVaryings) printf("xfb %s type=0x%x size=%d buffer=%d offset=%d\n", x.name.c_str(), x.type, x.arraySize, x.buffer, x.offset);
+    if (r.stageMask & (1u << (int)Stage::TessEval)) {
+        // tessellation fast path analysis: the levels as postfix programs (c = constant, f/i/u@offset = uniform)
+        printf("tessFusable=%d", r.tessFusable);
+        static const char* names[] = {"outer0", "outer1", "outer2", "outer3", "inner0", "inner1"};
+        static const char* ops[] = {"", "", "", "", "neg", "+", "-", "*", "/", "min", "max", "clamp"};
+        for (int i = 0; i < 6; i++) {
+            if (r.tessLevels[i].empty()) continue;
+            printf(" %s=", names[i]);
+            for (auto& op : r.tessLevels[i]) {
+                switch (op.kind) {
+                    case TessLevelOp::Const: printf("[c %g]", op.value); break;
+                    case TessLevelOp::Float: printf("[f@%u]", op.offset); break;
+                    case TessLevelOp::Int: printf("[i@%u]", op.offset); break;
+                    case TessLevelOp::UInt: printf("[u@%u]", op.offset); break;
+                    default: printf("[%s]", ops[op.kind]); break;
+                }
+            }
+        }
+        printf("\n");
+    }
     for (int st = 0; st < (int)Stage::Count; st++) {
         auto& ss = r.subroutines[st];
         for (size_t i = 0; i < ss.functions.size(); i++) printf("subroutine[%d] %zu: %s\n", st, i, ss.functions[i].c_str());
@@ -116,6 +136,8 @@ int main(int argc, char** argv) {
     std::string mslOut;
     std::vector<std::string> quirks, hidden;
     bool validate = true, quiet = false, compileOnly = false, timing = false, xfb = false, capture = false, separable = false;
+    bool tessCompute = false;
+    int tessFused = 0;
     auto now = [] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     double t0 = 0, tc = 0;
     for (int i = 1; i < argc; i++) {
@@ -147,6 +169,8 @@ int main(int argc, char** argv) {
         else if (a == "--capture") capture = true;  // emit the XfbCapture variant even for GS/tess programs
         else if (a == "--quirk" && i + 1 < argc) quirks.push_back(argv[++i]);  // GLSL quirk (app profiles), Mesa driconf name
         else if (a == "--hide" && i + 1 < argc) hidden.push_back(argv[++i]);   // extension hidden by an app profile
+        else if (a == "--tess-fused" && i + 1 < argc) tessFused = atoi(argv[++i]);  // tessellation fast path variant (patch vertices)
+        else if (a == "--tess-compute") tessCompute = true;  // tessellation pass 1 as the mgl_tcs kernel
         else { fprintf(stderr, "usage: glslc -S <stage> <file> ... [--msl out] [--no-validate] [-q]\n"); return 2; }
     }
     LinkInput li;
@@ -200,6 +224,10 @@ int main(int argc, char** argv) {
              : (sm & (1u << (int)Stage::TessEval)) ? PipelineKind::Tessellation
              : (sm & (1u << (int)Stage::Geometry)) ? PipelineKind::MeshGeometry
              : xfb ? PipelineKind::XfbCapture : PipelineKind::Classic;
+    if (key.kind == PipelineKind::Tessellation) {
+        key.tessFused = (uint8_t)tessFused;
+        key.tessComputePass = tessCompute;
+    }
     t0 = now();
     MSLOutput mo = generateMSL(*lr.program, key);
     double tm = now() - t0;

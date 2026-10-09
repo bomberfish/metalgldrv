@@ -82,13 +82,37 @@ Vertex ids come from the uint32 list `indexBuffer` (+ `baseVertex`).
   threads = vertices per input primitive (1/2/4/3/6). maxMeshVertices = max_vertices (<= 256), maxMeshPrimitives = strip-adjusted.
   Strips are converted to lists with GL's last-vertex provoking order (flat varyings follow GL's default). gl_PrimitiveIDIn = list
   primitive index within the instance, gl_InvocationID = grid z.
-* **Tessellation**: pass 1 `mgl_tcs` (Kernel): dispatchThreadgroups(patches, instances, 1), threadsPerThreadgroup = TCS output vertices
-  (32 when there is no TCS). Writes `tcsVertexOut[(instance*patches + patch) * cps + cp]` records of `multipass.tcsVertexOutBytes`
-  (cps = `multipass.tcsOutputVertices`, or `patchVertices` when it is 0) and `tcsPatchOut[...]` records of `multipass.tcsPatchOutBytes`
-  (float outer[4], inner[2] at offset 0, patch varyings from byte 32). Without a TCS the levels come from `MGLSys::tessDefaultOuter/Inner`.
-  Pass 2 `mgl_tes_obj` (Object, 1 thread, payload 128 B) + `mgl_tes` (Mesh, 64 threads, <= 130 vertices / 128 primitives):
-  grid (patches, instances, 1); the object stage sizes the mesh grid itself. Tessellation follows GL 4.6 11.2.2
-  (clamping/rounding per spacing, culling on outer <= 0 or NaN, all domains, point_mode, cw/ccw), verified watertight by `glslrun --tesscheck`.
+* **Tessellation**: patches come from the sub-draw table `MGLDrawInfo::subDraws` (`MGLSubDraw`: first patch, gl_DrawID,
+  gl_BaseVertex, list offset / first vertex / index address, as `subDrawIndexType` says): grid patch p belongs to the last sub-draw
+  whose `firstPatch` <= p (`mgl_sd_find`), its control point j is list position (p - firstPatch) * patchVertices + j of that
+  sub-draw (`mgl_sd_vertex`), and gl_PrimitiveID counts from the sub-draw's first patch. One draw has one sub-draw; a batched
+  multi-draw all of them (`primitiveCount` = patches over all sub-draws).
+  Pass 1 (VS + TCS per patch) writes the control point records (`multipass.tcsVertexOutBytes` each; cps = `multipass.tcsOutputVertices`,
+  or `patchVertices` when it is 0) and the patch record (`multipass.tcsPatchOutBytes`: float outer[4], inner[2] at offset 0, patch
+  varyings from byte 32). Without a TCS the levels come from `MGLSys::tessDefaultOuter/Inner`. It runs
+  * in the object stage `mgl_tes_obj` (threads = TCS output vertices, 32 without a TCS), which passes the records in the payload
+    (`uint4 rec[]`: cps records, then the patch record) when they fit 16 KB (`EntryPoint::payloadBytes`); or
+  * as the kernel `mgl_tcs` (`VariantKey::tessComputePass`, payloads over 16 KB, the counted paths below): dispatchThreadgroups(patches,
+    instances, 1), records at `tcsVertexOut[(instance*patches + patch) * cps + cp]` / `tcsPatchOut[...]`; `mgl_tes_obj` has 1 thread.
+  The variant has `mgl_tcs` exactly when the runtime must dispatch it. Pass 2 `mgl_tes_obj` (Object) + `mgl_tes` (Mesh, 64 threads,
+  <= 130 vertices / 128 primitives): grid (patches, instances, 1); the object stage sizes the mesh grid itself. Tessellation follows
+  GL 4.6 11.2.2 (clamping/rounding per spacing, culling on outer <= 0 or NaN, all domains, point_mode, cw/ccw), verified watertight
+  by `glslrun --tesscheck`.
+* **Tessellation fast path** (`VariantKey::tessFused` = patch vertices): `mgl_vs` (Vertex) for a non-indexed triangle list of 3
+  (quads: 6) vertices per grid patch; vertex k of patch p runs the VS for the patch's input vertices, the TCS invocations one after
+  another, packs their outputs into the same records as pass 1 and runs the TES at domain corner k (mgl_tess_unit's special-case
+  order: triangles (0,0,1) (1,0,0) (0,1,0), quads (0,0) (1,0) (1,1) / (0,0) (1,1) (0,1), cw swapping the last two), with the
+  tessellator's fp pragmas; the TCS / TES shared state lives in thread memory (`sharedSpace_`). Equivalent to the emulation when
+  the levels give one segment per edge: the outer levels the domain uses in (0, 1] and its inner levels <= 1, with equal or
+  fractional_odd spacing (fractional_even clamps to 2). The linker checks the rest (`Reflection::tessFusable`): VS + TES (+ TCS
+  with at most 4 output vertices and no barrier()), no GS, triangles or quads, no point_mode, no memory writes (buffer stores,
+  buffer lvalues passed to out parameters, atomics, image stores) or subgroup operations in VS / TCS / TES, no gl_Layer /
+  gl_ViewportIndex from the TES, a fragment shader that doesn't read gl_PrimitiveID and has <= 124 input scalars. The TCS must
+  write each level the domain uses exactly once, in main, as `gl_TessLevel*[c] = expr;` (chains allowed) at top level or in
+  `if (gl_InvocationID == c)` for an existing invocation, after no return, with expr made of constants, default-block uniforms
+  (float scalars or components, int/uint converted), unary minus, + - * /, min, max and clamp; `Reflection::tessLevels` holds them
+  as postfix programs that the runtime evaluates (in float) at each draw. Without barrier(), running the TCS invocations in sequence
+  is a valid order (reads of other invocations' outputs are undefined without it).
 * **XfbCapture** (`mgl_xfb`, Kernel, 64 threads): dispatchThreads(count * instances). Writes captured varyings at
   (xfbVertexBase + t) * `multipass.xfbStride[b]` + offset into `xfbBuffer[b]`, primitives `t / vpp < xfbPrimLimit[0]` only.
   Captured layout comes from `Reflection::xfbVaryings` (glTransformFeedbackVaryings incl. gl_NextBuffer / gl_SkipComponentsN, or

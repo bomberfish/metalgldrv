@@ -253,6 +253,8 @@ private:
     void checkBlockInterfaces();
     void writeInit(const Type& t, const TL& L, const ConstVal& cv, size_t& ci, uint8_t* dst);
     void stageMetadata();
+    bool tessLevelCode(const Expr* e, std::vector<TessLevelOp>& out);
+    void tessFusedAnalysis();
 };
 
 void Linker::collectStage(Stage s) {
@@ -1630,6 +1632,256 @@ void Linker::stageMetadata() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tessellation fast path (Reflection::tessFusable / tessLevels, VariantKey::tessFused)
+// ---------------------------------------------------------------------------
+// Compiles a float scalar expression made of constants, default-block uniforms (float scalars, single
+// components of float vectors, integer scalars converted to float), negation, + - * /, min, max and
+// clamp into a postfix program. Returns false for anything else.
+bool Linker::tessLevelCode(const Expr* e, std::vector<TessLevelOp>& out) {
+    auto uniformOffset = [&](const Variable* v, uint32_t& off) {
+        if (!v || !v->global || v->q.storage != Storage::Uniform || v->block || v->type.isOpaque() || v->type.isArray()) return false;
+        auto it = prog_->defaultOffsets.find(v->name);
+        if (it == prog_->defaultOffsets.end()) return false;
+        off = it->second;
+        return true;
+    };
+    TessLevelOp op;
+    if (!e->type.isScalar() || e->type.base != BT::Float) return false;
+    if (e->cv && !e->cv->c.empty()) {
+        op.kind = TessLevelOp::Const;
+        op.value = (float)e->cv->c[0].f;
+        out.push_back(op);
+        return true;
+    }
+    switch (e->kind) {
+        case EK::Var:
+            if (!uniformOffset(e->var, op.offset)) return false;
+            op.kind = TessLevelOp::Float;
+            out.push_back(op);
+            return true;
+        case EK::Swizzle:
+            if (e->nswz != 1 || e->args[0]->kind != EK::Var || !e->args[0]->type.isVector() || !uniformOffset(e->args[0]->var, op.offset))
+                return false;
+            op.kind = TessLevelOp::Float;
+            op.offset += 4u * e->swz[0];
+            out.push_back(op);
+            return true;
+        case EK::Ctor: {  // conversion to float
+            if (e->args.size() != 1) return false;
+            const Expr* a = e->args[0];
+            if (a->type.isScalar() && a->type.base == BT::Float) return tessLevelCode(a, out);
+            if (!a->type.isScalar() || (a->type.base != BT::Int && a->type.base != BT::UInt) || a->kind != EK::Var ||
+                !uniformOffset(a->var, op.offset))
+                return false;
+            op.kind = a->type.base == BT::Int ? TessLevelOp::Int : TessLevelOp::UInt;
+            out.push_back(op);
+            return true;
+        }
+        case EK::Unary:
+            if (e->op != Op::Neg && e->op != Op::Plus) return false;
+            if (!tessLevelCode(e->args[0], out)) return false;
+            if (e->op == Op::Neg) out.push_back({TessLevelOp::Neg});
+            return true;
+        case EK::Binary: {
+            TessLevelOp::Kind k;
+            switch (e->op) {
+                case Op::Add: k = TessLevelOp::Add; break;
+                case Op::Sub: k = TessLevelOp::Sub; break;
+                case Op::Mul: k = TessLevelOp::Mul; break;
+                case Op::Div: k = TessLevelOp::Div; break;
+                default: return false;
+            }
+            if (!tessLevelCode(e->args[0], out) || !tessLevelCode(e->args[1], out)) return false;
+            out.push_back({k});
+            return true;
+        }
+        case EK::Builtin: {
+            const std::string& n = e->fn->name;
+            TessLevelOp::Kind k;
+            if (n == "min" && e->args.size() == 2) k = TessLevelOp::Min;
+            else if (n == "max" && e->args.size() == 2) k = TessLevelOp::Max;
+            else if (n == "clamp" && e->args.size() == 3) k = TessLevelOp::Clamp;
+            else return false;
+            for (auto* a : e->args)
+                if (!tessLevelCode(a, out)) return false;
+            out.push_back({k});
+            return true;
+        }
+        default: return false;
+    }
+}
+
+// Decides Reflection::tessFusable and the level programs (see glsl.h). The TCS must write each level
+// the domain uses exactly once, in main, as `gl_TessLevelX[c] = <expr>;` (or a chain of such
+// assignments), either unconditionally or inside `if (gl_InvocationID == c)` (no else) for an
+// invocation that exists, with no return before it and nothing else touching the levels.
+void Linker::tessFusedAnalysis() {
+    auto& r = prog_->refl;
+    const uint32_t m = prog_->stageMask;
+    auto has = [&](Stage s) { return (m & (1u << (int)s)) != 0; };
+    if (!has(Stage::Vertex) || !has(Stage::TessEval) || has(Stage::Geometry)) return;
+    bool tri = r.tesPrimitiveMode == gl::TRIANGLES;
+    if ((!tri && r.tesPrimitiveMode != gl::QUADS) || r.tesPointMode || r.tesSpacing == gl::FRACTIONAL_EVEN) return;
+    if (r.writesLayer || r.writesViewportIndex) return;
+    // The fused vertex function runs the vertex shader once per patch vertex for every output vertex
+    // and the TCS invocations one after another (no barrier()): memory writes would happen several
+    // times and subgroup operations would see other invocations. Reading buffers and images is fine.
+    auto bufferRoot = [](const Expr* e) {
+        while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
+        return e->kind == EK::Var && e->var->q.storage == Storage::Buffer;
+    };
+    for (Stage st : {Stage::Vertex, Stage::TessControl, Stage::TessEval}) {
+        const StageCode& sc = prog_->stages[(int)st];
+        if (!sc.main) continue;
+        for (const std::string& n : sc.usedNames)
+            if (n.compare(0, 11, "gl_Subgroup") == 0 || n.compare(0, 11, "gl_SubGroup") == 0) return;
+        bool bad = false;
+        Walker w;
+        w.onExpr = [&](const Expr* e) {
+            switch (e->kind) {
+                case EK::Assign: bad |= bufferRoot(e->args[0]); return;
+                case EK::Unary:
+                    if (e->op == Op::PreInc || e->op == Op::PreDec || e->op == Op::PostInc || e->op == Op::PostDec) bad |= bufferRoot(e->args[0]);
+                    return;
+                case EK::Call: case EK::Builtin: case EK::SubroutineCall: break;
+                default: return;
+            }
+            if (!e->fn) return;
+            for (size_t i = 0; i < e->args.size() && i < e->fn->params.size(); i++) {  // buffer lvalues as out / inout arguments
+                Storage s = e->fn->params[i]->q.storage;
+                if ((s == Storage::Out || s == Storage::InOut) && bufferRoot(e->args[i])) bad = true;
+            }
+            if (e->kind != EK::Builtin) return;
+            const std::string& n = e->fn->name;
+            if ((n.compare(0, 6, "atomic") == 0 && n != "atomicCounter") || n.compare(0, 10, "imageStore") == 0 ||
+                n.compare(0, 11, "imageAtomic") == 0)
+                bad = true;
+            if ((n == "barrier" && st == Stage::TessControl) || n.compare(0, 8, "subgroup") == 0 || n.compare(0, 6, "ballot") == 0 ||
+                n.compare(0, 14, "readInvocation") == 0 || n.compare(0, 19, "readFirstInvocation") == 0 ||
+                n.compare(0, 13, "anyInvocation") == 0 || n.compare(0, 14, "allInvocations") == 0)
+                bad = true;
+        };
+        for (auto* f : sc.reachable) w.stmt(f->body);
+        if (bad) return;
+    }
+    // Fragment shader: gl_PrimitiveID would count the rasterized triangles (not the patches) and the
+    // inputs must fit a classic vertex function (124 scalars).
+    if (const StageCode& fs = prog_->stages[(int)Stage::Fragment]; fs.main) {
+        if (fs.usedNames.count("gl_PrimitiveID")) return;
+        int scalars = 0;
+        std::function<int(const Type&)> count = [&](const Type& t) -> int {
+            int n = std::max(1, t.totalArrayElements());
+            Type b = t.stripArrays();
+            if (b.base == BT::Struct) {
+                int c = 0;
+                for (auto& mb : b.sdef->members) c += count(mb.type);
+                return n * c;
+            }
+            return n * b.components() * (b.is64() ? 2 : 1);
+        };
+        for (auto* v : fs.used)
+            if (v->q.storage == Storage::In && (v->builtin == BuiltinVar::None || v->builtin == BuiltinVar::ClipDistance ||
+                                                v->builtin == BuiltinVar::CullDistance))
+                scalars += count(v->type);
+        if (scalars > 124) return;
+    }
+    for (auto& l : r.tessLevels) l.clear();
+    const StageCode& tc = prog_->stages[(int)Stage::TessControl];
+    if (tc.main) {
+        int outv = tc.outLayout.vertices;
+        if (outv < 1 || outv > 4) return;
+        auto isLevel = [](const Expr* e) {
+            return e->kind == EK::Var && (e->var->builtin == BuiltinVar::TessLevelOuter || e->var->builtin == BuiltinVar::TessLevelInner);
+        };
+        // references to the levels: in all reachable code, and in one statement
+        auto countRefs = [&](const auto& visit) {
+            int n = 0;
+            Walker w;
+            w.onExpr = [&](const Expr* e) { if (isLevel(e)) n++; };
+            visit(w);
+            return n;
+        };
+        int refs = countRefs([&](Walker& w) { for (auto* f : tc.reachable) w.stmt(f->body); });
+        auto refsIn = [&](const Stmt* s) { return countRefs([&](Walker& w) { w.stmt(s); }); };
+        bool hasReturn = false, ok = true;
+        int matched = 0;
+        int writes[6] = {};
+        auto containsReturn = [&](const Stmt* s) {
+            bool ret = false;
+            Walker w;
+            w.onExpr = [](const Expr*) {};
+            w.onStmt = [&](const Stmt* t) { if (t->kind == SK::Return) ret = true; };
+            w.stmt(s);
+            return ret;
+        };
+        // `gl_TessLevelX[c] = (gl_TessLevelY[d] = ...) = rhs`
+        auto assignment = [&](const Expr* e) {
+            std::vector<int> targets;
+            while (e->kind == EK::Assign && e->op == Op::Assign) {
+                const Expr* l = e->args[0];
+                if (l->kind != EK::Index || !isLevel(l->args[0]) || !l->args[1]->cv) return false;
+                bool inner = l->args[0]->var->builtin == BuiltinVar::TessLevelInner;
+                int64_t c = l->args[1]->cv->c[0].i;
+                if (c < 0 || c >= (inner ? 2 : 4)) return false;
+                targets.push_back((int)c + (inner ? 4 : 0));
+                e = e->args[1];
+            }
+            if (targets.empty()) return false;
+            std::vector<TessLevelOp> code;
+            if (!tessLevelCode(e, code)) return false;
+            for (int t : targets) {
+                if (writes[t]++) return false;
+                r.tessLevels[t] = code;
+            }
+            matched += (int)targets.size();
+            return true;
+        };
+        std::function<void(const Stmt*, bool)> walk = [&](const Stmt* s, bool top) {
+            if (!s || !ok) return;
+            int n = refsIn(s);
+            if (n == 0) {
+                if (containsReturn(s)) hasReturn = true;
+                return;
+            }
+            if (hasReturn) { ok = false; return; }
+            switch (s->kind) {
+                case SK::Block:
+                    for (auto* b : s->body) walk(b, top);
+                    return;
+                case SK::Expr:
+                    if (!assignment(s->expr)) ok = false;
+                    return;
+                case SK::If: {
+                    // only `if (gl_InvocationID == c)` for an existing invocation, levels in the then branch
+                    const Expr* c = s->expr;
+                    const Expr *a = c ? c->args.size() == 2 ? c->args[0] : nullptr : nullptr, *b = a ? c->args[1] : nullptr;
+                    if (a && b && b->kind == EK::Var) std::swap(a, b);
+                    bool inv = top && c && c->kind == EK::Binary && c->op == Op::Eq && a && b && a->kind == EK::Var &&
+                               a->var->builtin == BuiltinVar::InvocationID && b->cv && b->cv->c[0].i >= 0 && b->cv->c[0].i < outv;
+                    if (!inv || refsIn(s->els) || refsIn(s->then) != n) { ok = false; return; }
+                    walk(s->then, false);
+                    if (containsReturn(s->then)) hasReturn = true;
+                    return;
+                }
+                default: ok = false; return;
+            }
+        };
+        if (tc.main->body)
+            for (auto* s : tc.main->body->body) walk(s, true);
+        if (!ok || matched != refs) {
+            for (auto& l : r.tessLevels) l.clear();
+            return;
+        }
+        int nOuter = tri ? 3 : 4, nInner = tri ? 1 : 2;
+        for (int i = 0; i < nOuter; i++)
+            if (!writes[i]) return;
+        for (int i = 0; i < nInner; i++)
+            if (!writes[4 + i]) return;
+    }
+    r.tessFusable = true;
+}
+
 // Uniform/storage blocks with the same block name must match across the program (GLSL 4.60 4.3.9), and the
 // global names exposed by anonymous uniform blocks must not collide with other uniforms.
 void Linker::checkBlockInterfaces() {
@@ -1722,6 +1974,7 @@ LinkResult Linker::run() {
         checkVaryings();
         stageMetadata();
         if (ok_) reflectProgramInterface(*prog_, prog_->refl);
+        if (ok_) tessFusedAnalysis();
     }
     // names produced by the stage feeding the rasterizer (used by the FS emitter to drop unmatched inputs)
     if (ok_) {
