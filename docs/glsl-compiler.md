@@ -99,17 +99,29 @@ object grid whose payloads add up to a few hundred MB (the watchdog kills it or 
     (`uint4 rec[]`: cps records, then the patch record) when they fit 16 KB (`EntryPoint::payloadBytes`); or
   * as the kernel `mgl_tcs` (`VariantKey::tessComputePass`, payloads over 16 KB, the counted paths below): dispatchThreadgroups(patches,
     instances, 1), records at `tcsVertexOut[(instance*patches + patch) * cps + cp]` / `tcsPatchOut[...]`; `mgl_tes_obj` has 1 thread.
-  The variant has `mgl_tcs` exactly when the runtime must dispatch it. Pass 2 `mgl_tes_obj` (Object) + `mgl_tes` (Mesh, 64 threads,
-  <= 130 vertices / 128 primitives): grid (patches, instances, 1); the object stage sizes the mesh grid itself. Tessellation follows
+  The variant has `mgl_tcs` exactly when the runtime must dispatch it. Pass 2 `mgl_tes_obj` (Object) + `mgl_tes` (Mesh, 32 threads,
+  <= 130 vertices / 128 primitives): grid (patches, instances, 1); the object stage packs the patch's units into groups that fit one
+  mesh threadgroup (payload `gstart[]`, `groups`) and sizes the mesh grid to the groups. `VariantKey::patchVertices` sizes the TCS's
+  per-vertex input arrays (the TES's without a TCS) to the patch and the TES's to the TCS output vertex count instead of
+  gl_MaxPatchVertices (indices clamped; arrays the stage uses whole keep their size). Tessellation follows
   GL 4.6 11.2.2 (clamping/rounding per spacing, culling on outer <= 0 or NaN, all domains, point_mode, cw/ccw), verified watertight
   by `glslrun --tesscheck`.
 * **Tessellation fast path** (`VariantKey::tessFused` = patch vertices): `mgl_vs` (Vertex) for a non-indexed triangle list of 3
   (quads: 6) vertices per grid patch; vertex k of patch p runs the VS for the patch's input vertices, the TCS invocations one after
   another, packs their outputs into the same records as pass 1 and runs the TES at domain corner k (mgl_tess_unit's special-case
   order: triangles (0,0,1) (1,0,0) (0,1,0), quads (0,0) (1,0) (1,1) / (0,0) (1,1) (0,1), cw swapping the last two), with the
-  tessellator's fp pragmas; the TCS / TES shared state lives in thread memory (`sharedSpace_`). Equivalent to the emulation when
-  the levels give one segment per edge: the outer levels the domain uses in (0, 1] and its inner levels <= 1, with equal or
-  fractional_odd spacing (fractional_even clamps to 2). The linker checks the rest (`Reflection::tessFusable`): VS + TES (+ TCS
+  tessellator's fp pragmas; the TCS / TES shared state lives in thread memory (`sharedSpace_`); a patch whose outer levels (as
+  the fused TCS computes them) are <= 0 or NaN collapses to a point. Equivalent to the emulation when the levels give one segment
+  per edge: the outer levels the domain uses in (0, 1] and its inner levels <= 1, with equal or fractional_odd spacing
+  (fractional_even clamps to 2). At any levels when `Reflection::tesAffine` (and polygon mode GL_FILL): the TES classifies as
+  constant per patch / affine in gl_TessCoord / other (sums of affine terms, products and quotients by constants, `mix` with a
+  constant weight or constant ends, `dot` / matrix products with a constant side, constructors to float types; conditions
+  constant per patch; writes in loops, under other conditions or through calls are "other"; user functions reading
+  gl_TessCoord / outputs / private globals are "other"), gl_Position and clip distances must be affine, cull distances and
+  compatibility varyings rule it out, and each varying the fragment shader reads must be affine if it interpolates it smoothly at
+  the pixel centre and constant otherwise (flat, integer, noperspective, centroid, sample). Sub-triangles of an affine patch
+  then lie in one plane with the same perspective-correct attribute functions as the corner triangle, so the image matches up
+  to rounding. The linker checks the rest (`Reflection::tessFusable`): VS + TES (+ TCS
   with at most 4 output vertices and no barrier()), no GS, triangles or quads, no point_mode, no memory writes (buffer stores,
   buffer lvalues passed to out parameters, atomics, image stores) or subgroup operations in VS / TCS / TES, no gl_Layer /
   gl_ViewportIndex from the TES, a fragment shader that doesn't read gl_PrimitiveID and has <= 124 input scalars. The TCS must

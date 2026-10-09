@@ -2,7 +2,7 @@
 // include resolution) with the draw calls Minecraft 26 + Sodium + Iris issue, for reproducing driver problems with
 // real shaders. Run it under MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1.
 //
-//   packreplay PREFIX... [--frames N] [--uniform NAME=V]
+//   packreplay PREFIX... [--frames N] [--regions N] [--uniform NAME=V]
 //
 // For each PREFIX, PREFIX.vert, PREFIX.frag and the optional PREFIX.tesc / .tese / .geom are linked; every active
 // attribute gets per-vertex data (float or integer as declared), the projection matrices (the compatibility matrix
@@ -26,7 +26,10 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <chrono>
 #include <vector>
+
+extern "C" double mglTestMaxGpuSeconds(void);
 
 namespace {
 
@@ -204,11 +207,12 @@ Program setup(const std::string& prefix, const std::vector<std::pair<std::string
 
 int main(int argc, char** argv) {
     std::vector<std::string> prefixes;
-    int frames = 3;
+    int frames = 3, regions = 40;
     std::vector<std::pair<std::string, float>> floatUniforms;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) frames = atoi(argv[++i]);
+        else if (a == "--regions" && i + 1 < argc) regions = atoi(argv[++i]);  // Sodium multi-draws per pass (~3000 triangles each)
         else if (a == "--uniform" && i + 1 < argc) {
             std::string v = argv[++i];
             size_t eq = v.find('=');
@@ -222,7 +226,7 @@ int main(int argc, char** argv) {
         }
     }
     if (prefixes.empty()) {
-        fprintf(stderr, "usage: packreplay PREFIX... [--frames N] [--uniform NAME=V]\n");
+        fprintf(stderr, "usage: packreplay PREFIX... [--frames N] [--regions N] [--uniform NAME=V]\n");
         return 2;
     }
     setenv("METALGLDRV_IMPLICIT_PATCHES", "1", 1);
@@ -308,7 +312,7 @@ int main(int argc, char** argv) {
 
     // Sodium: 40 regions x 7 facings, sub-draws of 50..250 quads from the shared index buffer, some empty
     auto sodium = [&]() {
-        for (int c = 0; c < 40; c++) {
+        for (int c = 0; c < regions; c++) {
             GLsizei counts[7];
             const void* offs[7];
             GLint bv[7];
@@ -321,7 +325,10 @@ int main(int argc, char** argv) {
             glMultiDrawElementsBaseVertex(GL_TRIANGLES, counts, GL_UNSIGNED_INT, offs, 7, bv);
         }
     };
+    std::vector<double> frameMs;
+    mglTestMaxGpuSeconds();
     for (int f = 0; f < frames; f++) {
+        auto t0 = std::chrono::steady_clock::now();
         for (auto& P : progs) {
             glUseProgram(P.prog);
             glBindVertexArray(P.vao);
@@ -346,6 +353,7 @@ int main(int argc, char** argv) {
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib32);
         }
         glFinish();
+        frameMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         if (GLenum e = glGetError()) fprintf(stderr, "frame %d: GL error 0x%x\n", f, e);
     }
     for (auto& P : progs) {
@@ -360,6 +368,9 @@ int main(int argc, char** argv) {
         }
         printf("packreplay %s: %d frames done, %ld pixels shaded\n", P.prefix.c_str(), frames, shaded);
     }
+    std::sort(frameMs.begin(), frameMs.end());
+    printf("packreplay: %d regions per pass, frame median %.1f ms (max %.1f), longest command buffer %.1f ms on the GPU\n", regions,
+           frameMs[frameMs.size() / 2], frameMs.back(), mglTestMaxGpuSeconds() * 1000);
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(dpy, ctx);
     eglDestroySurface(dpy, surf);

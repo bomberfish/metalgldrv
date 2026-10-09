@@ -153,10 +153,20 @@ tessellator (equal / fractional_even / fractional_odd spacing, triangles / quads
   decides whether a program qualifies and how the TCS computes its levels from
   constants and default-block uniforms (`Reflection::tessFusable`,
   `tessLevels`); the draw evaluates them with the current uniform values (or the
-  GL_PATCH_DEFAULT_* levels without a TCS). Shader packs that tessellate every
-  terrain draw with levels 1 (Shrimple) render at close to the cost of no
-  tessellation. `METALGLDRV_TESS_FAST=0` disables it. Conditions in
-  docs/glsl-compiler.md.
+  GL_PATCH_DEFAULT_* levels without a TCS). When the TES is affine in
+  gl_TessCoord (`Reflection::tesAffine`: interpolation of the inputs, as
+  Shrimple's terrain and water do), the fast path applies at any levels: the
+  tessellated patch covers the same triangle with the same perspective-correct
+  values; the fused vertex function drops patches whose outer levels cull them.
+  Shader packs that tessellate every terrain draw (Shrimple) render at close to
+  the cost of no tessellation. `METALGLDRV_TESS_FAST=0` disables it. Conditions
+  in docs/glsl-compiler.md.
+* **Watchdog budget**: emulated geometry (tessellation, geometry shaders, and
+  fast-path patches at a lower weight) is weighed in expected output triangles;
+  a command buffer is committed before it holds more than ~250 ms of it, also
+  between the chunks of one large draw (`meshWork*` in draw.mm). The ns per
+  triangle comes from the GPU times of completed command buffers. A command
+  buffer that runs longer than 0.5 s on the GPU is logged as a warning.
 
 ## Sparse textures and buffers (ARB_sparse_texture(2), _clamp, ARB_sparse_buffer)
 Advertised when the device supports placement sparse resources (`supportsPlacementSparse`;

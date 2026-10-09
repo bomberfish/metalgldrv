@@ -255,6 +255,8 @@ private:
     void stageMetadata();
     bool tessLevelCode(const Expr* e, std::vector<TessLevelOp>& out);
     void tessFusedAnalysis();
+    void tessLevelAnalysis();
+    bool tesAffineAnalysis();
 };
 
 void Linker::collectStage(Stage s) {
@@ -1712,18 +1714,400 @@ bool Linker::tessLevelCode(const Expr* e, std::vector<TessLevelOp>& out) {
     }
 }
 
-// Decides Reflection::tessFusable and the level programs (see glsl.h). The TCS must write each level
-// the domain uses exactly once, in main, as `gl_TessLevelX[c] = <expr>;` (or a chain of such
-// assignments), either unconditionally or inside `if (gl_InvocationID == c)` (no else) for an
-// invocation that exists, with no return before it and nothing else touching the levels.
+// Reflection::tessLevels: how the TCS sets the levels the domain uses. The TCS must write each of them exactly
+// once, in main, as `gl_TessLevelX[c] = <expr>;` (or a chain of such assignments), either unconditionally or
+// inside `if (gl_InvocationID == c)` (no else) for an invocation that exists, with no return before it and
+// nothing else touching the levels. Left empty otherwise.
+void Linker::tessLevelAnalysis() {
+    auto& r = prog_->refl;
+    for (auto& l : r.tessLevels) l.clear();
+    const StageCode& tc = prog_->stages[(int)Stage::TessControl];
+    if (!tc.main) return;
+    int outv = tc.outLayout.vertices;
+    auto isLevel = [](const Expr* e) {
+        return e->kind == EK::Var && (e->var->builtin == BuiltinVar::TessLevelOuter || e->var->builtin == BuiltinVar::TessLevelInner);
+    };
+    // references to the levels: in all reachable code, and in one statement
+    auto countRefs = [&](const auto& visit) {
+        int n = 0;
+        Walker w;
+        w.onExpr = [&](const Expr* e) { if (isLevel(e)) n++; };
+        visit(w);
+        return n;
+    };
+    int refs = countRefs([&](Walker& w) { for (auto* f : tc.reachable) w.stmt(f->body); });
+    auto refsIn = [&](const Stmt* s) { return countRefs([&](Walker& w) { w.stmt(s); }); };
+    bool hasReturn = false, ok = true;
+    int matched = 0;
+    int writes[6] = {};
+    auto containsReturn = [&](const Stmt* s) {
+        bool ret = false;
+        Walker w;
+        w.onExpr = [](const Expr*) {};
+        w.onStmt = [&](const Stmt* t) { if (t->kind == SK::Return) ret = true; };
+        w.stmt(s);
+        return ret;
+    };
+    // `gl_TessLevelX[c] = (gl_TessLevelY[d] = ...) = rhs`
+    auto assignment = [&](const Expr* e) {
+        std::vector<int> targets;
+        while (e->kind == EK::Assign && e->op == Op::Assign) {
+            const Expr* l = e->args[0];
+            if (l->kind != EK::Index || !isLevel(l->args[0]) || !l->args[1]->cv) return false;
+            bool inner = l->args[0]->var->builtin == BuiltinVar::TessLevelInner;
+            int64_t c = l->args[1]->cv->c[0].i;
+            if (c < 0 || c >= (inner ? 2 : 4)) return false;
+            targets.push_back((int)c + (inner ? 4 : 0));
+            e = e->args[1];
+        }
+        if (targets.empty()) return false;
+        std::vector<TessLevelOp> code;
+        if (!tessLevelCode(e, code)) return false;
+        for (int t : targets) {
+            if (writes[t]++) return false;
+            r.tessLevels[t] = code;
+        }
+        matched += (int)targets.size();
+        return true;
+    };
+    std::function<void(const Stmt*, bool)> walk = [&](const Stmt* s, bool top) {
+        if (!s || !ok) return;
+        int n = refsIn(s);
+        if (n == 0) {
+            if (containsReturn(s)) hasReturn = true;
+            return;
+        }
+        if (hasReturn) { ok = false; return; }
+        switch (s->kind) {
+            case SK::Block:
+                for (auto* b : s->body) walk(b, top);
+                return;
+            case SK::Expr:
+                if (!assignment(s->expr)) ok = false;
+                return;
+            case SK::If: {
+                // only `if (gl_InvocationID == c)` for an existing invocation, levels in the then branch
+                const Expr* c = s->expr;
+                const Expr *a = c ? c->args.size() == 2 ? c->args[0] : nullptr : nullptr, *b = a ? c->args[1] : nullptr;
+                if (a && b && b->kind == EK::Var) std::swap(a, b);
+                bool inv = top && c && c->kind == EK::Binary && c->op == Op::Eq && a && b && a->kind == EK::Var &&
+                           a->var->builtin == BuiltinVar::InvocationID && b->cv && b->cv->c[0].i >= 0 && b->cv->c[0].i < outv;
+                if (!inv || refsIn(s->els) || refsIn(s->then) != n) { ok = false; return; }
+                walk(s->then, false);
+                if (containsReturn(s->then)) hasReturn = true;
+                return;
+            }
+            default: ok = false; return;
+        }
+    };
+    if (tc.main->body)
+        for (auto* s : tc.main->body->body) walk(s, true);
+    int nOuter = r.tesPrimitiveMode == gl::TRIANGLES ? 3 : r.tesPrimitiveMode == gl::QUADS ? 4 : 2;
+    int nInner = r.tesPrimitiveMode == gl::TRIANGLES ? 1 : r.tesPrimitiveMode == gl::QUADS ? 2 : 0;
+    for (int i = 0; i < nOuter; i++) ok = ok && writes[i];
+    for (int i = 0; i < nInner; i++) ok = ok && writes[4 + i];
+    if (!ok || matched != refs)
+        for (auto& l : r.tessLevels) l.clear();
+}
+
+// Reflection::tesAffine: every TES output the rest of the pipeline uses is affine in gl_TessCoord (a sum of
+// gl_TessCoord components times per-patch values, plus a per-patch value), and outputs the fragment shader
+// doesn't interpolate perspective-correctly at the pixel centre (flat, integer, noperspective, centroid, sample)
+// don't depend on gl_TessCoord at all. Then the tessellated patch, at any levels, covers the triangle(s) of its
+// corners with the same interpolated values: perspective-correct interpolation of an attribute affine in the
+// domain is exact on every sub-triangle (both it and the clip position are affine there), flat values are the
+// same at every vertex, and clipping by affine clip distances cuts the same region. Classes per expression:
+// constant per patch (inputs, uniforms, levels, gl_PrimitiveID, ...), affine, other. Straight-line code with
+// conditions constant per patch; anything written in loops, under other conditions or by called functions is
+// "other"; a return before the end of main, cull distances, compatibility color varyings fail the analysis.
+bool Linker::tesAffineAnalysis() {
+    const StageCode& te = prog_->stages[(int)Stage::TessEval];
+    const StageCode& fs = prog_->stages[(int)Stage::Fragment];
+    if (!te.main || !te.main->body) return false;
+    enum { C = 0, A = 1, N = 2 };
+    using Slot = std::pair<const Variable*, int>;  // variable, block member (-1: whole variable)
+    std::map<Slot, int> cls;
+    bool fail = false;
+    auto isOut = [](const Variable* v) { return v->global && v->q.storage == Storage::Out; };
+    // functions other than main must not write outputs or globals (their writes aren't tracked)
+    for (auto* f : te.reachable) {
+        if (f == te.main) continue;
+        Walker w;
+        w.onExpr = [&](const Expr* e) {
+            const Expr* l = nullptr;
+            if (e->kind == EK::Assign) l = e->args[0];
+            else if (e->kind == EK::Unary && (e->op == Op::PreInc || e->op == Op::PreDec || e->op == Op::PostInc || e->op == Op::PostDec))
+                l = e->args[0];
+            while (l && (l->kind == EK::Index || l->kind == EK::Field || l->kind == EK::Swizzle)) l = l->args[0];
+            if (l && l->kind == EK::Var && l->var->global) fail = true;
+        };
+        w.stmt(f->body);
+    }
+    if (fail) return false;
+    // user functions that read gl_TessCoord, outputs or private globals (directly or through their callees)
+    // aren't constant per patch even with constant arguments
+    std::set<const Function*> impure;
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (auto* f : te.reachable) {
+            if (impure.count(f)) continue;
+            bool bad = false;
+            Walker w;
+            w.onExpr = [&](const Expr* e) {
+                if (e->kind == EK::Var && (e->var->builtin == BuiltinVar::TessCoord ||
+                                           (e->var->global && (e->var->q.storage == Storage::Out || e->var->q.storage == Storage::Temp))))
+                    bad = true;
+                if ((e->kind == EK::Call || e->kind == EK::SubroutineCall) && e->fn) {
+                    auto it = te.defs.find(e->fn->mangled);
+                    if (e->kind == EK::SubroutineCall || it == te.defs.end() || impure.count(it->second)) bad = true;
+                }
+            };
+            w.stmt(f->body);
+            if (bad) {
+                impure.insert(f);
+                changed = true;
+            }
+        }
+    }
+    auto slotOf =[&](const Expr* e, bool& whole) -> Slot {
+        whole = true;
+        const Expr* member = nullptr;
+        while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) {
+            if (e->kind == EK::Field && e->args[0]->kind == EK::Var && e->args[0]->var->block) member = e;
+            else whole = false;
+            e = e->args[0];
+        }
+        if (e->kind != EK::Var) return {nullptr, -1};
+        if (member && member != e) {
+            // `block.member` written whole only when the member access is the outermost expression
+            return {e->var, member->field};
+        }
+        return {e->var, -1};
+    };
+    std::function<int(const Expr*)> ex;
+    bool taint = false;  // inside a loop or a condition that isn't constant per patch
+    auto write = [&](const Expr* l, int c) {
+        bool whole;
+        Slot s = slotOf(l, whole);
+        if (!s.first) { fail = true; return; }
+        // a member of a block written whole: whole iff the expression is just `block.member`
+        if (s.second >= 0) whole = l->kind == EK::Field && l->args[0]->kind == EK::Var;
+        else whole = l->kind == EK::Var;
+        if (taint) c = N;
+        int& v = cls[s];
+        v = whole ? c : std::max(v, c);
+    };
+    auto readVar = [&](const Variable* v, int member) {
+        if (v->builtin == BuiltinVar::TessCoord) return (int)A;
+        auto it = cls.find({v, member});
+        if (it != cls.end()) return it->second;
+        if (member >= 0) {
+            auto w = cls.find({v, -1});
+            if (w != cls.end()) return w->second;
+        }
+        return (int)C;  // inputs, uniforms, levels, built-ins, unwritten locals
+    };
+    ex = [&](const Expr* e) -> int {
+        if (e->cv) return C;
+        switch (e->kind) {
+            case EK::Const: case EK::Length: return C;
+            case EK::Var: return readVar(e->var, -1);
+            case EK::Field:
+                if (e->args[0]->kind == EK::Var && e->args[0]->var->block) return readVar(e->args[0]->var, e->field);
+                return ex(e->args[0]);
+            case EK::Swizzle: return ex(e->args[0]);
+            case EK::Index: {
+                int i = ex(e->args[1]), b = ex(e->args[0]);
+                return i == C ? b : N;
+            }
+            case EK::Unary:
+                if (e->op == Op::Neg || e->op == Op::Plus) return ex(e->args[0]);
+                if (e->op == Op::PreInc || e->op == Op::PreDec || e->op == Op::PostInc || e->op == Op::PostDec) {
+                    int c = ex(e->args[0]);
+                    write(e->args[0], c);
+                    return c;
+                }
+                return ex(e->args[0]) == C ? C : N;
+            case EK::Binary: {
+                int a = ex(e->args[0]), b = ex(e->args[1]);
+                switch (e->op) {
+                    case Op::Add: case Op::Sub: return std::max(a, b);
+                    case Op::Mul: return a == C ? b : b == C ? a : N;
+                    case Op::Div: return b == C ? a : N;
+                    default: return a == C && b == C ? C : N;
+                }
+            }
+            case EK::Assign: {
+                int rc = ex(e->args[1]);
+                if (e->op != Op::Assign) {
+                    int lc = ex(e->args[0]);
+                    switch (e->op) {
+                        case Op::AddAssign: case Op::SubAssign: rc = std::max(lc, rc); break;
+                        case Op::MulAssign: rc = lc == C ? rc : rc == C ? lc : N; break;
+                        case Op::DivAssign: rc = rc == C ? lc : N; break;
+                        default: rc = lc == C && rc == C ? C : N; break;
+                    }
+                }
+                write(e->args[0], rc);
+                return rc;
+            }
+            case EK::Ternary: {
+                int c = ex(e->args[0]), a = ex(e->args[1]), b = ex(e->args[2]);
+                return c == C ? std::max(a, b) : N;
+            }
+            case EK::Comma: {
+                int c = C;
+                for (auto* a : e->args) c = ex(a);
+                return c;
+            }
+            case EK::Ctor: {
+                int c = C;
+                for (auto* a : e->args) c = std::max(c, ex(a));
+                Type t = e->type.stripArrays();
+                if (c != C && t.base != BT::Float && t.base != BT::Double) return N;  // e.g. truncation to int
+                return c;
+            }
+            case EK::Builtin: case EK::Call: case EK::SubroutineCall: {
+                std::vector<int> a;
+                for (auto* x : e->args) a.push_back(ex(x));
+                // out / inout arguments: written with an unknown value
+                if (e->fn)
+                    for (size_t i = 0; i < e->args.size() && i < e->fn->params.size(); i++) {
+                        Storage s = e->fn->params[i]->q.storage;
+                        if (s == Storage::Out || s == Storage::InOut) write(e->args[i], N);
+                    }
+                int all = C;
+                for (int c : a) all = std::max(all, c);
+                if (e->kind != EK::Builtin) {
+                    auto it = e->fn ? te.defs.find(e->fn->mangled) : te.defs.end();
+                    if (e->kind == EK::SubroutineCall || it == te.defs.end() || impure.count(it->second)) return N;
+                }
+                if (all == C) return C;
+                if (e->kind != EK::Builtin || !e->fn) return N;
+                const std::string& n = e->fn->name;
+                if (n == "mix" && a.size() == 3) {
+                    if (a[2] == C) return std::max(a[0], a[1]);
+                    return a[0] == C && a[1] == C && a[2] == A ? A : N;
+                }
+                if ((n == "dot" || n == "cross" || n == "matrixCompMult" || n == "outerProduct") && a.size() == 2)
+                    return a[0] == C ? a[1] : a[1] == C ? a[0] : N;
+                return N;
+            }
+            default: return N;
+        }
+    };
+    // statements of main; conditions constant per patch keep values affine (each patch takes one branch)
+    std::function<void(const Stmt*)> st = [&](const Stmt* s) {
+        if (!s || fail) return;
+        switch (s->kind) {
+            case SK::Block:
+                for (auto* b : s->body) st(b);
+                return;
+            case SK::Expr: ex(s->expr); return;
+            case SK::Decl:
+                for (auto* v : s->vars) cls[{v, -1}] = taint ? (int)N : v->init ? ex(v->init) : (int)C;
+                return;
+            case SK::If: {
+                bool saved = taint;
+                if (ex(s->expr) != C) taint = true;
+                auto before = cls;
+                st(s->then);
+                auto afterThen = cls;
+                cls = before;
+                st(s->els);
+                for (auto& [k, v] : afterThen) cls[k] = std::max(cls.count(k) ? cls[k] : (int)C, v);
+                taint = saved;
+                return;
+            }
+            case SK::For: case SK::While: case SK::DoWhile: case SK::Switch: {
+                bool saved = taint;
+                taint = true;
+                st(s->init);
+                if (s->expr) ex(s->expr);
+                if (s->cond) ex(s->cond);
+                st(s->condDecl);
+                st(s->then);
+                for (auto* b : s->body) st(b);
+                if (s->incr) ex(s->incr);
+                taint = saved;
+                return;
+            }
+            case SK::Return: case SK::Discard: fail = true; return;
+            default: return;
+        }
+    };
+    const auto& body = te.main->body->body;
+    for (size_t i = 0; i < body.size() && !fail; i++) {
+        if (body[i]->kind == SK::Return && i + 1 == body.size()) break;
+        st(body[i]);
+    }
+    if (fail) return false;
+    // fragment inputs by varying key: how each is interpolated
+    std::map<std::string, const Variable*> fsIn;
+    if (fs.main)
+        for (auto* v : fs.used)
+            if (v->q.storage == Storage::In && v->builtin == BuiltinVar::None) fsIn[varyingKey(v, Stage::Fragment)] = v;
+    auto pixelCentreSmooth = [](const Qualifiers& q, const Type& t) {
+        Type b = t.stripArrays();
+        bool intLike = b.isIntLike() || b.base == BT::Double || b.base == BT::Bool;
+        return q.interp == Interp::Smooth && !q.centroid && !q.sample && !intLike;
+    };
+    for (auto* v : te.globals) {
+        if (!isOut(v)) continue;
+        if (v->builtin == BuiltinVar::CullDistance && te.used.count(v)) return false;
+        if (v->builtin != BuiltinVar::None && v->builtin != BuiltinVar::Position && v->builtin != BuiltinVar::ClipDistance &&
+            v->builtin != BuiltinVar::PointSize && te.used.count(v))
+            return false;  // compatibility varyings (flat shading is runtime state), gl_PerVertex redeclarations
+    }
+    for (auto& [slot, c] : cls) {
+        const Variable* v = slot.first;
+        if (!isOut(v) || c == C) continue;
+        if (v->block && slot.second < 0) return false;  // a whole output block (its members' interpolation varies)
+        if (c == N) {
+            if (v->builtin == BuiltinVar::PointSize) continue;  // triangles: no point size
+            if (v->builtin != BuiltinVar::None) return false;   // gl_Position, clip distances
+            // a varying the fragment shader doesn't read doesn't matter
+            auto it = fsIn.find(varyingKey(v, Stage::TessEval));
+            if (it == fsIn.end()) continue;
+            if (slot.second < 0 || !v->block) return false;
+            const std::string& name = v->block->members[slot.second].name;
+            int fm = it->second->block ? it->second->block->findMember(name) : -1;
+            if (fm >= 0 || !it->second->block) return false;
+            continue;
+        }
+        // affine: the fragment shader must interpolate it perspective-correctly at the pixel centre
+        if (v->builtin != BuiltinVar::None) continue;  // gl_Position, clip distances
+        auto it = fsIn.find(varyingKey(v, Stage::TessEval));
+        if (it == fsIn.end()) continue;
+        const Variable* f = it->second;
+        if (slot.second >= 0 && v->block && f->block) {
+            int fm = f->block->findMember(v->block->members[slot.second].name);
+            if (fm < 0) continue;
+            const Member& m = f->block->members[fm];
+            Qualifiers q = m.q;
+            if (f->q.interp != Interp::Smooth) q.interp = f->q.interp;
+            q.centroid |= f->q.centroid;
+            q.sample |= f->q.sample;
+            if (!pixelCentreSmooth(q, m.type)) return false;
+        } else if (!pixelCentreSmooth(f->q, f->type)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Decides Reflection::tessFusable, tessLevels and tesAffine (see glsl.h).
 void Linker::tessFusedAnalysis() {
     auto& r = prog_->refl;
     const uint32_t m = prog_->stageMask;
     auto has = [&](Stage s) { return (m & (1u << (int)s)) != 0; };
-    if (!has(Stage::Vertex) || !has(Stage::TessEval) || has(Stage::Geometry)) return;
+    if (!has(Stage::TessEval)) return;
+    tessLevelAnalysis();
+    if (!has(Stage::Vertex) || has(Stage::Geometry)) return;
     bool tri = r.tesPrimitiveMode == gl::TRIANGLES;
-    if ((!tri && r.tesPrimitiveMode != gl::QUADS) || r.tesPointMode || r.tesSpacing == gl::FRACTIONAL_EVEN) return;
+    if ((!tri && r.tesPrimitiveMode != gl::QUADS) || r.tesPointMode) return;
     if (r.writesLayer || r.writesViewportIndex) return;
+    if (const StageCode& tc = prog_->stages[(int)Stage::TessControl]; tc.main && (tc.outLayout.vertices < 1 || tc.outLayout.vertices > 4)) return;
     // The fused vertex function runs the vertex shader once per patch vertex for every output vertex
     // and the TCS invocations one after another (no barrier()): memory writes would happen several
     // times and subgroup operations would see other invocations. Reading buffers and images is fine.
@@ -1786,100 +2170,8 @@ void Linker::tessFusedAnalysis() {
                 scalars += count(v->type);
         if (scalars > 124) return;
     }
-    for (auto& l : r.tessLevels) l.clear();
-    const StageCode& tc = prog_->stages[(int)Stage::TessControl];
-    if (tc.main) {
-        int outv = tc.outLayout.vertices;
-        if (outv < 1 || outv > 4) return;
-        auto isLevel = [](const Expr* e) {
-            return e->kind == EK::Var && (e->var->builtin == BuiltinVar::TessLevelOuter || e->var->builtin == BuiltinVar::TessLevelInner);
-        };
-        // references to the levels: in all reachable code, and in one statement
-        auto countRefs = [&](const auto& visit) {
-            int n = 0;
-            Walker w;
-            w.onExpr = [&](const Expr* e) { if (isLevel(e)) n++; };
-            visit(w);
-            return n;
-        };
-        int refs = countRefs([&](Walker& w) { for (auto* f : tc.reachable) w.stmt(f->body); });
-        auto refsIn = [&](const Stmt* s) { return countRefs([&](Walker& w) { w.stmt(s); }); };
-        bool hasReturn = false, ok = true;
-        int matched = 0;
-        int writes[6] = {};
-        auto containsReturn = [&](const Stmt* s) {
-            bool ret = false;
-            Walker w;
-            w.onExpr = [](const Expr*) {};
-            w.onStmt = [&](const Stmt* t) { if (t->kind == SK::Return) ret = true; };
-            w.stmt(s);
-            return ret;
-        };
-        // `gl_TessLevelX[c] = (gl_TessLevelY[d] = ...) = rhs`
-        auto assignment = [&](const Expr* e) {
-            std::vector<int> targets;
-            while (e->kind == EK::Assign && e->op == Op::Assign) {
-                const Expr* l = e->args[0];
-                if (l->kind != EK::Index || !isLevel(l->args[0]) || !l->args[1]->cv) return false;
-                bool inner = l->args[0]->var->builtin == BuiltinVar::TessLevelInner;
-                int64_t c = l->args[1]->cv->c[0].i;
-                if (c < 0 || c >= (inner ? 2 : 4)) return false;
-                targets.push_back((int)c + (inner ? 4 : 0));
-                e = e->args[1];
-            }
-            if (targets.empty()) return false;
-            std::vector<TessLevelOp> code;
-            if (!tessLevelCode(e, code)) return false;
-            for (int t : targets) {
-                if (writes[t]++) return false;
-                r.tessLevels[t] = code;
-            }
-            matched += (int)targets.size();
-            return true;
-        };
-        std::function<void(const Stmt*, bool)> walk = [&](const Stmt* s, bool top) {
-            if (!s || !ok) return;
-            int n = refsIn(s);
-            if (n == 0) {
-                if (containsReturn(s)) hasReturn = true;
-                return;
-            }
-            if (hasReturn) { ok = false; return; }
-            switch (s->kind) {
-                case SK::Block:
-                    for (auto* b : s->body) walk(b, top);
-                    return;
-                case SK::Expr:
-                    if (!assignment(s->expr)) ok = false;
-                    return;
-                case SK::If: {
-                    // only `if (gl_InvocationID == c)` for an existing invocation, levels in the then branch
-                    const Expr* c = s->expr;
-                    const Expr *a = c ? c->args.size() == 2 ? c->args[0] : nullptr : nullptr, *b = a ? c->args[1] : nullptr;
-                    if (a && b && b->kind == EK::Var) std::swap(a, b);
-                    bool inv = top && c && c->kind == EK::Binary && c->op == Op::Eq && a && b && a->kind == EK::Var &&
-                               a->var->builtin == BuiltinVar::InvocationID && b->cv && b->cv->c[0].i >= 0 && b->cv->c[0].i < outv;
-                    if (!inv || refsIn(s->els) || refsIn(s->then) != n) { ok = false; return; }
-                    walk(s->then, false);
-                    if (containsReturn(s->then)) hasReturn = true;
-                    return;
-                }
-                default: ok = false; return;
-            }
-        };
-        if (tc.main->body)
-            for (auto* s : tc.main->body->body) walk(s, true);
-        if (!ok || matched != refs) {
-            for (auto& l : r.tessLevels) l.clear();
-            return;
-        }
-        int nOuter = tri ? 3 : 4, nInner = tri ? 1 : 2;
-        for (int i = 0; i < nOuter; i++)
-            if (!writes[i]) return;
-        for (int i = 0; i < nInner; i++)
-            if (!writes[4 + i]) return;
-    }
     r.tessFusable = true;
+    r.tesAffine = tesAffineAnalysis();
 }
 
 // Uniform/storage blocks with the same block name must match across the program (GLSL 4.60 4.3.9), and the

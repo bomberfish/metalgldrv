@@ -303,15 +303,17 @@ struct Reflection {
     int tcsOutputVertices = 0;
     uint32_t tesPrimitiveMode = 0, tesSpacing = 0, tesOrder = 0;
     bool tesPointMode = false;
-    // Tessellation fast path (VariantKey::tessFused) when the levels make every patch one primitive at
-    // the domain corners. tessFusable: everything else allows it (VS + TES, no GS; triangles or quads,
-    // not point_mode or fractional_even; no TCS barrier(); at most 4 TCS output vertices; no memory
-    // writes or subgroup operations before rasterization; the TES doesn't write gl_Layer /
-    // gl_ViewportIndex; the fragment shader doesn't read gl_PrimitiveID and its inputs fit a classic
-    // vertex function). tessLevels: gl_TessLevelOuter[0..3] (0-3) and gl_TessLevelInner[0..1] (4, 5) as
-    // the TCS writes them; the ones the domain uses are set (without a TCS the levels are
+    // Tessellation fast path (VariantKey::tessFused). tessFusable: the program allows it (VS + TES, no GS;
+    // triangles or quads, not point_mode; no TCS barrier(); at most 4 TCS output vertices; no memory writes
+    // or subgroup operations before rasterization; the TES doesn't write gl_Layer / gl_ViewportIndex; the
+    // fragment shader doesn't read gl_PrimitiveID and its inputs fit a classic vertex function). A draw takes
+    // it when its levels make every patch one primitive at the domain corners, or, with tesAffine (every TES
+    // output used later is affine in gl_TessCoord, and those the fragment shader doesn't interpolate
+    // perspective-correctly at the pixel centre are constant per patch), whenever no patch is culled.
+    // tessLevels: gl_TessLevelOuter[0..3] (0-3) and gl_TessLevelInner[0..1] (4, 5) as the TCS writes them,
+    // for the levels the domain uses (empty when the CPU can't compute them; without a TCS the levels are
     // GL_PATCH_DEFAULT_OUTER/INNER_LEVEL).
-    bool tessFusable = false;
+    bool tessFusable = false, tesAffine = false;
     std::vector<TessLevelOp> tessLevels[6];
     // mesh shaders (EXT_mesh_shader)
     int taskLocalSize[3] = {1, 1, 1}, meshLocalSize[3] = {1, 1, 1};
@@ -420,6 +422,10 @@ struct VariantKey {
     // primitive at the domain corners): a classic vertex function runs, per output vertex, the VS for
     // the patch's `tessFused` input vertices, the TCS for all its invocations and the TES at the corner.
     uint8_t tessFused = 0;
+    // Tessellation: GL_PATCH_VERTICES of the draw (0 = unknown). The TCS's per-vertex input arrays (and the TES's
+    // without a TCS) get that many elements instead of gl_MaxPatchVertices, the TES's the TCS output vertex count;
+    // indices into them are clamped.
+    uint8_t patchVertices = 0;
 };
 
 struct EntryPoint {

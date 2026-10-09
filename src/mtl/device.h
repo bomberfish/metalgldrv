@@ -96,6 +96,8 @@ public:
     void waitIdle();
     // GPU execution interval (host time, seconds) of a completed serial; false if unknown.
     bool gpuTimes(uint64_t serial, double* start, double* end);
+    // The longest GPU time of a command buffer completed since the last call (seconds; mglTestMaxGpuSeconds).
+    double takeMaxGpuSeconds();
     // A reserved serial whose command buffer was never submitted.
     void abandonSerial(uint64_t serial) { markComplete(serial, nil); }
 
@@ -170,6 +172,7 @@ private:
 
     void markComplete(uint64_t serial, NSError* error, double gpuStart = 0, double gpuEnd = 0);
     std::map<uint64_t, std::pair<double, double>> gpuTimes_;
+    double maxGpuSeconds_ = 0, lastLongWarning_ = 0;
 
     std::mutex mutex_;
     std::condition_variable cv_;

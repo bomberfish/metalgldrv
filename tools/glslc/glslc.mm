@@ -80,7 +80,7 @@ static void printReflection(const Reflection& r) {
     for (auto& x : r.xfbVaryings) printf("xfb %s type=0x%x size=%d buffer=%d offset=%d\n", x.name.c_str(), x.type, x.arraySize, x.buffer, x.offset);
     if (r.stageMask & (1u << (int)Stage::TessEval)) {
         // tessellation fast path analysis: the levels as postfix programs (c = constant, f/i/u@offset = uniform)
-        printf("tessFusable=%d", r.tessFusable);
+        printf("tessFusable=%d tesAffine=%d", r.tessFusable, r.tesAffine);
         static const char* names[] = {"outer0", "outer1", "outer2", "outer3", "inner0", "inner1"};
         static const char* ops[] = {"", "", "", "", "neg", "+", "-", "*", "/", "min", "max", "clamp"};
         for (int i = 0; i < 6; i++) {

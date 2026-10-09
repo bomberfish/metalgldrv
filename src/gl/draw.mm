@@ -2068,6 +2068,8 @@ void mpUpload(MPState& s) {
         info->subDraws = t.gpu;
         info->subDrawCount = (uint32_t)n;
         info->subDrawIndexType = s.subDraws.empty() ? 0 : s.subDrawIndexType;
+        // the GL index buffer is read on the GPU (by this command buffer: uploads follow budget splits)
+        if (info->subDrawIndexType >= 2 && ctx->vao->elementBuffer) ctx->vao->elementBuffer->lastUse = serial;
     }
     failSafeDrawInfo(ctx, info);
     s.infoAddr = di.gpu;
@@ -2259,8 +2261,69 @@ void mpFinishCounts(MPState& s, const uint64_t generated[4], int outVpp, bool co
 
 }  // namespace
 
+static double tessItemsPerPatch(Context* ctx, ProgramObj* prog);
+
 // Tessellation emulation passes and fused fast-path draws so far (mglTestTessCounters).
 static uint64_t g_tessPasses = 0, g_tessFusedDraws = 0;
+
+// Test hook: the longest GPU time of a command buffer completed since the last call (seconds).
+extern "C" __attribute__((visibility("default"))) double mglTestMaxGpuSeconds(void) {
+    return mgl::Device::get()->takeMaxGpuSeconds();
+}
+
+// ---------------------------------------------------------------------------
+// Emulated geometry per command buffer (watchdog safety). The tessellation and geometry shader emulation can
+// put unbounded work into one command buffer (an ocean of tessellated water, a shadow pass, ...), and the GPU
+// watchdog kills command buffers that run for a few seconds ("CDM Kill timeout"). Draws are weighed in items
+// (expected output triangles); once a command buffer holds kMeshWorkBudgetNs worth of them it is committed and
+// the next draw (or the next chunk of a large draw) goes into a new one. The ns per item comes from the GPU
+// times of completed command buffers that consisted mostly of such work; until then a conservative guess.
+// ---------------------------------------------------------------------------
+static constexpr double kMeshWorkBudgetNs = 250e6;
+// Items per patch of the tessellation fast path (a classic vertex pipeline, but each vertex runs the VS for the
+// whole patch and the TCS: cheaper than an emulated output triangle, not free).
+static constexpr double kFusedPatchItems = 0.25;
+
+static double meshWorkBudgetItems(Context* ctx) { return kMeshWorkBudgetNs / ctx->meshWorkNsPerItem; }
+
+// Moves the count of a submitted command buffer to the pending list and learns from completed ones.
+static void meshWorkPoll(Context* ctx) {
+    uint64_t cur = ctx->serial();
+    if (ctx->meshWorkSerial != cur) {
+        if (ctx->meshWorkItems > 0 && ctx->meshWorkPending.size() < 64) ctx->meshWorkPending.push_back({ctx->meshWorkSerial, ctx->meshWorkItems});
+        ctx->meshWorkSerial = cur;
+        ctx->meshWorkItems = 0;
+    }
+    auto& pending = ctx->meshWorkPending;
+    for (size_t i = 0; i < pending.size();) {
+        double start, end;
+        auto [serial, items] = pending[i];
+        if (ctx->dev->gpuTimes(serial, &start, &end)) {
+            // only command buffers mostly made of emulated geometry say something about its cost
+            if (items >= 0.25 * meshWorkBudgetItems(ctx)) {
+                double ns = (end - start) * 1e9 / items;
+                double& est = ctx->meshWorkNsPerItem;
+                est = ns > est ? ns : 0.9 * est + 0.1 * ns;  // up at once, down slowly
+                est = std::clamp(est, 1.0, 1e6);
+            }
+        } else if (!ctx->dev->isComplete(serial)) {
+            i++;
+            continue;
+        }
+        pending.erase(pending.begin() + (long)i);
+    }
+}
+
+// Before encoding a draw of `items`: commits the command buffer if the draw would take it over the budget.
+static void meshWorkReserve(Context* ctx, double items) {
+    meshWorkPoll(ctx);
+    double budget = meshWorkBudgetItems(ctx);
+    if (ctx->meshWorkItems > 0 && ctx->meshWorkItems + std::min(items, budget) > budget) {
+        MGL_STAT("split:mesh-work-budget");
+        ctx->flush();
+        meshWorkPoll(ctx);
+    }
+}
 
 // Test hook: the number of rasterizing tessellation passes (one per draw, or per batched multi-draw)
 // and how many of them took the fused fast path.
@@ -2316,6 +2379,17 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     }
     if (!s.prims) return true;
 
+    // Emulated geometry (tessellation without the fast path, geometry shaders, VS on mesh): weigh the draw
+    // (expected output triangles) and keep its command buffer within the watchdog budget.
+    double itemsPerColumn = 0;  // per grid column: patch / primitive x instances (x invocations)
+    if ((vk.kind == glsl::PipelineKind::Tessellation && !vk.tessFused) || vk.kind == glsl::PipelineKind::MeshGeometry) {
+        if (vk.kind == glsl::PipelineKind::Tessellation) itemsPerColumn = tessItemsPerPatch(ctx, prog) * d.instances;
+        else itemsPerColumn = (double)d.instances * std::max(1, refl.gsInvocations) * std::max(1.0, refl.gsMaxVertices / 3.0);
+        meshWorkReserve(ctx, itemsPerColumn * s.prims);
+    } else if (vk.tessFused) {
+        meshWorkReserve(ctx, kFusedPatchItems * d.instances * s.prims);
+    }
+
     fillVertexFetch(ctx, prog, vk);
     vk.primitive = (uint8_t)s.listMode;
     s.var = ctx->pipelines_->variant(prog, vk);
@@ -2360,6 +2434,8 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         g_tessFusedDraws++;
         NSUInteger vpp = refl.tesPrimitiveMode == GL_QUADS ? 6 : 3;
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)s.prims * vpp instanceCount:d.instances baseInstance:0];
+        meshWorkPoll(ctx);
+        ctx->meshWorkItems += kFusedPatchItems * d.instances * s.prims;
         return true;
     }
 
@@ -2523,7 +2599,11 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     // (193 MB) takes 40 ms, one of 3 x 2^17 (289 MB) never finishes (the watchdog kills it or the GPU
     // faults). Batched multi-draws (a Sodium region) easily reach such sizes; chunks stay below
     // kMeshGridPayloadBytes and kMeshGridChunk threadgroups.
-    auto drawMesh = [&](id<MTL4RenderCommandEncoder> enc, const glsl::MGLDrawInfo* info) {
+    // A draw larger than the command buffer budget continues in a new command buffer between chunks
+    // (`restart` re-uploads the draw's description and binds everything again). Not with pass 1 records in
+    // upload memory, spill buffers or a post-depth-coverage pre-pass, which belong to this command buffer.
+    std::function<id<MTL4RenderCommandEncoder>()> restart;
+    auto drawMesh = [&](id<MTL4RenderCommandEncoder> enc, const glsl::MGLDrawInfo* info, bool splittable) {
         MTLSize tg = MTLSizeMake(1, 1, 1);
         uint32_t n, y, z, chunk = kMeshGridChunk;
         if (os) {
@@ -2536,15 +2616,26 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
             n = hasTess ? s.tesPrimCount : s.prims;
             y = hasTess ? 1 : (uint32_t)d.instances;
         }
+        // items per grid column of this grid (the TES records of tessellation + GS: one GS input primitive each)
+        double perColumn = hasTess && !os ? (double)z * std::max(1.0, refl.gsMaxVertices / 3.0) : itemsPerColumn;
+        if (perColumn > 0) chunk = (uint32_t)std::clamp(meshWorkBudgetItems(ctx) / perColumn, 1.0, (double)chunk);
         for (uint32_t base = 0; base < n; base += chunk) {
+            uint32_t count = std::min(chunk, n - base);
+            if (splittable && restart && base && ctx->meshWorkItems > 0 && ctx->meshWorkItems + perColumn * count > meshWorkBudgetItems(ctx)) {
+                MGL_STAT("split:mesh-work-budget");
+                enc = restart();
+                if (!enc) return;
+                info = s.info;
+            }
             if (base) {
                 UploadAlloc c = ctx->upload(sizeof(glsl::MGLDrawInfo), 16);
                 memcpy(c.cpu, info, sizeof(glsl::MGLDrawInfo));
                 ((glsl::MGLDrawInfo*)c.cpu)->gridBase = base;
                 [table setAddress:c.gpu atIndex:glsl::kBufStageIO];
             }
-            [enc drawMeshThreadgroups:MTLSizeMake(std::min(chunk, n - base), y, z) threadsPerObjectThreadgroup:tg
-                threadsPerMeshThreadgroup:meshTG];
+            [enc drawMeshThreadgroups:MTLSizeMake(count, y, z) threadsPerObjectThreadgroup:tg threadsPerMeshThreadgroup:meshTG];
+            meshWorkPoll(ctx);
+            ctx->meshWorkItems += perColumn * count;
         }
     };
     id<MTLTexture> cov = nil;
@@ -2561,7 +2652,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         [table setAddress:preArgAddr ? preArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
         [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
         [table setAddress:preInfoAddr atIndex:glsl::kBufStageIO];
-        drawMesh(pe, preInfo);
+        drawMesh(pe, preInfo, false);
         ctx->endPass();
         if (s.spillCounterBuffer) {  // the draw's vertices spill from the start again
             id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
@@ -2571,23 +2662,36 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         e = ctx->renderEncoder();
         if (!e || !(ctx->curPass == mainPass)) { retire(); return true; }
     }
-    if (ctx->enc.pipeline != pso) {
-        [e setRenderPipelineState:pso];
-        ctx->enc.pipeline = pso;
-    }
-    applyDynamicState(ctx, e, rasterMode, refl.writesViewportIndex);
-    [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
-    [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
-    [table setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
-    if (ctx->enc.fsTableSplit) {
-        [e setArgumentTable:table atStages:MTLRenderStageFragment];
-        ctx->enc.fsTableSplit = false;
-    }
-    if (fsrAddr) [table setAddress:fsrAddr atIndex:glsl::kBufFsr];
+    auto bind = [&](id<MTL4RenderCommandEncoder> enc) {
+        if (ctx->enc.pipeline != pso) {
+            [enc setRenderPipelineState:pso];
+            ctx->enc.pipeline = pso;
+        }
+        applyDynamicState(ctx, enc, rasterMode, refl.writesViewportIndex);
+        [table setAddress:s.argAddr atIndex:glsl::kBufArgs];
+        [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
+        [table setAddress:s.infoAddr atIndex:glsl::kBufStageIO];
+        if (ctx->enc.fsTableSplit) {
+            [enc setArgumentTable:table atStages:MTLRenderStageFragment];
+            ctx->enc.fsTableSplit = false;
+        }
+        if (fsrAddr) [table setAddress:fsrAddr atIndex:glsl::kBufFsr];
+        mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts come from counted passes
+    };
+    bind(e);
     if (pdc) [table setAddress:pdcUpload(ctx, cov, 0, refl.writesLayer) atIndex:glsl::kBufPdc];
-    mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts come from counted passes
+    if (!pdc && !s.tcsVAddr && !s.spillCounterBuffer)
+        restart = [&]() -> id<MTL4RenderCommandEncoder> {
+            ctx->flush();
+            meshWorkPoll(ctx);
+            mpUpload(s);
+            if (vk.fsr) fsrAddr = fsrUpload(ctx);
+            id<MTL4RenderCommandEncoder> enc = ctx->renderEncoder();
+            if (enc) bind(enc);
+            return enc;
+        };
     if (hasTess) g_tessPasses++;
-    drawMesh(e, s.info);
+    drawMesh(e, s.info, true);
     retire();
     return true;
 }
@@ -3028,53 +3132,71 @@ static void executeDraw(Context* ctx, const DrawParams& d, const DrawParams* bat
     flushImageWritebacks(ctx);
 }
 
-// The draw's tessellation levels (as Reflection::tessLevels computes them from the current uniform
-// values, or the patch defaults without a TCS) make every patch exactly one primitive at the domain
-// corners, as mgl_tess_setup's `special` case: the outer levels the domain uses in (0, 1] (not culled,
-// one segment with equal and fractional_odd spacing) and its inner levels <= 1 (fractional_even, whose
-// levels clamp to 2, never qualifies). Evaluated in float like the TCS.
-static bool tessLevelsTrivial(Context* ctx, ProgramObj* prog) {
+// Outer / inner levels the tessellation domain uses.
+static void tessDomainLevels(const glsl::Reflection& r, int& nOuter, int& nInner) {
+    nOuter = r.tesPrimitiveMode == GL_TRIANGLES ? 3 : r.tesPrimitiveMode == GL_QUADS ? 4 : 2;
+    nInner = r.tesPrimitiveMode == GL_TRIANGLES ? 1 : r.tesPrimitiveMode == GL_QUADS ? 2 : 0;
+}
+
+// The draw's tessellation levels the domain uses (outer at 0..3, inner at 4..5): Reflection::tessLevels
+// evaluated with the current uniform values (in float, like the TCS), or GL_PATCH_DEFAULT_*_LEVEL without a TCS.
+// False when the TCS computes them in a way the CPU can't follow (per patch).
+static bool evalTessLevels(Context* ctx, ProgramObj* prog, float lv[6]) {
     const glsl::Reflection& r = prog->refl;
-    bool tri = r.tesPrimitiveMode == GL_TRIANGLES;
-    int nOuter = tri ? 3 : 4, nInner = tri ? 1 : 2;
-    float lv[6];
-    if (r.stageMask & (1u << (int)glsl::Stage::TessControl)) {
-        const std::vector<uint8_t>& u = prog->uniformData;
-        auto load = [&](uint32_t off, void* dst) {
-            if ((size_t)off + 4 > u.size()) return false;
-            memcpy(dst, u.data() + off, 4);
-            return true;
-        };
-        for (int i = 0; i < 6; i++) {
-            if ((i < 4 && i >= nOuter) || (i >= 4 && i - 4 >= nInner)) continue;
-            float st[16];
-            int n = 0;
-            for (const glsl::TessLevelOp& op : r.tessLevels[i]) {
-                using K = glsl::TessLevelOp;
-                int need = op.kind == K::Clamp ? 3 : op.kind >= K::Add ? 2 : op.kind == K::Neg ? 1 : 0;
-                if (n < need || (need == 0 && n >= 16)) return false;
-                switch (op.kind) {
-                case K::Const: st[n++] = op.value; break;
-                case K::Float: if (!load(op.offset, &st[n++])) return false; break;
-                case K::Int: { int32_t v; if (!load(op.offset, &v)) return false; st[n++] = (float)v; break; }
-                case K::UInt: { uint32_t v; if (!load(op.offset, &v)) return false; st[n++] = (float)v; break; }
-                case K::Neg: st[n - 1] = -st[n - 1]; break;
-                case K::Add: st[n - 2] = st[n - 2] + st[n - 1]; n--; break;
-                case K::Sub: st[n - 2] = st[n - 2] - st[n - 1]; n--; break;
-                case K::Mul: st[n - 2] = st[n - 2] * st[n - 1]; n--; break;
-                case K::Div: st[n - 2] = st[n - 2] / st[n - 1]; n--; break;
-                case K::Min: st[n - 2] = fminf(st[n - 2], st[n - 1]); n--; break;
-                case K::Max: st[n - 2] = fmaxf(st[n - 2], st[n - 1]); n--; break;
-                case K::Clamp: st[n - 3] = fminf(fmaxf(st[n - 3], st[n - 2]), st[n - 1]); n -= 2; break;
-                }
-            }
-            if (n != 1) return false;
-            lv[i] = st[0];
-        }
-    } else {
+    int nOuter, nInner;
+    tessDomainLevels(r, nOuter, nInner);
+    if (!(r.stageMask & (1u << (int)glsl::Stage::TessControl))) {
         memcpy(lv, ctx->patchDefaultOuter, 4 * sizeof(float));
         memcpy(lv + 4, ctx->patchDefaultInner, 2 * sizeof(float));
+        return true;
     }
+    const std::vector<uint8_t>& u = prog->uniformData;
+    auto load = [&](uint32_t off, void* dst) {
+        if ((size_t)off + 4 > u.size()) return false;
+        memcpy(dst, u.data() + off, 4);
+        return true;
+    };
+    for (int i = 0; i < 6; i++) {
+        lv[i] = 1.0f;
+        if ((i < 4 && i >= nOuter) || (i >= 4 && i - 4 >= nInner)) continue;
+        if (r.tessLevels[i].empty()) return false;
+        float st[16];
+        int n = 0;
+        for (const glsl::TessLevelOp& op : r.tessLevels[i]) {
+            using K = glsl::TessLevelOp;
+            int need = op.kind == K::Clamp ? 3 : op.kind >= K::Add ? 2 : op.kind == K::Neg ? 1 : 0;
+            if (n < need || (need == 0 && n >= 16)) return false;
+            switch (op.kind) {
+            case K::Const: st[n++] = op.value; break;
+            case K::Float: if (!load(op.offset, &st[n++])) return false; break;
+            case K::Int: { int32_t v; if (!load(op.offset, &v)) return false; st[n++] = (float)v; break; }
+            case K::UInt: { uint32_t v; if (!load(op.offset, &v)) return false; st[n++] = (float)v; break; }
+            case K::Neg: st[n - 1] = -st[n - 1]; break;
+            case K::Add: st[n - 2] = st[n - 2] + st[n - 1]; n--; break;
+            case K::Sub: st[n - 2] = st[n - 2] - st[n - 1]; n--; break;
+            case K::Mul: st[n - 2] = st[n - 2] * st[n - 1]; n--; break;
+            case K::Div: st[n - 2] = st[n - 2] / st[n - 1]; n--; break;
+            case K::Min: st[n - 2] = fminf(st[n - 2], st[n - 1]); n--; break;
+            case K::Max: st[n - 2] = fmaxf(st[n - 2], st[n - 1]); n--; break;
+            case K::Clamp: st[n - 3] = fminf(fmaxf(st[n - 3], st[n - 2]), st[n - 1]); n -= 2; break;
+            }
+        }
+        if (n != 1) return false;
+        lv[i] = st[0];
+    }
+    return true;
+}
+
+// The levels make every patch exactly one primitive at the domain corners, as mgl_tess_setup's `special` case:
+// the outer levels the domain uses in (0, 1] (not culled, one segment with equal and fractional_odd spacing) and
+// its inner levels <= 1; fractional_even clamps levels to 2, so it never qualifies.
+static bool tessLevelsTrivial(Context* ctx, ProgramObj* prog) {
+    const glsl::Reflection& r = prog->refl;
+    if (r.tesSpacing == GL_FRACTIONAL_EVEN || r.tesPrimitiveMode == GL_ISOLINES) return false;
+    int nOuter, nInner;
+    tessDomainLevels(r, nOuter, nInner);
+    float lv[6];
+    if (!evalTessLevels(ctx, prog, lv)) return false;
     for (int i = 0; i < nOuter; i++)
         if (!(lv[i] > 0.0f && lv[i] <= 1.0f)) return false;
     for (int i = 0; i < nInner; i++)
@@ -3082,15 +3204,45 @@ static bool tessLevelsTrivial(Context* ctx, ProgramObj* prog) {
     return true;
 }
 
+// Expected output primitives per patch (the emulation's GPU work, for the command buffer budget): from the
+// levels when the CPU knows them (segments per spacing as in mgl_tess_level), else a guess for levels of ~6.
+static double tessItemsPerPatch(Context* ctx, ProgramObj* prog) {
+    const glsl::Reflection& r = prog->refl;
+    float lv[6];
+    if (!evalTessLevels(ctx, prog, lv)) return 64;
+    int nOuter, nInner;
+    tessDomainLevels(r, nOuter, nInner);
+    auto segments = [&](float x) {
+        if (!(x > 0.0f)) return 1.0f;
+        if (r.tesSpacing == GL_FRACTIONAL_EVEN) return 2.0f * std::ceil(std::clamp(x, 2.0f, 64.0f) / 2.0f);
+        if (r.tesSpacing == GL_FRACTIONAL_ODD) return 2.0f * std::floor(std::ceil(std::clamp(x, 1.0f, 63.0f)) / 2.0f) + 1.0f;
+        return std::ceil(std::clamp(x, 1.0f, 64.0f));
+    };
+    if (r.tesPrimitiveMode == GL_ISOLINES) return std::max(1.0f, segments(lv[0]) * segments(lv[1]));
+    float m = 1;
+    for (int i = 0; i < nOuter; i++) m = std::max(m, segments(lv[i]));
+    for (int i = 0; i < nInner; i++) m = std::max(m, segments(lv[4 + i]));
+    return r.tesPrimitiveMode == GL_TRIANGLES ? 1.5 * m * m : 2.0 * m * m;
+}
+
 // Whether a tessellation draw takes the fused fast path (VariantKey::tessFused): the program qualifies
 // (Reflection::tessFusable; not a program pipeline composite), patches of at most 4 vertices, nothing that
 // needs the emulation's per-primitive work (pipeline statistics, rasterizer discard, coarse shading,
-// post-depth-coverage pre-passes) and trivial levels. METALGLDRV_TESS_FAST=0 disables it.
+// post-depth-coverage pre-passes), and either
+//   - levels that make every patch one primitive at the domain corners (the same output as the emulation), or
+//   - a TES that is affine in gl_TessCoord (Reflection::tesAffine), at any levels: the tessellated patch covers
+//     the same triangle(s) with the same interpolated values as its corners alone (up to rounding); the
+//     fused vertex function drops the patches GL culls (an outer level <= 0 or NaN).
+// METALGLDRV_TESS_FAST=0 disables it.
 static bool tessFusedWanted(Context* ctx, ProgramObj* prog, const glsl::VariantKey& vk) {
     const glsl::Reflection& r = prog->refl;
     if (!r.tessFusable || prog->composite || ctx->patchVertices < 1 || ctx->patchVertices > 4) return false;
     if (vk.pdc || vk.fsr || ctx->rasterizerDiscard || ctx->statsQueriesActive) return false;
-    return tessLevelsTrivial(ctx, prog) && envFlag("METALGLDRV_TESS_FAST", true);
+    if (!envFlag("METALGLDRV_TESS_FAST", true)) return false;
+    if (tessLevelsTrivial(ctx, prog)) return true;
+    // affine: the same filled triangles at any levels (polygon modes would draw the sub-triangles' edges or
+    // vertices); the fused vertex function culls patches by their outer levels itself
+    return r.tesAffine && ctx->polygonMode == GL_FILL;
 }
 
 // Whether the sub-draws of a multi-draw can share one emulation pass: tessellation without a geometry
@@ -3161,6 +3313,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
     if (hasTess) {  // METALGLDRV_TESS_PASS1=compute: VS + TCS in a compute pass even when the object stage could run them
         const char* p1 = getenv("METALGLDRV_TESS_PASS1");
         vk.tessComputePass = p1 && !strcmp(p1, "compute");
+        vk.patchVertices = (uint8_t)std::clamp(ctx->patchVertices, 0, 32);
     }
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
     bool primQueries = mglQueryPrimitivesActive(ctx);

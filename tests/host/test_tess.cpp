@@ -3,6 +3,7 @@
 // METALGLDRV_TESS_BATCH=0, METALGLDRV_TESS_PASS1=compute).
 #include "harness.h"
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -426,9 +427,17 @@ void main() {
     gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
     gl_TessLevelOuter[0] = gl_TessLevelOuter[1] = gl_TessLevelOuter[2] = gl_TessLevelInner[0] = gl_in[0].gl_Position.w;
 })";
+    // affine in gl_TessCoord (the fast path at any levels) and not (only levels that give one triangle per patch)
     auto tes = [](const char* layout) {
         return std::string("#version 410 core\nlayout(") + layout + R"() in;
 void main() { gl_Position = gl_TessCoord.x * gl_in[0].gl_Position + gl_TessCoord.y * gl_in[1].gl_Position + gl_TessCoord.z * gl_in[2].gl_Position; })";
+    };
+    auto tesCurved = [](const char* layout) {
+        return std::string("#version 410 core\nlayout(") + layout + R"() in;
+void main() {
+    vec3 t = gl_TessCoord;
+    gl_Position = t.x * gl_in[0].gl_Position + t.y * gl_in[1].gl_Position + t.z * gl_in[2].gl_Position + vec4(0.0, 0.5 * t.x * t.y, 0.0, 0.0);
+})";
     };
     const char* fs = R"(#version 410 core
 out vec4 o;
@@ -447,10 +456,12 @@ void main() { atomicAdd(b.count, 1u); gl_Position = vec4(p, 0.0, 1.0); })";
         const char* tcs;
         std::string tes;
         bool fused;
-    } cases[] = {{vs, tcsLevel, tes("triangles, equal_spacing, ccw"), true},
-                 {vs, tcsLevel, tes("triangles, fractional_even_spacing, ccw"), false},
+    } cases[] = {{vs, tcsLevel, tesCurved("triangles, equal_spacing, ccw"), true},
+                 {vs, tcsLevel, tesCurved("triangles, fractional_even_spacing, ccw"), false},  // level 1 rounds to 2
+                 {vs, tcsLevel, tes("triangles, fractional_even_spacing, ccw"), true},         // affine: any levels
                  {vs, tcsBarrier, tes("triangles, equal_spacing, ccw"), false},
-                 {vs, tcsInput, tes("triangles, equal_spacing, ccw"), false},
+                 {vs, tcsInput, tesCurved("triangles, equal_spacing, ccw"), false},            // levels unknown on the CPU
+                 {vs, tcsInput, tes("triangles, equal_spacing, ccw"), true},
                  {vs, tcsLevel, tes("triangles, equal_spacing, ccw, point_mode"), false},
                  {vsRead, tcsLevel, tes("triangles, equal_spacing, ccw"), true},
                  {vsWrite, tcsLevel, tes("triangles, equal_spacing, ccw"), false}};
@@ -650,5 +661,117 @@ TEST(tessellation_garbage_indices) {
     glDeleteBuffers(2, bufs);
     glDeleteVertexArrays(1, &vao);
     glDeleteProgram(p);
+    CHECK_GL();
+}
+
+// TES affine in gl_TessCoord (Shrimple's water): the fast path draws the patch's corners at any levels, which
+// gives the image of the tessellated patch up to rounding (perspective-correct interpolation of an affine
+// attribute is exact on every sub-triangle). Real tessellation levels (fractional_even) with perspective (w varies
+// per vertex), a flat varying constant per patch and a nonlinear output the fragment shader doesn't read; level 0
+// culls the patches. Varyings the fragment shader reads flat / noperspective / centroid that depend on
+// gl_TessCoord keep the emulation.
+TEST(tessellation_affine_fast_path) {
+    const char* vs = R"(#version 410 core
+layout(location = 0) in vec2 p;
+layout(location = 1) in vec4 c;
+out V { vec4 color; flat int id; } vo;
+void main() {
+    float w = 1.0 + 0.6 * (p.x + 1.0) + 0.3 * (p.y + 1.0);  // perspective: w differs per vertex
+    vo.color = c;
+    vo.id = gl_VertexID;
+    gl_Position = vec4(p * w, 0.25 * w, w);
+})";
+    const char* tcs = R"(#version 410 core
+layout(vertices = 3) out;
+uniform float lvl;
+in V { vec4 color; flat int id; } vi[];
+out V { vec4 color; flat int id; } vo[];
+void main() {
+    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
+    vo[gl_InvocationID].color = vi[gl_InvocationID].color;
+    vo[gl_InvocationID].id = vi[gl_InvocationID].id;
+    gl_TessLevelOuter[0] = gl_TessLevelOuter[1] = gl_TessLevelOuter[2] = lvl;
+    gl_TessLevelInner[0] = lvl * 1.5;
+})";
+    auto tes = [](const char* outDecl, const char* fsQual, const char* extra) {
+        std::string t = R"(#version 410 core
+layout(triangles, fractional_even_spacing, ccw) in;
+in V { vec4 color; flat int id; } vi[];
+)";
+        t += outDecl;
+        t += R"(
+void main() {
+    vec3 t = gl_TessCoord;
+    gl_Position = t.x * gl_in[0].gl_Position + t.y * gl_in[1].gl_Position + t.z * gl_in[2].gl_Position;
+    mat3 m = mat3(vi[0].color.rgb, vi[1].color.rgb, vi[2].color.rgb);
+    col = vec4(m * t, 1.0) * 0.5 + 0.25 * vi[1].color;   // affine (a constant matrix times gl_TessCoord)
+    id = vi[0].id + gl_PrimitiveID * 100;               // constant per patch
+)";
+        t += extra;
+        t += "}\n";
+        (void)fsQual;
+        return t;
+    };
+    auto fs = [](const char* inDecl) {
+        return std::string("#version 410 core\n") + inDecl + R"(
+out vec4 o;
+void main() { o = col + vec4(0.0, 0.0, float(id) * 0.001, 0.0); })";
+    };
+    struct Variant {
+        std::string tes, fs;
+        bool affine;
+    } variants[] = {
+        // affine; `unused` is nonlinear but the fragment shader doesn't read it
+        {tes("out vec4 col;\nflat out int id;\nout float unused;", "", "    unused = t.x * t.y;\n"), fs("in vec4 col;\nflat in int id;"), true},
+        // a flat varying that depends on gl_TessCoord
+        {tes("flat out vec4 col;\nflat out int id;", "", ""), fs("flat in vec4 col;\nflat in int id;"), false},
+        // noperspective / centroid interpolation of an affine varying
+        {tes("noperspective out vec4 col;\nflat out int id;", "", ""), fs("noperspective in vec4 col;\nflat in int id;"), false},
+        {tes("centroid out vec4 col;\nflat out int id;", "", ""), fs("centroid in vec4 col;\nflat in int id;"), false},
+        // nonlinear color
+        {tes("out vec4 col;\nflat out int id;", "", "    col *= t.x;\n"), fs("in vec4 col;\nflat in int id;"), false},
+    };
+    GLuint bufs[2];
+    GLuint vao = quadsVao(bufs);
+    Target t;
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    auto draw = [&]() { glDrawElementsBaseVertex(GL_PATCHES, 6, GL_UNSIGNED_SHORT, nullptr, 4); };
+    for (auto& v : variants) {
+        GLuint p = program(R"(#version 410 core
+layout(location = 0) in vec2 p;
+layout(location = 1) in vec4 c;
+out V { vec4 color; flat int id; } vo;
+void main() {
+    float w = 1.0 + 0.6 * (p.x + 1.0) + 0.3 * (p.y + 1.0);
+    vo.color = c;
+    vo.id = gl_VertexID;
+    gl_Position = vec4(p * w, 0.25 * w, w);
+})", tcs, v.tes.c_str(), v.fs.c_str());
+        (void)vs;
+        glUseProgram(p);
+        GLint lvl = glGetUniformLocation(p, "lvl");
+        for (float level : {1.0f, 3.0f, 7.3f, 0.0f}) {
+            glUniform1f(lvl, level);
+            std::vector<float> ref = render(t, false, false, false, draw);
+            uint64_t f0 = fusedDraws();
+            std::vector<float> fast = render(t, true, true, false, draw);
+            CHECK_EQ(fusedDraws() - f0, v.affine ? 1u : 0u);
+            // the same pixels covered; colors equal up to rounding
+            int coverage = 0, color = 0, covered = 0;
+            for (size_t i = 0; i < ref.size(); i += 4) {
+                bool a = ref[i + 3] != -1.0f, b = fast[i + 3] != -1.0f;
+                covered += a;
+                if (a != b) coverage++;
+                else if (a)
+                    for (int k = 0; k < 4; k++) color += fabsf(ref[i + k] - fast[i + k]) > 1e-4f;
+            }
+            CHECK(coverage <= 2);  // pixel centres exactly on an edge may round either way
+            CHECK_EQ(color, 0);
+            CHECK(level == 0.0f ? covered == 0 : covered > 500);
+        }
+        glDeleteProgram(p);
+    }
+    glDeleteBuffers(2, bufs);
+    glDeleteVertexArrays(1, &vao);
     CHECK_GL();
 }

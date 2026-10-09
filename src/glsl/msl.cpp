@@ -505,8 +505,22 @@ private:
         int cpsMax = 0, threads = 0;
         std::string objBody;  // object function body (VS + TCS for patch mgl_patch of sub-draw mgl_sd)
     } ts_;
+    // mgl_TPayload: units per patch (mgl_tess_setup: at most 4 x 32 ring strips + the centre) and the bytes
+    // before the control point records (gp..cps, mgl_tess, groups, gstart[], rounded up)
+    static constexpr int kTessMaxUnits = 130;
+    static constexpr size_t kTessPayloadHeader = 384;
     // Address space of G::S (shared per-patch state of the TCS / TES): thread in fused variants.
     std::string sharedSpace_ = "threadgroup";
+    // Per-vertex input arrays of the TCS / TES declared with the patch's vertex count instead of
+    // gl_MaxPatchVertices (VariantKey::patchVertices): elements per variable; indices into them are clamped.
+    std::map<const Variable*, int> resizedIn_;
+    int arrayedInputSize(Stage s) const {
+        int pv = K.patchVertices ? K.patchVertices : K.tessFused;
+        if (pv <= 0) return 0;
+        if (s == Stage::TessControl) return pv;
+        if (s == Stage::TessEval) return SC(Stage::TessControl).main ? RF(Stage::TessControl).tcsOutputVertices : pv;
+        return 0;
+    }
     // rasterOutput of a classic vertex function passes only the varyings the fragment shader reads (as for mesh outputs)
     bool filterOutputs_ = false;
     // gl_BaseVertex / gl_DrawID of the vertex shader run by runVS (tessellation: from the sub-draw)
@@ -1003,6 +1017,9 @@ std::string Emitter::ex(const Expr* e) {
             const Expr* b = e->args[0];
             std::string idx = ex(e->args[1]);
             if (b->type.isOpaque() || b->type.stripArrays().isOpaque()) fail("opaque array used as a value");
+            if (b->kind == EK::Var)
+                if (auto it = resizedIn_.find(b->var); it != resizedIn_.end())
+                    idx = "min(uint(" + idx + "), " + std::to_string(it->second - 1) + "u)";
             if (b->type.isVector() && !b->type.isArray() && rootInThreadgroup(b)) {
                 // Address the component as a scalar so concurrent invocations writing different
                 // components of one shared vector don't race through a whole-vector store.
@@ -2679,6 +2696,43 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         fnNames_[f] = "f_" + f->name + "_" + std::to_string(counts[f->name]++);
     }
 
+    // per-vertex inputs of the TCS / TES sized for the patch (only arrays the stage indexes, never uses whole)
+    resizedIn_.clear();
+    if (int n = arrayedInputSize(s); n > 0) {
+        std::set<const Variable*> whole;
+        std::function<void(const Expr*, bool)> walkE = [&](const Expr* e, bool indexed) {
+            if (!e) return;
+            if (e->kind == EK::Var && !indexed) whole.insert(e->var);
+            for (size_t i = 0; i < e->args.size(); i++) walkE(e->args[i], e->kind == EK::Index && i == 0);
+            walkE(e->aux, false);
+        };
+        std::function<void(const Stmt*)> walkS = [&](const Stmt* st) {
+            if (!st) return;
+            for (auto* b : st->body) walkS(b);
+            walkE(st->expr, false);
+            walkS(st->init);
+            walkE(st->cond, false);
+            walkS(st->condDecl);
+            walkE(st->incr, false);
+            walkS(st->then);
+            walkS(st->els);
+            for (auto* v : st->vars) walkE(v->init, false);
+        };
+        for (auto* f : sc_->reachable) walkS(f->body);
+        auto consider = [&](const Variable* v) {
+            if (v->global && v->q.storage == Storage::In && !v->q.patch && v->type.isArray() && v->type.dims[0] > n && !whole.count(v) &&
+                inThreadgroup(v))
+                resizedIn_[v] = n;
+        };
+        for (auto* v : sc_->globals) consider(v);
+        for (auto* v : si.builtins) consider(v);
+    }
+    auto declType = [&](const Variable* v) {
+        Type t = v->type;
+        if (auto it = resizedIn_.find(v); it != resizedIn_.end()) t.dims[0] = it->second;
+        return mt(t);
+    };
+
     std::string structs, members, funcs, init, zero;
     std::vector<const StructDef*> order;
     collectStructs(order);
@@ -2706,7 +2760,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
         if (s == Stage::Mesh && v->q.storage == Storage::Out && !sc_->used.count(v)) continue;
         if (v->type.isArray() && v->type.dims[0] == 0) fail("unsized global array '" + v->name + "'");
         if (inThreadgroup(v)) {
-            sharedDecl += "    " + mt(v->type) + " g_" + v->name + ";\n";
+            sharedDecl += "    " + declType(v) + " g_" + v->name + ";\n";
             continue;
         }
         members += "    " + mt(v->type) + " " + varName(v) + ";\n";
@@ -2720,7 +2774,7 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
                               v->block->members[mi].name + ";\n";
             continue;
         }
-        if (inThreadgroup(v)) sharedDecl += "    " + mt(v->type) + " bi_" + v->name + ";\n";
+        if (inThreadgroup(v)) sharedDecl += "    " + declType(v) + " bi_" + v->name + ";\n";
         else {
             members += "    " + mt(v->type) + " bi_" + v->name + ";\n";
             if (v->q.storage != Storage::In) zero += "        bi_" + v->name + " = {};\n";
@@ -4561,7 +4615,7 @@ void Emitter::emitTessControlPass(std::string& o) {
     // payload (Metal: 16 KB), so the draw stays in the render pass; otherwise (and for the counted passes of
     // geometry shaders / transform feedback) pass 1 is the mgl_tcs kernel.
     bool gs = stageMask_ & (1u << (int)Stage::Geometry);
-    size_t payload = 128 + (size_t)ts_.cpsMax * ts_.VB + ts_.PB;
+    size_t payload = kTessPayloadHeader + (size_t)ts_.cpsMax * ts_.VB + ts_.PB;
     ts_.inObject = K.kind == PipelineKind::Tessellation && !gs && !K.tessComputePass && payload <= 16384;
     std::string prefix = "    uint mgl_gpatch = mgl_tg.x + D.gridBase, mgl_inst = mgl_tg.y, mgl_gp = mgl_inst * D.primitiveCount + mgl_gpatch, mgl_pv = D.patchVertices;\n"
                          "    device const MGLSubDraw& mgl_sd = D.subDraws[mgl_sd_find(D, mgl_gpatch)];\n"
@@ -4644,7 +4698,8 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     bool isolines = R.tesPrimitiveMode != gl::TRIANGLES && R.tesPrimitiveMode != gl::QUADS;
     std::string topo = points ? "point" : isolines ? "line" : "triangle";
     int ipp = tesIpp_;
-    const int MAXV = 130, MAXP = 128, NT = 64;
+    // One SIMD-group per mesh threadgroup: most units (and groups of them) have far fewer than 64 vertices.
+    const int MAXV = 130, MAXP = 128, NT = 32;
     std::string sPB = std::to_string(ts_.PB) + "u";
     prepareStage(Stage::TessEval);
     StageInfo& esi = si_[(int)Stage::TessEval];
@@ -4670,9 +4725,12 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     o += "}  // namespace tes\n\n";
     // Object stage: one threadgroup per patch. With ts_.inObject it runs VS + TCS and passes the control
     // points and the patch record in the payload; otherwise they come from the mgl_tcs kernel's records.
+    // It packs the patch's units (mgl_tess_unit) into groups that fit one mesh threadgroup (<= MAXV vertices,
+    // <= MAXP primitives); mesh threadgroup g generates units gstart[g] .. gstart[g + 1] - 1.
     std::string ns = std::to_string(ts_.VB / 16) + "u";
     size_t nrec = (size_t)ts_.cpsMax * (ts_.VB / 16) + ts_.PB / 16;
-    o += "struct mgl_TPayload {\n    uint gp, patch, inst, cps;\n    mgl_tess T;\n";
+    o += "struct mgl_TPayload {\n    uint gp, patch, inst, cps;\n    mgl_tess T;\n    uint groups;\n    ushort gstart[" +
+         std::to_string(kTessMaxUnits + 1) + "];\n";
     if (ts_.inObject) o += "    uint4 rec[" + std::to_string(nrec) + "];\n";
     o += "};\n\n";
     std::string e = "[[object]] void mgl_tes_obj(object_data mgl_TPayload& pl [[payload]], mesh_grid_properties mgp, ";
@@ -4689,8 +4747,14 @@ void Emitter::emitTessEvalMesh(std::string& o) {
         e += "    device const float* lv = (device const float*)(D.tcsPatchOut + gp * " + sPB + ");\n";
         e += "    pl.gp = gp;\n    pl.patch = mgl_gpatch - D.subDraws[mgl_sd_find(D, mgl_gpatch)].firstPatch;\n    pl.inst = mgl_tg.y;\n    pl.cps = " + ts_.cps + ";\n";
     }
-    e += "    pl.T = " + ts_.setup + ";\n";
-    e += "    mgp.set_threadgroups_per_grid(uint3(pl.T.units, 1u, 1u));\n}\n\n";
+    e += "    mgl_tess T = " + ts_.setup + ";\n    pl.T = T;\n";
+    e += "    uint mgl_g = 0u, mgl_gnv = 0u, mgl_gnp = 0u;\n    pl.gstart[0] = 0;\n";
+    e += "    for (uint u = 0; u < T.units; u++) {\n        uint2 sz = mgl_tess_unit_size(T, u);\n";
+    e += "        if (u > uint(pl.gstart[mgl_g]) && (mgl_gnv + sz.x > " + std::to_string(MAXV) + "u || mgl_gnp + sz.y > " + std::to_string(MAXP) +
+         "u)) {\n            mgl_g++;\n            pl.gstart[mgl_g] = ushort(u);\n            mgl_gnv = 0u;\n            mgl_gnp = 0u;\n        }\n";
+    e += "        mgl_gnv += sz.x;\n        mgl_gnp += sz.y;\n    }\n";
+    e += "    pl.gstart[mgl_g + 1u] = ushort(T.units);\n    pl.groups = T.units != 0u ? mgl_g + 1u : 0u;\n";
+    e += "    mgp.set_threadgroups_per_grid(uint3(pl.groups, 1u, 1u));\n}\n\n";
     e += "[[mesh]] void mgl_tes(tes::MeshT mgl_mo, const object_data mgl_TPayload& pl [[payload]], constant MGLArgs& A [[buffer(0)]], "
          "constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], "
          "uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
@@ -4706,7 +4770,12 @@ void Emitter::emitTessEvalMesh(std::string& o) {
         e += indentBy(tesLoadControlPoints(tesDeviceRecord("pl.gp", "pl.cps"), "pl.cps", NT), 4);
         e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch(), 8);
     }
-    e += "        mgl_tess T = pl.T;\n        uint nv, np;\n        mgl_tess_unit(T, mgl_tg.x, mgl_co, mgl_tp, mgl_idx, nv, np);\n";
+    std::string sipp = std::to_string(ipp) + "u";
+    e += "        mgl_tess T = pl.T;\n        uint nv = 0u, np = 0u;\n";
+    e += "        for (uint u = pl.gstart[mgl_tg.x]; u < uint(pl.gstart[mgl_tg.x + 1u]); u++) {\n";
+    e += "            uint unv, unp;\n            mgl_tess_unit(T, u, mgl_co + nv, mgl_tp + nv, mgl_idx + np * " + sipp + ", unv, unp);\n";
+    e += "            for (uint k = np * " + sipp + "; k < (np + unp) * " + sipp + "; k++) mgl_idx[k] += ushort(nv);\n";
+    e += "            nv += unv;\n            np += unp;\n        }\n";
     e += "        mgl_cnt[0] = nv;\n        mgl_cnt[1] = np;\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
     e += "    uint nv = mgl_cnt[0], np = mgl_cnt[1];\n";
     if (!ro.spill.empty()) e += "    threadgroup uint mgl_svs[" + std::to_string(MAXV) + "];\n";
@@ -4728,7 +4797,7 @@ void Emitter::emitTessEvalMesh(std::string& o) {
          "            atomic_fetch_add_explicit(D.stats + 2, np, memory_order_relaxed);\n        }\n    }\n}\n\n";
     entries_ += e;
     EntryPoint obj{"mgl_tes_obj", Stage::TessEval, EntryPoint::Object};
-    obj.payloadBytes = (uint32_t)(128 + (ts_.inObject ? 16 * nrec : 0));
+    obj.payloadBytes = (uint32_t)(kTessPayloadHeader + (ts_.inObject ? 16 * nrec : 0));
     if (ts_.inObject) obj.threadsPerThreadgroup[0] = ts_.threads;
     out_.entryPoints.push_back(obj);
     EntryPoint ms{"mgl_tes", Stage::TessEval, EntryPoint::Mesh};
@@ -4878,7 +4947,12 @@ void Emitter::emitTessFused(std::string& o) {
     e += indentBy(tesLoadControlPoints("thread const uint4* r = mgl_rec + j * " + ns + ";\n", std::to_string(OUTV) + "u", 1), 4);
     e += indentBy(tesLoadPatch("thread"), 4);
     e += indentBy(tesRun("mgl_corner[mgl_v % " + std::to_string(vpp) + "u]", "mgl_patch", std::to_string(OUTV) + "u"), 4);
-    e += "    tes::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
+    e += "    tes::Out v;\n" + indentBy(ro.vertexCopy, 4);
+    // GL discards a patch with an outer level <= 0 or NaN: its vertices collapse to one point (a triangle without
+    // area). The runtime only knows the levels when they are constant (Reflection::tesAffine draws at any levels).
+    e += std::string("    if (!(lv[0] > 0.0f && lv[1] > 0.0f && lv[2] > 0.0f") + (quads ? " && lv[3] > 0.0f" : "") +
+         ")) v.mgl_pos = float4(0.0f, 0.0f, 0.0f, 1.0f);\n";
+    e += "    return v;\n}\n\n";
     entries_ += e;
     fragInputsAvailable_ = ro.names;
     haveVsOutputs_ = true;

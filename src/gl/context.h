@@ -258,6 +258,14 @@ public:
     uint32_t statsNext = 0;
     GLenum conditionalRenderMode = 0;
     Ref<Query> conditionalQuery;
+    // Emulated geometry per command buffer (draw.mm meshWork*): GPU work of the tessellation / geometry shader
+    // emulation is estimated in items (patches x expected triangles) and command buffers are committed before
+    // they hold more than a budget, so that none gets near the GPU watchdog. ns per item is learned from the
+    // GPU times of completed command buffers.
+    uint64_t meshWorkSerial = 0;
+    double meshWorkItems = 0;                                 // recorded in command buffer meshWorkSerial
+    double meshWorkNsPerItem = 200;                           // estimate (conservative until measured)
+    std::vector<std::pair<uint64_t, double>> meshWorkPending; // submitted command buffers: (serial, items)
 
     std::vector<uint32_t> subroutineSelection[(int)glsl::Stage::Count];  // glUniformSubroutinesuiv
 

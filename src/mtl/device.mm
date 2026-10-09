@@ -107,6 +107,13 @@ uint64_t Device::lastReservedSerial() {
     return nextSerial_ - 1;
 }
 
+double Device::takeMaxGpuSeconds() {
+    std::lock_guard<std::mutex> g(mutex_);
+    double m = maxGpuSeconds_;
+    maxGpuSeconds_ = 0;
+    return m;
+}
+
 bool Device::gpuTimes(uint64_t serial, double* start, double* end) {
     std::lock_guard<std::mutex> g(mutex_);
     auto it = gpuTimes_.find(serial);
@@ -128,6 +135,14 @@ void Device::markComplete(uint64_t serial, NSError* error, double gpuStart, doub
         if (gpuEnd > 0) {
             gpuTimes_[serial] = {gpuStart, gpuEnd};
             while (gpuTimes_.size() > 4096) gpuTimes_.erase(gpuTimes_.begin());
+            // Command buffers near the GPU watchdog (a few seconds) get killed ("CDM Kill timeout"): report
+            // long ones (at most every 10 s), which is where to look when that happens.
+            double dt = gpuEnd - gpuStart;
+            maxGpuSeconds_ = std::max(maxGpuSeconds_, dt);
+            if (dt > 0.5 && gpuEnd - lastLongWarning_ > 10) {
+                lastLongWarning_ = gpuEnd;
+                MGL_WARN("command buffer %llu ran %.0f ms on the GPU", (unsigned long long)serial, dt * 1000);
+            }
         }
         submitted_.erase(serial);
         completedAbove_.insert(serial);
