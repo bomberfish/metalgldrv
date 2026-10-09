@@ -2708,7 +2708,7 @@ static bool indirectNeedsCpu(Context* ctx, const DrawParams& d, ProgramObj* prog
 // ---------------------------------------------------------------------------
 // main draw
 // ---------------------------------------------------------------------------
-static bool validateDraw(Context* ctx, GLenum mode) {
+static bool validateDraw(Context* ctx, GLenum& mode) {
     if (!validMode(mode)) {
         ctx->setError(GL_INVALID_ENUM, "invalid draw mode 0x%x", mode);
         return false;
@@ -2751,6 +2751,20 @@ static bool validateDraw(Context* ctx, GLenum mode) {
         ctx->setError(GL_INVALID_OPERATION, "GL_PATCHES draw without a tessellation evaluation shader (program %u, stages 0x%x)",
                       prog ? prog->name : 0, prog ? prog->refl.stageMask : 0);
         return false;
+    }
+    // METALGLDRV_IMPLICIT_PATCHES=1 (the Fabric mod sets it): a draw whose primitives have
+    // GL_PATCH_VERTICES vertices (triangles with 3, lines with 2, points with 1) while
+    // tessellation is active runs as patches, as Apple's and NVIDIA's drivers do. GL says
+    // INVALID_OPERATION; Iris + Sodium draw terrain this way with tessellation shader packs.
+    // (Read only on this would-be-error path, so it costs nothing in conformant use.)
+    if (hasTess && mode != GL_PATCHES && envFlag("METALGLDRV_IMPLICIT_PATCHES", false)) {
+        int n = mode == GL_TRIANGLES ? 3 : mode == GL_LINES ? 2 : mode == GL_POINTS ? 1 : 0;
+        if (n && n == ctx->patchVertices) {
+            static bool logged = false;
+            if (!logged) MGL_INFO("tessellation active with draw mode 0x%x: drawing %d-vertex patches (METALGLDRV_IMPLICIT_PATCHES)", mode, n);
+            logged = true;
+            mode = GL_PATCHES;
+        }
     }
     if (hasTess && mode != GL_PATCHES) {
         ctx->setError(GL_INVALID_OPERATION, "program %u has tessellation shaders (stages 0x%x) but the draw mode is 0x%x, not GL_PATCHES",
@@ -3136,8 +3150,9 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d) {
 }
 
 static void draw(Context* ctx, const DrawParams& d) {
-    if (!validateDraw(ctx, d.mode)) return;
-    executeDraw(ctx, d);
+    DrawParams v = d;  // validateDraw may turn the mode into GL_PATCHES
+    if (!validateDraw(ctx, v.mode)) return;
+    executeDraw(ctx, v);
 }
 
 // ---------------------------------------------------------------------------

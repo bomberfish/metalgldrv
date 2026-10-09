@@ -172,6 +172,8 @@ final class Bootstrap {
         "# Driver settings: any METALGLDRV_<NAME> environment variable of the driver, as",
         "# METALGLDRV_<NAME>=value (or metalgldrv.<name>=value). Environment variables and",
         "# -Dmetalgldrv.<name> JVM arguments that are already set win. For example:",
+        "# The mod sets METALGLDRV_IMPLICIT_PATCHES=1 unless configured: shader packs with",
+        "# tessellation shaders (e.g. Shrimple) need it for terrain with Iris + Sodium.",
         "#METALGLDRV_LOG=3",
         "#METALGLDRV_LOG_FILE=documents",
         "#METALGLDRV_LOG_UNSUPPORTED=1",
@@ -209,7 +211,22 @@ final class Bootstrap {
             String value = cfg.getProperty(key).trim();
             if (System.getProperty(prop) == null) System.setProperty(prop, value);
         }
+        // Driver settings the mod turns on for Minecraft unless the environment, a -D property or
+        // the config file says otherwise:
+        //   IMPLICIT_PATCHES: Iris + Sodium draw terrain as GL_TRIANGLES while a shader pack's
+        //   tessellation shaders are active (Shrimple and others). GL makes that an error; Apple's
+        //   and NVIDIA's drivers draw 3-vertex patches, and so does metalgldrv with this on.
+        for (String[] d : DRIVER_DEFAULTS) {
+            String name = d[0];
+            if (System.getenv("METALGLDRV_" + name) != null) continue;
+            boolean set = false;
+            for (String k : System.getProperties().stringPropertyNames())
+                if (k.equalsIgnoreCase("metalgldrv." + name)) set = true;
+            if (!set) System.setProperty("metalgldrv." + name, d[1]);
+        }
     }
+
+    private static final String[][] DRIVER_DEFAULTS = {{"IMPLICIT_PATCHES", "1"}};
 
     // A setting: -Dmetalgldrv.<key> if set, else the config file's <key>, else null.
     static String setting(Properties cfg, String key) {

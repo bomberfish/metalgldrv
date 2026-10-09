@@ -189,6 +189,16 @@ run "shader OS spoof: none when not activated" -- -Dmetalgldrv.enabled=false
 expect "shaderos=null$"
 done_case
 
+# 9d. Driver defaults: IMPLICIT_PATCHES reaches the driver's environment unless configured.
+CONFIG_TEXT=""
+run "driver default: IMPLICIT_PATCHES" -- -Dtest.env=METALGLDRV_IMPLICIT_PATCHES
+expect "env METALGLDRV_IMPLICIT_PATCHES=1$"
+done_case
+CONFIG_TEXT="METALGLDRV_IMPLICIT_PATCHES=0"
+run "driver default: IMPLICIT_PATCHES off in config" -- -Dtest.env=METALGLDRV_IMPLICIT_PATCHES
+expect "env METALGLDRV_IMPLICIT_PATCHES=0$"
+done_case
+
 # 10. GLFW already loaded: warned about, still activated.
 CONFIG_TEXT=""
 run "GLFW class already loaded" -- -Dtest.preloadGlfw=true --add-opens java.base/java.lang=ALL-UNNAMED

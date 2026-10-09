@@ -1,5 +1,6 @@
 // Geometry/tessellation/transform feedback/subroutines/provoking vertex through the GL runtime.
 #include "harness.h"
+#include <cstdlib>
 #include <vector>
 
 static GLuint makeShader(GLenum type, const char* src) {
@@ -151,6 +152,55 @@ in vec2 uv; out vec4 o; void main() { o = vec4(uv, 1, 1); })";
     readPixel(8, 8, px);
     CHECK(px[2] == 255 && px[0] > 30 && px[0] < 100);  // uv ~ (0.25, 0.25)
     CHECK_PIXEL(48, 48, 0, 0, 0, 255);
+    glDeleteProgram(p);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}
+
+// METALGLDRV_IMPLICIT_PATCHES: GL_TRIANGLES with tessellation active runs as 3-vertex patches
+// (as Apple's and NVIDIA's drivers do); without it the draw is GL_INVALID_OPERATION.
+TEST(tessellation_implicit_patches) {
+    const char* vs = R"(#version 400 core
+layout(location = 0) in vec2 p; void main() { gl_Position = vec4(p, 0, 1); })";
+    const char* tcs = R"(#version 400 core
+layout(vertices = 3) out;
+void main() {
+    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
+    if (gl_InvocationID == 0) {
+        gl_TessLevelOuter[0] = gl_TessLevelOuter[1] = gl_TessLevelOuter[2] = 2.0;
+        gl_TessLevelInner[0] = 2.0;
+    }
+})";
+    const char* tes = R"(#version 400 core
+layout(triangles, equal_spacing, ccw) in;
+void main() {
+    gl_Position = gl_TessCoord.x * gl_in[0].gl_Position + gl_TessCoord.y * gl_in[1].gl_Position + gl_TessCoord.z * gl_in[2].gl_Position;
+})";
+    const char* fs = R"(#version 400 core
+out vec4 o; void main() { o = vec4(0, 1, 0, 1); })";
+    GLuint p = linkShaders({makeShader(GL_VERTEX_SHADER, vs), makeShader(GL_TESS_CONTROL_SHADER, tcs),
+                            makeShader(GL_TESS_EVALUATION_SHADER, tes), makeShader(GL_FRAGMENT_SHADER, fs)});
+    GLuint vao = fullscreenVao();  // 4 vertices: draw the first triangle (bottom-left half)
+    glUseProgram(p);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glClearColor(0, 0, 0, 1);
+
+    unsetenv("METALGLDRV_IMPLICIT_PATCHES");
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK(glGetError() == GL_INVALID_OPERATION);
+    CHECK_PIXEL(8, 8, 0, 0, 0, 255);
+
+    setenv("METALGLDRV_IMPLICIT_PATCHES", "1", 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK(glGetError() == GL_NO_ERROR);
+    CHECK_PIXEL(8, 8, 0, 255, 0, 255);
+    glPatchParameteri(GL_PATCH_VERTICES, 4);  // primitive size no longer matches: still an error
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK(glGetError() == GL_INVALID_OPERATION);
+    unsetenv("METALGLDRV_IMPLICIT_PATCHES");
+
     glDeleteProgram(p);
     glDeleteVertexArrays(1, &vao);
     CHECK_GL();
