@@ -280,6 +280,31 @@ NSOpenGLPixelFormat* ctx_pixelFormat(id self, SEL _cmd) {
     return ((id(*)(id, SEL))o_ctx_pixelFormat)(self, _cmd);
 }
 
+// NSView backing conversions. Apple's NSOpenGL backs a view that doesn't want a best-resolution
+// surface with a 1x layer, so AppKit's convert*ToBacking: report points for it, and GLFW/SDL size
+// their framebuffer from that. Our views keep AppKit's own (2x on Retina) layer, so report 1x
+// ourselves for views carrying one of our surfaces without wantsBestResolutionOpenGLSurface;
+// otherwise the app renders a 2x framebuffer into the 1x drawable.
+IMP o_view_rectToBacking, o_view_rectFromBacking, o_view_sizeToBacking, o_view_sizeFromBacking, o_view_pointToBacking,
+    o_view_pointFromBacking;
+
+bool pointsBacked(NSView* view) {
+    return objc_getAssociatedObject(view, &kViewSurfaceKey) && !view.wantsBestResolutionOpenGLSurface;
+}
+
+#define BACKING_CONV(fn, T)                                                        \
+    T fn(NSView* self, SEL _cmd, T v) {                                            \
+        if (pointsBacked(self)) return v;                                          \
+        return ((T(*)(id, SEL, T))o_##fn)(self, _cmd, v);                          \
+    }
+BACKING_CONV(view_rectToBacking, NSRect)
+BACKING_CONV(view_rectFromBacking, NSRect)
+BACKING_CONV(view_sizeToBacking, NSSize)
+BACKING_CONV(view_sizeFromBacking, NSSize)
+BACKING_CONV(view_pointToBacking, NSPoint)
+BACKING_CONV(view_pointFromBacking, NSPoint)
+#undef BACKING_CONV
+
 // Lays the view's CAMetalLayer over the view: its bounds, at the backing scale when the
 // view wants a best-resolution surface. Main thread.
 void layoutViewLayer(NSView* view, CAMetalLayer* layer) {
@@ -524,6 +549,13 @@ void installNSOpenGLHooks() {
         Class meta = object_getClass(ctx);
         HOOK(meta, clearCurrentContext, cls_clearCurrentContext);
         HOOK(meta, currentContext, cls_currentContext);
+        Class view = objc_getClass("NSView");
+        HOOK(view, convertRectToBacking:, view_rectToBacking);
+        HOOK(view, convertRectFromBacking:, view_rectFromBacking);
+        HOOK(view, convertSizeToBacking:, view_sizeToBacking);
+        HOOK(view, convertSizeFromBacking:, view_sizeFromBacking);
+        HOOK(view, convertPointToBacking:, view_pointToBacking);
+        HOOK(view, convertPointFromBacking:, view_pointFromBacking);
 #undef HOOK
         MGL_INFO("NSOpenGLContext / NSOpenGLPixelFormat now run on metalgldrv");
     });
