@@ -3246,7 +3246,8 @@ static double tessItemsPerPatch(Context* ctx, ProgramObj* prog) {
 //   - levels that make every patch one primitive at the domain corners (the same output as the emulation), or
 //   - a TES that is affine in gl_TessCoord (Reflection::tesAffine), at any levels: the tessellated patch covers
 //     the same triangle(s) with the same interpolated values as its corners alone (up to rounding); the
-//     fused vertex function drops the patches GL culls (an outer level <= 0 or NaN).
+//     fused vertex function drops the patches GL culls (an outer level <= 0 or NaN). Not in the strict profiles,
+//     which want the tessellated primitives themselves, not an equivalent up to rounding.
 // METALGLDRV_TESS_FAST=0 disables it.
 static bool tessFusedWanted(Context* ctx, ProgramObj* prog, const glsl::VariantKey& vk) {
     const glsl::Reflection& r = prog->refl;
@@ -3256,7 +3257,7 @@ static bool tessFusedWanted(Context* ctx, ProgramObj* prog, const glsl::VariantK
     if (tessLevelsTrivial(ctx, prog)) return true;
     // affine: the same filled triangles at any levels (polygon modes would draw the sub-triangles' edges or
     // vertices); the fused vertex function culls patches by their outer levels itself
-    return r.tesAffine && ctx->polygonMode == GL_FILL;
+    return r.tesAffine && ctx->polygonMode == GL_FILL && !ctx->strict();
 }
 
 // Whether the sub-draws of a multi-draw can share one emulation pass: tessellation without a geometry

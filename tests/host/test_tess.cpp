@@ -456,12 +456,13 @@ void main() { atomicAdd(b.count, 1u); gl_Position = vec4(p, 0.0, 1.0); })";
         const char* tcs;
         std::string tes;
         bool fused;
+        bool affineOnly = false;  // fused only as an affine TES at other levels (not in the strict profiles)
     } cases[] = {{vs, tcsLevel, tesCurved("triangles, equal_spacing, ccw"), true},
                  {vs, tcsLevel, tesCurved("triangles, fractional_even_spacing, ccw"), false},  // level 1 rounds to 2
-                 {vs, tcsLevel, tes("triangles, fractional_even_spacing, ccw"), true},         // affine: any levels
+                 {vs, tcsLevel, tes("triangles, fractional_even_spacing, ccw"), true, true},   // affine: any levels
                  {vs, tcsBarrier, tes("triangles, equal_spacing, ccw"), false},
                  {vs, tcsInput, tesCurved("triangles, equal_spacing, ccw"), false},            // levels unknown on the CPU
-                 {vs, tcsInput, tes("triangles, equal_spacing, ccw"), true},
+                 {vs, tcsInput, tes("triangles, equal_spacing, ccw"), true, true},
                  {vs, tcsLevel, tes("triangles, equal_spacing, ccw, point_mode"), false},
                  {vsRead, tcsLevel, tes("triangles, equal_spacing, ccw"), true},
                  {vsWrite, tcsLevel, tes("triangles, equal_spacing, ccw"), false}};
@@ -481,7 +482,7 @@ void main() { atomicAdd(b.count, 1u); gl_Position = vec4(p, 0.0, 1.0); })";
         std::vector<float> ref = render(t, false, false, false, draw);
         uint64_t f0 = fusedDraws();
         CHECK_EQ(differing(ref, render(t, true, true, false, draw)), 0);
-        CHECK_EQ(fusedDraws() - f0, c.fused ? 1u : 0u);
+        CHECK_EQ(fusedDraws() - f0, c.fused && !(c.affineOnly && strictLevelFromEnv() >= 1) ? 1u : 0u);
         glDeleteProgram(p);
     }
     glDeleteBuffers(1, &ssbo);
@@ -755,7 +756,12 @@ void main() {
             std::vector<float> ref = render(t, false, false, false, draw);
             uint64_t f0 = fusedDraws();
             std::vector<float> fast = render(t, true, true, false, draw);
-            CHECK_EQ(fusedDraws() - f0, v.affine ? 1u : 0u);
+            // strict profiles: the affine case is off, so subdividing levels take the full emulation
+            if (strictLevelFromEnv() >= 1) {
+                if (level == 3.0f || level == 7.3f) CHECK_EQ(fusedDraws() - f0, 0u);
+            } else {
+                CHECK_EQ(fusedDraws() - f0, v.affine ? 1u : 0u);
+            }
             // the same pixels covered; colors equal up to rounding
             int coverage = 0, color = 0, covered = 0;
             for (size_t i = 0; i < ref.size(); i += 4) {

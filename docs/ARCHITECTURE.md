@@ -159,7 +159,9 @@ tessellator (equal / fractional_even / fractional_odd spacing, triangles / quads
   tessellated patch covers the same triangle with the same perspective-correct
   values; the fused vertex function drops patches whose outer levels cull them.
   Shader packs that tessellate every terrain draw (Shrimple) render at close to
-  the cost of no tessellation. `METALGLDRV_TESS_FAST=0` disables it. Conditions
+  the cost of no tessellation. The affine case is off in the strict profiles
+  (equal only up to rounding); the trivial-levels case stays. `METALGLDRV_TESS_FAST=0`
+  disables both. Conditions
   in docs/glsl-compiler.md.
 * **Watchdog budget**: emulated geometry (tessellation, geometry shaders, and
   fast-path patches at a lower weight) is weighed in expected output triangles;
