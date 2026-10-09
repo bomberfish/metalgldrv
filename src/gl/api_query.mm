@@ -387,7 +387,18 @@ static void getQueryObject(Context* ctx, GLuint id, GLenum pname, T* params) {
     Buffer* qb = ctx->queryBuffer.get();
     T value = 0;
     switch (pname) {
-    case GL_QUERY_RESULT: resolveQuery(ctx, q, true); value = (T)q->result; break;
+    case GL_QUERY_RESULT:
+        // SPEEDDEMON: never wait for the GPU. An occlusion query that isn't done counts as visible (at least one
+        // sample; an object drawn one frame early instead of popping in late), others give their previous result.
+        if (ctx->dev->caps.speedDemon() && !resolveQuery(ctx, q, false)) {
+            bool occlusion = q->target == GL_SAMPLES_PASSED || q->target == GL_ANY_SAMPLES_PASSED ||
+                             q->target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE;
+            value = (T)(occlusion ? std::max<uint64_t>(q->result, 1) : q->result);
+            break;
+        }
+        resolveQuery(ctx, q, true);
+        value = (T)q->result;
+        break;
     case GL_QUERY_RESULT_NO_WAIT:
         if (!resolveQuery(ctx, q, false)) return;
         value = (T)q->result;

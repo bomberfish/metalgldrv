@@ -9,6 +9,16 @@
 
 namespace mgl {
 
+// Highest anisotropy samplers get: 16, 4 with TURBOHAX, 2 with SPEEDDEMON.
+static int maxAnisotropyCap() {
+    static const int cap = [] {
+        Device* d = Device::get();
+        return d && d->caps.speedDemon() ? 2 : d && d->caps.turbo() ? 4 : 16;
+    }();
+    return cap;
+}
+
+
 Texture::~Texture() {
     dropViews();
     if (mtl) Device::get()->releaseAfter(mtl, std::max(lastUse, lastGpuWrite));
@@ -516,7 +526,7 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     int32_t k[] = {(int32_t)s.minFilter, (int32_t)s.magFilter, (int32_t)s.wrapS, (int32_t)s.wrapT, (int32_t)s.wrapR,
                    q(s.minLod, 0.0f, 1000.0f), q(s.maxLod, 0.0f, 1000.0f), 0,
                    s.compareMode == GL_COMPARE_REF_TO_TEXTURE ? (int32_t)s.compareFunc : 0,
-                   (int32_t)std::clamp(lroundf(s.maxAnisotropy), 1L, 16L), border, isInteger ? 1 : 0, (int32_t)s.reductionMode};
+                   (int32_t)std::clamp(lroundf(s.maxAnisotropy), 1L, (long)maxAnisotropyCap()), border, isInteger ? 1 : 0, (int32_t)s.reductionMode};
     std::string key((const char*)k, sizeof k);
     std::lock_guard<std::mutex> g(m);
     auto it = cache.find(key);
@@ -542,7 +552,7 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     d.lodMaxClamp = std::max(d.lodMinClamp, k[6] / 256.0f);
     // No lodBias: shaders add GL_TEXTURE_LOD_BIAS (SlotKind::LodBias); a sampler bias combined with
     // a shader bias() loses LOD precision on Apple GPUs.
-    d.maxAnisotropy = std::clamp((NSUInteger)lroundf(s.maxAnisotropy), (NSUInteger)1, (NSUInteger)16);
+    d.maxAnisotropy = std::clamp((NSUInteger)lroundf(s.maxAnisotropy), (NSUInteger)1, (NSUInteger)maxAnisotropyCap());
     if (d.maxAnisotropy > 1 && d.mipFilter == MTLSamplerMipFilterNotMipmapped) d.maxAnisotropy = 1;
     if (s.compareMode == GL_COMPARE_REF_TO_TEXTURE) d.compareFunction = compareFunc(s.compareFunc);
     if (s.reductionMode != GL_WEIGHTED_AVERAGE_ARB && !isInteger) {

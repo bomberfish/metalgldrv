@@ -280,6 +280,16 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
     geometry/tessellation draws (and vertex shaders past the classic varying
     budget, which run on the mesh pipeline) get one pre-pass per draw, so their
     primitives don't see each other's depth/stencil writes in the coverage.
+* `METALGL_TURBOHAX=1`, `METALGL_SPEEDDEMON=1` (also spelled `METALGLDRV_TURBOHAX` /
+  `METALGLDRV_SPEEDDEMON`, the spelling metalgldrv.conf reads) – the speed profiles, the other
+  direction from strict: they give up accuracy, and conformance, for performance. They are
+  `DeviceCaps::strictLevel` -1 and -2 (`turbo()`, `speedDemon()`); `METALGLDRV_STRICT` takes
+  precedence over both, and SPEEDDEMON over TURBOHAX.
+  * TURBOHAX: shaders compile with `MTLMathModeFast` (reassociation, no NaN / infinity
+    guarantees); anisotropic filtering is capped at 4x.
+  * SPEEDDEMON, TURBOHAX plus: `GL_QUERY_RESULT` never waits for the GPU (an unfinished occlusion
+    query reads as visible, other queries give their previous result); `glFinish` submits without
+    waiting; robust-access contexts get no texelFetch bounds checks; anisotropy is capped at 2x.
 * macOS: `METALGLDRV_*=value` lines in `~/Library/Application Support/metalgldrv/metalgldrv.conf`
   apply to every process that loads the driver, unless its environment sets them (for hosts whose
   environment is hard to reach, such as Steam → NotProton → CrossOver). `METALGLDRV_CONF=<path>`

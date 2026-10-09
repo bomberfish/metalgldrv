@@ -884,6 +884,8 @@ API void APIENTRY glFlush(void) {
 API void APIENTRY glFinish(void) {
     MGL_CTX();
     ctx->applyClearNow();
+    // SPEEDDEMON: submit without waiting for the GPU (fences and reads still wait for what they need).
+    if (ctx->dev->caps.speedDemon()) return ctx->flush();
     ctx->finish();
 }
 

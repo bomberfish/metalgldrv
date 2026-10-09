@@ -502,7 +502,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
     in.xfbInterleaved = p->xfbBufferMode == GL_INTERLEAVED_ATTRIBS;
     in.separable = p->separable;
     in.strictLevel = ctx->strictLevel;
-    in.robustTexelFetch = ctx->robustAccess;
+    in.robustTexelFetch = ctx->robustAccess && !ctx->dev->caps.speedDemon();  // SPEEDDEMON: no bounds checks
     p->linkGeneration++;
     // A failed (re)link keeps the previous executable (p->program, refl, variants): GL keeps
     // using it while the program stays current (§7.3); only LINK_STATUS turns false.

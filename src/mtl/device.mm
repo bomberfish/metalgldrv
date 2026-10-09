@@ -84,11 +84,27 @@ bool Device::init() {
             if (mtl.supportsPlacementSparse) sparseTileBytes = [mtl sparseTileSizeInBytesForSparsePageSize:kSparsePageSize];
         }
         caps.sparse = sparseTileBytes > 0;
-        caps.strictLevel = parseStrictLevel(getenv("METALGLDRV_STRICT"));
+        caps.strictLevel = parseAccuracyLevel();
         MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d, sparse=%d%s)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression,
-                 caps.sparse, caps.superStrict() ? ", super strict" : caps.strict() ? ", strict" : "");
+                 caps.sparse,
+                 caps.superStrict() ? ", super strict" : caps.strict() ? ", strict" : caps.speedDemon() ? ", SPEEDDEMON" : caps.turbo() ? ", TURBOHAX" : "");
     }
     return true;
+}
+
+int parseAccuracyLevel() {
+    int strict = parseStrictLevel(getenv("METALGLDRV_STRICT"));
+    if (strict > 0) return strict;  // accuracy wins over speed
+    auto on = [](const char* a, const char* b) {
+        for (const char* n : {a, b}) {
+            const char* v = getenv(n);
+            if (v && *v && strcmp(v, "0") && strcasecmp(v, "false") && strcasecmp(v, "no")) return true;
+        }
+        return false;
+    };
+    if (on("METALGL_SPEEDDEMON", "METALGLDRV_SPEEDDEMON")) return -2;
+    if (on("METALGL_TURBOHAX", "METALGLDRV_TURBOHAX")) return -1;
+    return 0;
 }
 
 int parseStrictLevel(const char* v) {
@@ -489,7 +505,8 @@ id<MTLLibrary> Device::compileLibrary(const std::string& source, std::string* er
         ld.source = @(source.c_str());
         MTLCompileOptions* co = [MTLCompileOptions new];
         co.languageVersion = MTLLanguageVersion4_0;
-        co.mathMode = fastMath ? MTLMathModeFast : MTLMathModeSafe;
+        // TURBOHAX / SPEEDDEMON: fast math everywhere (reassociation, no NaN / infinity guarantees).
+        co.mathMode = fastMath || caps.turbo() ? MTLMathModeFast : MTLMathModeSafe;
         // Safe arithmetic (no reassociation, IEEE NaN/Inf) but the fast sin/cos/exp/log/pow...: GLSL bounds
         // them loosely (sin/cos: 2^-11 absolute), and the precise versions cost several times as much in
         // shaders that use many (DOOM (2016)'s depth of field: 64 sin/cos per pixel). The strict profiles

@@ -300,6 +300,7 @@ TEST(buffer_storage_persistent) {
 }
 
 TEST(timer_query) {
+    if (strictLevelFromEnv() <= -2) return;  // SPEEDDEMON: GL_QUERY_RESULT doesn't wait for the GPU
     GLuint q;
     glGenQueries(1, &q);
     glBeginQuery(GL_TIME_ELAPSED, q);

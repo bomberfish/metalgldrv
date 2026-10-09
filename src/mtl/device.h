@@ -59,14 +59,21 @@ struct DeviceCaps {
     // METALGLDRV_STRICT, read once at startup: the accuracy profile, 0 default, 1 strict (accuracy features
     // that cost performance and aren't needed for conformance), 2 super strict (strict plus the most
     // expensive emulations). See docs/ARCHITECTURE.md, "Environment variables".
+    // Below 0, the speed profiles trade accuracy for performance: -1 TURBOHAX, -2 SPEEDDEMON (TURBOHAX plus
+    // more). The strict profiles take precedence (parseAccuracyLevel).
     int strictLevel = 0;
     bool strict() const { return strictLevel >= 1; }
     bool superStrict() const { return strictLevel >= 2; }
+    bool turbo() const { return strictLevel <= -1; }
+    bool speedDemon() const { return strictLevel <= -2; }
 };
 
 // METALGLDRV_STRICT value -> DeviceCaps::strictLevel: unset/"0"/"false"/"no" 0, "2"/"super"/"superstrict" 2,
 // anything else ("1", "strict", ...) 1.
 int parseStrictLevel(const char* v);
+// The accuracy level from the environment: METALGLDRV_STRICT (1, 2) if set, else -2 with METALGL_SPEEDDEMON
+// (or METALGLDRV_SPEEDDEMON), else -1 with METALGL_TURBOHAX (or METALGLDRV_TURBOHAX), else 0.
+int parseAccuracyLevel();
 
 // A run of consecutive tiles in one of the device's placement heaps (sparse resources).
 struct SparseTiles {
