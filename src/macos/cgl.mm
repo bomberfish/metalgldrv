@@ -65,6 +65,11 @@ struct PBuffer {
     GLenum face = 0;    // of the last CGLSetPBuffer (cube map pbuffers)
 };
 
+bool cglTrace() {
+    static const bool t = envFlag("METALGLDRV_CGL_TRACE", false);
+    return t;
+}
+
 struct RendererInfo {
     int count = 1;
 };
@@ -347,6 +352,27 @@ CGL_EXPORT CGLError CGLChoosePixelFormat(const CGLPixelFormatAttribute* attribs,
     if (!Device::get()) return kCGLBadDisplay;
     PixelFormat* pf = nullptr;
     CGLError err = choosePixelFormat(attribs, &pf);
+    static const bool trace = envFlag("METALGLDRV_CGL_TRACE", false);  // pixel-format negotiation (Wine)
+    if (trace) {
+        static std::atomic<uint64_t> calls{0};
+        uint64_t n = ++calls;
+        if (n <= 3000 || n % 1000 == 0) {
+            std::string a;
+            for (const CGLPixelFormatAttribute* p = attribs; p && *p && a.size() < 400; p++) {
+                int at = (int)*p;
+                a += " " + std::to_string(at);
+                switch (at) {  // the attributes that take a value
+                case kCGLPFAAuxBuffers: case kCGLPFAColorSize: case kCGLPFAAlphaSize: case kCGLPFADepthSize: case kCGLPFAStencilSize:
+                case kCGLPFAAccumSize: case kCGLPFASampleBuffers: case kCGLPFASamples: case kCGLPFARendererID: case kCGLPFADisplayMask:
+                case kCGLPFAOpenGLProfile: case kCGLPFAVirtualScreenCount:
+                    a += "=" + std::to_string((int)*++p);
+                    break;
+                default: break;
+                }
+            }
+            MGL_INFO("CGLChoosePixelFormat #%llu ->%s:%s", (unsigned long long)n, err == kCGLNoError ? " ok" : " fail", a.c_str());
+        }
+    }
     if (err != kCGLNoError || !pf) return err;
     {
         std::lock_guard<std::mutex> g(g_mutex);
@@ -409,7 +435,9 @@ CGL_EXPORT CGLError CGLDescribePixelFormat(CGLPixelFormatObj pix, GLint pix_num,
     case kCGLPFAMinimumPolicy: case kCGLPFAMaximumPolicy: case kCGLPFAClosestPolicy:
         v = 0;
         break;
-    default: return kCGLBadAttribute;
+    default:
+        if (cglTrace()) MGL_INFO("CGLDescribePixelFormat(attr %d) -> kCGLBadAttribute", (int)attrib);
+        return kCGLBadAttribute;
     }
     *value = v;
     return kCGLNoError;
@@ -430,6 +458,7 @@ CGL_EXPORT CGLError CGLQueryRendererInfo(GLuint display_mask, CGLRendererInfoObj
     }
     *rend = (CGLRendererInfoObj)r;
     if (nrend) *nrend = r->count;
+    if (cglTrace()) MGL_INFO("CGLQueryRendererInfo(mask 0x%x) -> %d renderer(s)", display_mask, r->count);
     return kCGLNoError;
 }
 
@@ -462,8 +491,14 @@ CGL_EXPORT CGLError CGLDescribeRenderer(CGLRendererInfoObj rend, GLint rend_num,
         v = 1;
         break;
     case kCGLRPOffScreen: case kCGLRPFullScreen: case kCGLRPRobust: case kCGLRPSampleAlpha: case kCGLRPRemovable:
-    case kCGLRPMaxAuxBuffers: case kCGLRPAccumModes:
+    case kCGLRPAccumModes:
         v = 0;
+        break;
+    case kCGLRPMaxAuxBuffers:
+        // Like Apple's renderers, report one. Wine's pixel-format enumeration (winemac.drv) steps
+        // its aux loop by this value, so 0 never terminates and hangs explorer.exe. Requests for aux
+        // buffers fail under the minimum policy (choosePixelFormat), so no format claims any.
+        v = 1;
         break;
     case kCGLRPBufferModes: v = kCGLMonoscopicBit | kCGLSingleBufferBit | kCGLDoubleBufferBit; break;
     case kCGLRPColorModes: v = kCGLRGB888Bit | kCGLARGB8888Bit; break;
@@ -477,9 +512,12 @@ CGL_EXPORT CGLError CGLDescribeRenderer(CGLRendererInfoObj rend, GLint rend_num,
     case kCGLRPMajorGLVersion: v = 4; break;
     case kCGLRPRegistryIDLow: v = Device::get() ? (GLint)(Device::get()->mtl.registryID & 0xffffffffu) : 0; break;
     case kCGLRPRegistryIDHigh: v = Device::get() ? (GLint)(Device::get()->mtl.registryID >> 32) : 0; break;
-    default: return kCGLBadProperty;
+    default:
+        if (cglTrace()) MGL_INFO("CGLDescribeRenderer(prop %d) -> kCGLBadProperty", (int)prop);
+        return kCGLBadProperty;
     }
     *value = v;
+    if (cglTrace()) MGL_INFO("CGLDescribeRenderer(prop %d) -> %d", (int)prop, v);
     return kCGLNoError;
 }
 
