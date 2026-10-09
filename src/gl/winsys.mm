@@ -230,7 +230,14 @@ void presentWindowSurface(Context* ctx, Surface* surf) {
 void setSurfaceSwapInterval(Surface* s, int interval) {
     s->swapInterval = interval;
 #if !TARGET_OS_IPHONE
-    if (s->layer) s->layer.displaySyncEnabled = interval > 0;
+    if (s->layer) {
+        s->layer.displaySyncEnabled = interval > 0;
+        // Without display sync, a window the display scans out directly (full screen, Game Mode: the Metal HUD
+        // says "Direct") tears, and with framebuffer-only (losslessly compressed) drawables the tear shows
+        // half-written compressed tiles: flickering bands of colored noise. Shader-readable drawables aren't
+        // compressed that way, so the tear is a plain line.
+        s->layer.framebufferOnly = interval > 0;
+    }
 #endif
 }
 
