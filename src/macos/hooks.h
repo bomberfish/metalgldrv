@@ -24,6 +24,13 @@ CGDirectDisplayID displayOfContext(CGLContextObj cgl);
 
 // Turns on replacement mode (idempotent). `why` is logged.
 void activateReplacement(const char* why);
+bool replacementActive();
+
+// METALGLDRV_RENDER_SCALE (0.25..1, default 1) in replacement mode: views carrying our surfaces report and
+// render at this fraction of their backing scale, so GLFW / SDL apps size their framebuffers smaller; the
+// image is scaled up to the window when presented (with MetalFX under METALGLDRV_USE_METALFX). 1 under Wine,
+// which sizes windows itself.
+double renderScale();
 
 // Path and dlopen handle of libmetalgldrv itself.
 const char* ownPath();

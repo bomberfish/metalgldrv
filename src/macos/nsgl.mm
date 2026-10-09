@@ -288,21 +288,39 @@ NSOpenGLPixelFormat* ctx_pixelFormat(id self, SEL _cmd) {
 IMP o_view_rectToBacking, o_view_rectFromBacking, o_view_sizeToBacking, o_view_sizeFromBacking, o_view_pointToBacking,
     o_view_pointFromBacking;
 
-bool pointsBacked(NSView* view) {
-    return objc_getAssociatedObject(view, &kViewSurfaceKey) && !view.wantsBestResolutionOpenGLSurface;
+// METALGLDRV_RENDER_SCALE multiplies the backing scale of views carrying our surfaces (macos::renderScale).
+//
+// The backing scale our layer renders at for the view: 0 for views that aren't ours (AppKit's own
+// conversions apply), else 1 (no best-resolution surface) or the window's backing scale, times the render
+// scale.
+CGFloat ourBackingScale(NSView* view) {
+    if (!objc_getAssociatedObject(view, &kViewSurfaceKey)) return 0;
+    CGFloat s = 1.0;
+    if (view.wantsBestResolutionOpenGLSurface) {
+        NSWindow* w = view.window;
+        s = w ? w.backingScaleFactor : (NSScreen.mainScreen ? NSScreen.mainScreen.backingScaleFactor : 1.0);
+    }
+    return s * macos::renderScale();
 }
 
-#define BACKING_CONV(fn, T)                                                        \
+NSRect scaled(NSRect r, CGFloat k) { return NSMakeRect(r.origin.x * k, r.origin.y * k, r.size.width * k, r.size.height * k); }
+NSSize scaled(NSSize v, CGFloat k) { return NSMakeSize(v.width * k, v.height * k); }
+NSPoint scaled(NSPoint p, CGFloat k) { return NSMakePoint(p.x * k, p.y * k); }
+
+#define BACKING_CONV(fn, T, TO)                                                    \
     T fn(NSView* self, SEL _cmd, T v) {                                            \
-        if (pointsBacked(self)) return v;                                          \
-        return ((T(*)(id, SEL, T))o_##fn)(self, _cmd, v);                          \
+        CGFloat k = ourBackingScale(self);                                         \
+        /* not ours, or a best-resolution view at render scale 1: AppKit's answer */ \
+        if (k == 0 || (self.wantsBestResolutionOpenGLSurface && macos::renderScale() == 1.0)) \
+            return ((T(*)(id, SEL, T))o_##fn)(self, _cmd, v);                      \
+        return scaled(v, TO ? k : 1.0 / k);                                        \
     }
-BACKING_CONV(view_rectToBacking, NSRect)
-BACKING_CONV(view_rectFromBacking, NSRect)
-BACKING_CONV(view_sizeToBacking, NSSize)
-BACKING_CONV(view_sizeFromBacking, NSSize)
-BACKING_CONV(view_pointToBacking, NSPoint)
-BACKING_CONV(view_pointFromBacking, NSPoint)
+BACKING_CONV(view_rectToBacking, NSRect, true)
+BACKING_CONV(view_rectFromBacking, NSRect, false)
+BACKING_CONV(view_sizeToBacking, NSSize, true)
+BACKING_CONV(view_sizeFromBacking, NSSize, false)
+BACKING_CONV(view_pointToBacking, NSPoint, true)
+BACKING_CONV(view_pointFromBacking, NSPoint, false)
 #undef BACKING_CONV
 
 // The color space the layer's pixels are tagged with. Apple's NSOpenGL drawables aren't
@@ -334,6 +352,7 @@ void layoutViewLayer(NSView* view, CAMetalLayer* layer) {
         NSWindow* w = view.window;
         scale = w ? w.backingScaleFactor : (NSScreen.mainScreen ? NSScreen.mainScreen.backingScaleFactor : 1.0);
     }
+    scale *= macos::renderScale();  // METALGLDRV_RENDER_SCALE (1 unless set, and under Wine)
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     if (!CGRectEqualToRect(layer.frame, parent.bounds)) layer.frame = parent.bounds;

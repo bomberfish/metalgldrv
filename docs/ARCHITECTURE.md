@@ -322,7 +322,13 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   rebinding, see above) without the JVMTI agent.
 * `METALGLDRV_DUMP_GLSL=<substring|#program>`, `METALGLDRV_DUMP_MSL=<1|substring|#program>`, `METALGLDRV_DUMP_SPIRV`,
   `METALGLDRV_DUMP_FAILED_GLSL`, `METALGLDRV_DUMP_FAILED_MSL` – shader dumps.
-* `METALGLDRV_MAX_FPS`, `METALGLDRV_UPSCALER=metalfx`, `METALGLDRV_CAPTURE*` (frame and
+* `METALGLDRV_USE_METALFX=1` – window surfaces present at the display's native resolution, upscaled
+  with MetalFX's spatial scaler when the render size is smaller (`metalfxUpscale` in
+  internal_shaders.mm).
+* `METALGLDRV_RENDER_SCALE=<0.25..1>` – macOS replacement mode (Minecraft): views carrying our
+  surfaces report and render at that fraction of their backing scale (`ourBackingScale` in nsgl.mm),
+  so GLFW / SDL size the framebuffer smaller; ignored under Wine, which sizes windows itself.
+* `METALGLDRV_MAX_FPS`, `METALGLDRV_CAPTURE*` (frame and
   per-program texture captures, written to `METALGLDRV_DUMP_DIR` when set),
   `METALGLDRV_MSL_OPTS`, `METALGLDRV_MSL_OVERRIDE`, `METALGLDRV_GLSL_PATCH`,
   `METALGLDRV_DEBUG_*` – presentation and debugging switches (see the

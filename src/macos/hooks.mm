@@ -25,6 +25,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -262,6 +263,21 @@ __attribute__((constructor)) void macosInit() {
 }  // namespace
 
 namespace mgl::macos {
+
+bool replacementActive() { return g_replacement.load(); }
+
+double renderScale() {
+    if (!g_replacement.load()) return 1.0;
+    static const double scale = [] {
+        const char* v = getenv("METALGLDRV_RENDER_SCALE");
+        double s = v && *v ? atof(v) : 1.0;
+        if (!(s > 0)) s = 1.0;
+        s = std::clamp(s, 0.25, 1.0);
+        if (s < 1.0) MGL_INFO("rendering at %.0f%% of the window's pixel size (METALGLDRV_RENDER_SCALE)", s * 100);
+        return s;
+    }();
+    return scale;
+}
 
 const char* ownPath() {
     static std::string path = [] {

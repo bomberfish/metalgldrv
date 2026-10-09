@@ -80,7 +80,7 @@ public:
     const FormatInfo* dsFmt = nullptr;
     Ref<Framebuffer> fb;  // the default framebuffer object (name 0)
     uint64_t lastUse = 0;
-    // METALGLDRV_UPSCALER=metalfx: the drawable is kept at native resolution and the
+    // METALGLDRV_USE_METALFX=1: the drawable is kept at native resolution and the
     // rendered image is upscaled with MetalFX's spatial scaler at present time.
     id upscaler = nil;               // id<MTL4FXSpatialScaler>
     id<MTLTexture> upscaled = nil;

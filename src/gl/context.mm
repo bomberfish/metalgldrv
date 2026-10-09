@@ -703,10 +703,7 @@ void Surface::syncSizeFromLayer() {
     }
     // Drawable size: the render size, or the native size when upscaling with MetalFX.
     int ow = w, oh = h;
-    static const bool upscale = [] {
-        const char* u = getenv("METALGLDRV_UPSCALER");
-        return u && (strcasecmp(u, "metalfx") == 0 || strcasecmp(u, "spatial") == 0);
-    }();
+    static const bool upscale = envFlag("METALGLDRV_USE_METALFX", false);
     if (upscale && !fixed && b.width > 0) {
 #if TARGET_OS_IPHONE
         CGFloat native = UIScreen.mainScreen.scale;

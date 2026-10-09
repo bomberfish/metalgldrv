@@ -9,6 +9,7 @@
 // WineOpenGLContext: a subclass with its own ivars and -dealloc).
 #define GL_SILENCE_DEPRECATION 1
 #import <AppKit/AppKit.h>
+#include <algorithm>
 #import <QuartzCore/QuartzCore.h>
 #include <OpenGL/gl3.h>
 #include <dlfcn.h>
@@ -241,7 +242,13 @@ int main(int argc, char** argv) {
         CAMetalLayer* layer = ourLayer(view);
         CHECK(layer != nil);
         CHECK(layer && CGRectEqualToRect(layer.frame, view.layer.bounds));
-        CHECK(layer && layer.contentsScale == win.backingScaleFactor);
+        // METALGLDRV_RENDER_SCALE (replacement mode): the layer renders at that fraction of the backing scale
+        // and the view reports the same scale to the app (GLFW / SDL size their framebuffer from it).
+        const char* rsEnv = getenv("METALGLDRV_RENDER_SCALE");
+        double rs = rsEnv && *rsEnv && atof(rsEnv) > 0 ? std::clamp(atof(rsEnv), 0.25, 1.0) : 1.0;
+        CHECK(layer && layer.contentsScale == win.backingScaleFactor * rs);
+        NSSize backingSize = [view convertSizeToBacking:view.bounds.size];
+        CHECK(lround(backingSize.width) == lround(view.bounds.size.width * win.backingScaleFactor * rs));
         CHECK(layer && layer.opaque);
 
         [ctx makeCurrentContext];
@@ -265,10 +272,15 @@ int main(int argc, char** argv) {
         CHECK(mask & GL_CONTEXT_CORE_PROFILE_BIT);
         GLint vp[4] = {};
         glGetIntegerv_(GL_VIEWPORT, vp);
-        int expectW = (int)lround(view.bounds.size.width * win.backingScaleFactor);
-        int expectH = (int)lround(view.bounds.size.height * win.backingScaleFactor);
+        int expectW = (int)lround(view.bounds.size.width * win.backingScaleFactor * rs);
+        int expectH = (int)lround(view.bounds.size.height * win.backingScaleFactor * rs);
         printf("  viewport %dx%d (expect %dx%d)\n", vp[2], vp[3], expectW, expectH);
         CHECK(vp[2] == expectW && vp[3] == expectH);
+        // METALGLDRV_USE_METALFX: the drawable stays at the display's native size (the image is upscaled into it)
+        if (const char* fx = getenv("METALGLDRV_USE_METALFX"); fx && atoi(fx) > 0) {
+            printf("  drawable %.0fx%.0f\n", layer.drawableSize.width, layer.drawableSize.height);
+            CHECK(lround(layer.drawableSize.width) == lround(view.bounds.size.width * 2.0));
+        }
 
         glClearColor_(0, 1, 0, 1);
         glClear_(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
