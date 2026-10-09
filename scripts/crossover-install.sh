@@ -16,6 +16,9 @@
 #                    ~/Applications/CrossOver-MetalGL.app, /Applications/CrossOver.app,
 #                    "/Applications/CrossOver Preview.app"). Recommended: patch a copy,
 #                    e.g. ditto "/Applications/CrossOver.app" ~/Applications/CrossOver-MetalGL.app
+#   --wine-root DIR  a bare CrossOver directory instead of an app bundle (the one holding
+#                    lib/wine/x86_64-unix/winemac.so), e.g. NotProton's runner:
+#                    "~/Library/Application Support/notproton/runners/current"
 #   --dylib PATH     driver to install (default: build-universal/libmetalgldrv.dylib;
 #                    must contain x86_64)
 #   --dest DIR       where the driver is installed (default:
@@ -27,7 +30,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-APP="" DYLIB="$REPO/build-universal/libmetalgldrv.dylib" DEST="$HOME/Library/Application Support/metalgldrv"
+APP="" WINE_ROOT="" DYLIB="$REPO/build-universal/libmetalgldrv.dylib" DEST="$HOME/Library/Application Support/metalgldrv"
 UNINSTALL=0 DRY=0
 WINEMAC_REL="Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix/winemac.so"
 BACKUP_SUFFIX=".metalgldrv-backup"
@@ -46,6 +49,7 @@ run() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --app) APP="$2"; shift 2 ;;
+        --wine-root) WINE_ROOT="$2"; shift 2 ;;
         --dylib) DYLIB="$2"; shift 2 ;;
         --dest) DEST="$2"; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
@@ -55,14 +59,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$APP" ]]; then
+if [[ -n "$WINE_ROOT" ]]; then
+    WINE_ROOT="${WINE_ROOT%/}"
+    WINEMAC="$WINE_ROOT/lib/wine/x86_64-unix/winemac.so"
+    APP="$WINE_ROOT"
+elif [[ -z "$APP" ]]; then
     for c in "$HOME/Applications/CrossOver-MetalGL.app" "/Applications/CrossOver.app" "/Applications/CrossOver Preview.app"; do
         if [[ -f "$c/$WINEMAC_REL" ]]; then APP="$c"; break; fi
     done
     [[ -n "$APP" ]] || die "no CrossOver found; pass --app /path/to/CrossOver.app"
 fi
 APP="${APP%/}"
-WINEMAC="$APP/$WINEMAC_REL"
+[[ -n "$WINE_ROOT" ]] || WINEMAC="$APP/$WINEMAC_REL"
 BACKUP="$WINEMAC$BACKUP_SUFFIX"
 TARGET="$DEST/libmetalgldrv.dylib"
 [[ -f "$WINEMAC" ]] || die "$WINEMAC not found (is $APP a CrossOver bundle?)"
@@ -174,5 +182,5 @@ METALGLDRV_LOG=2 (the default) Wine's log / terminal shows lines like
   [metalgldrv I] CrossOver/Wine: .../winemac.so: dlopen rebound (1 slot); OpenGL.framework -> $TARGET
   [metalgldrv I] NSOpenGLContext / NSOpenGLPixelFormat now run on metalgldrv
   [metalgldrv I] CGL: created GL 4.6 core context ...
-Undo with: $0 --app "$APP" --uninstall
+Undo with: $0 $([[ -n "$WINE_ROOT" ]] && echo "--wine-root \"$WINE_ROOT\"" || echo "--app \"$APP\"") --uninstall
 EOF
