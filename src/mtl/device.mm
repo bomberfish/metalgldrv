@@ -95,15 +95,12 @@ bool Device::init() {
 int parseAccuracyLevel() {
     int strict = parseStrictLevel(getenv("METALGLDRV_STRICT"));
     if (strict > 0) return strict;  // accuracy wins over speed
-    auto on = [](const char* a, const char* b) {
-        for (const char* n : {a, b}) {
-            const char* v = getenv(n);
-            if (v && *v && strcmp(v, "0") && strcasecmp(v, "false") && strcasecmp(v, "no")) return true;
-        }
-        return false;
+    auto on = [](const char* n) {
+        const char* v = getenv(n);
+        return v && *v && strcmp(v, "0") && strcasecmp(v, "false") && strcasecmp(v, "no");
     };
-    if (on("METALGL_SPEEDDEMON", "METALGLDRV_SPEEDDEMON")) return -2;
-    if (on("METALGL_TURBOHAX", "METALGLDRV_TURBOHAX")) return -1;
+    if (on("METALGLDRV_SPEEDDEMON")) return -2;
+    if (on("METALGLDRV_TURBOHAX")) return -1;
     return 0;
 }
 

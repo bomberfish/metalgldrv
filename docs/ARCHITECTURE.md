@@ -280,8 +280,7 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
     geometry/tessellation draws (and vertex shaders past the classic varying
     budget, which run on the mesh pipeline) get one pre-pass per draw, so their
     primitives don't see each other's depth/stencil writes in the coverage.
-* `METALGL_TURBOHAX=1`, `METALGL_SPEEDDEMON=1` (also spelled `METALGLDRV_TURBOHAX` /
-  `METALGLDRV_SPEEDDEMON`, the spelling metalgldrv.conf reads) – the speed profiles, the other
+* `METALGLDRV_TURBOHAX=1`, `METALGLDRV_SPEEDDEMON=1` – the speed profiles, the other
   direction from strict: they give up accuracy, and conformance, for performance. They are
   `DeviceCaps::strictLevel` -1 and -2 (`turbo()`, `speedDemon()`); `METALGLDRV_STRICT` takes
   precedence over both, and SPEEDDEMON over TURBOHAX.

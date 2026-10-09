@@ -54,8 +54,8 @@ inline int strictLevelFromEnv() {
         if (!strcasecmp(v, "super") || !strcasecmp(v, "superstrict") || !strcasecmp(v, "super-strict")) return 2;
         return atoi(v) >= 2 ? 2 : 1;
     }
-    if (on("METALGL_SPEEDDEMON") || on("METALGLDRV_SPEEDDEMON")) return -2;
-    if (on("METALGL_TURBOHAX") || on("METALGLDRV_TURBOHAX")) return -1;
+    if (on("METALGLDRV_SPEEDDEMON")) return -2;
+    if (on("METALGLDRV_TURBOHAX")) return -1;
     return 0;
 }
 

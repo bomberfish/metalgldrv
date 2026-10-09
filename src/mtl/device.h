@@ -71,8 +71,8 @@ struct DeviceCaps {
 // METALGLDRV_STRICT value -> DeviceCaps::strictLevel: unset/"0"/"false"/"no" 0, "2"/"super"/"superstrict" 2,
 // anything else ("1", "strict", ...) 1.
 int parseStrictLevel(const char* v);
-// The accuracy level from the environment: METALGLDRV_STRICT (1, 2) if set, else -2 with METALGL_SPEEDDEMON
-// (or METALGLDRV_SPEEDDEMON), else -1 with METALGL_TURBOHAX (or METALGLDRV_TURBOHAX), else 0.
+// The accuracy level from the environment: METALGLDRV_STRICT (1, 2) if set, else -2 with METALGLDRV_SPEEDDEMON,
+// else -1 with METALGLDRV_TURBOHAX, else 0.
 int parseAccuracyLevel();
 
 // A run of consecutive tiles in one of the device's placement heaps (sparse resources).
