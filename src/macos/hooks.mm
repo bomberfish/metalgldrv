@@ -174,9 +174,37 @@ void onImageAdded(const mach_header* mh, intptr_t slide) {
     else if (g_replacement.load()) rebindForReplacement(mh, slide, path);
 }
 
+// ~/Library/Application Support/metalgldrv/metalgldrv.conf: METALGLDRV_<NAME>=value lines
+// (# comments) applied to the environment unless already set. For hosts where setting the
+// environment is awkward, like games launched by Steam through CrossOver.
+void loadConfFile() {
+    const char* home = getenv("HOME");
+    if (!home || !*home) return;
+    std::string path = std::string(home) + "/Library/Application Support/metalgldrv/metalgldrv.conf";
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return;
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        std::string l = line;
+        while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ' || l.back() == '\t')) l.pop_back();
+        size_t b = l.find_first_not_of(" \t");
+        if (b == std::string::npos || l[b] == '#') continue;
+        l = l.substr(b);
+        size_t eq = l.find('=');
+        if (eq == std::string::npos || l.compare(0, 11, "METALGLDRV_") != 0) continue;
+        std::string key = l.substr(0, eq), value = l.substr(eq + 1);
+        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+        if (!getenv(key.c_str())) setenv(key.c_str(), value.c_str(), 0);
+    }
+    fclose(f);
+}
+
 __attribute__((constructor)) void macosInit() {
+    loadConfFile();
     // May run before log.mm's initializer; same value it computes.
     g_logLevel = envInt("METALGLDRV_LOG", LOG_INFO);
+    g_logUnsupported = envFlag("METALGLDRV_LOG_UNSUPPORTED");
+    g_statsEnabled = envFlag("METALGLDRV_STATS", false);
     macos::ownPath();  // resolve (dladdr) now, outside any dyld callback
     if (envFlag("METALGLDRV_HOOK_NSOPENGL")) macos::activateReplacement("METALGLDRV_HOOK_NSOPENGL");
     // Called for every image already loaded (winemac.so when it is what loaded us)

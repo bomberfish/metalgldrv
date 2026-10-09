@@ -4,6 +4,8 @@
 #include <cstring>
 #include <os/log.h>
 #include <mutex>
+#include <stdlib.h>
+#include <unistd.h>
 #include <unordered_set>
 #include <string>
 #include "gl/stub_report.h"
@@ -47,10 +49,10 @@ void logf(int level, const char* fmt, ...) {
         std::string path = p;
         if (path == "documents") path = std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/metalgldrv.log";
         if (lf) fclose(lf);
-        lf = fopen(path.c_str(), "w");
+        lf = fopen(path.c_str(), "a");  // several processes (e.g. Wine's) may share one file
     }
     if (lf) {
-        fprintf(lf, "[%s] %s\n", tags[level], buf);
+        fprintf(lf, "[%d %s %s] %s\n", (int)getpid(), getprogname(), tags[level], buf);
         fflush(lf);
     }
     os_log_type_t t = level == LOG_ERROR ? OS_LOG_TYPE_ERROR : level == LOG_WARN ? OS_LOG_TYPE_DEFAULT : OS_LOG_TYPE_INFO;
