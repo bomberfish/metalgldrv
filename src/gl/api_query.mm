@@ -380,7 +380,8 @@ static void getQueryObject(Context* ctx, GLuint id, GLenum pname, T* params) {
     if (pname != GL_QUERY_RESULT && pname != GL_QUERY_RESULT_NO_WAIT && pname != GL_QUERY_RESULT_AVAILABLE && pname != GL_QUERY_TARGET)
         return ctx->setError(GL_INVALID_ENUM);
     Query* q = ctx->queries.get(id);
-    if (!q || (!q->everActive && !q->target)) return ctx->setError(GL_INVALID_OPERATION, "invalid query");
+    if (!q || (!q->everActive && !q->target))
+        return ctx->setError(GL_INVALID_OPERATION, "query %u %s", id, !q ? "does not exist in this context" : "was never begun");
     if (q->active && pname != GL_QUERY_TARGET) return ctx->setError(GL_INVALID_OPERATION, "query active");
     // Results written into a bound GL_QUERY_BUFFER (offset in params).
     Buffer* qb = ctx->queryBuffer.get();

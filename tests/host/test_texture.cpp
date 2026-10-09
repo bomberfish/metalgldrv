@@ -469,3 +469,57 @@ TEST(cube_linear_not_seamless) {
     glDeleteTextures(2, ts);
     glDeleteVertexArrays(1, &vao);
 }
+
+// glReadPixels into a pixel pack buffer is a GPU copy when the storage format is read as is (no CPU wait);
+// the data must land at the PBO offset with GL_PACK_ROW_LENGTH / SKIP_* applied, and be visible after a fence.
+TEST(readpixels_pbo_gpu_copy) {
+    GLuint tex[2], fb;
+    glGenTextures(2, tex);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    std::vector<float> rf(16 * 8);
+    for (size_t i = 0; i < rf.size(); i++) rf[i] = (float)i * 0.5f;
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, 16, 8, 0, GL_RED, GL_FLOAT, rf.data());
+    std::vector<uint32_t> rgba(16 * 8);
+    for (size_t i = 0; i < rgba.size(); i++) rgba[i] = 0x01020304u * (uint32_t)(i + 1);
+    glBindTexture(GL_TEXTURE_2D, tex[1]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    GLuint pbo;
+    glGenBuffers(1, &pbo);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+    glBufferStorage(GL_PIXEL_PACK_BUFFER, 4096, nullptr, GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT);
+    const float* mapped = (const float*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, 4096, GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT);
+    CHECK(mapped != nullptr);
+
+    // Whole R32F image at offset 64.
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
+    glReadPixels(0, 0, 16, 8, GL_RED, GL_FLOAT, (void*)64);
+    GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, ~0ull);
+    glDeleteSync(s);
+    CHECK_GL();
+    for (int i = 0; i < 16 * 8; i++) CHECK_EQ(mapped[16 + i], rf[i]);
+
+    // RGBA8 sub-rectangle with row length 10 and skip 1 pixel / 2 rows, read with glGetBufferSubData.
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[1], 0);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 10);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 1);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 2);
+    glReadPixels(3, 1, 4, 5, GL_RGBA, GL_UNSIGNED_BYTE, (void*)0);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    std::vector<uint32_t> got(10 * 7);
+    glGetBufferSubData(GL_PIXEL_PACK_BUFFER, 0, got.size() * 4, got.data());
+    CHECK_GL();
+    for (int y = 0; y < 5; y++)
+        for (int x = 0; x < 4; x++) CHECK_EQ(got[(2 + y) * 10 + 1 + x], rgba[(1 + y) * 16 + 3 + x]);
+
+    glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glDeleteBuffers(1, &pbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(2, tex);
+}

@@ -2,6 +2,7 @@
 #import "gl/texture.h"
 #include "gl/internal_shaders.h"
 #include "util/log.h"
+#include "util/stats.h"
 
 using namespace mgl;
 #define API extern "C" __attribute__((visibility("default")))
@@ -1060,6 +1061,40 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
     int lw = std::max(1, (int)src.width >> level), lh = std::max(1, (int)src.height >> level);
     ClientLayout cl = clientLayout(format, type, w, h, ps);
     size_t need = clientImageSize(format, type, w, h, 1, ps);
+    // Pack buffer bound and a plain copy of the storage format: the GPU writes the PBO, no CPU wait (games
+    // read back through PBOs every frame expecting exactly that, e.g. DOOM (2016)'s 160x120 R32F read).
+    if (Buffer* pbo = ctx->pixelPackBuffer.get(); pbo && pbo->mtl && !pbo->sparse && !isDepth && !isStencil && !isDS &&
+                                                    f->comp != Comp::Compressed && f->comp != Comp::D32F_S8 && src.sampleCount == 1 &&
+                                                    src.textureType != MTLTextureType3D && src.pixelFormat == f->mtl && !ps.swapBytes &&
+                                                    directUploadCompatible(f, format, type) && f->baseFormat != GL_LUMINANCE &&
+                                                    f->baseFormat != GL_LUMINANCE_ALPHA && f->baseFormat != GL_INTENSITY &&
+                                                    f->baseFormat != GL_ALPHA && f->kind != FmtKind::UInt && f->kind != FmtKind::SInt && f->kind != FmtKind::Snorm &&
+                                                    !(ctx->clampReadColor == GL_TRUE && f->kind != FmtKind::Unorm)) {
+        if ((size_t)pixels + need > (size_t)pbo->size) {
+            ctx->setError(GL_INVALID_OPERATION, "pack buffer %u too small", pbo->name);
+            return false;
+        }
+        if (pbo->mapped && !(pbo->mapAccess & GL_MAP_PERSISTENT_BIT)) {
+            ctx->setError(GL_INVALID_OPERATION, "pack buffer %u is mapped", pbo->name);
+            return false;
+        }
+        int x0 = std::max(0, x), y0 = std::max(0, y), x1 = std::min(lw, x + w), y1 = std::min(lh, y + h);
+        if (x1 <= x0 || y1 <= y0) return true;
+        size_t bpp = f->bytesPerPixel;
+        size_t off = (size_t)pixels + cl.skipBytes + (size_t)(y0 - y) * cl.rowStride + (size_t)(x0 - x) * bpp;
+        if (off % std::max<size_t>(bpp, 4) == 0 && cl.rowStride % 4 == 0) {
+            id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+            [e copyFromTexture:src sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(x0, y0, 0)
+                    sourceSize:MTLSizeMake(x1 - x0, y1 - y0, 1) toBuffer:pbo->mtl destinationOffset:off
+                    destinationBytesPerRow:cl.rowStride destinationBytesPerImage:cl.rowStride * (y1 - y0)];
+            [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch
+                       visibilityOptions:MTL4VisibilityOptionDevice];
+            pbo->lastUse = pbo->lastGpuWrite = ctx->serial();
+            pbo->contentVersion++;
+            MGL_STAT("readpixels-pbo-gpu");
+            return true;
+        }
+    }
     uint8_t* dst;
     PackStaging staging;
     if (Buffer* pbo = ctx->pixelPackBuffer.get()) {

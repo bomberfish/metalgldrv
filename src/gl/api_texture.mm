@@ -448,14 +448,20 @@ static void compressedSubImage(Context* ctx, Texture* t, GLenum target, GLint le
     int face = faceIndex(target);
     if (level < 0 || level >= Texture::kMaxLevels) return ctx->setError(GL_INVALID_VALUE);
     const TexImageLevel& L = t->levels[face][level];
-    if (!L.defined()) return ctx->setError(GL_INVALID_OPERATION);
-    if (L.fmt->internalFormat != format && L.internalFormat != format) return ctx->setError(GL_INVALID_OPERATION);
+    if (!L.defined()) return ctx->setError(GL_INVALID_OPERATION, "compressed sub-image: texture %u level %d not defined", t->name, level);
+    if (L.fmt->internalFormat != format && L.internalFormat != format)
+        return ctx->setError(GL_INVALID_OPERATION, "compressed sub-image: format 0x%x, texture %u level %d is 0x%x", format, t->name, level,
+                             L.internalFormat);
     const FormatInfo* f = L.fmt;
-    if (f->comp != Comp::Compressed) return ctx->setError(GL_INVALID_OPERATION);
-    if (x % f->blockW || y % f->blockH) return ctx->setError(GL_INVALID_OPERATION);
-    if ((w % f->blockW && x + w != L.width) || (h % f->blockH && y + h != L.height)) return ctx->setError(GL_INVALID_OPERATION);
+    if (f->comp != Comp::Compressed) return ctx->setError(GL_INVALID_OPERATION, "compressed sub-image: texture %u is not compressed", t->name);
+    if (x % f->blockW || y % f->blockH)
+        return ctx->setError(GL_INVALID_OPERATION, "compressed sub-image: offset %d,%d not block aligned (texture %u)", x, y, t->name);
+    if ((w % f->blockW && x + w != L.width) || (h % f->blockH && y + h != L.height))
+        return ctx->setError(GL_INVALID_OPERATION, "compressed sub-image: size %dx%d at %d,%d not block aligned in %dx%d level %d (texture %u)", w, h,
+                             x, y, L.width, L.height, level, t->name);
     if (x < 0 || y < 0 || x + w > L.width || y + h > L.height || z < 0 || z + d > L.depth) return ctx->setError(GL_INVALID_VALUE);
-    if ((size_t)imageSize != storageImageBytes(f, w, h) * d) return ctx->setError(GL_INVALID_VALUE);
+    if ((size_t)imageSize != storageImageBytes(f, w, h) * d)
+        return ctx->setError(GL_INVALID_VALUE, "compressed sub-image: imageSize %d, expected %zu", imageSize, storageImageBytes(f, w, h) * d);
     uploadCompressedSubImage(ctx, t, level, face, x, y, z, w, h, d, imageSize, data);
 }
 
