@@ -10,6 +10,7 @@
 #include "gl/winsys.h"
 #include "gl/internal_shaders.h"
 #include "util/log.h"
+#include "util/stats.h"
 #include <chrono>
 #include <cmath>
 #include <string>
@@ -207,6 +208,7 @@ void presentWindowSurface(Context* ctx, Surface* surf) {
     Device::get()->waitForeground();
     @autoreleasepool {
         if (currentContext() == ctx) maybeCaptureFrame(surf);
+        hitchFrameEnd();
         ctx->applyClearNow();
         id<CAMetalDrawable> drawable = [surf->layer nextDrawable];
         if (drawable) {

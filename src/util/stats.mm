@@ -12,6 +12,7 @@
 #include "util/log.h"
 #include "mtl/device.h"
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <TargetConditionals.h>
 #if TARGET_OS_IOS
 #include <os/proc.h>
@@ -151,17 +152,97 @@ void callReporter() {
 }
 }  // namespace
 
+// ---- METALGLDRV_HITCH_MS ----
+int g_hitchMs = 0;
+namespace {
+bool g_countCalls = false;  // METALGLDRV_TRACE_CALLS / TRACE_SEQ (g_traceCalls is also set for hitch timing)
+struct CallTime {
+    uint64_t ticks = 0, count = 0, maxTicks = 0;
+};
+std::mutex g_hitchMutex;
+std::map<std::pair<uint64_t, const char*>, CallTime> g_hitchCalls;  // (thread, entry point)
+std::map<std::string, std::pair<double, int>> g_hitchCompiles;      // what -> ms, count
+double ticksToMs(uint64_t t) {
+    static mach_timebase_info_data_t tb = [] {
+        mach_timebase_info_data_t i;
+        mach_timebase_info(&i);
+        return i;
+    }();
+    return (double)t * tb.numer / tb.denom / 1e6;
+}
+}  // namespace
+
+void traceCallEnd(const char* name, uint64_t start) {
+    uint64_t dt = mach_absolute_time() - start;
+    uint64_t tid = pthread_mach_thread_np(pthread_self());
+    std::lock_guard<std::mutex> g(g_hitchMutex);
+    CallTime& c = g_hitchCalls[{tid, name}];
+    c.ticks += dt;
+    c.count++;
+    c.maxTicks = std::max(c.maxTicks, dt);
+}
+
+void hitchCompile(const char* what, double ms) {
+    if (g_hitchMs <= 0) return;
+    std::lock_guard<std::mutex> g(g_hitchMutex);
+    auto& e = g_hitchCompiles[what];
+    e.first += ms;
+    e.second++;
+}
+
+void hitchFrameEnd() {
+    if (g_hitchMs <= 0) return;
+    static uint64_t last = 0;
+    uint64_t now = mach_absolute_time();
+    std::map<std::pair<uint64_t, const char*>, CallTime> calls;
+    std::map<std::string, std::pair<double, int>> compiles;
+    {
+        std::lock_guard<std::mutex> g(g_hitchMutex);
+        calls.swap(g_hitchCalls);
+        compiles.swap(g_hitchCompiles);
+    }
+    double frame = last ? ticksToMs(now - last) : 0;
+    last = now;
+    if (frame <= g_hitchMs) return;
+    std::map<uint64_t, double> perThread;
+    std::vector<std::pair<double, std::string>> top;
+    for (auto& [k, c] : calls) {
+        perThread[k.first] += ticksToMs(c.ticks);
+        char b[160];
+        snprintf(b, sizeof b, "thread %llu %s: %.1f ms in %llu call%s (longest %.1f ms)", (unsigned long long)k.first, k.second,
+                 ticksToMs(c.ticks), (unsigned long long)c.count, c.count == 1 ? "" : "s", ticksToMs(c.maxTicks));
+        top.push_back({ticksToMs(c.ticks), b});
+    }
+    std::sort(top.begin(), top.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    char head[96];
+    snprintf(head, sizeof head, "hitch: %.0f ms frame; time in GL calls by thread:", frame);
+    std::string out = head;
+    for (auto& [t, ms] : perThread) out += " " + std::to_string(t) + "=" + std::to_string((int)ms) + "ms";
+    for (auto& [what, e] : compiles) {
+        char b[128];
+        snprintf(b, sizeof b, "\n  driver work: %s %.1f ms (%d)", what.c_str(), e.first, e.second);
+        out += b;
+    }
+    for (size_t i = 0; i < top.size() && i < 12; i++) out += "\n  " + top[i].second;
+    MGL_INFO("%s", out.c_str());
+}
+
 void statsRefreshFromEnv() {
     g_statsEnabled = envFlag("METALGLDRV_STATS", false);
     g_traceCalls = envFlag("METALGLDRV_TRACE_CALLS", false);
+    g_countCalls = g_traceCalls;
+    g_hitchMs = envInt("METALGLDRV_HITCH_MS", 0);
     int top = envInt("METALGLDRV_TRACE_CALLS", 0);
     g_traceTop = top > 1 ? (size_t)top : 30;
     g_traceSeq = envInt("METALGLDRV_TRACE_SEQ", 0);
     g_profilePasses = envFlag("METALGLDRV_PROFILE_PASSES", false);
-    if (g_traceSeq > 0) g_traceCalls = true;
+    if (g_traceSeq > 0) g_traceCalls = g_countCalls = true;
+    if (g_hitchMs > 0) g_traceCalls = true;
 }
 
-void traceCall(const char* name) {
+uint64_t traceCall(const char* name) {
+    uint64_t start = g_hitchMs > 0 ? mach_absolute_time() : 0;
+    if (!g_countCalls) return start;
     static std::once_flag once;
     std::call_once(once, [] { std::thread(callReporter).detach(); });
     if (g_traceSeq > 0) {
@@ -171,5 +252,6 @@ void traceCall(const char* name) {
     }
     std::lock_guard<std::mutex> g(g_callMutex);
     g_calls[name]++;
+    return start;
 }
 }  // namespace mgl

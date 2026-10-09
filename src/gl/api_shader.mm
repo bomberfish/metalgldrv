@@ -570,6 +570,7 @@ API void APIENTRY glLinkProgram(GLuint program) {
         vk.kind = (sm & (1u << (int)glsl::Stage::Compute)) ? glsl::PipelineKind::Compute
                 : (sm & (1u << (int)glsl::Stage::Mesh))    ? glsl::PipelineKind::Mesh
                                                            : glsl::PipelineKind::Classic;
+        if (vk.kind == glsl::PipelineKind::Classic) vk.primitive = GL_TRIANGLES;  // what non-point draws use (draw.mm)
         ProgramVariant* v = ctx->pipelines_->variant(p, vk);
         if (v && !v->ok) {
             // Report backend failures through the link status so apps see them.

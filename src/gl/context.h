@@ -435,18 +435,24 @@ const std::vector<std::string>& mglDeviceGlslExtensions(const DeviceCaps& caps);
 // MGL_CTX, such as glDrawElements, report the entry point implementing them).
 extern thread_local const char* t_apiName;
 // METALGLDRV_TRACE_CALLS=1: per-entry-point call counts logged every 5 s from a background thread
-// (stats.mm), also when the app makes no frames; one branch per call when off.
+// (stats.mm), also when the app makes no frames. METALGLDRV_HITCH_MS: time spent in each call, reported for
+// slow frames (hitchFrameEnd). One branch per call when both are off.
 extern bool g_traceCalls;
-void traceCall(const char* name);
+uint64_t traceCall(const char* name);  // returns the start time when hitches are timed, else 0
+void traceCallEnd(const char* name, uint64_t start);
 struct ApiName {
     const char* saved;
+    uint64_t start = 0;
     explicit ApiName(const char* name) : saved(t_apiName) {
         if (!*saved) {
             t_apiName = name;
-            if (g_traceCalls) traceCall(name);
+            if (g_traceCalls) start = traceCall(name);
         }
     }
-    ~ApiName() { t_apiName = saved; }
+    ~ApiName() {
+        if (start) traceCallEnd(t_apiName, start);
+        t_apiName = saved;
+    }
 };
 #define MGL_CTX_RET(r)                                                         \
     ::mgl::ApiName mgl_apiName_(__func__);                                 \

@@ -10,6 +10,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include "util/log.h"
 #include "util/stats.h"
+#include <chrono>
 
 namespace mgl {
 
@@ -257,9 +258,11 @@ void Device::submit(id<MTL4CommandBuffer> cb, id<MTL4CommandAllocator> alloc, ui
 void Device::commitResidencyLocked() {
     if (!residencyDirty_) return;
     // Allocations removed from the set are deallocated here, and their dealloc autoreleases.
+    auto t0 = std::chrono::steady_clock::now();
     @autoreleasepool {
         [residency commit];
     }
+    if (g_hitchMs > 0) hitchCompile("residency commit", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     residencyDirty_ = false;
 }
 
@@ -302,18 +305,27 @@ void Device::collect() {
             while (!sparseRetired_.empty() && sparseRetired_.front().first <= now && isCompleteLocked(sparseRetired_.front().second.serial))
                 sparseRetired_.pop_front();
         }
-        // deferred_ is not strictly sorted (different contexts), so scan.
-        for (auto it = deferred_.begin(); it != deferred_.end();) {
+        // deferred_ is not strictly sorted (different contexts), so scan; compact in one pass (erasing
+        // entries one at a time is quadratic when a streaming thread frees thousands of objects at once).
+        auto t0 = std::chrono::steady_clock::now();
+        size_t freed = 0;
+        auto out = deferred_.begin();
+        for (auto it = deferred_.begin(); it != deferred_.end(); ++it) {
             if (isCompleteLocked(it->serial)) {
                 if (it->removeResidency) {
                     [residency removeAllocation:(id<MTLAllocation>)it->obj];
                     residencyDirty_ = true;
                 }
-                it = deferred_.erase(it);
+                it->obj = nil;  // drops the last reference
+                freed++;
             } else {
-                ++it;
+                if (out != it) *out = std::move(*it);
+                ++out;
             }
         }
+        deferred_.erase(out, deferred_.end());
+        if (freed && g_hitchMs > 0)
+            hitchCompile("deferred releases", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
 }
 

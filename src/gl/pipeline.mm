@@ -61,6 +61,8 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     if (it != prog->variants.end()) return it->second.get();
     auto v = std::make_shared<ProgramVariant>();
     MGL_STAT("variant-compile");
+    auto t0 = std::chrono::steady_clock::now();
+    double genMs = 0;
     static std::atomic<uint64_t> nextUid{1};
     v->uid = nextUid++;
     v->manualFetch = key.manualFetch;
@@ -74,6 +76,7 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
         } else {
             v->msl = glsl::generateMSL(*prog->program, key);
         }
+        genMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (!v->msl.error.empty()) {
             v->error = v->msl.error;
         } else {
@@ -113,6 +116,28 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
         }
     }
     if (!v->ok) MGL_ERR("program %u variant failed: %s", prog->name, v->error.c_str());
+    if (g_hitchMs > 0) {
+        double total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        // Which key fields made a draw compile a variant the link-time one didn't cover.
+        if (strcmp(t_apiName, "glLinkProgram") != 0) {
+            std::string why;
+            const glsl::VariantKey d;
+            if (key.kind != d.kind) why += " kind=" + std::to_string((int)key.kind);
+            if (key.primitive != d.primitive) why += " primitive=" + std::to_string(key.primitive);
+            if (key.flatshadeLastVertex != d.flatshadeLastVertex) why += " flatshadeFirst";
+            if (key.rasterDiscard) why += " rasterDiscard";
+            if (key.attribSignFlip) why += " attribSignFlip";
+            if (key.manualFetch) why += " manualFetch";
+            if (key.xfbInVertex) why += " xfbInVertex";
+            if (key.sampleShading) why += " sampleShading";
+            if (key.sampleMask) why += " sampleMask";
+            if (key.advancedBlend) why += " advancedBlend";
+            if (key.patchVertices) why += " patchVertices";
+            MGL_INFO("draw-time variant: program %u (%s) %.1f ms:%s", prog->name, t_apiName, total, why.empty() ? " (link-time key)" : why.c_str());
+        }
+        hitchCompile("MSL generation", genMs);
+        hitchCompile("Metal library compile", total - genMs);
+    }
     ProgramVariant* r = v.get();
     prog->variants[h] = std::move(v);
     return r;
@@ -233,9 +258,11 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
     auto it = cache.find(k);
     if (it != cache.end()) return it->second;
     id<MTLRenderPipelineState> pso;
+    auto t0 = std::chrono::steady_clock::now();
     @autoreleasepool {  // descriptor setup and pipeline compiles autorelease
         pso = newRenderPipeline(ctx_->dev, key);
     }
+    if (g_hitchMs > 0) hitchCompile("render pipeline creation", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     cache[k] = pso;
     return pso;
 }

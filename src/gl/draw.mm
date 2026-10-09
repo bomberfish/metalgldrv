@@ -384,6 +384,18 @@ static void msArraySlots(Context* ctx, ProgramObj* prog, glsl::VariantKey& vk) {
 }
 
 // VariantKey::sparseImageSlots: image slots whose unit holds a sparse texture.
+// Whether a draw's fragments go through the sample mask / sample coverage operations: GL_SAMPLE_MASK with a mask
+// that drops samples, or GL_SAMPLE_COVERAGE, on a multisample draw framebuffer with GL_MULTISAMPLE enabled
+// (GL 4.6 14.9.3: they apply only when SAMPLE_BUFFERS is one). Single-sample targets need no mask variant.
+static bool sampleMaskActive(Context* ctx) {
+    bool wanted = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
+    if (!wanted || !ctx->multisample) return false;
+    PassDesc p;
+    if (ctx->passOpen && !ctx->passDirty) p = ctx->curPass;
+    else if (!ctx->resolvePass(p)) return wanted;
+    return p.samples > 1;
+}
+
 static uint64_t sparseImageSlots(Context* ctx, ProgramObj* prog) {
     if (!ctx->dev->sparseTextures.load(std::memory_order_relaxed) || prog->composite) return 0;
     uint64_t m = 0;
@@ -3304,10 +3316,13 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
     // more fragment inputs than a classic vertex function can pass: the vertex shader runs on a mesh stage
     if (vk.kind == glsl::PipelineKind::Classic && refl.vsMeshPassthrough && !d.indirect) vk.kind = glsl::PipelineKind::MeshGeometry;
     vk.primitive = (uint8_t)d.mode;
+    // Classic vertex functions only depend on whether the mode is points (point size with gl_Layer; see
+    // emitVertex): one variant for the other modes, the triangles one glLinkProgram precompiles.
+    if (vk.kind == glsl::PipelineKind::Classic && d.mode != GL_POINTS) vk.primitive = GL_TRIANGLES;
     vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
     vk.rasterDiscard = ctx->rasterizerDiscard;
     vk.sampleShading = ctx->sampleShading && ctx->minSampleShading > 0;
-    vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
+    vk.sampleMask = sampleMaskActive(ctx);
     vk.sparseImageSlots = sparseImageSlots(ctx, prog);
     msArraySlots(ctx, prog, vk);
     vk.advancedBlend = advancedBlendKey(ctx);
@@ -3923,7 +3938,7 @@ static void executeMeshDraw(Context* ctx, ProgramObj* prog, ProgramObj* fsProg, 
     vk.flatshadeLastVertex = ctx->provokingVertex == GL_LAST_VERTEX_CONVENTION;
     vk.rasterDiscard = ctx->rasterizerDiscard;
     vk.sampleShading = ctx->sampleShading && ctx->minSampleShading > 0;
-    vk.sampleMask = (ctx->sampleMaskEnabled && (ctx->sampleMaskValue & 0xffu) != 0xffu) || ctx->sampleCoverage;
+    vk.sampleMask = sampleMaskActive(ctx);
     vk.fsr = fsrWanted(ctx, true, fsProg ? &fsProg->refl : nullptr);  // the mesh shader may write the primitive's rate
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
     if (!var || !var->ok) return;
