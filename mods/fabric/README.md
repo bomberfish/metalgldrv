@@ -103,6 +103,31 @@ force=false         # true: activate despite conflicts (see below)
 * **`library=`** loads a local driver build, e.g. `build/libmetalgldrv.dylib`, which
   is handy while working on the driver.
 
+### Shader packs: `spoof_shader_os`
+
+Iris defines `MC_OS_MAC` for shader packs on macOS. Many packs use it to work around Apple's
+OpenGL 4.1, for example by turning features off. metalgldrv isn't Apple's OpenGL, so while it is
+active the mod makes Iris report another OS to shader packs:
+
+* `spoof_shader_os=windows` (default) gives `MC_OS_WINDOWS`, the most widely tested path.
+* `spoof_shader_os=linux` gives `MC_OS_LINUX`.
+* `spoof_shader_os=unknown` gives `MC_OS_UNKNOWN`.
+* `spoof_shader_os=off` keeps `MC_OS_MAC`.
+* The `-Dmetalgldrv.spoof_shader_os=...` JVM argument overrides the config file.
+
+Only the shader-pack define changes, both in GLSL and in `shaders.properties` conditions. The change
+is a mixin on Iris's `StandardMacros.getOsString()`. Minecraft and other mods still detect macOS,
+so macOS-specific input and windowing handling keeps working. When the spoof is applied, the log
+says `shader packs see MC_OS_WINDOWS instead of MC_OS_MAC`.
+
+### Color space
+
+The driver tags the game's window with the screen's color space. Like Apple's OpenGL, the pixels
+then reach the display without color conversion. Iris's "Display P3" color space option expects
+this on wide-gamut Macs. Without the tag, macOS would convert the frame from sRGB and it would look
+washed out. To override, set `METALGLDRV_COLORSPACE=srgb`, `displayp3` or `none` in the config file
+(as a driver setting) or as an environment variable.
+
 ## Log lines to look for
 
 Prism's log window, or `logs/latest.log`. The mod logs as `metalgldrv`; the driver

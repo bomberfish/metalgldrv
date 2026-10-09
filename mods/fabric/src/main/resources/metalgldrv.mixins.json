@@ -1,0 +1,8 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "ca.bomberfish.metalgldrv.fabric.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": ["IrisStandardMacrosMixin"],
+  "injectors": { "defaultRequire": 0 }
+}

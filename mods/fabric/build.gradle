@@ -44,6 +44,8 @@ dependencies {
     compileOnly 'net.fabricmc:fabric-loader:0.14.21'
     // Provided by Minecraft (1.18+) at runtime; the mod falls back to stderr without it.
     compileOnly 'org.slf4j:slf4j-api:1.7.36'
+    // Mixin annotations for the Iris shader-OS mixin (provided by Fabric Loader at runtime).
+    compileOnly 'net.fabricmc:sponge-mixin:0.15.4+mixin.0.8.7'
 }
 
 // Java 17 bytecode: Minecraft 1.20.2 runs on Java 17.

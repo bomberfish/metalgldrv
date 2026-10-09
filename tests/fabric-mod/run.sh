@@ -168,6 +168,27 @@ expect "prop metalgldrv.activation=jni$"
 expect "prop org.lwjgl.opengl.libname=$CACHED$"
 done_case
 
+# 9c. The shader-pack OS define: windows by default once active, configurable, off keeps
+#     MC_OS_MAC, and nothing is spoofed when the mod doesn't activate.
+CONFIG_TEXT=""
+run "shader OS spoof: default" --
+expect "prop metalgldrv.activation=jni$"
+expect "shaderos=MC_OS_WINDOWS$"
+done_case
+CONFIG_TEXT="spoof_shader_os=linux"
+run "shader OS spoof: linux" --
+expect "shaderos=MC_OS_LINUX$"
+done_case
+CONFIG_TEXT="spoof_shader_os=windows"
+run "shader OS spoof: off by -D" -- -Dmetalgldrv.spoof_shader_os=off
+expect "prop metalgldrv.activation=jni$"
+expect "shaderos=null$"
+done_case
+CONFIG_TEXT=""
+run "shader OS spoof: none when not activated" -- -Dmetalgldrv.enabled=false
+expect "shaderos=null$"
+done_case
+
 # 10. GLFW already loaded: warned about, still activated.
 CONFIG_TEXT=""
 run "GLFW class already loaded" -- -Dtest.preloadGlfw=true --add-opens java.base/java.lang=ALL-UNNAMED

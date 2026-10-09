@@ -12,6 +12,7 @@
   "entrypoints": {
     "preLaunch": ["ca.bomberfish.metalgldrv.fabric.MetalGLDrvPreLaunch"]
   },
+  "mixins": ["metalgldrv.mixins.json"],
   "depends": {
     "fabricloader": ">=0.14.0",
     "minecraft": "*"

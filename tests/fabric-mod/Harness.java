@@ -46,6 +46,8 @@ public final class Harness {
 
         for (String k : new String[] {"metalgldrv.activation", "metalgldrv.version", "metalgldrv.library", "org.lwjgl.opengl.libname"})
             System.out.println("prop " + k + "=" + System.getProperty(k));
+        // What the Iris mixin would report instead of MC_OS_MAC (null: no spoof).
+        System.out.println("shaderos=" + Class.forName("ca.bomberfish.metalgldrv.fabric.ShaderOs").getMethod("define").invoke(null));
         String probe = System.getProperty("test.envProbe");
         if (probe != null) {
             System.load(probe);

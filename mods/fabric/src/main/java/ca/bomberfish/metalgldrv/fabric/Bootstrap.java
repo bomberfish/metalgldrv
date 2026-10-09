@@ -75,6 +75,7 @@ final class Bootstrap {
         String activation = System.getProperty("metalgldrv.activation");
         if ("agent".equals(activation) || "jni".equals(activation)) {
             Log.info("metalgldrv is already active (" + activation + ", " + System.getProperty("metalgldrv.library") + "); not loading the bundled copy");
+            ShaderOs.configure(setting(cfg, "spoof_shader_os"));
             return;
         }
 
@@ -127,6 +128,7 @@ final class Bootstrap {
             String version = System.getProperty("metalgldrv.version", "?");
             if ("jni".equals(activation)) {
                 Log.info("metalgldrv " + version + " active: " + lib + "; " + GL_LIBNAME + "=" + System.getProperty(GL_LIBNAME));
+                ShaderOs.configure(setting(cfg, "spoof_shader_os"));
             } else if (activation == null) {
                 Log.warn("loaded " + lib + " but it did not report back (no JNI_OnLoad? an older driver?); Minecraft may use Apple's OpenGL");
             } else {
@@ -156,6 +158,13 @@ final class Bootstrap {
         "# GLFW\") or a renderer mod such as VulkanMod. force=true activates anyway",
         "# and points org.lwjgl.opengl.libname at metalgldrv.",
         "force=false",
+        "#",
+        "# Shader packs (Iris): many use MC_OS_MAC to work around Apple's OpenGL 4.1 by turning",
+        "# features off. While metalgldrv is active, Iris reports this OS to shader packs instead:",
+        "# windows (default), linux, unknown, or off to keep MC_OS_MAC. Only the shader-pack",
+        "# define changes; Minecraft and other mods still see macOS. -Dmetalgldrv.spoof_shader_os=...",
+        "# overrides.",
+        "spoof_shader_os=windows",
         "#",
         "# library=/path/to/libmetalgldrv.dylib loads that driver instead of the bundled one.",
         "#library=",
@@ -200,6 +209,12 @@ final class Bootstrap {
             String value = cfg.getProperty(key).trim();
             if (System.getProperty(prop) == null) System.setProperty(prop, value);
         }
+    }
+
+    // A setting: -Dmetalgldrv.<key> if set, else the config file's <key>, else null.
+    static String setting(Properties cfg, String key) {
+        String v = System.getProperty("metalgldrv." + key);
+        return v != null ? v : cfg.getProperty(key);
     }
 
     static boolean isFalse(String v) {
