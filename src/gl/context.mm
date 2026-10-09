@@ -349,6 +349,11 @@ id<MTL4ComputeCommandEncoder> Context::computeEncoder() {
     if (pendingClear.any()) applyClearNow();
     if (renderEnc) endPass();
     if (!computeEnc) {
+        if (g_profilePasses) {
+            char label[64];
+            snprintf(label, sizeof label, "blit/compute from %s", *t_apiName ? t_apiName : "?");
+            profileTag(serial(), label);
+        }
         computeEnc = newComputeEncoder();
         // Conservative GL-style ordering against all prior work.
         [computeEnc barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
@@ -384,6 +389,11 @@ UploadAlloc Context::upload(size_t size, size_t align) {
 
 void Context::flush(id<CAMetalDrawable> present) {
     MGL_STAT_CALLER("flush");
+    struct InFlush {
+        bool& f, saved;
+        explicit InFlush(bool& b) : f(b), saved(b) { f = true; }
+        ~InFlush() { f = saved; }
+    } inFlush(inFlush_);
     statMaybeReport();
     if (pendingClear.any()) applyClearNow();
     if (!cb_) {
@@ -604,6 +614,10 @@ void Context::beginPass() {
                      visibilityOptions:MTL4VisibilityOptionDevice];
     [renderEnc setArgumentTable:renderArgTable
                        atStages:MTLRenderStageVertex | MTLRenderStageFragment | MTLRenderStageObject | MTLRenderStageMesh];
+    if (g_profilePasses) {
+        snprintf(passLabel_, sizeof passLabel_, "fb %s%u %dx%d%s%s from %s", drawFb && drawFb->isDefault ? "window " : "", drawFb ? drawFb->name : 0,
+                 p.width, p.height, p.depth.tex ? " +depth" : "", p.layers > 1 ? " layered" : "", *t_apiName ? t_apiName : "?");
+    }
     pendingClear.reset();
     passFb_ = drawFb.get();
     curPass = p;
@@ -615,11 +629,20 @@ void Context::beginPass() {
 
 void Context::endPass() {
     if (renderEnc) MGL_STAT_CALLER("endPass");
+    bool profile = g_profilePasses && renderEnc;
     if (renderEnc) {
         [renderEnc endEncoding];
         renderEnc = nil;
     }
     passOpen = false;
+    if (profile) {
+        char label[192];
+        snprintf(label, sizeof label, "%s, %d draw%s, first program %u", passLabel_, passDraws_, passDraws_ == 1 ? "" : "s", passFirstProgram_);
+        profileTag(serial_, label);
+        passDraws_ = 0;
+        passFirstProgram_ = 0;
+        if (!inFlush_) flush();  // one pass per command buffer
+    }
 }
 
 id<MTL4RenderCommandEncoder> Context::renderEncoder() {

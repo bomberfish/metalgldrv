@@ -216,10 +216,18 @@ void onImageAdded(const mach_header* mh, intptr_t slide) {
 // ~/Library/Application Support/metalgldrv/metalgldrv.conf: METALGLDRV_<NAME>=value lines
 // (# comments) applied to the environment unless already set. For hosts where setting the
 // environment is awkward, like games launched by Steam through CrossOver.
+// METALGLDRV_CONF=<path> reads another file, METALGLDRV_CONF=none none (test runners: the file applies to every
+// process that loads the driver).
 void loadConfFile() {
-    const char* home = getenv("HOME");
-    if (!home || !*home) return;
-    std::string path = std::string(home) + "/Library/Application Support/metalgldrv/metalgldrv.conf";
+    std::string path;
+    if (const char* c = getenv("METALGLDRV_CONF")) {
+        if (!*c || !strcmp(c, "none")) return;
+        path = c;
+    } else {
+        const char* home = getenv("HOME");
+        if (!home || !*home) return;
+        path = std::string(home) + "/Library/Application Support/metalgldrv/metalgldrv.conf";
+    }
     FILE* f = fopen(path.c_str(), "r");
     if (!f) return;
     char line[1024];

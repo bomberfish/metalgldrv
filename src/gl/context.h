@@ -318,6 +318,11 @@ public:
     bool passOpen = false;
     uint64_t passCounter = 0;  // render passes begun (feedback-loop snapshots are per pass)
     Framebuffer* passFb_ = nullptr;  // framebuffer the open pass was started for (stats only)
+    // METALGLDRV_PROFILE_PASSES: the open pass's label parts, and whether flush() is running.
+    char passLabel_[128] = {};
+    int passDraws_ = 0;
+    GLuint passFirstProgram_ = 0;
+    bool inFlush_ = false;
     bool passDirty = true;           // framebuffer binding/attachments changed
     PendingClear pendingClear;       // clears not yet applied (folded into next pass load action)
     // Non-layered image bindings of a 3D texture slice go through a 2D copy (Metal has no 2D

@@ -46,6 +46,48 @@ void statAddCaller(const char* event, void* ra, uint64_t amount) {
     g_counts[event] += amount;
 }
 
+// ---- METALGLDRV_PROFILE_PASSES ----
+bool g_profilePasses = false;
+namespace {
+std::mutex g_profMutex;
+std::unordered_map<uint64_t, std::string> g_profTags;          // serial -> label (pending)
+std::map<std::string, std::pair<double, uint64_t>> g_profTimes;  // label -> GPU seconds, count
+}  // namespace
+
+void profileTag(uint64_t serial, const char* label) {
+    std::lock_guard<std::mutex> g(g_profMutex);
+    std::string& t = g_profTags[serial];
+    if (t.empty()) t = label;
+    else if (t.size() < 200) t += std::string(" + ") + label;
+}
+
+void profileComplete(uint64_t serial, double gpuSeconds) {
+    std::lock_guard<std::mutex> g(g_profMutex);
+    auto it = g_profTags.find(serial);
+    std::string label = it == g_profTags.end() ? "(untagged)" : it->second;
+    if (it != g_profTags.end()) g_profTags.erase(it);
+    auto& e = g_profTimes[label];
+    e.first += gpuSeconds;
+    e.second++;
+}
+
+static std::string profileReport() {
+    std::vector<std::pair<std::string, std::pair<double, uint64_t>>> v;
+    {
+        std::lock_guard<std::mutex> g(g_profMutex);
+        v.assign(g_profTimes.begin(), g_profTimes.end());
+        g_profTimes.clear();
+    }
+    std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second.first > b.second.first; });
+    std::string out = "\n  GPU time by pass (5s):";
+    char buf[320];
+    for (size_t i = 0; i < v.size() && i < 25; i++) {
+        snprintf(buf, sizeof buf, "\n  %8.1f ms %6llu x  %s", v[i].second.first * 1000, (unsigned long long)v[i].second.second, v[i].first.c_str());
+        out += buf;
+    }
+    return out;
+}
+
 void statMaybeReport() {
     if (!g_statsEnabled) return;
     std::vector<std::pair<std::string, uint64_t>> v;
@@ -71,6 +113,13 @@ void statMaybeReport() {
              (unsigned long long)(vm.phys_footprint >> 20), (unsigned long long)(vm.virtual_size >> 20),
              (unsigned long long)(avail >> 20), (unsigned long long)(d ? [d->mtl currentAllocatedSize] >> 20 : 0));
     std::string out = std::string("stats (5s): ") + mem;
+    if (d) {
+        double busy = d->takeGpuBusySeconds();
+        char gpu[96];
+        snprintf(gpu, sizeof gpu, ", GPU busy %.0f ms (%.0f%%)", busy * 1000, busy / 5 * 100);
+        out += gpu;
+    }
+    if (g_profilePasses) out += profileReport();
     for (size_t i = 0; i < v.size() && i < 25; i++) out += "\n  " + std::to_string(v[i].second) + "  " + v[i].first;
     MGL_INFO("%s", out.c_str());
 }
@@ -108,6 +157,7 @@ void statsRefreshFromEnv() {
     int top = envInt("METALGLDRV_TRACE_CALLS", 0);
     g_traceTop = top > 1 ? (size_t)top : 30;
     g_traceSeq = envInt("METALGLDRV_TRACE_SEQ", 0);
+    g_profilePasses = envFlag("METALGLDRV_PROFILE_PASSES", false);
     if (g_traceSeq > 0) g_traceCalls = true;
 }
 

@@ -104,8 +104,10 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
                 v->ok = true;
                 // METALGLDRV_DUMP_MSL=1 dumps every variant; any other value dumps variants whose MSL contains it.
                 static const char* dumpMsl = getenv("METALGLDRV_DUMP_MSL");
+                // METALGLDRV_DUMP_MSL=1 (all), <substring>, or #<n> (program n)
                 if (dumpMsl && *dumpMsl && strcmp(dumpMsl, "0") &&
-                    (!strcmp(dumpMsl, "1") || v->msl.source.find(dumpMsl) != std::string::npos))
+                    (!strcmp(dumpMsl, "1") || (dumpMsl[0] == '#' ? strtoul(dumpMsl + 1, nullptr, 10) == prog->name
+                                                                  : v->msl.source.find(dumpMsl) != std::string::npos)))
                     MGL_INFO("program %u MSL:\n%s", prog->name, v->msl.source.c_str());
             }
         }

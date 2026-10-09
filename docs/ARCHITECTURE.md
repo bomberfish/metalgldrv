@@ -278,6 +278,10 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
     geometry/tessellation draws (and vertex shaders past the classic varying
     budget, which run on the mesh pipeline) get one pre-pass per draw, so their
     primitives don't see each other's depth/stencil writes in the coverage.
+* macOS: `METALGLDRV_*=value` lines in `~/Library/Application Support/metalgldrv/metalgldrv.conf`
+  apply to every process that loads the driver, unless its environment sets them (for hosts whose
+  environment is hard to reach, such as Steam → NotProton → CrossOver). `METALGLDRV_CONF=<path>`
+  reads another file and `METALGLDRV_CONF=none` none; tests/cts/run.sh uses `none`.
 * `METALGLDRV_LOG=<0-4>`, `METALGLDRV_LOG_FILE=<path|documents>` – log level / file.
 * `METALGLDRV_LOG_UNSUPPORTED=1` – warns once per unique unsupported thing: an entry point that
   is a stub (when called) or unknown (GetProcAddress), an `INVALID_ENUM` (with the entry point
@@ -288,7 +292,10 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   `METALGLDRV_RENDERER`, `METALGLDRV_VERSION_STRING`, `METALGLDRV_GLSL_VERSION_STRING`,
   `METALGLDRV_HIDE_EXTENSIONS`, `METALGLDRV_EXTRA_EXTENSIONS`, `METALGLDRV_VRAM_MB`,
   `METALGLDRV_GLSL_QUIRKS`, `METALGLDRV_SHARE_FRAMEBUFFERS`.
-* `METALGLDRV_STATS=1` – per-function event counters, logged every 5 s.
+* `METALGLDRV_STATS=1` – per-function event counters and the GPU's busy time, logged every 5 s.
+  `METALGLDRV_PROFILE_PASSES=1` adds GPU time per render pass / compute dispatch (each is committed
+  in its own command buffer, so it changes performance; labels name the framebuffer, the entry
+  point that opened the pass, its draw count and first program).
 * `METALGLDRV_TRACE_CALLS=1|<n>` – calls per GL entry point, the 30 (or n) most frequent logged
   every 5 s from a background thread (also while the app draws nothing);
   `METALGLDRV_TRACE_SEQ=<n>` also logs each thread's first n calls in order.
@@ -302,7 +309,7 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
 * `METALGLDRV_PROFILE=core` – EGL and CGL create core instead of compatibility contexts.
 * `METALGLDRV_HOOK_NSOPENGL=1` – macOS replacement mode (NSOpenGL hooks + import
   rebinding, see above) without the JVMTI agent.
-* `METALGLDRV_DUMP_GLSL=<substring|#program>`, `METALGLDRV_DUMP_MSL`, `METALGLDRV_DUMP_SPIRV`,
+* `METALGLDRV_DUMP_GLSL=<substring|#program>`, `METALGLDRV_DUMP_MSL=<1|substring|#program>`, `METALGLDRV_DUMP_SPIRV`,
   `METALGLDRV_DUMP_FAILED_GLSL`, `METALGLDRV_DUMP_FAILED_MSL` – shader dumps.
 * `METALGLDRV_MAX_FPS`, `METALGLDRV_UPSCALER=metalfx`, `METALGLDRV_CAPTURE*` (frame and
   per-program texture captures, written to `METALGLDRV_DUMP_DIR` when set),

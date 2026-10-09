@@ -3273,6 +3273,16 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
     if (!prog) return;
     if (!prog->program) return;  // last successfully linked executable
     if (!mglCheckDrawConditional(ctx)) return;
+    // METALGLDRV_PROFILE_PASSES: counted when the draw is done, i.e. in the pass it was encoded in.
+    struct PassDrawCount {
+        Context* c;
+        GLuint program;
+        ~PassDrawCount() {
+            if (!c) return;
+            c->passDraws_++;
+            if (!c->passFirstProgram_) c->passFirstProgram_ = program;
+        }
+    } passDrawCount{g_profilePasses ? ctx : nullptr, ctx->program ? ctx->program->name : prog->name};
     mgl::debugCaptureBeforeDraw(ctx, prog);
     if (d.indirect && indirectNeedsCpu(ctx, d, prog)) {
         DrawParams direct;
@@ -4080,6 +4090,13 @@ static void dispatch(Context* ctx, GLuint gx, GLuint gy, GLuint gz, Buffer* indi
     MTL4VisibilityOptions vis = vk.sparseImageSlots ? MTL4VisibilityOptionDevice | MTL4VisibilityOptionResourceAlias : MTL4VisibilityOptionDevice;
     [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:vis];
     flushImageWritebacks(ctx);
+    if (g_profilePasses) {  // one dispatch per command buffer
+        char label[96];
+        snprintf(label, sizeof label, "compute program %u, %ux%ux%u groups of %ux%ux%u%s", prog->name, gx, gy, gz, prog->refl.localSize[0],
+                 prog->refl.localSize[1], prog->refl.localSize[2], indirect ? " (indirect)" : "");
+        profileTag(ctx->serial(), label);
+        ctx->flush();
+    }
 }
 
 API void APIENTRY glDispatchCompute(GLuint x, GLuint y, GLuint z) {

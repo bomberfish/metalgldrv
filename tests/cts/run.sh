@@ -112,6 +112,8 @@ mkdir -p "$out"; out="$(cd "$out" && pwd)"
 # Snapshot the driver so concurrent rebuilds of build/ don't affect a running suite.
 cp "$DRIVER_BUILD/libmetalgldrv.dylib" "$out/libmetalgldrv.dylib"
 export METALGLDRV_LIBRARY="$out/libmetalgldrv.dylib"
+# The per-user metalgldrv.conf (app settings, debugging switches) must not change conformance runs.
+export METALGLDRV_CONF="${METALGLDRV_CONF:-none}"
 (cd "$REPO" && git rev-parse --short HEAD 2>/dev/null; git -C "$REPO" status --short -- src 2>/dev/null | head -50) > "$out/driver-version.txt" || true
 
 args=(--glcts "$GLCTS_DIR/glcts" --workdir "$GLCTS_DIR" --outdir "$out" --timeout "$timeout" --jobs "$jobs")

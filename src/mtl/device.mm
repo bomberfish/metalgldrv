@@ -114,6 +114,13 @@ double Device::takeMaxGpuSeconds() {
     return m;
 }
 
+double Device::takeGpuBusySeconds() {
+    std::lock_guard<std::mutex> g(mutex_);
+    double b = gpuBusySeconds_;
+    gpuBusySeconds_ = 0;
+    return b;
+}
+
 bool Device::gpuTimes(uint64_t serial, double* start, double* end) {
     std::lock_guard<std::mutex> g(mutex_);
     auto it = gpuTimes_.find(serial);
@@ -139,6 +146,12 @@ void Device::markComplete(uint64_t serial, NSError* error, double gpuStart, doub
             // long ones (at most every 10 s), which is where to look when that happens.
             double dt = gpuEnd - gpuStart;
             maxGpuSeconds_ = std::max(maxGpuSeconds_, dt);
+            // Exclusive time: the part of this command buffer's interval after the previous ones ended (a
+            // command buffer starting early mostly waits at its leading barrier).
+            double exclusive = gpuEnd > gpuBusyUntil_ ? gpuEnd - std::max(gpuStart, gpuBusyUntil_) : 0;
+            if (g_profilePasses) profileComplete(serial, exclusive);
+            gpuBusySeconds_ += exclusive;
+            gpuBusyUntil_ = std::max(gpuBusyUntil_, gpuEnd);
             if (dt > 0.5 && gpuEnd - lastLongWarning_ > 10) {
                 lastLongWarning_ = gpuEnd;
                 MGL_WARN("command buffer %llu ran %.0f ms on the GPU", (unsigned long long)serial, dt * 1000);
@@ -458,11 +471,17 @@ id<MTLLibrary> Device::compileLibrary(const std::string& source, std::string* er
         MTLCompileOptions* co = [MTLCompileOptions new];
         co.languageVersion = MTLLanguageVersion4_0;
         co.mathMode = fastMath ? MTLMathModeFast : MTLMathModeSafe;
+        // Safe arithmetic (no reassociation, IEEE NaN/Inf) but the fast sin/cos/exp/log/pow...: GLSL bounds
+        // them loosely (sin/cos: 2^-11 absolute), and the precise versions cost several times as much in
+        // shaders that use many (DOOM (2016)'s depth of field: 64 sin/cos per pixel). The strict profiles
+        // keep the precise ones; METALGLDRV_MSL_OPTS=precisefn too.
+        co.mathFloatingPointFunctions = caps.strictLevel >= 1 ? MTLMathFloatingPointFunctionsPrecise : MTLMathFloatingPointFunctionsFast;
         co.preserveInvariance = YES;
         // Debugging aid, read per compile: METALGLDRV_MSL_OPTS containing "noinv" and/or "size".
         if (const char* o = getenv("METALGLDRV_MSL_OPTS")) {
             if (strstr(o, "noinv")) co.preserveInvariance = NO;
             if (strstr(o, "size")) co.optimizationLevel = MTLLibraryOptimizationLevelSize;
+            if (strstr(o, "precisefn")) co.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
         }
         ld.options = co;
         NSError* err = nil;
