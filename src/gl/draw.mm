@@ -3006,6 +3006,7 @@ static bool validateDraw(Context* ctx, GLenum& mode) {
         ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
         return false;
     }
+    if (ctx->depthTest || ctx->stencilTest) ctx->useDefaultDepthStencil(fb);
     if (ctx->pipeline && !ctx->program) {
         ProgramPipelineObj* pp = ctx->pipeline.get();
         std::string err = pp->stages[(int)glsl::Stage::Vertex] || pp->stages[(int)glsl::Stage::Fragment] ? pipelineValidationError(pp) : "";
@@ -3902,6 +3903,7 @@ static ProgramObj* validateMeshDraw(Context* ctx, ProgramObj** fsProg) {
         ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
         return nullptr;
     }
+    if (ctx->depthTest || ctx->stencilTest) ctx->useDefaultDepthStencil(fb);
     if (ctx->xfb && ctx->xfb->active && !ctx->xfb->paused) {
         ctx->setError(GL_INVALID_OPERATION, "mesh draws cannot be used with active transform feedback");
         return nullptr;

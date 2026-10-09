@@ -698,6 +698,7 @@ static void doClear(Context* ctx, bool color, int colorDB, const float* fval, co
     GLenum status;
     if (!mglFramebufferComplete(ctx, fb, &status))
         return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
+    if (depth || stencil) ctx->useDefaultDepthStencil(fb);
     PassDesc p;
     if (!ctx->resolvePass(p)) return;
     // Which draw buffers are cleared

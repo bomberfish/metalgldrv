@@ -65,6 +65,10 @@ public:
     MTLPixelFormat colorFormat = MTLPixelFormatRGBA8Unorm;
     bool hasDepth = true, hasStencil = true;
     bool hasAlpha = true;  // EGL config with alpha bits; without them alpha reads and blends as 1
+    // Whether the app has used depthStencil (cleared it, drawn with depth or stencil testing, blitted into
+    // it). Until then render passes on the default framebuffer leave it out, so apps that render offscreen
+    // and only blit to the window don't load and store it every frame.
+    bool dsUsed = false;
     bool srgbCapable = false;
     int swapInterval = 1;
     id<MTLTexture> color = nil, depthStencil = nil, msColor = nil;
@@ -286,6 +290,13 @@ public:
     Ref<Buffer>* bufferBindingRef(GLenum target);
     Framebuffer* fbForTarget(GLenum target);
     Framebuffer* defaultFramebuffer() { return drawSurface ? drawSurface->fb.get() : nullptr; }
+    // Marks the default framebuffer's depth/stencil buffer as used (Surface::dsUsed) when fb is it.
+    void useDefaultDepthStencil(Framebuffer* fb) {
+        if (fb && fb->isDefault && fb->surface && !fb->surface->dsUsed) {
+            fb->surface->dsUsed = true;
+            passDirty = true;
+        }
+    }
     ProgramObj* activeProgramForStage(glsl::Stage s);
     ProgramObj* activeProgram();  // program or pipeline's active program
     void unbindDeletedBuffer(Buffer* b);

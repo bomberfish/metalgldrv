@@ -1278,6 +1278,7 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
         }
         blitToTexture(ctx, bp, dst, dlevel, dslice);
     };
+    if (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) ctx->useDefaultDepthStencil(ctx->drawFb.get());
     PassDesc dp;
     if (!ctx->resolvePass(dp)) return;
     if (mask & GL_COLOR_BUFFER_BIT) {

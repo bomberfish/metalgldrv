@@ -464,7 +464,7 @@ bool Context::resolvePass(PassDesc& p) {
                 p.color[i].noAlpha = !s->hasAlpha;
             }
         }
-        if (s->depthStencil) {
+        if (s->depthStencil && s->dsUsed) {
             if (s->hasDepth) p.depth.tex = s->depthStencil;
             if (s->hasStencil) p.stencil.tex = s->depthStencil;
         }
