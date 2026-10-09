@@ -68,6 +68,10 @@ public:
     bool srgbCapable = false;
     int swapInterval = 1;
     id<MTLTexture> color = nil, depthStencil = nil, msColor = nil;
+    // Non-sRGB views of color/msColor: GL_FRAMEBUFFER_SRGB disabled writes an sRGB-capable
+    // default framebuffer without encoding (linearWriteView). Rebuilt on resize.
+    id<MTLTexture> colorLinear = nil, msColorLinear = nil;
+    id<MTLTexture> linearWriteView(id<MTLTexture> t);
     const FormatInfo* colorFmt = nullptr;
     const FormatInfo* dsFmt = nullptr;
     Ref<Framebuffer> fb;  // the default framebuffer object (name 0)

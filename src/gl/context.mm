@@ -426,6 +426,9 @@ bool Context::resolvePass(PassDesc& p) {
             GLenum db = fb->drawBuffers[i];
             if (db == GL_BACK || db == GL_BACK_LEFT || db == GL_FRONT || db == GL_FRONT_LEFT || db == GL_FRONT_AND_BACK || db == GL_LEFT) {
                 p.color[i].tex = s->msColor ? s->msColor : s->color;
+                // GL_FRAMEBUFFER_SRGB disabled: the sRGB-capable default framebuffer is written
+                // without encoding, as for FBO attachments (attachmentWriteView) and Apple's GL.
+                if (!framebufferSRGB && s->srgbCapable) p.color[i].tex = s->linearWriteView(p.color[i].tex);
                 p.color[i].noAlpha = !s->hasAlpha;
             }
         }
@@ -675,6 +678,16 @@ void Surface::syncSizeFromLayer() {
     resize(w, h);
 }
 
+id<MTLTexture> Surface::linearWriteView(id<MTLTexture> t) {
+    MTLPixelFormat lf = t.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB   ? MTLPixelFormatRGBA8Unorm
+                        : t.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB ? MTLPixelFormatBGRA8Unorm
+                                                                         : MTLPixelFormatInvalid;
+    if (lf == MTLPixelFormatInvalid) return t;
+    id<MTLTexture> __strong& cached = t == msColor ? msColorLinear : colorLinear;
+    if (!cached) cached = [t newTextureViewWithPixelFormat:lf];
+    return cached;
+}
+
 bool Surface::resize(int w, int h) {
     if (w <= 0) w = 1;
     if (h <= 0) h = 1;
@@ -696,10 +709,11 @@ bool Surface::resize(int w, int h) {
     color.label = @"default fb color";
     d->makeResident(color);
     msColor = nil;
+    colorLinear = msColorLinear = nil;
     if (samples > 1) {
         td.textureType = MTLTextureType2DMultisample;
         td.sampleCount = samples;
-        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
         msColor = [d->mtl newTextureWithDescriptor:td];
         d->makeResident(msColor);
     }
