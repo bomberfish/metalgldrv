@@ -60,7 +60,7 @@ run() {
   mkdir -p "$CONFIG"
   [[ -n "${CONFIG_TEXT:-}" ]] && printf '%s\n' "$CONFIG_TEXT" > "$CONFIG/metalgldrv.properties"
   echo "--- $name"
-  OUT="$(env ${envs[@]+"${envs[@]}"} "$JDK/bin/java" -Duser.home="$HOME_DIR" -Dtest.configDir="$CONFIG" \
+  OUT="$(env HOME="$HOME_DIR" ${envs[@]+"${envs[@]}"} "$JDK/bin/java" -Duser.home="$HOME_DIR" -Dtest.configDir="$CONFIG" \
     -Dtest.envProbe="$WORK/libenvprobe.dylib" "$@" -cp "$CP${EXTRA_CP:+:$EXTRA_CP}" Harness 2>&1)" && CASE_OK=1 || { CASE_OK=0; echo "  FAIL: exit status"; }
 }
 expect() {  # expect PATTERN (grep -E against the output)
