@@ -363,8 +363,9 @@ static void bufferSubData(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr s
     if (offset < 0 || size < 0 || offset + size > b->size) return ctx->setError(GL_INVALID_VALUE);
     // Updating a non-persistently mapped range is an error; the rest of the buffer stays writable.
     if (b->mapped && !(b->mapAccess & GL_MAP_PERSISTENT_BIT) && offset < b->mapOffset + b->mapLength && b->mapOffset < offset + size)
-        return ctx->setError(GL_INVALID_OPERATION);
-    if (b->immutable && !(b->storageFlags & GL_DYNAMIC_STORAGE_BIT)) return ctx->setError(GL_INVALID_OPERATION);
+        return ctx->setError(GL_INVALID_OPERATION, "buffer %u range [%lld, +%lld) is mapped", b->name, (long long)offset, (long long)size);
+    if (b->immutable && !(b->storageFlags & GL_DYNAMIC_STORAGE_BIT))
+        return ctx->setError(GL_INVALID_OPERATION, "buffer %u is immutable without GL_DYNAMIC_STORAGE_BIT (flags 0x%x)", b->name, b->storageFlags);
     if (!data || !size) return;
     writeBuffer(ctx, b, offset, size, data);
 }

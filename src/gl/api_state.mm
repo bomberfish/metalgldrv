@@ -685,6 +685,7 @@ API void APIENTRY glClearStencil(GLint s) {
 }
 
 bool mglFramebufferComplete(Context* ctx, Framebuffer* fb, GLenum* status);  // api_fbo.mm
+const char* framebufferIncompleteReason(Context* ctx, Framebuffer* fb);  // api_fbo.mm
 bool mglCheckDrawConditional(Context* ctx);  // queries: conditional rendering
 
 // Shared clear implementation. colorDB: draw buffer index (-1: all), values per call.
@@ -695,7 +696,8 @@ static void doClear(Context* ctx, bool color, int colorDB, const float* fval, co
     Framebuffer* fb = ctx->drawFb.get();
     if (!fb) return;
     GLenum status;
-    if (!mglFramebufferComplete(ctx, fb, &status)) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+    if (!mglFramebufferComplete(ctx, fb, &status))
+        return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
     PassDesc p;
     if (!ctx->resolvePass(p)) return;
     // Which draw buffers are cleared

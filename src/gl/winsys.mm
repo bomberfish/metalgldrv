@@ -144,7 +144,8 @@ CAMetalLayer* layerFromNative(void* win) {
 #endif
 
 // METALGLDRV_CAPTURE=<seconds>: periodically saves the default framebuffer to
-// $HOME/Documents/metalgldrv-frame.png (field debugging without screen access).
+// $METALGLDRV_DUMP_DIR/metalgldrv-frame.png, else $HOME/Documents/metalgldrv-frame.png (field debugging
+// without screen access; Documents is privacy-protected for apps like Wine, a dump dir is not).
 static void maybeCaptureFrame(Surface* surf) {
     static const double every = [] { const char* e = getenv("METALGLDRV_CAPTURE"); return e ? atof(e) : 0.0; }();
     if (every <= 0) return;
@@ -185,7 +186,9 @@ static void maybeCaptureFrame(Surface* surf) {
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef bc = CGBitmapContextCreate(img.data(), w, h, 8, (size_t)w * 4, cs, kCGImageAlphaPremultipliedLast);
     CGImageRef im = bc ? CGBitmapContextCreateImage(bc) : nullptr;
-    std::string path = std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/metalgldrv-frame.png";
+    const char* dir = getenv("METALGLDRV_DUMP_DIR");
+    std::string path = dir && *dir ? std::string(dir) + "/metalgldrv-frame.png"
+                                   : std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/metalgldrv-frame.png";
     NSURL* url = [NSURL fileURLWithPath:@(path.c_str())];
     CGImageDestinationRef dst = im ? CGImageDestinationCreateWithURL((__bridge CFURLRef)url, CFSTR("public.png"), 1, nullptr) : nullptr;
     if (dst) {

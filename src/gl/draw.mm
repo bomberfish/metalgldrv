@@ -15,6 +15,7 @@ std::string pipelineValidationError(ProgramPipelineObj* pp);  // api_shader.mm
 #define API extern "C" __attribute__((visibility("default")))
 
 GLenum framebufferStatus(Context* ctx, Framebuffer* fb);
+const char* framebufferIncompleteReason(Context* ctx, Framebuffer* fb);
 bool mglCheckDrawConditional(Context* ctx);
 ProgramObj* mglCompatPrepareDraw(Context* ctx, ProgramObj* prog);  // compat.mm (fixed-function emulation + gl_* uniforms)
 bool mglXfbPrepareDraw(Context* ctx, GLenum mode, uint64_t vertices);  // api_xfb.mm
@@ -3002,7 +3003,7 @@ static bool validateDraw(Context* ctx, GLenum& mode) {
     }
     Framebuffer* fb = ctx->drawFb.get();
     if (!fb || framebufferStatus(ctx, fb) != GL_FRAMEBUFFER_COMPLETE) {
-        ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+        ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
         return false;
     }
     if (ctx->pipeline && !ctx->program) {
@@ -3888,7 +3889,7 @@ static ProgramObj* validateMeshDraw(Context* ctx, ProgramObj** fsProg) {
     }
     Framebuffer* fb = ctx->drawFb.get();
     if (!fb || framebufferStatus(ctx, fb) != GL_FRAMEBUFFER_COMPLETE) {
-        ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+        ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
         return nullptr;
     }
     if (ctx->xfb && ctx->xfb->active && !ctx->xfb->paused) {

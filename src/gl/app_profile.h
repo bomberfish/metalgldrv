@@ -23,6 +23,9 @@ struct AppProfile {
     // vramCapMB (profiles; 0 = no cap), or exactly vramMB (METALGLDRV_VRAM_MB; 0 = unset).
     uint64_t vramMB = 0, vramCapMB = 0;
     glsl::Quirks glsl;  // compiler leniency
+    // Framebuffer objects belong to the share group instead of one context (as on AMD's and NVIDIA's
+    // Windows drivers): DOOM (2016) attaches its render targets in one context and draws in another.
+    bool shareFramebuffers = false;
     // METALGLDRV_LOG_UNSUPPORTED: log unsupported entry points, enums, #extension requests and
     // shader failures (sources dumped to dumpDir) once each.
     bool logUnsupported = false;

@@ -10,6 +10,8 @@ void statCount(const char* event);
 void statAddCaller(const char* event, void* returnAddress, uint64_t amount);
 // Logs and resets the counters at most every 5 seconds.
 void statMaybeReport();
+// Re-reads METALGLDRV_STATS and METALGLDRV_TRACE_CALLS (after the environment changed, e.g. from the conf file).
+void statsRefreshFromEnv();
 }  // namespace mgl
 #define MGL_STAT_CALLER(ev) do { if (::mgl::g_statsEnabled) ::mgl::statCaller(ev, __builtin_return_address(0)); } while (0)
 #define MGL_STAT(ev) do { if (::mgl::g_statsEnabled) ::mgl::statCount(ev); } while (0)

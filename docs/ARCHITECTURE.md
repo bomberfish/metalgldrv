@@ -287,8 +287,13 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
 * Application profiles (next section): `METALGLDRV_APP_PROFILE`, `METALGLDRV_VENDOR`,
   `METALGLDRV_RENDERER`, `METALGLDRV_VERSION_STRING`, `METALGLDRV_GLSL_VERSION_STRING`,
   `METALGLDRV_HIDE_EXTENSIONS`, `METALGLDRV_EXTRA_EXTENSIONS`, `METALGLDRV_VRAM_MB`,
-  `METALGLDRV_GLSL_QUIRKS`.
+  `METALGLDRV_GLSL_QUIRKS`, `METALGLDRV_SHARE_FRAMEBUFFERS`.
 * `METALGLDRV_STATS=1` – per-function event counters, logged every 5 s.
+* `METALGLDRV_TRACE_CALLS=1|<n>` – calls per GL entry point, the 30 (or n) most frequent logged
+  every 5 s from a background thread (also while the app draws nothing);
+  `METALGLDRV_TRACE_SEQ=<n>` also logs each thread's first n calls in order.
+* `METALGLDRV_WINE_SHARE_PATCH=0` – leave CrossOver's `winemac.so` check that stops core and
+  compatibility contexts from sharing (patched in memory by default; see docs/doom2016.md).
 * `METALGLDRV_IMPLICIT_PATCHES=1` – draws whose primitives have GL_PATCH_VERTICES vertices run as
   patches while tessellation is active (Iris + Sodium; set by the Fabric mod).
 * `METALGLDRV_TESS_FAST=0`, `METALGLDRV_TESS_BATCH=0`, `METALGLDRV_TESS_PASS1=compute` – turn off
@@ -297,9 +302,10 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
 * `METALGLDRV_PROFILE=core` – EGL and CGL create core instead of compatibility contexts.
 * `METALGLDRV_HOOK_NSOPENGL=1` – macOS replacement mode (NSOpenGL hooks + import
   rebinding, see above) without the JVMTI agent.
-* `METALGLDRV_DUMP_GLSL`, `METALGLDRV_DUMP_MSL`, `METALGLDRV_DUMP_SPIRV`,
+* `METALGLDRV_DUMP_GLSL=<substring|#program>`, `METALGLDRV_DUMP_MSL`, `METALGLDRV_DUMP_SPIRV`,
   `METALGLDRV_DUMP_FAILED_GLSL`, `METALGLDRV_DUMP_FAILED_MSL` – shader dumps.
-* `METALGLDRV_MAX_FPS`, `METALGLDRV_UPSCALER=metalfx`, `METALGLDRV_CAPTURE*`,
+* `METALGLDRV_MAX_FPS`, `METALGLDRV_UPSCALER=metalfx`, `METALGLDRV_CAPTURE*` (frame and
+  per-program texture captures, written to `METALGLDRV_DUMP_DIR` when set),
   `METALGLDRV_MSL_OPTS`, `METALGLDRV_MSL_OVERRIDE`, `METALGLDRV_GLSL_PATCH`,
   `METALGLDRV_DEBUG_*` – presentation and debugging switches (see the
   `getenv` sites).

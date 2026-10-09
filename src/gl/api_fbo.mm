@@ -96,6 +96,41 @@ GLenum framebufferStatus(Context* ctx, Framebuffer* fb) {
     return GL_FRAMEBUFFER_COMPLETE;
 }
 
+// Why a framebuffer is incomplete, for GL_INVALID_FRAMEBUFFER_OPERATION messages (thread-local buffer).
+const char* framebufferIncompleteReason(Context* ctx, Framebuffer* fb) {
+    static thread_local std::string out;
+    if (!fb) return "no framebuffer bound";
+    GLenum st = framebufferStatus(ctx, fb);
+    char buf[256];
+    snprintf(buf, sizeof buf, "framebuffer %u status 0x%x (context %p)", fb->name, st, (void*)ctx);
+    out = buf;
+    for (int i = 0; i < kNumAttachments; i++) {
+        const Attachment& a = fb->att[i];
+        if (a.type == GL_NONE) continue;
+        int w, h, smp, layers;
+        bool layered;
+        GLenum as = attachmentStatus(ctx, a, i < kMaxDrawBuffers, i == kAttDepth, i == kAttStencil, &w, &h, &smp, &layers, &layered);
+        const char* which = i == kAttDepth ? "depth" : i == kAttStencil ? "stencil" : "color";
+        if (a.type == GL_TEXTURE && a.tex) {
+            Texture* t = a.tex.get();
+            int face = t->target == GL_TEXTURE_CUBE_MAP && !a.layered ? a.layer : 0;
+            const TexImageLevel* L = a.level >= 0 && a.level < Texture::kMaxLevels ? &t->levels[face][a.level] : nullptr;
+            snprintf(buf, sizeof buf, "; %s%d: texture %u target 0x%x level %d layer %d%s, %dx%d fmt 0x%x samples %d%s%s", which,
+                     i < kMaxDrawBuffers ? i : 0, t->name, t->target, a.level, a.layer, a.layered ? " layered" : "", L ? L->width : 0,
+                     L ? L->height : 0, L ? L->internalFormat : 0, t->samples, t->msArray ? " (emulated MS array)" : "",
+                     as != GL_FRAMEBUFFER_COMPLETE ? " INCOMPLETE" : "");
+        } else if (a.type == GL_RENDERBUFFER && a.rb) {
+            Renderbuffer* rb = a.rb.get();
+            snprintf(buf, sizeof buf, "; %s%d: renderbuffer %u %dx%d samples %d%s", which, i < kMaxDrawBuffers ? i : 0, rb->name, rb->width,
+                     rb->height, rb->samples, as != GL_FRAMEBUFFER_COMPLETE ? " INCOMPLETE" : "");
+        } else {
+            snprintf(buf, sizeof buf, "; %s%d: type 0x%x (object gone)", which, i < kMaxDrawBuffers ? i : 0, a.type);
+        }
+        out += buf;
+    }
+    return out.c_str();
+}
+
 bool mglFramebufferComplete(Context* ctx, Framebuffer* fb, GLenum* status) {
     *status = framebufferStatus(ctx, fb);
     return *status == GL_FRAMEBUFFER_COMPLETE;
@@ -257,23 +292,37 @@ API void APIENTRY glGetNamedRenderbufferParameteriv(GLuint rb, GLenum pname, GLi
 // ---------------------------------------------------------------------------
 // framebuffers
 // ---------------------------------------------------------------------------
+// A new framebuffer name. With shared framebuffers (AppProfile::shareFramebuffers) each context still counts
+// its own names from 1 and a name means the same object in every context of the group: AMD's Windows driver
+// behaves this way, and DOOM (2016) relies on it (its render context generates names and binds them without
+// attaching anything, getting the framebuffers its loading context generated and attached under those names).
+static GLuint genFramebufferName(Context* ctx) {
+    if (&ctx->framebuffers == &ctx->ownFramebuffers) return ctx->framebuffers.genName();
+    GLuint name = ctx->ownFramebuffers.genName();  // the own namespace only holds this context's reservations
+    ctx->framebuffers.reserve(name);
+    return name;
+}
+
 API void APIENTRY glGenFramebuffers(GLsizei n, GLuint* fbs) {
     MGL_CTX();
+    std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);  // framebuffer names may be shared
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
-    for (int i = 0; i < n; i++) fbs[i] = ctx->framebuffers.genName();
+    for (int i = 0; i < n; i++) fbs[i] = genFramebufferName(ctx);
 }
 
 API void APIENTRY glCreateFramebuffers(GLsizei n, GLuint* fbs) {
     MGL_CTX();
+    std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);  // framebuffer names may be shared
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) {
-        fbs[i] = ctx->framebuffers.genName();
-        ctx->framebuffers.create(fbs[i], new Framebuffer());
+        fbs[i] = genFramebufferName(ctx);
+        if (!ctx->framebuffers.get(fbs[i])) ctx->framebuffers.create(fbs[i], new Framebuffer());
     }
 }
 
 API void APIENTRY glDeleteFramebuffers(GLsizei n, const GLuint* fbs) {
     MGL_CTX();
+    std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);  // framebuffer names may be shared
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) {
         Framebuffer* fb = ctx->framebuffers.get(fbs[i]);
@@ -293,10 +342,12 @@ API void APIENTRY glDeleteFramebuffers(GLsizei n, const GLuint* fbs) {
 
 API GLboolean APIENTRY glIsFramebuffer(GLuint fb) {
     MGL_CTX_RET(GL_FALSE);
+    std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);  // framebuffer names may be shared
     return fb && ctx->framebuffers.get(fb) != nullptr;
 }
 
 static void bindFramebuffer(Context* ctx, GLenum target, GLuint framebuffer, bool ext) {
+    std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);  // framebuffer names may be shared
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) return ctx->setError(GL_INVALID_ENUM);
     Framebuffer* fb;
     if (!framebuffer) {
@@ -1078,7 +1129,8 @@ API void APIENTRY glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fo
     Framebuffer* fb = ctx->readFb.get();
     if (!fb) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
     GLenum status;
-    if (!mglFramebufferComplete(ctx, fb, &status)) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+    if (!mglFramebufferComplete(ctx, fb, &status))
+        return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
     if (!fb->isDefault) {
         for (auto& a : fb->att)
             if (a.type == GL_RENDERBUFFER && a.rb && a.rb->samples > 1) return ctx->setError(GL_INVALID_OPERATION);
@@ -1095,7 +1147,8 @@ API void APIENTRY glReadnPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f
     Framebuffer* fb = ctx->readFb.get();
     if (!fb) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
     GLenum status;
-    if (!mglFramebufferComplete(ctx, fb, &status)) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+    if (!mglFramebufferComplete(ctx, fb, &status))
+        return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
     readFramebufferPixels(ctx, fb, x, y, w, h, format, type, data, ctx->pack, bufSize);
 }
 

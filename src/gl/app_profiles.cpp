@@ -31,6 +31,7 @@ struct ProfileEntry {
     const char* extraExtensions = nullptr;
     const char* glslQuirks = nullptr;       // METALGLDRV_GLSL_QUIRKS syntax
     uint64_t vramCapMB = 0;                 // cap of the reported video memory
+    bool shareFramebuffers = false;         // AppProfile::shareFramebuffers
 };
 
 // The table. Keep entries minimal: every option here is a deviation from conformant behaviour for
@@ -41,11 +42,13 @@ const ProfileEntry kProfiles[] = {
     // AMD path is the one whose GL calls and shaders were checked against this driver (an apitrace from an
     // AMD driver). The cap keeps its streaming budgets in the range of a discrete GPU. Its depth pre-pass is
     // followed by GL_EQUAL tests from other programs without "invariant" (radv forces invariant geometry).
+    // It creates and attaches its framebuffers in one context and renders with them in another.
     {.name = "doom2016",
      .exes = "DOOMx64.exe",
      .vendor = "ATI Technologies Inc.",
      .glslQuirks = "vs_position_always_invariant",
-     .vramCapMB = 8192},
+     .vramCapMB = 8192,
+     .shareFramebuffers = true},
 };
 
 std::vector<std::string> splitList(const char* s) {
@@ -113,6 +116,7 @@ std::string summary(const AppProfile& p) {
     else if (p.vramCapMB) s += ", VRAM at most " + std::to_string(p.vramCapMB) + " MB";
     std::string q = quirksSummary(p.glsl);
     if (!q.empty()) s += ", GLSL quirks [" + q + "]";
+    if (p.shareFramebuffers) s += ", framebuffers shared between contexts";
     if (p.logUnsupported) s += ", logging unsupported features (dumps in " + p.dumpDir + ")";
     return s;
 }
@@ -170,6 +174,7 @@ AppProfile resolveAppProfile(const std::string& exe, const char* (*env)(const ch
         p.extraExtensions = splitList(entry->extraExtensions);
         for (const auto& q : splitList(entry->glslQuirks)) applyQuirk(p.glsl, q);
         p.vramCapMB = entry->vramCapMB;
+        p.shareFramebuffers = entry->shareFramebuffers;
     }
     auto str = [&](const char* var, std::string& out) {
         const char* v = env(var);
@@ -186,6 +191,7 @@ AppProfile resolveAppProfile(const std::string& exe, const char* (*env)(const ch
         for (auto& x : splitList(v)) p.extraExtensions.push_back(x);
     }
     if (const char* v = env("METALGLDRV_VRAM_MB"); v && *v) p.vramMB = strtoull(v, nullptr, 10);
+    if (const char* v = env("METALGLDRV_SHARE_FRAMEBUFFERS"); v && *v) p.shareFramebuffers = strcmp(v, "0") != 0;
     if (const char* v = env("METALGLDRV_GLSL_QUIRKS")) {
         for (auto& q : splitList(v))
             if (!applyQuirk(p.glsl, q)) MGL_WARN("METALGLDRV_GLSL_QUIRKS: unknown quirk '%s'", q.c_str());

@@ -478,6 +478,8 @@ public:
     NameSpace<Sampler> samplers;
     NameSpace<Object> shaderPrograms;  // ShaderObj or ProgramObj share one namespace
     std::unordered_map<SyncObj*, Ref<SyncObj>> syncs;
+    // Framebuffers, when the app profile shares them (AppProfile::shareFramebuffers); per context otherwise.
+    NameSpace<Framebuffer> framebuffers;
     // Display lists (compat) live here too in the future.
     ShaderObj* shader(GLuint n) { return dynamic_cast<ShaderObj*>(shaderPrograms.get(n)); }
     ProgramObj* program(GLuint n) { return dynamic_cast<ProgramObj*>(shaderPrograms.get(n)); }

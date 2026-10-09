@@ -134,6 +134,9 @@ struct DebugMessage {
     std::string text;
 };
 
+// The framebuffer namespace of a new context: `own`, or the share group's (AppProfile::shareFramebuffers).
+NameSpace<Framebuffer>& framebufferNames(ShareGroup* share, NameSpace<Framebuffer>& own);
+
 class Context : public RefCounted {
 public:
     Context(Ref<ShareGroup> share, int major, int minor, bool core, bool debug, bool forwardCompat, bool robust, bool noError);
@@ -195,7 +198,10 @@ public:
 
     // per-context namespaces
     NameSpace<VertexArray> vaos;
-    NameSpace<Framebuffer> framebuffers;
+    // Framebuffer names: this context's own, or the share group's when the app profile shares them
+    // (AppProfile::shareFramebuffers).
+    NameSpace<Framebuffer> ownFramebuffers;
+    NameSpace<Framebuffer>& framebuffers = framebufferNames(share.get(), ownFramebuffers);
     NameSpace<Query> queries;
     NameSpace<TransformFeedbackObj> xfbs;
     NameSpace<ProgramPipelineObj> pipelines;
@@ -412,10 +418,17 @@ const std::vector<std::string>& mglDeviceGlslExtensions(const DeviceCaps& caps);
 // MGL_CTX on the stack, so an entry point that calls others reports its own name (plain wrappers without
 // MGL_CTX, such as glDrawElements, report the entry point implementing them).
 extern thread_local const char* t_apiName;
+// METALGLDRV_TRACE_CALLS=1: per-entry-point call counts logged every 5 s from a background thread
+// (stats.mm), also when the app makes no frames; one branch per call when off.
+extern bool g_traceCalls;
+void traceCall(const char* name);
 struct ApiName {
     const char* saved;
     explicit ApiName(const char* name) : saved(t_apiName) {
-        if (!*saved) t_apiName = name;
+        if (!*saved) {
+            t_apiName = name;
+            if (g_traceCalls) traceCall(name);
+        }
     }
     ~ApiName() { t_apiName = saved; }
 };

@@ -22,7 +22,9 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
 #include <mach-o/loader.h>
+#include <mach/mach.h>
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -140,6 +142,42 @@ void* replacementResolver(const char* symbol, const char* library, void* current
     return nullptr;
 }
 
+// winemac.so's macdrv_context_create drops the share context when one side is a core context and the other
+// a compatibility one ("Cannot share core context with compatibility context"), a limit of Apple's OpenGL.
+// win32u shares every application context with an internal core context, so under this driver's 4.6
+// compatibility contexts nothing would be shared (DOOM (2016) renders black: Wine's opengl32 then reports
+// "broken display list sharing"). This driver shares across profiles, so the check's conditional jump is made
+// unconditional. Matched by its bytes in CrossOver 26/27's winemac.so (`cmp [r15], r13d; jz +0x30;
+// test byte [rip+...], 4`); other builds are left alone. METALGLDRV_WINE_SHARE_PATCH=0 turns it off.
+void patchWinemacShareCheck(const mach_header* mh, const char* path) {
+    if (!envFlag("METALGLDRV_WINE_SHARE_PATCH", true) || mh->magic != MH_MAGIC_64) return;
+    unsigned long size = 0;
+    uint8_t* text = getsectiondata((const mach_header_64*)mh, "__TEXT", "__text", &size);
+    if (!text) return;
+    static const uint8_t pat[] = {0x45, 0x39, 0x2f, 0x74, 0x30, 0xf6, 0x05};
+    uint8_t* hit = nullptr;
+    int hits = 0;
+    for (unsigned long i = 0; i + sizeof pat <= size; i++)
+        if (text[i] == pat[0] && memcmp(text + i, pat, sizeof pat) == 0) {
+            hit = text + i;
+            hits++;
+        }
+    if (hits != 1) {
+        MGL_INFO("CrossOver/Wine: %s: share check not found (%d matches); core/compatibility contexts won't share", path, hits);
+        return;
+    }
+    uint8_t* jz = hit + 3;
+    vm_address_t page = (vm_address_t)jz & ~(vm_address_t)(vm_page_size - 1);
+    kern_return_t kr = vm_protect(mach_task_self(), page, vm_page_size, false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        MGL_WARN("CrossOver/Wine: %s: can't patch the share check (vm_protect %d)", path, kr);
+        return;
+    }
+    *jz = 0xeb;  // jz rel8 -> jmp rel8
+    vm_protect(mach_task_self(), page, vm_page_size, false, VM_PROT_READ | VM_PROT_EXECUTE);
+    MGL_INFO("CrossOver/Wine: %s: core and compatibility contexts may share", path);
+}
+
 void onWinemac(const mach_header* mh, intptr_t slide, const char* path) {
     static std::once_flag once;
     std::call_once(once, [&] {
@@ -150,6 +188,7 @@ void onWinemac(const mach_header* mh, intptr_t slide, const char* path) {
         }
         MGL_INFO("CrossOver/Wine: %s: dlopen rebound (%d slot%s); OpenGL.framework -> %s", path, n, n == 1 ? "" : "s",
                  macos::ownPath());
+        patchWinemacShareCheck(mh, path);
         macos::installNSOpenGLHooks();
     });
 }
@@ -204,7 +243,7 @@ __attribute__((constructor)) void macosInit() {
     // May run before log.mm's initializer; same value it computes.
     g_logLevel = envInt("METALGLDRV_LOG", LOG_INFO);
     g_logUnsupported = envFlag("METALGLDRV_LOG_UNSUPPORTED");
-    g_statsEnabled = envFlag("METALGLDRV_STATS", false);
+    statsRefreshFromEnv();
     macos::ownPath();  // resolve (dladdr) now, outside any dyld callback
     if (envFlag("METALGLDRV_HOOK_NSOPENGL")) macos::activateReplacement("METALGLDRV_HOOK_NSOPENGL");
     // Called for every image already loaded (winemac.so when it is what loaded us)
@@ -423,7 +462,7 @@ void copyPropertiesToEnv(const JavaSystem& js, const char* who) {
     }
     g_logLevel = envInt("METALGLDRV_LOG", LOG_INFO);
     g_logUnsupported = envFlag("METALGLDRV_LOG_UNSUPPORTED");
-    g_statsEnabled = envFlag("METALGLDRV_STATS", false);
+    statsRefreshFromEnv();
 }
 
 bool g_setLibname = true;

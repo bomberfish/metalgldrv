@@ -327,7 +327,7 @@ static void texSubImage(Context* ctx, Texture* t, GLenum target, GLint level, GL
         return;
     }
     const TexImageLevel& L = t->levels[face][level];
-    if (!L.defined()) return ctx->setError(GL_INVALID_OPERATION, "level %d not defined", level);
+    if (!L.defined()) return ctx->setError(GL_INVALID_OPERATION, "texture %u (target 0x%x) level %d not defined", t->name, t->target, level);
     if (x < 0 || y < 0 || z < 0 || x + w > L.width || y + h > L.height || z + d > L.depth) return ctx->setError(GL_INVALID_VALUE);
     if (GLenum e = texImageFormatError(L.fmt, format, type, t->target)) return ctx->setError(e);
     if (L.fmt->comp == Comp::Compressed) {
@@ -1528,6 +1528,7 @@ static void copyTexSubImage(Context* ctx, Texture* t, GLenum target, GLint level
 }
 
 bool mglFramebufferComplete(Context* ctx, Framebuffer* fb, GLenum* status);  // api_fbo.mm
+const char* framebufferIncompleteReason(Context* ctx, Framebuffer* fb);  // api_fbo.mm
 
 static bool readFbMultisampled(Framebuffer* fb) {
     if (fb->isDefault) return fb->surface && fb->surface->samples > 1;
@@ -1553,7 +1554,8 @@ static void copySubImageChecked(Context* ctx, Texture* t, GLenum target, int dim
     if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
     Framebuffer* fb = ctx->readFb.get();
     GLenum status;
-    if (!fb || !mglFramebufferComplete(ctx, fb, &status)) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+    if (!fb || !mglFramebufferComplete(ctx, fb, &status))
+        return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
     if (readFbMultisampled(fb)) return ctx->setError(GL_INVALID_OPERATION, "copy: multisampled read framebuffer");
     if (dsa && tt == GL_TEXTURE_CUBE_MAP) {
         if (zo < 0 || zo > 5) return ctx->setError(GL_INVALID_VALUE);
@@ -1580,7 +1582,8 @@ static void copyTexImage(Context* ctx, GLenum target, GLint level, GLenum intern
     if (isCubeFace(target) && w != h) return ctx->setError(GL_INVALID_VALUE);
     Framebuffer* fb = ctx->readFb.get();
     GLenum status;
-    if (!fb || !mglFramebufferComplete(ctx, fb, &status)) return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION);
+    if (!fb || !mglFramebufferComplete(ctx, fb, &status))
+        return ctx->setError(GL_INVALID_FRAMEBUFFER_OPERATION, "%s", framebufferIncompleteReason(ctx, fb));
     if (readFbMultisampled(fb)) return ctx->setError(GL_INVALID_OPERATION, "copy: multisampled read framebuffer");
     bool depthReq = internalformat == GL_DEPTH_COMPONENT || internalformat == GL_DEPTH_COMPONENT16 || internalformat == GL_DEPTH_COMPONENT24 ||
                     internalformat == GL_DEPTH_COMPONENT32 || internalformat == GL_DEPTH_COMPONENT32F;

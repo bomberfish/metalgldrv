@@ -547,12 +547,12 @@ API void APIENTRY glLinkProgram(GLuint program) {
         for (auto& x : rf.bufferVariables) x.name.clear();
         for (auto& x : rf.xfbVaryings) x.name.clear();
     }
-    // METALGLDRV_DUMP_GLSL=<substring>: log the sources of linked programs containing it.
+    // METALGLDRV_DUMP_GLSL=<substring>: log the sources of linked programs containing it (#<n>: program n).
     if (const char* dump = getenv("METALGLDRV_DUMP_GLSL")) {
         std::string all;
         for (auto& sh : p->attached)
             for (auto& src : sh->sources) all += src;
-        if (all.find(dump) != std::string::npos)
+        if (dump[0] == '#' ? strtoul(dump + 1, nullptr, 10) == p->name : all.find(dump) != std::string::npos)
             for (auto& sh : p->attached) {
                 std::string src;
                 for (auto& part : sh->sources) src += part;

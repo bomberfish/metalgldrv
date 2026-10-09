@@ -1,5 +1,5 @@
 // Field debugging: METALGLDRV_CAPTURE_PROG=<program>[,<program>...] saves every texture
-// bound to that program's samplers as $HOME/Documents/capture_p<prog>_<sampler>.png at its
+// bound to that program's samplers as $METALGLDRV_DUMP_DIR (else $HOME/Documents)/capture_p<prog>_<sampler>.png at its
 // next draw after each METALGLDRV_CAPTURE interval (default 30 s). Values are clamped to 8 bits.
 #import <ImageIO/ImageIO.h>
 #include <chrono>
@@ -78,7 +78,8 @@ void debugCaptureBeforeDraw(Context* ctx, ProgramObj* prog) {
             }
         return s;
     }();
-    if (progs.empty() || !progs.count(prog->name)) return;
+    // Compatibility contexts draw with a derived program; match the one the app bound.
+    if (progs.empty() || !(progs.count(prog->name) || (ctx->program && progs.count(ctx->program->name)))) return;
     static const double every = [] { const char* e = getenv("METALGLDRV_CAPTURE"); return e ? atof(e) : 30.0; }();
     static std::map<GLuint, std::chrono::steady_clock::time_point> last;
     auto now = std::chrono::steady_clock::now();
@@ -89,7 +90,8 @@ void debugCaptureBeforeDraw(Context* ctx, ProgramObj* prog) {
         return;
     }
     last[prog->name] = now;
-    std::string dir = std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/";
+    const char* dd = getenv("METALGLDRV_DUMP_DIR");
+    std::string dir = dd && *dd ? std::string(dd) + "/" : std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/";
     const glsl::Reflection& r = prog->refl;
     for (size_t i = 0; i < r.slots.size(); i++) {
         const glsl::Slot& s = r.slots[i];
@@ -98,7 +100,11 @@ void debugCaptureBeforeDraw(Context* ctx, ProgramObj* prog) {
         int ti = texTargetIndex(s.textureTarget);
         if (unit < 0 || unit >= kMaxTextureUnits || ti < 0) continue;
         Texture* t = ctx->textures[unit][ti].get();
-        if (!t || !t->mtl) continue;
+        if (!t || !t->mtl) {
+            MGL_INFO("capture prog %u sampler %s: unit %d has %s %u", prog->name, r.uniforms[s.index].name.c_str(), unit,
+                     !t ? "no texture" : "a texture without storage", t ? t->name : 0);
+            continue;
+        }
         std::string name = r.uniforms[s.index].name;
         for (auto& c : name)
             if (c == '[' || c == ']' || c == '.') c = '_';

@@ -551,8 +551,8 @@ CGL_EXPORT CGLError CGLCreateContext(CGLPixelFormatObj pix, CGLContextObj share,
         g_contexts.insert(c);
     }
     *ctx = (CGLContextObj)c;
-    MGL_INFO("CGL: created GL 4.6 %s context %p (pixel format %s, share %p)", core ? "core" : "compatibility", c,
-             profileName(pf->profile), share);
+    MGL_INFO("CGL: created GL 4.6 %s context %p (pixel format %s, share %p; GL context %p, share group %p)", core ? "core" : "compatibility",
+             c, profileName(pf->profile), share, (void*)c->ctx.get(), (void*)group.get());
     return kCGLNoError;
 }
 
