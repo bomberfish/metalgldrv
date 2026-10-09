@@ -86,7 +86,7 @@ def main():
         lines.append(f"| {k} | {r['commit']}{'+' if r['dirty'] == '1' else ''} | {r['date']} | {r['total']} | {r['pass']} | "
                      f"{r['not_supported']} | {r['fail']} | {int(r['crash']) + int(r['timeout'])} | "
                      f"{int(r['quality_warning']) + int(r['compatibility_warning'])} | {r['pass_or_not_supported_pct']} | "
-                     f"[{r['report_dir']}]({r['report_dir']}/results.csv) |")
+                     f"[{os.path.basename(r['report_dir'])}]({os.path.basename(r['report_dir'])}/results.csv) |")
     open(os.path.join(REPORTS, "LATEST.md"), "w").write("\n".join(lines) + "\n")
     print(f"saved {dst}: {passed}/{total} pass, {ns} not supported, {st['Fail']} fail")
 
