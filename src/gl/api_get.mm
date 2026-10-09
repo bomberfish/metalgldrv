@@ -1,5 +1,6 @@
 // glGet* state queries, glGetString(i).
 #import "gl/texture.h"
+#include "mgl_version.h"
 #include <cmath>
 #include "gl/app_profile.h"
 #include "util/log.h"
@@ -755,7 +756,8 @@ API const GLubyte* APIENTRY glGetString(GLenum name) {
     case GL_RENDERER: return (const GLubyte*)(app.renderer.empty() ? rendererString() : app.renderer.c_str());
     case GL_VERSION:
         if (!app.version.empty()) return (const GLubyte*)app.version.c_str();
-        return (const GLubyte*)(ctx->coreProfile ? "4.6.0 Core Profile metalgldrv 0.1" : "4.6.0 Compatibility Profile metalgldrv 0.1");
+        return (const GLubyte*)(ctx->coreProfile ? "4.6.0 Core Profile metalgldrv " MGL_VERSION_STRING
+                                                 : "4.6.0 Compatibility Profile metalgldrv " MGL_VERSION_STRING);
     case GL_SHADING_LANGUAGE_VERSION: return (const GLubyte*)(app.glslVersion.empty() ? "4.60 metalgldrv" : app.glslVersion.c_str());
     case GL_EXTENSIONS:
         // Removed from core profiles (use glGetStringi). Clients whose GLFW shim still calls this,

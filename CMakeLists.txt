@@ -22,13 +22,12 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(GEN_DIR ${CMAKE_BINARY_DIR}/gen)
 
-# Driver version (git describe at configure time), reported by the macOS frontend.
-execute_process(COMMAND git describe --tags --always --dirty WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-  OUTPUT_VARIABLE MGL_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-if(NOT MGL_VERSION)
-  set(MGL_VERSION unknown)
-endif()
-configure_file(${CMAKE_SOURCE_DIR}/src/util/version.h.in ${GEN_DIR}/mgl_version.h @ONLY)
+# Driver version (git describe), regenerated on every build (cmake/version.cmake) so GL_VERSION
+# and the macOS frontend name the commit the driver was built from.
+add_custom_target(mgl_version
+  COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${GEN_DIR}/mgl_version.h -P ${CMAKE_SOURCE_DIR}/cmake/version.cmake
+  BYPRODUCTS ${GEN_DIR}/mgl_version.h
+  COMMENT "Driver version from git describe")
 add_custom_command(
   OUTPUT ${GEN_DIR}/glapi.h ${GEN_DIR}/gl_stubs.cpp ${GEN_DIR}/gl_procs.cpp
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen_glapi.py ${CMAKE_SOURCE_DIR}/registry/gl.xml ${GEN_DIR}
@@ -67,6 +66,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   set_source_files_properties(${CMAKE_SOURCE_DIR}/src/macos/nsgl.mm PROPERTIES COMPILE_OPTIONS "-fno-objc-arc")
 endif()
 add_library(metalgldrv SHARED ${DRV_SOURCES} ${GEN_DIR}/gl_stubs.cpp ${GEN_DIR}/gl_procs.cpp)
+add_dependencies(metalgldrv mgl_version)
 target_include_directories(metalgldrv PRIVATE src ${GEN_DIR} include)
 target_link_libraries(metalgldrv PRIVATE mglsl "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework CoreGraphics" "-framework ImageIO" "-framework MetalFX")
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
