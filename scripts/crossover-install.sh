@@ -46,6 +46,15 @@ run() {
     fi
 }
 
+# Replaces DST with SRC as a new file (new inode) via a temporary sibling and rename: macOS caches
+# code signatures per vnode, so overwriting signed code in place makes it fail to load ("code
+# signature supplement failed" under Rosetta), and processes that have it mapped would see it change.
+replace_file() {
+    local src="$1" dst="$2" tmp="$2.metalgldrv-new.$$"
+    run cp -p "$src" "$tmp"
+    run mv -f "$tmp" "$dst"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --app) APP="$2"; shift 2 ;;
@@ -110,7 +119,7 @@ if [[ $UNINSTALL == 1 ]]; then
         say "winemac.so is already the original"
     else
         say "restoring winemac.so from $BACKUP"
-        run cp -p "$BACKUP" "$WINEMAC"
+        replace_file "$BACKUP" "$WINEMAC"
     fi
     run rm -f "$BACKUP"
     say "uninstalled. $TARGET is left in place (delete it if nothing else uses it)."
@@ -150,7 +159,7 @@ fi
 
 say "installing driver: $TARGET"
 run mkdir -p "$DEST"
-run cp -f "$DYLIB" "$TARGET"
+replace_file "$DYLIB" "$TARGET"
 run codesign -f -s - "$TARGET"
 
 if [[ ! -f "$BACKUP" ]]; then
@@ -169,7 +178,7 @@ run codesign -f -s - "$tmp/winemac.so"
 if [[ $DRY == 0 ]]; then
     [[ "$(our_dep "$tmp/winemac.so")" == "$TARGET" ]] || die "patched winemac.so doesn't link $TARGET; not installing it"
 fi
-run cp -f "$tmp/winemac.so" "$WINEMAC"
+replace_file "$tmp/winemac.so" "$WINEMAC"
 
 if [[ $DRY == 0 ]]; then
     say "done. winemac.so now links:"
