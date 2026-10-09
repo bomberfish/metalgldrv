@@ -305,8 +305,26 @@ BACKING_CONV(view_pointToBacking, NSPoint)
 BACKING_CONV(view_pointFromBacking, NSPoint)
 #undef BACKING_CONV
 
+// The color space the layer's pixels are tagged with. Apple's NSOpenGL drawables aren't
+// color matched: their pixels go to the display as they are, and games rely on it (e.g. Iris
+// shaders' "Display P3" output for wide-gamut Macs). Tag the layer with the screen's own space
+// to match; an untagged layer would be matched from sRGB and look washed out.
+// METALGLDRV_COLORSPACE=srgb|displayp3|none overrides ("display", the default, follows the screen).
+CGColorSpaceRef layerColorSpace(NSView* view) {
+    static const char* mode = [] {
+        const char* v = getenv("METALGLDRV_COLORSPACE");
+        return v && *v ? v : "display";
+    }();
+    if (!strcmp(mode, "none")) return nullptr;
+    if (!strcmp(mode, "srgb")) return CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    if (!strcmp(mode, "displayp3")) return CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+    NSScreen* screen = view.window.screen ?: NSScreen.mainScreen;
+    CGColorSpaceRef cs = screen.colorSpace.CGColorSpace;
+    return cs ? CGColorSpaceRetain(cs) : nullptr;
+}
+
 // Lays the view's CAMetalLayer over the view: its bounds, at the backing scale when the
-// view wants a best-resolution surface. Main thread.
+// view wants a best-resolution surface, tagged with the screen's color space. Main thread.
 void layoutViewLayer(NSView* view, CAMetalLayer* layer) {
     CALayer* parent = view.layer;
     if (!parent) return;
@@ -320,6 +338,9 @@ void layoutViewLayer(NSView* view, CAMetalLayer* layer) {
     [CATransaction setDisableActions:YES];
     if (!CGRectEqualToRect(layer.frame, parent.bounds)) layer.frame = parent.bounds;
     if (layer.contentsScale != scale) layer.contentsScale = scale;
+    CGColorSpaceRef cs = layerColorSpace(view);
+    if (!(cs && layer.colorspace && CFEqual(cs, layer.colorspace)) && cs != layer.colorspace) layer.colorspace = cs;
+    if (cs) CGColorSpaceRelease(cs);
     [CATransaction commit];
 }
 
