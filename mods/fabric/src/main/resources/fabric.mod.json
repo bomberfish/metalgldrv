@@ -10,11 +10,16 @@
   },
   "environment": "client",
   "entrypoints": {
-    "preLaunch": ["ca.bomberfish.metalgldrv.fabric.MetalGLDrvPreLaunch"]
+    "preLaunch": ["ca.bomberfish.metalgldrv.fabric.MetalGLDrvPreLaunch"],
+    "modmenu": ["ca.bomberfish.metalgldrv.fabric.ModMenuIntegration"]
   },
   "mixins": ["metalgldrv.mixins.json"],
   "depends": {
     "fabricloader": ">=0.14.0",
     "minecraft": "*"
+  },
+  "suggests": {
+    "modmenu": "*",
+    "cloth-config": "*"
   }
 }

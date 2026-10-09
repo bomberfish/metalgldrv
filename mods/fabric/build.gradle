@@ -54,6 +54,15 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+// Compile-time stubs of Mod Menu's API (src/stubs): the real classes come from Mod Menu at run time, and
+// its actual jar would drag Minecraft classes into the compile. Not packaged.
+sourceSets {
+    stubs
+}
+dependencies {
+    compileOnly sourceSets.stubs.output
+}
+
 def nativesDir = layout.buildDirectory.dir('natives')
 
 // Copies the universal dylib into the resources (natives/macos/) with its SHA-256.
