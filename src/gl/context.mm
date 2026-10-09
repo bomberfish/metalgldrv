@@ -100,6 +100,19 @@ Context::~Context() {
 
 thread_local const char* t_apiName = "";
 
+static const char* errorName(GLenum e) {
+    switch (e) {
+    case GL_INVALID_ENUM: return "GL_INVALID_ENUM in";
+    case GL_INVALID_VALUE: return "GL_INVALID_VALUE in";
+    case GL_INVALID_OPERATION: return "GL_INVALID_OPERATION in";
+    case GL_INVALID_FRAMEBUFFER_OPERATION: return "GL_INVALID_FRAMEBUFFER_OPERATION in";
+    case GL_OUT_OF_MEMORY: return "GL_OUT_OF_MEMORY in";
+    case GL_STACK_OVERFLOW: return "GL_STACK_OVERFLOW in";
+    case GL_STACK_UNDERFLOW: return "GL_STACK_UNDERFLOW in";
+    default: return "GL error in";
+    }
+}
+
 void Context::setError(GLenum e, const char* fmt, ...) {
     if (error == GL_NO_ERROR) error = e;
     char buf[512];
@@ -123,7 +136,12 @@ void Context::setError(GLenum e, const char* fmt, ...) {
         int n = backtrace(frames, 6);
         if (n > 1) backtrace_symbols_fd(frames + 1, n - 1, 2);
     }
-    if (debugOutput) debugMessage(GL_DEBUG_SOURCE_API, GL_DEBUG_TYPE_ERROR, e, GL_DEBUG_SEVERITY_HIGH, buf[0] ? buf : "GL error");
+    if (debugOutput) {
+        // Name the entry point: apps (Minecraft/Iris) log these messages, often as the only trace.
+        char msg[640];
+        snprintf(msg, sizeof msg, "%s %s%s%s", errorName(e), t_apiName[0] ? t_apiName : "GL call", buf[0] ? ": " : "", buf);
+        debugMessage(GL_DEBUG_SOURCE_API, GL_DEBUG_TYPE_ERROR, e, GL_DEBUG_SEVERITY_HIGH, msg);
+    }
 }
 
 static uint64_t debugKey(GLenum source, GLenum type, GLenum severity) {
