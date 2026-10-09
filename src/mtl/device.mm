@@ -262,6 +262,8 @@ void Device::commitResidencyLocked() {
     @autoreleasepool {
         [residency commit];
     }
+    pendingResidentBytes_ = 0;
+    pendingResidentCount_ = 0;
     if (g_hitchMs > 0) hitchCompile("residency commit", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     residencyDirty_ = false;
 }
@@ -270,6 +272,11 @@ void Device::makeResident(id<MTLAllocation> a) {
     std::lock_guard<std::mutex> g(mutex_);
     [residency addAllocation:a];
     residencyDirty_ = true;
+    // Commit on the allocating thread once a lot is pending: a streaming thread creating hundreds of MB of
+    // textures would otherwise leave the whole commit (making them resident) to the next submit on the render
+    // thread, a stall of 100+ ms.
+    pendingResidentBytes_ += a.allocatedSize;
+    if (++pendingResidentCount_ >= 256 || pendingResidentBytes_ >= (64u << 20)) commitResidencyLocked();
 }
 
 void Device::releaseAfter(id<MTLAllocation> a, uint64_t serial) {

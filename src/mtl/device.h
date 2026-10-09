@@ -187,6 +187,7 @@ private:
     std::set<uint64_t> completedAbove_;   // completed serials > watermark_
     std::set<uint64_t> submitted_;        // submitted, not complete
     bool residencyDirty_ = false;
+    uint64_t pendingResidentBytes_ = 0, pendingResidentCount_ = 0;  // added since the last commit
     void commitResidencyLocked();
     bool isCompleteLocked(uint64_t serial) const {
         return serial <= watermark_ || completedAbove_.count(serial);
