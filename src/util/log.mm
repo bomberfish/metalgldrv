@@ -36,13 +36,19 @@ void logf(int level, const char* fmt, ...) {
     static const char* tags[] = {"E", "W", "I", "D", "T"};
     fprintf(stderr, "[metalgldrv %s] %s\n", tags[level], buf);
     // METALGLDRV_LOG_FILE=<path> (or "documents" for $HOME/Documents/metalgldrv.log)
-    static FILE* lf = [] () -> FILE* {
-        const char* p = getenv("METALGLDRV_LOG_FILE");
-        if (!p || !*p) return nullptr;
+    // Opened on the first message after the variable appears: the Fabric mod / JNI_OnLoad set it
+    // from Java properties after the driver has already logged.
+    static std::mutex lfMutex;
+    std::lock_guard<std::mutex> lfLock(lfMutex);
+    static FILE* lf = nullptr;
+    static std::string lfPath;
+    if (const char* p = getenv("METALGLDRV_LOG_FILE"); p && *p && lfPath != p) {
+        lfPath = p;
         std::string path = p;
         if (path == "documents") path = std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/metalgldrv.log";
-        return fopen(path.c_str(), "w");
-    }();
+        if (lf) fclose(lf);
+        lf = fopen(path.c_str(), "w");
+    }
     if (lf) {
         fprintf(lf, "[%s] %s\n", tags[level], buf);
         fflush(lf);

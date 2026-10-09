@@ -2748,11 +2748,13 @@ static bool validateDraw(Context* ctx, GLenum mode) {
     }
     bool hasTess = prog && (prog->refl.stageMask & (1u << (int)glsl::Stage::TessEval));
     if (mode == GL_PATCHES && !hasTess) {
-        ctx->setError(GL_INVALID_OPERATION);
+        ctx->setError(GL_INVALID_OPERATION, "GL_PATCHES draw without a tessellation evaluation shader (program %u, stages 0x%x)",
+                      prog ? prog->name : 0, prog ? prog->refl.stageMask : 0);
         return false;
     }
     if (hasTess && mode != GL_PATCHES) {
-        ctx->setError(GL_INVALID_OPERATION);
+        ctx->setError(GL_INVALID_OPERATION, "program %u has tessellation shaders (stages 0x%x) but the draw mode is 0x%x, not GL_PATCHES",
+                      prog->name, prog->refl.stageMask, mode);
         return false;
     }
     if (prog) {
