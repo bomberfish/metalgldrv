@@ -131,14 +131,17 @@ expect "disabled by -Dmetalgldrv.enabled"
 expect "prop metalgldrv.activation=null$"
 done_case
 
-# 6-9. Conflicts skip activation; force=true overrides.
+# 6-9. Conflicts skip activation; force=true overrides. The libraries must exist: libname
+#      arguments pointing at missing files are stale and ignored (case 9b).
+OLD_GL="$WORK/old-mesa-libGL.dylib"; OLD_GLFW="$WORK/custom-libglfw.dylib"
+touch "$OLD_GL" "$OLD_GLFW"
 CONFIG_TEXT=""
-run "conflict: -Dorg.lwjgl.opengl.libname" -- -Dorg.lwjgl.opengl.libname=/old/mesa/libGL.dylib
-expect "not activating: found -Dorg.lwjgl.opengl.libname=/old/mesa/libGL.dylib"
+run "conflict: -Dorg.lwjgl.opengl.libname" -- -Dorg.lwjgl.opengl.libname="$OLD_GL"
+expect "not activating: found -Dorg.lwjgl.opengl.libname=$OLD_GL"
 expect "prop metalgldrv.activation=null$"
-expect "prop org.lwjgl.opengl.libname=/old/mesa/libGL.dylib$"
+expect "prop org.lwjgl.opengl.libname=$OLD_GL$"
 done_case
-run "conflict: -Dorg.lwjgl.glfw.libname" -- -Dorg.lwjgl.glfw.libname=/custom/libglfw.dylib
+run "conflict: -Dorg.lwjgl.glfw.libname" -- -Dorg.lwjgl.glfw.libname="$OLD_GLFW"
 expect "not activating: found -Dorg.lwjgl.glfw.libname"
 expect "prop metalgldrv.activation=null$"
 done_case
@@ -147,8 +150,20 @@ expect "not activating: found mod 'vulkanmod'"
 expect "prop metalgldrv.activation=null$"
 done_case
 CONFIG_TEXT="force=true"
-run "force=true over -Dorg.lwjgl.opengl.libname" -- -Dorg.lwjgl.opengl.libname=/old/mesa/libGL.dylib
-expect "force=true: replacing org.lwjgl.opengl.libname=/old/mesa/libGL.dylib"
+run "force=true over -Dorg.lwjgl.opengl.libname" -- -Dorg.lwjgl.opengl.libname="$OLD_GL"
+expect "force=true: replacing org.lwjgl.opengl.libname=$OLD_GL"
+expect "prop metalgldrv.activation=jni$"
+expect "prop org.lwjgl.opengl.libname=$CACHED$"
+done_case
+
+# 9b. Stale libname arguments (files that no longer exist, e.g. an old home folder) are dropped
+#     with a warning and don't block activation.
+CONFIG_TEXT=""
+run "stale libname arguments ignored" -- -Dorg.lwjgl.opengl.libname=/Users/nobody-here/mesa/libGL.dylib \
+    -Dorg.lwjgl.egl.libname=/Users/nobody-here/mesa/libEGL.dylib -Dorg.lwjgl.glfw.libname=/Users/nobody-here/glfw/libglfw.3.dylib
+expect "ignoring -Dorg.lwjgl.opengl.libname=/Users/nobody-here/mesa/libGL.dylib: the file doesn't exist"
+expect "ignoring -Dorg.lwjgl.glfw.libname=/Users/nobody-here/glfw/libglfw.3.dylib: the file doesn't exist"
+reject "not activating"
 expect "prop metalgldrv.activation=jni$"
 expect "prop org.lwjgl.opengl.libname=$CACHED$"
 done_case

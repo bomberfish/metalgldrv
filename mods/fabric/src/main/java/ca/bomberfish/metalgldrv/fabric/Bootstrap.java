@@ -82,7 +82,15 @@ final class Bootstrap {
         List<String> conflicts = new ArrayList<>();
         for (String key : LWJGL_LIBNAME_KEYS) {
             String v = System.getProperty(key);
-            if (v != null) conflicts.add("-D" + key + "=" + v);
+            if (v == null) continue;
+            // A path that doesn't exist (e.g. left over from an old setup) can only make LWJGL fail to
+            // load the library and crash the game, so it isn't a real conflict: drop it.
+            if (Paths.get(v).isAbsolute() && !Files.exists(Paths.get(v))) {
+                Log.warn("ignoring -D" + key + "=" + v + ": the file doesn't exist (stale JVM argument; remove it from the launcher)");
+                System.clearProperty(key);
+                continue;
+            }
+            conflicts.add("-D" + key + "=" + v);
         }
         for (String id : CONFLICTING_MODS)
             if (isModLoaded.test(id)) conflicts.add("mod '" + id + "'");
