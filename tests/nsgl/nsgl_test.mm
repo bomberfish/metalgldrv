@@ -15,6 +15,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -81,7 +82,7 @@ void* jniEnv = jniTable;
 void* vm = vmTable;
 int notifyMode = -1, notifyEvent = -1;
 void (*vmInit)(void*, void*, void*) = nullptr;
-std::string setKey, setValue;
+std::map<std::string, std::string> props;  // System.setProperty calls
 bool haveProperty = false;
 
 int GetEnv(void* vm, void** penv, int version) {
@@ -111,8 +112,8 @@ void* CallStaticObjectMethod(void* env, void* cls, void* mid, ...) {
         const char* key = (const char*)va_arg(ap, void*);
         if (haveProperty && key && !strcmp(key, "org.lwjgl.opengl.libname")) r = strdup("/elsewhere/libGL.dylib");
     } else if (mid == (void*)2) {
-        setKey = (const char*)va_arg(ap, void*);
-        setValue = (const char*)va_arg(ap, void*);
+        std::string key = (const char*)va_arg(ap, void*);
+        props[key] = (const char*)va_arg(ap, void*);
     }
     va_end(ap);
     return r;
@@ -123,6 +124,8 @@ void ReleaseStringUTFChars(void* env, void* str, const char* chars) {}
 void DeleteLocalRef(void* env, void* obj) {}
 unsigned char ExceptionCheck(void* env) { return 0; }
 void ExceptionClear(void* env) {}
+int PushLocalFrame(void* env, int capacity) { return 0; }
+void* PopLocalFrame(void* env, void* result) { return result; }
 
 void init() {
     vmTable[6] = (void*)&GetEnv;
@@ -130,6 +133,8 @@ void init() {
     jvmtiTable[121] = (void*)&SetEventCallbacks;
     jniTable[6] = (void*)&FindClass;
     jniTable[17] = (void*)&ExceptionClear;
+    jniTable[19] = (void*)&PushLocalFrame;
+    jniTable[20] = (void*)&PopLocalFrame;
     jniTable[23] = (void*)&DeleteLocalRef;
     jniTable[113] = (void*)&GetStaticMethodID;
     jniTable[114] = (void*)&CallStaticObjectMethod;
@@ -151,14 +156,32 @@ static void testAgent(void* drv) {
     CHECK(vmInit != nullptr);
     if (!vmInit) return;
     vmInit(&jvmtiEnv, &jniEnv, nullptr);
-    printf("  agent: %s=%s\n", setKey.c_str(), setValue.c_str());
-    CHECK(setKey == "org.lwjgl.opengl.libname");
-    CHECK(setValue.find("libmetalgldrv.dylib") != std::string::npos);
+    std::string& libname = props["org.lwjgl.opengl.libname"];
+    printf("  agent: org.lwjgl.opengl.libname=%s, metalgldrv.activation=%s\n", libname.c_str(), props["metalgldrv.activation"].c_str());
+    CHECK(libname.find("libmetalgldrv.dylib") != std::string::npos);
+    CHECK(props["metalgldrv.activation"] == "agent");
+    CHECK(!props["metalgldrv.version"].empty());
     // An existing value is left alone.
-    setKey.clear();
+    props.clear();
     haveProperty = true;
     vmInit(&jvmtiEnv, &jniEnv, nullptr);
-    CHECK(setKey.empty());
+    CHECK(props.count("org.lwjgl.opengl.libname") == 0);
+    // JNI_OnLoad (System.load) with replacement mode already on: nothing new, JNI 1.8.
+    haveProperty = false;
+    props.clear();
+    vmTable[6] = (void*)+[](void* vm, void** penv, int version) -> int {
+        *penv = &jniEnv;
+        return version == 0x00010008 ? 0 : -3;
+    };
+    auto jniOnLoad = (int (*)(void*, void*))dlsym(drv, "JNI_OnLoad");
+    CHECK(jniOnLoad != nullptr);
+    if (!jniOnLoad) return;
+    CHECK(jniOnLoad(&vm, nullptr) == 0x00010008);
+    CHECK(props["org.lwjgl.opengl.libname"].find("libmetalgldrv.dylib") != std::string::npos);
+    CHECK(props.count("metalgldrv.activation") == 0);  // the agent's report stands
+    props.clear();
+    CHECK(jniOnLoad(&vm, nullptr) == 0x00010008);  // once per image
+    CHECK(props.empty());
 }
 
 int main(int argc, char** argv) {

@@ -21,6 +21,14 @@ endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(GEN_DIR ${CMAKE_BINARY_DIR}/gen)
+
+# Driver version (git describe at configure time), reported by the macOS frontend.
+execute_process(COMMAND git describe --tags --always --dirty WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE MGL_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT MGL_VERSION)
+  set(MGL_VERSION unknown)
+endif()
+configure_file(${CMAKE_SOURCE_DIR}/src/util/version.h.in ${GEN_DIR}/mgl_version.h @ONLY)
 add_custom_command(
   OUTPUT ${GEN_DIR}/glapi.h ${GEN_DIR}/gl_stubs.cpp ${GEN_DIR}/gl_procs.cpp
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen_glapi.py ${CMAKE_SOURCE_DIR}/registry/gl.xml ${GEN_DIR}
@@ -64,7 +72,7 @@ target_link_libraries(metalgldrv PRIVATE mglsl "-framework Metal" "-framework Qu
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   target_link_libraries(metalgldrv PRIVATE "-framework UIKit")
 else()
-  target_link_libraries(metalgldrv PRIVATE "-framework AppKit")
+  target_link_libraries(metalgldrv PRIVATE "-framework AppKit" "-framework CoreVideo")
 endif()
 target_compile_options(metalgldrv PRIVATE -fvisibility=hidden -fobjc-arc -Wall -Wno-unused-parameter -Wno-unused-function)
 set_target_properties(metalgldrv PROPERTIES

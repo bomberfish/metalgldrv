@@ -7,3 +7,6 @@
 compile_commands.json
 /.claude/
 /build-rel/
+/dist/
+/mods/fabric/build/
+/mods/fabric/.gradle/

@@ -1,0 +1,100 @@
+// metalgldrv Fabric mod: a preLaunch entrypoint that loads the bundled universal
+// libmetalgldrv.dylib (see README.md). Plain Java against the Fabric Loader API; no
+// Loom, no Minecraft classes.
+//
+//   gradle jar  -Pdylib=/path/to/universal/libmetalgldrv.dylib   (default: ../../build-universal)
+//   gradle dist                                                  (also copies the jar to ../../dist)
+// mods/fabric/build.sh builds the dylib first and runs `gradle dist`.
+
+plugins {
+    id 'java'
+}
+
+def repoRoot = file('../..')
+
+// (A closure, not a method: script methods can't see the script's local variables.)
+def git = { String... args ->
+    try {
+        def r = providers.exec {
+            commandLine(['git', '-C', repoRoot.path] + args.toList())
+            ignoreExitValue = true
+        }
+        def text = r.standardOutput.asText.get().trim()
+        r.result.get().exitValue == 0 && text ? text : null
+    } catch (Exception ignored) {
+        null
+    }
+}
+
+// Driver version: what git describe says for the repo (the dylib reports its own at runtime too).
+def driverVersion = findProperty('driverVersion') ?: git('describe', '--tags', '--always', '--dirty') ?: 'unknown'
+// Mod version: -PmodVersion, else a tag-based describe (v1.2.3 -> 1.2.3), else 0.1.0+<commit>.
+version = findProperty('modVersion') ?: (driverVersion ==~ /v?\d+\.\d+.*/ ? driverVersion.replaceFirst(/^v/, '') : "0.1.0+${driverVersion}")
+group = 'ca.bomberfish.metalgldrv'
+
+def dylib = file(findProperty('dylib') ?: new File(repoRoot, 'build-universal/libmetalgldrv.dylib'))
+
+repositories {
+    maven { url = 'https://maven.fabricmc.net/' }
+    mavenCentral()
+}
+
+dependencies {
+    // The oldest loader the mod supports (fabric.mod.json: fabricloader >= 0.14).
+    compileOnly 'net.fabricmc:fabric-loader:0.14.21'
+    // Provided by Minecraft (1.18+) at runtime; the mod falls back to stderr without it.
+    compileOnly 'org.slf4j:slf4j-api:1.7.36'
+}
+
+// Java 17 bytecode: Minecraft 1.20.2 runs on Java 17.
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+    options.encoding = 'UTF-8'
+}
+
+def nativesDir = layout.buildDirectory.dir('natives')
+
+// Copies the universal dylib into the resources (natives/macos/) with its SHA-256.
+// Checks it has both slices, then signs the copy ad hoc: the linker only signs the
+// arm64 slice (arm64 code must be signed), and a full signature covers x86_64
+// (Rosetta JVMs) too. The jar stores the signed bytes unchanged.
+def prepareNatives = tasks.register('prepareNatives') {
+    inputs.file(dylib)
+    inputs.property('driverVersion', driverVersion)
+    inputs.property('modVersion', version)
+    outputs.dir(nativesDir)
+    doLast {
+        if (!dylib.isFile()) throw new GradleException("no dylib at ${dylib}; build it (mods/fabric/build.sh) or pass -Pdylib=...")
+        def archs = providers.exec { commandLine 'lipo', '-archs', dylib.path }.standardOutput.asText.get().trim().split(/\s+/) as Set
+        if (!archs.containsAll(['arm64', 'x86_64'])) throw new GradleException("${dylib} has slices ${archs}; need arm64 and x86_64 (-DMGL_UNIVERSAL=ON)")
+        def out = nativesDir.get().dir('natives/macos').asFile
+        out.deleteDir()
+        out.mkdirs()
+        def target = new File(out, 'libmetalgldrv.dylib')
+        java.nio.file.Files.copy(dylib.toPath(), target.toPath())
+        providers.exec { commandLine 'codesign', '--force', '--sign', '-', target.path }.result.get()
+        ['arm64', 'x86_64'].each { a -> providers.exec { commandLine 'codesign', '--verify', '--strict', '--arch', a, target.path }.result.get() }
+        def sha = java.security.MessageDigest.getInstance('SHA-256').digest(target.bytes).encodeHex().toString()
+        new File(nativesDir.get().asFile, 'metalgldrv-build.properties').text =
+            "modVersion=${version}\ndriverVersion=${driverVersion}\nsha256=${sha}\n"
+        logger.lifecycle("bundled ${dylib} (${archs.join('+')}, signed ad hoc, sha256 ${sha.take(16)}..., driver ${driverVersion})")
+    }
+}
+
+sourceSets.main.resources.srcDir(nativesDir)
+
+tasks.named('processResources') {
+    dependsOn prepareNatives
+    inputs.property('version', version)
+    filesMatching('fabric.mod.json') { expand(version: version) }
+}
+
+tasks.named('jar') {
+    archiveFileName = "metalgldrv-fabric-${version}.jar"
+    manifest { attributes('Implementation-Title': 'metalgldrv-fabric', 'Implementation-Version': version) }
+}
+
+tasks.register('dist', Copy) {
+    from tasks.named('jar')
+    into new File(repoRoot, 'dist')
+}

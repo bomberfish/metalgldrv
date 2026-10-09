@@ -42,3 +42,12 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     MGL_FAKE_WINEMAC_PATH="$<TARGET_FILE:fake_winemac>")
   add_dependencies(winemodetest fake_winemac)
 endif()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # SDL 3's Cocoa GL backend (Minecraft 26.3+) on the replacement mode; takes the
+  # path of a libSDL3.dylib (LWJGL's lwjgl-sdl natives) as its argument.
+  add_executable(sdltest nsgl/sdl_test.mm)
+  target_link_libraries(sdltest PRIVATE "-framework Foundation")
+  target_compile_options(sdltest PRIVATE -fno-objc-arc)
+  target_compile_definitions(sdltest PRIVATE MGL_DYLIB_PATH="$<TARGET_FILE:metalgldrv>")
+  add_dependencies(sdltest metalgldrv)
+endif()

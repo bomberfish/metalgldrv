@@ -1,5 +1,29 @@
 # Minecraft on macOS with metalgldrv
 
+## Recommended: the Fabric mod
+
+For Fabric instances, use the mod in `mods/fabric` (see its
+[README](../mods/fabric/README.md)). Build it with `mods/fabric/build.sh`, put
+`dist/metalgldrv-fabric-<version>.jar` into the instance's `mods/` folder and remove
+the old JVM arguments and environment variables (below). It needs no JVM arguments,
+no custom GLFW and no launcher settings.
+
+The mod bundles the universal dylib and loads it from a Fabric `preLaunch`
+entrypoint. The driver's `JNI_OnLoad` then activates the same replacement as route B
+below. Settings go in `config/metalgldrv.properties`; `enabled=false` there, or
+`-Dmetalgldrv.enabled=false`, turns it off.
+
+The mod covers Minecraft 1.20.2 through 26.3 (LWJGL 3.3.2 to 3.4.3). That includes
+26.3, which opens its window with SDL 3 instead of GLFW. It doesn't cover LWJGL 2
+(1.12 and older), NeoForge/Forge (their early loading window comes before mods), or
+Macs without a Metal 4 GPU, where the driver steps aside. VulkanMod, or leftover
+`-Dorg.lwjgl.*.libname` flags, make it stand down with a warning.
+
+The two manual routes below remain for other setups: no Fabric, or a driver build
+you're debugging with JVM flags.
+
+## Manual routes
+
 Two ways to run Java Edition (LWJGL 3) on metalgldrv in Prism Launcher. Both use
 `libmetalgldrv.dylib` as LWJGL's OpenGL library; they differ in how GLFW gets a
 context:
@@ -112,11 +136,23 @@ What happens: the JVM loads the dylib before any Java code runs and calls
   `GL_VERSION` while creating the window) to metalgldrv;
 * sets `org.lwjgl.opengl.libname` to the dylib's own path when the VM is
   initialized (`System.setProperty`, before Minecraft's main runs), unless it is
-  already set. `-agentpath:...dylib=nolibname` skips that.
+  already set. `-agentpath:...dylib=nolibname` skips that. It also copies
+  `-Dmetalgldrv.<NAME>=value` JVM arguments into `METALGLDRV_<NAME>` environment
+  variables, unless those are already set.
+
+Minecraft 26.3 and later open the window with SDL 3 (LWJGL's `libSDL3.dylib`)
+instead of GLFW. SDL's Cocoa GL backend subclasses `NSOpenGLContext`, which the hooks
+cover. For vsync it points a `CVDisplayLink` at the context's display with
+`CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext`, which the driver also redirects
+in SDL's image: it uses the display of the context's window. `tests/nsgl/sdl_test.mm`
+(`sdltest /path/to/libSDL3.dylib`) runs that path on a hidden window.
+
+On a Mac without a Metal 4 GPU the agent logs `not activating (the app keeps Apple's
+OpenGL)` and does nothing.
 
 Expected log lines:
 
-    [metalgldrv I] system GL replacement on (JVMTI agent): /Users/fish/metalgldrv/build/libmetalgldrv.dylib
+    [metalgldrv I] system GL replacement on (JVMTI agent): metalgldrv <version>, /Users/fish/metalgldrv/build/libmetalgldrv.dylib
     [metalgldrv I] NSOpenGLContext / NSOpenGLPixelFormat now run on metalgldrv
     [metalgldrv I] JVMTI agent: org.lwjgl.opengl.libname=/Users/fish/metalgldrv/build/libmetalgldrv.dylib
     [metalgldrv I] rebound N GL/loader imports in /var/folders/.../lwjgl.../libglfw.dylib
@@ -130,6 +166,8 @@ NSOpenGL + CGL through `liblwjgl.dylib`), but that is untested.
 
 * `METALGLDRV_LOG=3` (environment variable) logs GL errors and more;
   `METALGLDRV_LOG_FILE=documents` writes the log to `~/Documents/metalgldrv.log`.
+  With the mod, put them in `config/metalgldrv.properties` instead; with route B,
+  `-Dmetalgldrv.LOG=3` works too.
 * `unimplemented: glXxx` warnings name GL entry points a mod uses that the driver
   doesn't implement yet.
 * Route B prints `NSOpenGLContext: CGLCreateContext failed` or a black window: check

@@ -469,6 +469,22 @@ void ctx_createTexture(id self, SEL _cmd, GLenum target, NSView* view, GLenum fo
 
 namespace mgl::macos {
 
+CGDirectDisplayID displayOfContext(CGLContextObj cgl) {
+    if (![NSThread isMainThread]) return 0;  // NSWindow.screen is main-thread only
+    NSView* view = nil;
+    {
+        std::lock_guard<std::mutex> g(g_mutex);
+        for (auto& [obj, st] : g_contexts) {
+            if (st->cgl != cgl) continue;
+            view = objc_loadWeakRetained(&st->view);
+            break;
+        }
+    }
+    NSNumber* n = view.window.screen.deviceDescription[@"NSScreenNumber"];
+    [view release];
+    return n ? (CGDirectDisplayID)n.unsignedIntValue : 0;
+}
+
 void installNSOpenGLHooks() {
     static std::once_flag once;
     std::call_once(once, [] {
