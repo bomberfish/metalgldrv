@@ -2,6 +2,7 @@
 // multi-draw batching, compared bit for bit against the emulation (METALGLDRV_TESS_FAST=0,
 // METALGLDRV_TESS_BATCH=0, METALGLDRV_TESS_PASS1=compute).
 #include "harness.h"
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -475,5 +476,179 @@ void main() { atomicAdd(b.count, 1u); gl_Position = vec4(p, 0.0, 1.0); })";
     glDeleteBuffers(1, &ssbo);
     glDeleteBuffers(2, bufs);
     glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}
+
+// The draw kinds Minecraft 26 issues besides Sodium's multi-draws, fast path vs emulation: instanced with base
+// vertex / base instance and an index offset, indirect multi-draws, 8-bit indices, and a depth-only target.
+TEST(tessellation_fast_path_draw_kinds) {
+    const char* vs = R"(#version 460 core
+layout(location = 0) in vec2 p;
+layout(location = 1) in vec4 c;
+out V { vec4 color; flat int id; } vo;
+void main() {
+    vo.color = c;
+    vo.id = gl_InstanceID * 100000 + gl_BaseInstance * 10000 + gl_DrawID * 1000 + gl_BaseVertex * 10 + (gl_VertexID - gl_BaseVertex);
+    gl_Position = vec4(p + vec2(float(gl_InstanceID), 0.0), 0.5 * c.r, 1.0);
+})";
+    GLuint p = program(vs, kTCS, kTES, kFS);
+    GLuint bufs[2];
+    GLuint vao = quadsVao(bufs);
+    Target t;
+    glUseProgram(p);
+    glUniform1f(glGetUniformLocation(p, "lvl"), 1.0f);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    setenv("METALGLDRV_IMPLICIT_PATCHES", "1", 1);
+    GLuint indirect, ib8;
+    const uint32_t cmds[10] = {3, 1, 0, 0, 0, 3, 1, 3, 4, 0};  // count, instances, first index, base vertex, base instance
+    glGenBuffers(1, &indirect);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirect);
+    glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof cmds, cmds, GL_STATIC_DRAW);
+    const uint8_t idx8[6] = {4, 5, 6, 6, 7, 4};
+    glGenBuffers(1, &ib8);
+    auto draws = [&]() {
+        glDrawElementsInstancedBaseVertexBaseInstance(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, (void*)6, 2, 0, 3);  // quad A's 2 3 0, twice
+        glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_SHORT, nullptr, 2, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib8);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx8, idx8, GL_STATIC_DRAW);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, nullptr);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bufs[1]);
+    };
+    std::vector<float> ref = render(t, false, false, false, draws);
+    uint64_t f0 = fusedDraws();
+    CHECK_EQ(differing(ref, render(t, true, true, false, draws)), 0);
+    CHECK_EQ(fusedDraws() - f0, 4u);  // the instanced draw, both indirect commands, the 8-bit one
+    CHECK(at(ref, 8, 16)[2] == 3.0f * 10000 + 2.0f);       // instance 0, base instance 3, vertex 2
+    CHECK(at(ref, 40, 16)[2] == 100000.0f + 30000 + 2.0f);  // instance 1 (moved right by 1)
+    CHECK_EQ(differing(ref, render(t, false, true, true, draws)), 0);
+    // depth-only target (a shadow pass)
+    GLuint fbo, depth;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &depth);
+    glBindTexture(GL_TEXTURE_2D, depth);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT32F, 64, 64);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    glEnable(GL_DEPTH_TEST);
+    auto depthPass = [&](bool fast) {
+        setenv("METALGLDRV_TESS_FAST", fast ? "1" : "0", 1);
+        glClearDepth(1.0);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        draws();
+        std::vector<float> d(64 * 64);
+        glReadPixels(0, 0, 64, 64, GL_DEPTH_COMPONENT, GL_FLOAT, d.data());
+        unsetenv("METALGLDRV_TESS_FAST");
+        return d;
+    };
+    std::vector<float> dref = depthPass(false), dfast = depthPass(true);
+    CHECK(memcmp(dref.data(), dfast.data(), dref.size() * 4) == 0);
+    CHECK(dref[16 * 64 + 8] < 1.0f);
+    glDisable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &depth);
+    unsetenv("METALGLDRV_IMPLICIT_PATCHES");
+    glDeleteBuffers(1, &indirect);
+    glDeleteBuffers(1, &ib8);
+    glDeleteBuffers(2, bufs);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(p);
+    CHECK_GL();
+}
+
+// One batched multi-draw of more patches than Apple GPUs take in one object/mesh grid (from 2^19 object
+// threadgroups a draw takes seconds and faults or trips the watchdog): the emulation draws the grid in chunks.
+// Every patch is a tiny triangle at its own depth, so the image doesn't depend on the order; the emulation must
+// match the fast path and finish quickly.
+TEST(tessellation_large_batch) {
+    const char* vs = R"(#version 460 core
+layout(location = 0) in vec3 p;
+out V { vec4 color; flat int id; } vo;
+void main() { vo.color = vec4(p.z, fract(p.z * 256.0), 0.0, 1.0); vo.id = gl_VertexID; gl_Position = vec4(p.xy, p.z, 1.0); })";
+    GLuint prog = program(vs, kTCS, kTES, kFS);
+    glUseProgram(prog);
+    glUniform1f(glGetUniformLocation(prog, "lvl"), 1.0f);
+    const int patches = 1000000, half = patches / 2;  // ~300 MB of payload in one grid
+    std::vector<float> v((size_t)patches * 9);
+    uint32_t rng = 1;
+    for (int i = 0; i < patches; i++) {
+        rng = rng * 1664525u + 1013904223u;
+        float x = (float)(rng >> 8 & 1023) / 512.0f - 1.0f, y = (float)(rng >> 18) / 8192.0f - 1.0f;
+        float z = (float)i / patches;  // unique depth
+        const float tri[9] = {x, y, z, x + 0.03f, y, z, x, y + 0.03f, z};
+        memcpy(&v[(size_t)i * 9], tri, sizeof tri);
+    }
+    GLuint vao, vbo;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(v.size() * 4), v.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, nullptr);
+    glEnableVertexAttribArray(0);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    Target t;
+    GLuint depth;
+    glGenRenderbuffers(1, &depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, 64, 64);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+    glEnable(GL_DEPTH_TEST);
+    auto draw = [&]() {
+        glClear(GL_DEPTH_BUFFER_BIT);
+        const GLint first[2] = {0, half * 3};
+        const GLsizei count[2] = {half * 3, half * 3};
+        glMultiDrawArrays(GL_PATCHES, first, count, 2);
+    };
+    std::vector<float> fast = render(t, true, true, false, draw);
+    auto t0 = std::chrono::steady_clock::now();
+    uint64_t p0 = passes();
+    std::vector<float> emu = render(t, false, true, false, draw);
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    CHECK_EQ(passes() - p0, 1u);
+    CHECK(ms < 3000.0);
+    CHECK_EQ(differing(fast, emu), 0);
+    CHECK(at(emu, 32, 32)[0] != -1.0f);
+    glDisable(GL_DEPTH_TEST);
+    glDeleteRenderbuffers(1, &depth);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    CHECK_GL();
+}
+
+// Indices far past the vertex buffers (GL leaves the values undefined; nothing may fault): the GPU-side index
+// reads of the fast path and the emulation fetch the attributes' default values instead, and later draws work.
+TEST(tessellation_garbage_indices) {
+    GLuint p = program(kVS, kTCS, kTES, kFS);
+    GLuint bufs[2];
+    GLuint vao = quadsVao(bufs);
+    Target t;
+    glUseProgram(p);
+    glUniform1f(glGetUniformLocation(p, "lvl"), 1.0f);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    GLuint ib;
+    const uint32_t bad[6] = {0x7fffffffu, 0xfffffff0u, 123456789u, 4000000000u, 1u << 30, 99999u};
+    glGenBuffers(1, &ib);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof bad, bad, GL_STATIC_DRAW);
+    for (bool fast : {true, false}) {
+        render(t, fast, true, false, [&]() {
+            const GLsizei counts[2] = {3, 3};
+            const void* offs[2] = {nullptr, (void*)12};
+            const GLint bv[2] = {0, 1 << 20};
+            glMultiDrawElementsBaseVertex(GL_PATCHES, counts, GL_UNSIGNED_INT, offs, 2, bv);
+        });
+    }
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bufs[1]);
+    std::vector<float> after = render(t, true, true, false, [&]() { glDrawElements(GL_PATCHES, 6, GL_UNSIGNED_SHORT, nullptr); });
+    CHECK(at(after, 12, 8)[2] == 0.0f);  // quad A drawn normally: control point 0's id
+    glDeleteBuffers(1, &ib);
+    glDeleteBuffers(2, bufs);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(p);
     CHECK_GL();
 }

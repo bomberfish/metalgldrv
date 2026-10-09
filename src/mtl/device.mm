@@ -427,6 +427,15 @@ id<MTLBuffer> Device::newBuffer(size_t size, MTLResourceOptions opts) {
     return b;
 }
 
+uint64_t Device::zeroBufferAddress() {
+    static id<MTLBuffer> zero = [this] {
+        id<MTLBuffer> b = newBuffer(kZeroBufferBytes);
+        memset(bufferContents(b), 0, kZeroBufferBytes);
+        return b;
+    }();
+    return zero.gpuAddress;
+}
+
 id<MTLLibrary> Device::compileLibrary(const std::string& source, std::string* errorOut, bool fastMath) {
     @autoreleasepool {  // the source string, options and errors autorelease
         MTL4LibraryDescriptor* ld = [MTL4LibraryDescriptor new];

@@ -141,7 +141,9 @@ tessellator (equal / fractional_even / fractional_odd spacing, triangles / quads
   primitive queries or post-depth-coverage pre-passes (`tessBatchable`).
   `METALGLDRV_TESS_BATCH=0` draws the sub-draws one by one. Indexed patch lists
   read the GL index buffer on the GPU (16/32-bit, no primitive restart);
-  otherwise the CPU decomposes them.
+  otherwise the CPU decomposes them. The object/mesh grid of such a draw (one
+  object threadgroup per patch) is drawn in chunks: Apple GPUs never finish
+  grids whose payloads add up to a few hundred MB (docs/glsl-compiler.md).
 * **Fast path** (`VariantKey::tessFused`): when the levels make every patch
   exactly one primitive at the domain corners (triangles or quads; outer levels
   in (0, 1], inner levels <= 1; equal or fractional_odd spacing; no point_mode),
@@ -210,6 +212,10 @@ emulation on the integer ALUs. Planned: move heavy ops into an
 * `./build/tests/tessbench` – benchmark of Sodium + Iris terrain with a tessellating shader pack
   (multi-draws of tessellated triangles; `--level`, `--notess`, `--single`, see the file header).
   Not part of mgltest.
+* `./build/tests/packreplay PREFIX...` – draws real shader pack programs (stage files, e.g. assembled
+  with `tests/glsl/corpus.py`'s include resolution) with Minecraft + Sodium + Iris's draw calls
+  (multi-draws, indirect, instanced, 8-bit indices, a depth-only pass), for reproducing driver
+  problems under `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`. Not part of mgltest.
 * `METALGLDRV_STRICT=1 ./build/tests/mgltest`, `METALGLDRV_STRICT=2 ./build/tests/mgltest`
   – the same suite in strict and super strict mode (`tests/host/test_strict.cpp`
   and `test_fsr.cpp` cover the strict-only paths, `test_pdc.cpp` the super

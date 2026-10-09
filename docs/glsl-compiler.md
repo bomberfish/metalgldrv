@@ -76,7 +76,12 @@ Fed by the runtime through the default block, reported in `Reflection::uniforms`
 All non-classic kinds fetch vertices manually: attribute at location L uses `VariantKey::attribs[L]` (binding, glType, size (5 = BGRA),
 normalized, integer, isDouble, relativeOffset) with `MGLDrawInfo::vertexBuffer/vertexStride/vertexDivisor[binding]` (stride must be the
 effective stride; instanced: element = instance / divisor + baseInstance). Disabled arrays (`enabled = false`) read `MGLSys::currentAttrib[L]`.
-Vertex ids come from the uint32 list `indexBuffer` (+ `baseVertex`).
+Vertices whose data would start past `vertexBufferSize[binding]` read the default value (out-of-range indices never read unmapped memory).
+Vertex ids come from the uint32 list `indexBuffer` (+ `baseVertex`). Pointers a draw has nothing for hold the address of a zeroed
+buffer (`Device::zeroBufferAddress`), never 0; only `stats` and unbound `vertexBuffer` entries are null, and shaders test those.
+Mesh grids (`mgl_tes_obj`, `mgl_gs`, `mgl_vsm`) are drawn in chunks along x: each chunk's draw info has `gridBase`, which the shaders
+add to their threadgroup x position. Chunks are at most 65536 threadgroups and 64 MB of object payload: Apple GPUs never finish an
+object grid whose payloads add up to a few hundred MB (the watchdog kills it or the GPU faults).
 
 * **MeshGeometry** (`mgl_gs`, EntryPoint::Mesh): no object function. Grid (primitiveCount, instanceCount, gsInvocations),
   threads = vertices per input primitive (1/2/4/3/6). maxMeshVertices = max_vertices (<= 256), maxMeshPrimitives = strip-adjusted.

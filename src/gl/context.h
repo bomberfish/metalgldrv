@@ -400,11 +400,20 @@ std::vector<const char*> mglDeviceExtensions(const DeviceCaps& caps);
 const std::vector<std::string>& mglDeviceGlslExtensions(const DeviceCaps& caps);
 
 // Common entry-point prologue.
-// The entry point's name is remembered for GL error logging (METALGLDRV_LOG=3) only.
+// The entry point's name is remembered for GL errors (log lines and KHR_debug messages): that of the outermost
+// MGL_CTX on the stack, so an entry point that calls others reports its own name (plain wrappers without
+// MGL_CTX, such as glDrawElements, report the entry point implementing them).
 extern thread_local const char* t_apiName;
+struct ApiName {
+    const char* saved;
+    explicit ApiName(const char* name) : saved(t_apiName) {
+        if (!*saved) t_apiName = name;
+    }
+    ~ApiName() { t_apiName = saved; }
+};
 #define MGL_CTX_RET(r)                                                         \
+    ::mgl::ApiName mgl_apiName_(__func__);                                 \
     ::mgl::Context* ctx = ::mgl::currentContext();                         \
-    if (::mgl::g_logLevel >= ::mgl::LOG_DEBUG || ::mgl::g_logUnsupported) ::mgl::t_apiName = __func__; \
     if (!ctx) return r
 #define MGL_CTX() MGL_CTX_RET()
 

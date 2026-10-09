@@ -49,17 +49,23 @@ struct MGLDrawInfo {
     device uint4* spillBuffer;
     device atomic_uint* spillCounter;
     uint spillCapacity;
-    uint pad1;
+    uint gridBase;
     device const MGLSubDraw* subDraws;
     uint subDrawCount;
     uint subDrawIndexType;
+    uint vertexBufferSize[16];
 };
+// Address of the attribute data of vertex `vid` / instance `inst` in binding b, or null (the attribute's
+// default value) when nothing is bound or the vertex lies outside the buffer (garbage indices must not read
+// unmapped memory).
 inline device const uchar* mgl_vptr(constant MGLDrawInfo& D, uint b, uint off, uint vid, uint inst) {
     device const uchar* p = D.vertexBuffer[b];
     if (p == nullptr) return nullptr;
     uint d = D.vertexDivisor[b];
     uint idx = d != 0u ? inst / d + D.baseInstance : vid;
-    return p + idx * D.vertexStride[b] + off;
+    ulong at = ulong(idx) * ulong(D.vertexStride[b]) + ulong(off);
+    if (at >= ulong(D.vertexBufferSize[b])) return nullptr;
+    return p + at;
 }
 
 //@chunk mgl_sd_find mgl_sd_vertex

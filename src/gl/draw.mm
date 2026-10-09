@@ -787,6 +787,33 @@ static bool wantManualFetch(Context* ctx, ProgramObj* prog) {
 }
 
 // Builds the render pipeline key & binds vertex buffers. Returns false if the draw must be skipped.
+// Vertex buffers of the bound VAO for shaders that fetch attributes themselves (MGLDrawInfo::vertexBuffer:
+// the binding's address, its size for the shader's range check, stride and divisor).
+static void fillVertexBindings(Context* ctx, glsl::MGLDrawInfo* info) {
+    VertexArray* vao = ctx->vao.get();
+    uint64_t serial = ctx->serial();
+    for (int b = 0; b < kMaxVertexBindings; b++) {
+        const VertexBinding& vb = vao->bindings[b];
+        if (vb.buffer && vb.buffer->mtl && vb.offset >= 0 && vb.offset < vb.buffer->size) {
+            info->vertexBuffer[b] = vb.buffer->gpuAddress() + vb.offset;
+            info->vertexBufferSize[b] = (uint32_t)std::min<GLsizeiptr>(vb.buffer->size - vb.offset, UINT32_MAX);
+            vb.buffer->lastUse = serial;
+        }
+        info->vertexStride[b] = vb.stride;
+        info->vertexDivisor[b] = vb.divisor;
+    }
+}
+
+// Pointers a draw has nothing for point at the device's zero buffer instead of 0, so that no shader can
+// follow a null address (MGLDrawInfo::stats stays null: shaders test it). One sub-draw if there is no table.
+static void failSafeDrawInfo(Context* ctx, glsl::MGLDrawInfo* info) {
+    uint64_t zero = ctx->dev->zeroBufferAddress();
+    for (uint64_t* p : {&info->indexBuffer, &info->tcsVertexOut, &info->tcsPatchOut, &info->counters, &info->itemCounts, &info->itemOffsets,
+                        &info->tesVertexOut, &info->tesPrimOut, &info->gsRecord, &info->spillBuffer, &info->spillCounter, &info->subDraws})
+        if (!*p) *p = zero;
+    if (!info->subDrawCount) info->subDrawCount = 1;  // the zero buffer: one sub-draw from patch 0, list from indexBuffer
+}
+
 static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& key, id<MTL4ArgumentTable> table, const DrawParams& d,
                              uint32_t minIndex, uint32_t maxIndex) {
     VertexArray* vao = ctx->vao.get();
@@ -796,16 +823,9 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         UploadAlloc di = ctx->upload(sizeof(glsl::MGLDrawInfo), 16);
         glsl::MGLDrawInfo* info = (glsl::MGLDrawInfo*)di.cpu;
         memset(info, 0, sizeof *info);
-        for (int b = 0; b < kMaxVertexBindings; b++) {
-            const VertexBinding& vb = vao->bindings[b];
-            if (vb.buffer && vb.buffer->mtl) {
-                info->vertexBuffer[b] = vb.buffer->gpuAddress() + vb.offset;
-                vb.buffer->lastUse = serial;
-            }
-            info->vertexStride[b] = vb.stride;
-            info->vertexDivisor[b] = vb.divisor;
-        }
+        fillVertexBindings(ctx, info);
         info->baseInstance = d.baseInstance;
+        failSafeDrawInfo(ctx, info);
         [table setAddress:di.gpu atIndex:glsl::kBufStageIO];
         return true;
     }
@@ -1939,6 +1959,11 @@ static uint64_t drawArguments(Context* ctx, ProgramObj* prog, bool inert = false
 // ---------------------------------------------------------------------------
 namespace {
 
+// Largest mesh grid width drawn at once (executeMultiPass drawMesh), and the most object payload memory a
+// draw's grid may need (threadgroups x EntryPoint::payloadBytes).
+constexpr uint32_t kMeshGridChunk = 65536;
+constexpr size_t kMeshGridPayloadBytes = 64u << 20;
+
 struct MPState {
     Context* ctx;
     ProgramObj* prog;
@@ -1967,6 +1992,7 @@ struct MPState {
     uint32_t spillCapacity = 0;
     // per phase (upload memory is retired by every CPU wait)
     uint64_t infoAddr = 0, argAddr = 0, sysAddr = 0;
+    const glsl::MGLDrawInfo* info = nullptr;  // CPU view of infoAddr (copies for mesh grid chunks)
 };
 
 // Uploads the per-phase draw description (vertex ids, MGLDrawInfo, arguments, system values).
@@ -1980,16 +2006,7 @@ void mpUpload(MPState& s) {
     glsl::MGLDrawInfo* info = (glsl::MGLDrawInfo*)di.cpu;
     memset(info, 0, sizeof *info);
     uint64_t serial = ctx->serial();
-    VertexArray* vao = ctx->vao.get();
-    for (int b = 0; b < kMaxVertexBindings; b++) {
-        const VertexBinding& vb = vao->bindings[b];
-        if (vb.buffer && vb.buffer->mtl) {
-            info->vertexBuffer[b] = vb.buffer->gpuAddress() + vb.offset;
-            vb.buffer->lastUse = serial;
-        }
-        info->vertexStride[b] = vb.stride;
-        info->vertexDivisor[b] = vb.divisor;
-    }
+    fillVertexBindings(ctx, info);
     info->indexBuffer = idxUp.gpu;  // always a 32-bit list of vertex ids (base vertex not yet applied)
     info->indexType = 4;
     info->count = (uint32_t)s.ids.size();
@@ -2040,7 +2057,7 @@ void mpUpload(MPState& s) {
         memcpy(off.cpu, s.offsets.data(), s.offsets.size() * 4);
         info->itemOffsets = off.gpu;
     }
-    if (refl.stageMask & (1u << (int)glsl::Stage::TessEval)) {
+    {  // tessellation's sub-draw table (one sub-draw unless batched; other kinds don't read it)
         glsl::MGLSubDraw one = {};
         one.drawID = (uint32_t)d.drawID;
         one.baseVertex = d.indexed ? d.baseVertex : 0;
@@ -2052,7 +2069,9 @@ void mpUpload(MPState& s) {
         info->subDrawCount = (uint32_t)n;
         info->subDrawIndexType = s.subDraws.empty() ? 0 : s.subDrawIndexType;
     }
+    failSafeDrawInfo(ctx, info);
     s.infoAddr = di.gpu;
+    s.info = info;
     s.argAddr = drawArguments(ctx, s.prog, s.inert);
     if (!s.argAddr) s.argAddr = ctx->upload(16).gpu;
     s.sysAddr = buildSys(ctx, s.prog, d.drawID, d.baseVertex, d.baseInstance, d.first);
@@ -2478,12 +2497,14 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     // primitives come from the GPU here, so a draw that writes depth/stencil isn't split per primitive.
     bool pdc = vk.pdc && !ctx->rasterizerDiscard;
     uint64_t preInfoAddr = 0, preArgAddr = 0;
+    const glsl::MGLDrawInfo* preInfo = nullptr;
     if (pdc) {  // the pre-pass's draw description: storage copies, no statistics (before any encoder)
         MPState pre = s;
         pre.inert = pre.noStats = true;
         mpUpload(pre);
         preInfoAddr = pre.infoAddr;
         preArgAddr = pre.argAddr;
+        preInfo = pre.info;
     }
     id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
     if (!e) { retire(); return true; }
@@ -2496,14 +2517,34 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     GLenum rasterMode = hasGS ? refl.gsOutputPrimitive : hasTess ? GL_TRIANGLES : s.listMode;
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
     MTLSize meshTG = MTLSizeMake(ms->threadsPerThreadgroup[0], ms->threadsPerThreadgroup[1], ms->threadsPerThreadgroup[2]);
-    auto drawMesh = [&](id<MTL4RenderCommandEncoder> enc) {
+    // Mesh grids are drawn in chunks along x (the patch / primitive index); each chunk binds a copy of the
+    // draw info whose gridBase the shaders add to their x position. Apple GPUs don't cope with object grids
+    // whose payloads add up to a few hundred MB: a tessellation draw of 2^18 patches with 736-byte payloads
+    // (193 MB) takes 40 ms, one of 3 x 2^17 (289 MB) never finishes (the watchdog kills it or the GPU
+    // faults). Batched multi-draws (a Sodium region) easily reach such sizes; chunks stay below
+    // kMeshGridPayloadBytes and kMeshGridChunk threadgroups.
+    auto drawMesh = [&](id<MTL4RenderCommandEncoder> enc, const glsl::MGLDrawInfo* info) {
+        MTLSize tg = MTLSizeMake(1, 1, 1);
+        uint32_t n, y, z, chunk = kMeshGridChunk;
         if (os) {
-            MTLSize objTG = MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2]);
-            [enc drawMeshThreadgroups:MTLSizeMake(s.prims, d.instances, 1) threadsPerObjectThreadgroup:objTG threadsPerMeshThreadgroup:meshTG];
+            tg = MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2]);
+            n = s.prims, y = (uint32_t)d.instances, z = 1;
+            size_t perColumn = (size_t)std::max<uint32_t>(1, os->payloadBytes) * y;  // y object threadgroups per grid column
+            chunk = (uint32_t)std::clamp<size_t>(kMeshGridPayloadBytes / perColumn, 1, kMeshGridChunk);
         } else {
-            int invocations = std::max(1, refl.gsInvocations);
-            MTLSize grid = hasTess ? MTLSizeMake(s.tesPrimCount, 1, invocations) : MTLSizeMake(s.prims, d.instances, invocations);
-            [enc drawMeshThreadgroups:grid threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:meshTG];
+            z = (uint32_t)std::max(1, refl.gsInvocations);
+            n = hasTess ? s.tesPrimCount : s.prims;
+            y = hasTess ? 1 : (uint32_t)d.instances;
+        }
+        for (uint32_t base = 0; base < n; base += chunk) {
+            if (base) {
+                UploadAlloc c = ctx->upload(sizeof(glsl::MGLDrawInfo), 16);
+                memcpy(c.cpu, info, sizeof(glsl::MGLDrawInfo));
+                ((glsl::MGLDrawInfo*)c.cpu)->gridBase = base;
+                [table setAddress:c.gpu atIndex:glsl::kBufStageIO];
+            }
+            [enc drawMeshThreadgroups:MTLSizeMake(std::min(chunk, n - base), y, z) threadsPerObjectThreadgroup:tg
+                threadsPerMeshThreadgroup:meshTG];
         }
     };
     id<MTLTexture> cov = nil;
@@ -2520,7 +2561,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         [table setAddress:preArgAddr ? preArgAddr : ctx->upload(16).gpu atIndex:glsl::kBufArgs];
         [table setAddress:s.sysAddr atIndex:glsl::kBufSys];
         [table setAddress:preInfoAddr atIndex:glsl::kBufStageIO];
-        drawMesh(pe);
+        drawMesh(pe, preInfo);
         ctx->endPass();
         if (s.spillCounterBuffer) {  // the draw's vertices spill from the start again
             id<MTL4ComputeCommandEncoder> ce = ctx->computeEncoder();
@@ -2546,7 +2587,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     if (pdc) [table setAddress:pdcUpload(ctx, cov, 0, refl.writesLayer) atIndex:glsl::kBufPdc];
     mglQueryNotifyDraw(ctx, GL_NONE, 0, 0);  // visibility only; primitive counts come from counted passes
     if (hasTess) g_tessPasses++;
-    drawMesh(e);
+    drawMesh(e, s.info);
     retire();
     return true;
 }

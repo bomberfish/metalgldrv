@@ -4055,7 +4055,7 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
     std::string N = std::to_string(NV);
     std::string loop = "        for (uint j = 0; j < " + N + "u; j++) {\n";
     if (!fromTes) {
-        e += "    threadgroup vs::Rec mgl_vin[" + N + "];\n    uint mgl_prim = mgl_tg.x, mgl_inst = mgl_tg.y;\n";
+        e += "    threadgroup vs::Rec mgl_vin[" + N + "];\n    uint mgl_prim = mgl_tg.x + D.gridBase, mgl_inst = mgl_tg.y;\n";
         e += "    if (mgl_tid < " + N + "u) {\n";
         e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_tid] + uint(D.baseVertex)", "mgl_inst"), 8);
         useStage(Stage::Vertex);
@@ -4063,7 +4063,7 @@ void Emitter::emitGeometry(std::string& o, bool fromTes) {
         e += "    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
         loop += indentBy(gsUnpack(vf, "mgl_vin[j].s[$I]", "g."), 12);
     } else {
-        e += "    uint mgl_prim = mgl_tg.x;\n";
+        e += "    uint mgl_prim = mgl_tg.x + D.gridBase;\n";
         loop = "        for (uint j = 0; j < " + std::to_string(std::min(NV, tesIpp_)) + "u; j++) {\n";
         loop += "            device const uint4* r = (device const uint4*)(D.tesVertexOut + D.tesPrimOut[mgl_prim * " + std::to_string(tesIpp_) +
                 "u + j] * " + std::to_string(tesRB_) + "u);\n";
@@ -4126,7 +4126,7 @@ void Emitter::emitVertexMesh(std::string& o) {
     std::string e = "[[mesh]] void mgl_vsm(mgl_VM_T mgl_mo, constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], "
                     "constant MGLDrawInfo& D [[buffer(22)]], uint3 mgl_tg [[threadgroup_position_in_grid]], "
                     "uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
-    e += "    uint mgl_prim = mgl_tg.x, mgl_inst = mgl_tg.y;\n";
+    e += "    uint mgl_prim = mgl_tg.x + D.gridBase, mgl_inst = mgl_tg.y;\n";
     if (!ro.spill.empty()) e += "    threadgroup uint mgl_svs[" + N + "];\n";
     e += "    if (mgl_tid < " + N + "u) {\n";
     e += indentBy(runVS("vg", "D.indexBuffer[mgl_prim * " + N + "u + mgl_tid] + uint(D.baseVertex)", "mgl_inst"), 8);
@@ -4563,7 +4563,7 @@ void Emitter::emitTessControlPass(std::string& o) {
     bool gs = stageMask_ & (1u << (int)Stage::Geometry);
     size_t payload = 128 + (size_t)ts_.cpsMax * ts_.VB + ts_.PB;
     ts_.inObject = K.kind == PipelineKind::Tessellation && !gs && !K.tessComputePass && payload <= 16384;
-    std::string prefix = "    uint mgl_gpatch = mgl_tg.x, mgl_inst = mgl_tg.y, mgl_gp = mgl_inst * D.primitiveCount + mgl_gpatch, mgl_pv = D.patchVertices;\n"
+    std::string prefix = "    uint mgl_gpatch = mgl_tg.x + D.gridBase, mgl_inst = mgl_tg.y, mgl_gp = mgl_inst * D.primitiveCount + mgl_gpatch, mgl_pv = D.patchVertices;\n"
                          "    device const MGLSubDraw& mgl_sd = D.subDraws[mgl_sd_find(D, mgl_gpatch)];\n"
                          "    uint mgl_patch = mgl_gpatch - mgl_sd.firstPatch;\n";
     if (ts_.inObject) {
@@ -4685,9 +4685,9 @@ void Emitter::emitTessEvalMesh(std::string& o) {
         e += "    pl.gp = mgl_gp;\n    pl.patch = mgl_patch;\n    pl.inst = mgl_inst;\n    pl.cps = " + (ts_.hasTCS ? ts_.cps : std::string("mgl_pv")) + ";\n";
     } else {
         e += "    if (mgl_tid != 0u) return;\n";
-        e += "    uint gp = mgl_tg.y * D.primitiveCount + mgl_tg.x;\n";
+        e += "    uint mgl_gpatch = mgl_tg.x + D.gridBase, gp = mgl_tg.y * D.primitiveCount + mgl_gpatch;\n";
         e += "    device const float* lv = (device const float*)(D.tcsPatchOut + gp * " + sPB + ");\n";
-        e += "    pl.gp = gp;\n    pl.patch = mgl_tg.x - D.subDraws[mgl_sd_find(D, mgl_tg.x)].firstPatch;\n    pl.inst = mgl_tg.y;\n    pl.cps = " + ts_.cps + ";\n";
+        e += "    pl.gp = gp;\n    pl.patch = mgl_gpatch - D.subDraws[mgl_sd_find(D, mgl_gpatch)].firstPatch;\n    pl.inst = mgl_tg.y;\n    pl.cps = " + ts_.cps + ";\n";
     }
     e += "    pl.T = " + ts_.setup + ";\n";
     e += "    mgp.set_threadgroups_per_grid(uint3(pl.T.units, 1u, 1u));\n}\n\n";

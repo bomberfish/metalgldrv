@@ -325,12 +325,13 @@ TEST(timer_query) {
 }
 
 TEST(debug_output) {
-    struct Rec { int count = 0; GLenum lastType = 0; } rec;
+    struct Rec { int count = 0; GLenum lastType = 0; std::string last; } rec;
     glEnable(GL_DEBUG_OUTPUT);
     glDebugMessageCallback([](GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* user) {
         Rec* r = (Rec*)user;
         r->count++;
         r->lastType = type;
+        r->last = message;
     }, &rec);
     glDebugMessageInsert(GL_DEBUG_SOURCE_APPLICATION, GL_DEBUG_TYPE_MARKER, 1, GL_DEBUG_SEVERITY_NOTIFICATION, -1, "hello");
     CHECK_EQ(rec.count, 1);
@@ -338,6 +339,14 @@ TEST(debug_output) {
     CHECK_EQ(glGetError(), (GLenum)GL_INVALID_ENUM);
     CHECK_EQ(rec.count, 2);
     CHECK_EQ(rec.lastType, (GLenum)GL_DEBUG_TYPE_ERROR);
+    // error messages name the error and the entry point the application called (without any logging enabled)
+    CHECK(rec.last.find("GL_INVALID_ENUM in glBindBuffer") == 0);
+    glGetStringi(GL_EXTENSIONS, 1u << 20);
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_VALUE);
+    CHECK(rec.last.find("GL_INVALID_VALUE in glGetStringi") == 0);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, -1, 1);  // a wrapper: named after the entry point implementing it
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_VALUE);
+    CHECK(rec.last == "GL_INVALID_VALUE in glDrawArraysInstancedBaseInstance");
     glDebugMessageCallback(nullptr, nullptr);
     GLuint b;
     glGenBuffers(1, &b);

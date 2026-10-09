@@ -121,6 +121,7 @@ int runPipeline(const PipelineArgs& pa) {
         MGLDrawInfo info{};
         for (auto& a : r.attributes) {
             info.vertexBuffer[a.location] = vb.gpuAddress;
+            info.vertexBufferSize[a.location] = (uint32_t)vb.length;
             info.vertexStride[a.location] = 16;
         }
         info.indexBuffer = ib.gpuAddress;

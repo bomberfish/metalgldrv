@@ -154,6 +154,11 @@ public:
 
     // --- helpers ------------------------------------------------------------
     id<MTLBuffer> newBuffer(size_t size, MTLResourceOptions opts = MTLResourceStorageModeShared);
+    // GPU address of a zeroed, always resident buffer of kZeroBufferBytes for pointers a shader may follow
+    // but that a draw has nothing for (never 0). Shaders that write through such a pointer by mistake
+    // only change this scratch memory.
+    static constexpr size_t kZeroBufferBytes = 64 << 10;
+    uint64_t zeroBufferAddress();
     id<MTLLibrary> compileLibrary(const std::string& source, std::string* errorOut, bool fastMath = false);
 
     // Called periodically (e.g. on submit) to reap finished work.

@@ -565,7 +565,7 @@ struct alignas(16) MGLDrawInfo {
     uint64_t spillBuffer;
     uint64_t spillCounter;        // device atomic_uint
     uint32_t spillCapacity;       // records that fit in spillBuffer
-    uint32_t pad1;
+    uint32_t gridBase;            // added to the threadgroup x position of mesh grids drawn in chunks (kMeshGridChunk)
     // Tessellation: the sub-draws of the draw (all of a multi-draw's, or one), sorted by firstPatch.
     // Patch p of the grid (primitiveCount patches over all sub-draws) belongs to the last sub-draw
     // with firstPatch <= p; control point j of its patch q = p - firstPatch is list position
@@ -574,6 +574,7 @@ struct alignas(16) MGLDrawInfo {
     uint32_t subDrawCount;
     uint32_t subDrawIndexType;    // 0: indexBuffer[first + i] (decomposed list), 1: first + i (non-indexed),
                                   // 2 / 4: uint16 / uint32 index i at `indices` (the GL index buffer); base vertex added
+    uint32_t vertexBufferSize[16];// bytes from vertexBuffer[b] to the end of the buffer: fetches past it read the default value
 };
 
 // One sub-draw of a tessellation draw (MGLDrawInfo::subDraws).
