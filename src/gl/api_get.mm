@@ -64,7 +64,7 @@ const char* kExtensions[] = {
     "GL_EXT_transform_feedback", "GL_EXT_vertex_array_bgra", "GL_IBM_texture_mirrored_repeat", "GL_KHR_context_flush_control",
     "GL_KHR_debug", "GL_KHR_no_error", "GL_KHR_parallel_shader_compile", "GL_KHR_robust_buffer_access_behavior",
     "GL_KHR_robustness", "GL_KHR_shader_subgroup", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
-    "GL_NV_depth_clamp", "GL_NV_fence", "GL_NV_occlusion_query", "GL_NV_shader_subgroup_partitioned", "GL_NV_texture_barrier",
+    "GL_NV_depth_clamp", "GL_NV_fence", "GL_NV_occlusion_query", "GL_NV_primitive_restart", "GL_NV_shader_subgroup_partitioned", "GL_NV_texture_barrier",
     "GL_ATI_meminfo", "GL_NVX_gpu_memory_info",
 };
 struct DeviceExtension {
@@ -644,7 +644,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_POINT_SIZE: v = F(ctx->pointSize); return true;
     case GL_POINT_FADE_THRESHOLD_SIZE: v = F(ctx->pointFadeThreshold); return true;
     case GL_POINT_SPRITE_COORD_ORIGIN: v = E(ctx->pointSpriteOrigin); return true;
-    case GL_PRIMITIVE_RESTART_INDEX: v = I(ctx->primitiveRestartIndex); return true;
+    case GL_PRIMITIVE_RESTART_INDEX: case GL_PRIMITIVE_RESTART_INDEX_NV: v = I(ctx->primitiveRestartIndex); return true;
     case GL_PROVOKING_VERTEX: v = E(ctx->provokingVertex); return true;
     case GL_SAMPLE_COVERAGE_VALUE: v = F(ctx->sampleCoverageValue); return true;
     case GL_SAMPLE_COVERAGE_INVERT: v = B(ctx->sampleCoverageInvert); return true;

@@ -631,3 +631,33 @@ TEST(compat_getn_map) {
     getnMapfv(GL_MAP1_VERTEX_3, GL_COEFF, 4 * sizeof(float), coeff);
     CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);
 }
+
+// GL_NV_primitive_restart: restart inside Begin/End, and the enable / index as core primitive restart.
+TEST(compat_nv_primitive_restart) {
+    auto restart = (void (*)())eglGetProcAddress("glPrimitiveRestartNV");
+    auto restartIndex = (void (*)(GLuint))eglGetProcAddress("glPrimitiveRestartIndexNV");
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor3f(1, 1, 0);
+    // two separate strips; without the restart the strip would also cover the middle band
+    glBegin(GL_TRIANGLE_STRIP);
+    glVertex2f(-1, -1); glVertex2f(-0.5f, -1); glVertex2f(-1, 1); glVertex2f(-0.5f, 1);
+    restart();
+    glVertex2f(0.5f, -1); glVertex2f(1, -1); glVertex2f(0.5f, 1); glVertex2f(1, 1);
+    glEnd();
+    CHECK_PIXEL(4, 32, 255, 255, 0, 255);
+    CHECK_PIXEL(60, 32, 255, 255, 0, 255);
+    CHECK_PIXEL(32, 32, 0, 0, 0, 255);
+    glEnable(0x8558 /* GL_PRIMITIVE_RESTART_NV */);
+    CHECK(glIsEnabled(GL_PRIMITIVE_RESTART));
+    restartIndex(77);
+    GLint idx = 0;
+    glGetIntegerv(0x8559 /* GL_PRIMITIVE_RESTART_INDEX_NV */, &idx);
+    CHECK_EQ(idx, 77);
+    glDisable(0x8558);
+    CHECK_GL();
+}

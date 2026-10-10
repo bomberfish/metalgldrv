@@ -76,7 +76,7 @@ static bool setCap(Context* ctx, GLenum cap, bool v, int index = -1) {
     case GL_POLYGON_OFFSET_LINE: ctx->polygonOffsetLine = v; return true;
     case GL_POLYGON_OFFSET_POINT: ctx->polygonOffsetPoint = v; return true;
     case GL_PROGRAM_POINT_SIZE: ctx->programPointSize = v; return true;
-    case GL_PRIMITIVE_RESTART: ctx->primitiveRestart = v; return true;
+    case GL_PRIMITIVE_RESTART: case GL_PRIMITIVE_RESTART_NV: ctx->primitiveRestart = v; return true;
     case GL_PRIMITIVE_RESTART_FIXED_INDEX: ctx->primitiveRestartFixed = v; return true;
     case GL_DEPTH_CLAMP: ctx->depthClamp = v; return true;
     case GL_RASTERIZER_DISCARD: ctx->rasterizerDiscard = v; return true;
@@ -158,7 +158,7 @@ bool mglIsEnabled(Context* ctx, GLenum cap, int index, bool* out) {
     case GL_POLYGON_OFFSET_LINE: *out = ctx->polygonOffsetLine; return true;
     case GL_POLYGON_OFFSET_POINT: *out = ctx->polygonOffsetPoint; return true;
     case GL_PROGRAM_POINT_SIZE: *out = ctx->programPointSize; return true;
-    case GL_PRIMITIVE_RESTART: *out = ctx->primitiveRestart; return true;
+    case GL_PRIMITIVE_RESTART: case GL_PRIMITIVE_RESTART_NV: *out = ctx->primitiveRestart; return true;
     case GL_PRIMITIVE_RESTART_FIXED_INDEX: *out = ctx->primitiveRestartFixed; return true;
     case GL_DEPTH_CLAMP: *out = ctx->depthClamp; return true;
     case GL_RASTERIZER_DISCARD: *out = ctx->rasterizerDiscard; return true;

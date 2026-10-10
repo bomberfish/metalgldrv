@@ -2735,3 +2735,22 @@ API void APIENTRY glGetnMapiv(GLenum target, GLenum query, GLsizei bufSize, GLin
 API void APIENTRY glGetnMapdvARB(GLenum target, GLenum query, GLsizei bufSize, GLdouble* v) { getnMap(target, query, bufSize, v); }
 API void APIENTRY glGetnMapfvARB(GLenum target, GLenum query, GLsizei bufSize, GLfloat* v) { getnMap(target, query, bufSize, v); }
 API void APIENTRY glGetnMapivARB(GLenum target, GLenum query, GLsizei bufSize, GLint* v) { getnMap(target, query, bufSize, v); }
+
+// ---------------------------------------------------------------------------
+// GL_NV_primitive_restart: the enable and index are core primitive restart's; glPrimitiveRestartNV ends the
+// immediate-mode primitive and starts another of the same mode.
+// ---------------------------------------------------------------------------
+API void APIENTRY glPrimitiveRestartIndexNV(GLuint index) { glPrimitiveRestartIndex(index); }
+
+static void primitiveRestart(Context* ctx) {
+    CompatState* cs = compat(ctx);
+    if (!cs->inBegin) return ctx->setError(GL_INVALID_OPERATION);
+    GLenum mode = cs->beginMode;
+    immEnd(ctx);
+    immBegin(ctx, mode);
+}
+API void APIENTRY glPrimitiveRestartNV(void) {
+    MGL_CTX();
+    RECORD(primitiveRestart(ctx));
+    primitiveRestart(ctx);
+}
