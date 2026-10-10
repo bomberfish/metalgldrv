@@ -574,3 +574,54 @@ TEST(varyings_124_components) {
     glDeleteVertexArrays(1, &vao);
     CHECK_GL();
 }
+
+// Unigine declares several outputs, writes one and binds them all to location 0: only active
+// outputs may share a location, so the link succeeds and the written one lands in color 0.
+TEST(frag_data_location_inactive_overlap) {
+    const char* vs = R"(#version 150
+void main() { gl_Position = vec4(vec2(gl_VertexID & 1, gl_VertexID >> 1) * 2.0 - 1.0, 0, 1); })";
+    const char* fs = R"(#version 150
+out vec4 s_frag_color; out vec4 s_frag_data_0; out vec4 s_frag_data_1;
+void main() { s_frag_color = vec4(0, 1, 0, 1); })";
+    auto build = [&](const char* f) {
+        GLuint p = glCreateProgram();
+        const char* srcs[2] = {vs, f};
+        GLenum types[2] = {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER};
+        for (int i = 0; i < 2; i++) {
+            GLuint s = glCreateShader(types[i]);
+            glShaderSource(s, 1, &srcs[i], nullptr);
+            glCompileShader(s);
+            glAttachShader(p, s);
+            glDeleteShader(s);
+        }
+        glBindFragDataLocation(p, 0, "s_frag_color");
+        glBindFragDataLocation(p, 0, "s_frag_data_0");
+        glBindFragDataLocation(p, 1, "s_frag_data_1");
+        glLinkProgram(p);
+        return p;
+    };
+    GLuint p = build(fs);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK_EQ(ok, 1);
+    CHECK_EQ(glGetFragDataLocation(p, "s_frag_color"), 0);
+    GLuint vao;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(p);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    CHECK_PIXEL(32, 32, 0, 255, 0, 255);
+    // two written outputs at one location still fail
+    GLuint q = build(R"(#version 150
+out vec4 s_frag_color; out vec4 s_frag_data_0; out vec4 s_frag_data_1;
+void main() { s_frag_color = vec4(1); s_frag_data_0 = vec4(1); })");
+    glGetProgramiv(q, GL_LINK_STATUS, &ok);
+    CHECK_EQ(ok, 0);
+    glUseProgram(0);
+    glDeleteProgram(p);
+    glDeleteProgram(q);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}

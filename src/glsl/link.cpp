@@ -520,23 +520,34 @@ void Linker::assignFragOutputs() {
     std::vector<const Variable*> outs;
     for (auto* v : sc.globals)
         if (v->q.storage == Storage::Out && v->builtin == BuiltinVar::None) outs.push_back(v);
+    // Outputs the shader writes claim their locations first: only active outputs may not share a
+    // location (GL 4.6 §15.2.3). Engines such as Unigine declare several outputs, write one, and bind
+    // them all to location 0 with BindFragDataLocation; an unwritten one that collides is inactive and dropped.
+    std::vector<const Variable*> order = outs;
+    std::stable_partition(order.begin(), order.end(), [&](const Variable* v) { return sc.used.count(v) > 0; });
     std::set<std::pair<int, int>> taken;
-    std::vector<const Variable*> pending;
-    for (auto* v : outs) {
+    std::set<const Variable*> unassigned;
+    for (auto* v : order) {
         int loc = -1, idx = 0;
+        bool bound = false;
         if (v->q.layout.location >= 0) { loc = v->q.layout.location; idx = std::max(0, v->q.layout.index); }
         else if (in_.fragDataBindings.count(v->name)) {
             loc = in_.fragDataBindings.at(v->name);
             if (in_.fragDataIndices.count(v->name)) idx = in_.fragDataIndices.at(v->name);
+            bound = true;
         }
-        if (loc < 0) { pending.push_back(v); continue; }
+        if (loc < 0) { unassigned.insert(v); continue; }
         int n = v->type.isArray() ? v->type.dims[0] : 1;
-        for (int i = 0; i < n; i++) {
-            if (taken.count({loc + i, idx})) error("fragment output '" + v->name + "' location overlaps another output");
-            taken.insert({loc + i, idx});
-        }
+        bool clash = false;
+        for (int i = 0; i < n; i++) clash |= taken.count({loc + i, idx}) > 0;
+        if (clash && bound && !sc.used.count(v)) continue;
+        if (clash) error("fragment output '" + v->name + "' location overlaps another output");
+        for (int i = 0; i < n; i++) taken.insert({loc + i, idx});
         prog_->fragOutputs[v->name] = {loc, idx};
     }
+    std::vector<const Variable*> pending;  // declaration order
+    for (auto* v : outs)
+        if (unassigned.count(v)) pending.push_back(v);
     for (auto* v : pending) {
         int n = v->type.isArray() ? v->type.dims[0] : 1;
         int loc = 0;
@@ -549,7 +560,9 @@ void Linker::assignFragOutputs() {
         prog_->fragOutputs[v->name] = {loc, 0};
     }
     for (auto* v : outs) {
-        auto [loc, idx] = prog_->fragOutputs[v->name];
+        auto it = prog_->fragOutputs.find(v->name);
+        if (it == prog_->fragOutputs.end()) continue;  // dropped above
+        auto [loc, idx] = it->second;
         FragOutput o;
         o.name = v->name;
         o.type = glTypeEnum(v->type);
