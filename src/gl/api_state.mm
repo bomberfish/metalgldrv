@@ -86,6 +86,7 @@ static bool setCap(Context* ctx, GLenum cap, bool v, int index = -1) {
             ctx->applyClearNow();  // pending clears belong to the current attachment views
             ctx->framebufferSRGB = v;
             ctx->passDirty = true;
+            ctx->syncSurfaceSRGB();
         }
         return true;
     case GL_LINE_SMOOTH: ctx->lineSmooth = v; return true;

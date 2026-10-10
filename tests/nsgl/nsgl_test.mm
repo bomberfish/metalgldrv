@@ -289,6 +289,32 @@ int main(int argc, char** argv) {
         CHECK(px[0] == 0 && px[1] == 255 && px[2] == 0 && px[3] == 255);
         CHECK(glGetError_() == GL_NO_ERROR);
 
+        // The window is sRGB-capable but stores linear RGBA8 until GL_FRAMEBUFFER_SRGB is enabled; then the
+        // contents move to sRGB storage and writes are encoded.
+        auto glEnable_ = gl<void (*)(GLenum)>("glEnable");
+        auto glDisable_ = gl<void (*)(GLenum)>("glDisable");
+        auto glScissor_ = gl<void (*)(GLint, GLint, GLsizei, GLsizei)>("glScissor");
+        CHECK(layer && layer.pixelFormat == MTLPixelFormatBGRA8Unorm);
+        glEnable_(GL_FRAMEBUFFER_SRGB);
+        CHECK(layer && layer.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB);
+        glReadPixels_(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px[0] == 0 && px[1] == 255 && px[2] == 0);  // kept across the switch
+        glEnable_(GL_SCISSOR_TEST);
+        glScissor_(0, 0, 8, 8);
+        glClearColor_(0.5f, 0.5f, 0.5f, 1);
+        glClear_(GL_COLOR_BUFFER_BIT);  // encoded: 0.5 -> 188
+        glDisable_(GL_FRAMEBUFFER_SRGB);
+        glReadPixels_(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px[0] >= 186 && px[0] <= 189);
+        glClear_(GL_COLOR_BUFFER_BIT);  // not encoded
+        glReadPixels_(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px[0] >= 127 && px[0] <= 128);
+        glDisable_(GL_SCISSOR_TEST);
+        glReadPixels_(20, 20, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px[0] == 0 && px[1] == 255 && px[2] == 0);
+        glClearColor_(0, 1, 0, 1);
+        CHECK(glGetError_() == GL_NO_ERROR);
+
         GLint one = 1, got = 0;
         [ctx setValues:&one forParameter:NSOpenGLContextParameterSwapInterval];
         [ctx getValues:&got forParameter:NSOpenGLContextParameterSwapInterval];

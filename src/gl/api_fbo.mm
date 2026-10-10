@@ -371,6 +371,7 @@ static void bindFramebuffer(Context* ctx, GLenum target, GLuint framebuffer, boo
     if (target == GL_FRAMEBUFFER || target == GL_READ_FRAMEBUFFER) {
         ctx->readFb = fb ? fb : (ctx->readSurface ? ctx->readSurface->fb.get() : nullptr);
     }
+    if (!fb) ctx->syncSurfaceSRGB();
 }
 API void APIENTRY glBindFramebuffer(GLenum target, GLuint framebuffer) { MGL_CTX(); bindFramebuffer(ctx, target, framebuffer, false); }
 // EXT_framebuffer_object (DOOM 2016 binds its framebuffers through this one)

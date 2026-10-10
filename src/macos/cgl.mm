@@ -307,7 +307,7 @@ Ref<Surface> newWindowSurface(CGLContextObj obj, CAMetalLayer* layer) {
     ContextImpl* c = lookup(obj);
     if (!c) return nullptr;
     // sRGB-capable like macOS's 8-bit default framebuffers (GL_FRAMEBUFFER_SRGB encodes).
-    Ref<Surface> s = mgl::newWindowSurface(c->pf->surfaceFormat(), layer, true);
+    Ref<Surface> s = mgl::newWindowSurface(c->pf->surfaceFormat(), layer, true, true);
     applyOpacity(s.get(), surfaceOpacity(obj));
     return s;
 }

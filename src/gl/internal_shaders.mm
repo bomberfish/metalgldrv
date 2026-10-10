@@ -223,7 +223,8 @@ static id<MTLTexture> metalfxUpscale(Context* ctx, Surface* s, int outW, int out
     if (![MTLFXSpatialScalerDescriptor supportsMetal4FX:ctx->dev->mtl]) return nil;
     id<MTL4FXSpatialScaler> scaler = s->upscaler;
     if (!scaler || scaler.inputWidth != (NSUInteger)s->width || scaler.inputHeight != (NSUInteger)s->height ||
-        scaler.outputWidth != (NSUInteger)outW || scaler.outputHeight != (NSUInteger)outH) {
+        scaler.outputWidth != (NSUInteger)outW || scaler.outputHeight != (NSUInteger)outH ||
+        scaler.colorTextureFormat != s->color.pixelFormat) {  // Surface::useSRGBStorage changes it
         MTLFXSpatialScalerDescriptor* d = [MTLFXSpatialScalerDescriptor new];
         d.colorTextureFormat = s->color.pixelFormat;
         d.outputTextureFormat = s->color.pixelFormat;

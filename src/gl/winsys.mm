@@ -38,10 +38,11 @@ Surface* newDefaultSurface(const SurfaceFormat& f) {
     return s;
 }
 
-Surface* newWindowSurface(const SurfaceFormat& f, CAMetalLayer* layer, bool srgb) {
+Surface* newWindowSurface(const SurfaceFormat& f, CAMetalLayer* layer, bool srgb, bool lazySRGB) {
     Device* d = Device::get();
     layer.device = d->mtl;
-    layer.pixelFormat = srgb ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
+    bool srgbNow = srgb && !lazySRGB;
+    layer.pixelFormat = srgbNow ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
     layer.framebufferOnly = YES;
     if (f.a == 0) layer.opaque = YES;
     if (layer.drawableSize.width < 1 || layer.drawableSize.height < 1) {
@@ -52,7 +53,7 @@ Surface* newWindowSurface(const SurfaceFormat& f, CAMetalLayer* layer, bool srgb
     Surface* s = newDefaultSurface(f);
     s->layer = layer;
     s->srgbCapable = srgb;
-    if (srgb) s->colorFormat = MTLPixelFormatRGBA8Unorm_sRGB;
+    if (srgbNow) s->colorFormat = MTLPixelFormatRGBA8Unorm_sRGB;
     s->syncSizeFromLayer();
     return s;
 }

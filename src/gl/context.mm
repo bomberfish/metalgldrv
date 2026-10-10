@@ -295,6 +295,7 @@ void Context::bindSurfaces(Surface* draw, Surface* read) {
     if (drawWasDefault) drawFb = draw ? draw->fb : nullptr;
     if (readWasDefault) readFb = read ? read->fb : nullptr;
     passDirty = true;
+    syncSurfaceSRGB();
     if (draw && !everCurrent) {
         everCurrent = true;
         viewport[0][2] = scissor[0][2] = draw->width;
@@ -730,6 +731,60 @@ id<MTLTexture> Surface::linearWriteView(id<MTLTexture> t) {
     return cached;
 }
 
+void Surface::allocColor() {
+    Device* d = Device::get();
+    MTLTextureDescriptor* td = texture2DDescriptor(colorFormat, width, height);
+    // Only sRGB storage needs other-format views (linearWriteView). Format-view usage turns off lossless
+    // compression on Apple GPUs, which makes every load and store of the color buffer cost two to three
+    // times as much (a 4K window: ~0.2 ms per pass).
+    const MTLTextureUsage viewUsage = srgbStorage() ? MTLTextureUsagePixelFormatView : 0;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | viewUsage;
+    td.storageMode = MTLStorageModePrivate;
+    td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+    color = [d->mtl newTextureWithDescriptor:td];
+    color.label = @"default fb color";
+    d->makeResident(color);
+    msColor = nil;
+    colorLinear = msColorLinear = nil;
+    if (samples > 1) {
+        td.textureType = MTLTextureType2DMultisample;
+        td.sampleCount = samples;
+        msColor = [d->mtl newTextureWithDescriptor:td];
+        d->makeResident(msColor);
+    }
+}
+
+void Surface::useSRGBStorage(Context* ctx) {
+    if (!srgbCapable || srgbStorage()) return;
+    colorFormat = MTLPixelFormatRGBA8Unorm_sRGB;
+    // the drawable stores what the color buffer holds: sRGB-encoded values either way
+    if (layer) layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+    colorFmt = formatInfoForMTL(colorFormat);
+    if (fb) fb->version++;
+    ctx->passDirty = true;
+    if (!color) return;
+    MGL_DBG("surface %dx%d: sRGB storage (GL_FRAMEBUFFER_SRGB)", width, height);
+    // Same bytes in the new storage: copy through its linear views.
+    id<MTLTexture> oldColor = color, oldMs = msColor;
+    allocColor();
+    ctx->endEncoder();
+    id<MTL4ComputeCommandEncoder> ce = ctx->newComputeEncoder();
+    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    [ce copyFromTexture:oldColor toTexture:linearWriteView(color)];
+    if (oldMs && msColor) [ce copyFromTexture:oldMs toTexture:linearWriteView(msColor)];
+    [ce endEncoding];
+    lastUse = ctx->serial();
+    Device* d = Device::get();
+    d->releaseAfter(oldColor, lastUse);
+    if (oldMs) d->releaseAfter(oldMs, lastUse);
+}
+
+void Context::syncSurfaceSRGB() {
+    if (!framebufferSRGB) return;
+    for (Framebuffer* f : {drawFb.get(), readFb.get()})
+        if (f && f->isDefault && f->surface && f->surface->srgbCapable && !f->surface->srgbStorage()) f->surface->useSRGBStorage(this);
+}
+
 bool Surface::resize(int w, int h) {
     if (w <= 0) w = 1;
     if (h <= 0) h = 1;
@@ -743,22 +798,7 @@ bool Surface::resize(int w, int h) {
     if (depthStencil) d->releaseAfter(depthStencil, lastUse);
     width = w;
     height = h;
-    MTLTextureDescriptor* td = texture2DDescriptor(colorFormat, w, h);
-    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
-    td.storageMode = MTLStorageModePrivate;
-    td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
-    color = [d->mtl newTextureWithDescriptor:td];
-    color.label = @"default fb color";
-    d->makeResident(color);
-    msColor = nil;
-    colorLinear = msColorLinear = nil;
-    if (samples > 1) {
-        td.textureType = MTLTextureType2DMultisample;
-        td.sampleCount = samples;
-        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
-        msColor = [d->mtl newTextureWithDescriptor:td];
-        d->makeResident(msColor);
-    }
+    allocColor();
     depthStencil = nil;
     if (hasDepth || hasStencil) {
         MTLPixelFormat df = hasStencil ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatDepth32Float;

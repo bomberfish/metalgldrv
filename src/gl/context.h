@@ -56,6 +56,7 @@ struct ImageUnit {
 };
 
 // A drawable surface (EGL window/pbuffer). Holds the default framebuffer images.
+class Context;
 class Surface : public RefCounted {
 public:
     ~Surface() override;
@@ -76,6 +77,12 @@ public:
     // default framebuffer without encoding (linearWriteView). Rebuilt on resize.
     id<MTLTexture> colorLinear = nil, msColorLinear = nil;
     id<MTLTexture> linearWriteView(id<MTLTexture> t);
+    // sRGB-capable window surfaces from CGL / NSOpenGL store linear RGBA8 until the app enables
+    // GL_FRAMEBUFFER_SRGB with this surface bound (Context::syncSurfaceSRGB), and then switch to sRGB
+    // storage with format views for the rest of their life: the views cost lossless compression.
+    bool srgbStorage() const { return colorFormat == MTLPixelFormatRGBA8Unorm_sRGB; }
+    void useSRGBStorage(Context* ctx);
+    void allocColor();  // color / msColor at width x height in colorFormat
     const FormatInfo* colorFmt = nullptr;
     const FormatInfo* dsFmt = nullptr;
     Ref<Framebuffer> fb;  // the default framebuffer object (name 0)
@@ -378,6 +385,7 @@ public:
     void beginPass();
     void endPass();
     void applyClearNow();  // apply pending clears by opening/closing a pass
+    void syncSurfaceSRGB();  // GL_FRAMEBUFFER_SRGB on: bound default framebuffers get sRGB storage (Surface::srgbStorage)
 
     // Synchronizes CPU access to a resource last used in `lastUse`.
     void waitForResource(uint64_t lastUse);

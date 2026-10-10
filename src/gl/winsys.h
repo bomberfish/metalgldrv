@@ -19,7 +19,9 @@ Surface* newDefaultSurface(const SurfaceFormat& f);
 
 // A window surface presenting into `layer`, sized from the layer. `srgb` makes the
 // default framebuffer sRGB-capable (GL_FRAMEBUFFER_SRGB encodes into it).
-Surface* newWindowSurface(const SurfaceFormat& f, CAMetalLayer* layer, bool srgb);
+// srgb: an sRGB-capable surface; lazySRGB: with linear storage until GL_FRAMEBUFFER_SRGB is used on it
+// (Surface::srgbStorage).
+Surface* newWindowSurface(const SurfaceFormat& f, CAMetalLayer* layer, bool srgb, bool lazySRGB = false);
 
 // Resolves an EGLNativeWindowType-style handle (CAMetalLayer, UIView/NSView, CALayer)
 // to the CAMetalLayer to present into, creating one if needed. Main thread only.
