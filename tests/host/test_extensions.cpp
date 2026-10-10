@@ -798,3 +798,21 @@ TEST(ext_polygon_offset) {
     glPolygonOffset(0, 0);
     CHECK_GL();
 }
+
+// GL_SGIS_texture_edge_clamp / GL_SGIS_texture_border_clamp / GL_SGIS_texture_lod: core enums under SGI's names.
+TEST(sgis_texture_params) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x812F /* GL_CLAMP_TO_EDGE_SGIS */);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, 0x812D /* GL_CLAMP_TO_BORDER_SGIS */);
+    glTexParameterf(GL_TEXTURE_2D, 0x813A /* GL_TEXTURE_MIN_LOD_SGIS */, 1);
+    glTexParameteri(GL_TEXTURE_2D, 0x813D /* GL_TEXTURE_MAX_LEVEL_SGIS */, 3);
+    GLint v = 0;
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, &v);
+    CHECK_EQ(v, GL_CLAMP_TO_BORDER);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &v);
+    CHECK_EQ(v, 3);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
