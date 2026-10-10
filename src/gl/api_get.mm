@@ -58,7 +58,7 @@ const char* kExtensions[] = {
     "GL_EXT_provoking_vertex", "GL_EXT_rescale_normal", "GL_EXT_secondary_color", "GL_EXT_separate_specular_color", "GL_EXT_shader_integer_mix",
     "GL_EXT_shadow_funcs", "GL_EXT_stencil_two_side", "GL_EXT_stencil_wrap", "GL_EXT_texture3D", "GL_EXT_texture_cube_map", "GL_EXT_texture_array",
     "GL_EXT_texture_compression_dxt1", "GL_EXT_texture_compression_latc", "GL_EXT_texture_compression_rgtc", "GL_EXT_texture_compression_s3tc",
-    "GL_EXT_texture_edge_clamp", "GL_EXT_texture_env_add", "GL_EXT_texture_env_dot3", "GL_EXT_texture_filter_anisotropic", "GL_EXT_texture_integer", "GL_EXT_texture_lod_bias",
+    "GL_EXT_texture_edge_clamp", "GL_EXT_texture_env_add", "GL_EXT_texture_env_combine", "GL_EXT_texture_env_dot3", "GL_EXT_texture_filter_anisotropic", "GL_EXT_texture_integer", "GL_EXT_texture_lod_bias",
     "GL_EXT_texture_mirror_clamp", "GL_EXT_texture_object", "GL_EXT_texture_rectangle", "GL_EXT_texture_sRGB", "GL_EXT_texture_sRGB_decode",
     "GL_EXT_texture_shadow_lod", "GL_EXT_texture_shared_exponent", "GL_EXT_texture_snorm", "GL_EXT_texture_swizzle", "GL_EXT_timer_query",
     "GL_EXT_transform_feedback", "GL_EXT_vertex_array", "GL_EXT_vertex_array_bgra", "GL_HP_occlusion_test", "GL_IBM_rasterpos_clip", "GL_IBM_texture_mirrored_repeat", "GL_KHR_context_flush_control",

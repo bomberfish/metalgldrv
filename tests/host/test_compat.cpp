@@ -1257,3 +1257,19 @@ TEST(compat_ibm_rasterpos_clip) {
     glDisable(0x19262);
     CHECK_GL();
 }
+
+// GL_EXT_texture_env_combine: the combiner under its EXT names (COMBINE_EXT, SOURCE0_RGB_EXT, ...).
+TEST(compat_ext_texture_env_combine) {
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, 0x8570 /* GL_COMBINE_EXT */);
+    glTexEnvi(GL_TEXTURE_ENV, 0x8571 /* GL_COMBINE_RGB_EXT */, GL_ADD);
+    glTexEnvi(GL_TEXTURE_ENV, 0x8580 /* GL_SOURCE0_RGB_EXT */, GL_TEXTURE);
+    glTexEnvi(GL_TEXTURE_ENV, 0x8581 /* GL_SOURCE1_RGB_EXT */, 0x8577 /* GL_PRIMARY_COLOR_EXT */);
+    glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND1_RGB, GL_SRC_COLOR);
+    uint8_t t[4] = {0, 128, 0, 255};
+    combineQuad(t, 0.5f, 0, 0, 1);
+    uint8_t p[4];
+    readPixel(32, 32, p);
+    CHECK(abs(p[0] - 128) <= 3 && abs(p[1] - 128) <= 3 && p[2] <= 2);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    CHECK_GL();
+}
