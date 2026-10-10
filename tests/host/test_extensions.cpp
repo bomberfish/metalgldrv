@@ -264,3 +264,31 @@ TEST(rgb9e5_renderbuffer) {
     CHECK(fabsf(px[0] - 1.25f) < 0.01f && fabsf(px[1] - 1.5f) < 0.01f && fabsf(px[2] - 3.0f) < 0.02f);
     CHECK_GL();
 }
+
+// GL_APPLE_vertex_array_object: binding a name that wasn't generated creates the object.
+TEST(apple_vertex_array_object) {
+    CHECK(hasExtension("GL_APPLE_vertex_array_object"));
+    auto bind = (void (*)(GLuint))eglGetProcAddress("glBindVertexArrayAPPLE");
+    auto isVao = (GLboolean(*)(GLuint))eglGetProcAddress("glIsVertexArrayAPPLE");
+    CHECK(bind && isVao);
+    if (!bind || !isVao) return;
+    bind(4242);
+    CHECK_GL();
+    CHECK(isVao(4242));
+    GLint b = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &b);
+    CHECK_EQ(b, 4242);
+    glEnableVertexAttribArray(3);
+    bind(0);
+    GLint en = 1;
+    glGetVertexAttribiv(3, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &en);
+    CHECK_EQ(en, 0);  // state stayed with VAO 4242
+    bind(4242);
+    glGetVertexAttribiv(3, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &en);
+    CHECK_EQ(en, 1);
+    bind(0);
+    GLuint name = 4242;
+    glDeleteVertexArrays(1, &name);
+    CHECK(!isVao(4242));
+    CHECK_GL();
+}
