@@ -3044,3 +3044,21 @@ API void APIENTRY glArrayElement(GLint i) {
     }
     arrayElement(ctx, i);
 }
+
+// ---------------------------------------------------------------------------
+// GL_EXT_vertex_array: GL 1.1 vertex arrays before they were core (the pointer calls carry a count, which only
+// bounds the array); GL_EXT_texture_object: texture objects likewise.
+// ---------------------------------------------------------------------------
+API void APIENTRY glVertexPointerEXT(GLint size, GLenum type, GLsizei stride, GLsizei, const void* p) { glVertexPointer(size, type, stride, p); }
+API void APIENTRY glNormalPointerEXT(GLenum type, GLsizei stride, GLsizei, const void* p) { glNormalPointer(type, stride, p); }
+API void APIENTRY glColorPointerEXT(GLint size, GLenum type, GLsizei stride, GLsizei, const void* p) { glColorPointer(size, type, stride, p); }
+API void APIENTRY glTexCoordPointerEXT(GLint size, GLenum type, GLsizei stride, GLsizei, const void* p) { glTexCoordPointer(size, type, stride, p); }
+API void APIENTRY glIndexPointerEXT(GLenum type, GLsizei stride, GLsizei, const void* p) { glIndexPointer(type, stride, p); }
+API void APIENTRY glEdgeFlagPointerEXT(GLsizei stride, GLsizei, const GLboolean* p) { glEdgeFlagPointer(stride, p); }
+
+API void APIENTRY glGenTexturesEXT(GLsizei n, GLuint* textures) { glGenTextures(n, textures); }
+API void APIENTRY glDeleteTexturesEXT(GLsizei n, const GLuint* textures) { glDeleteTextures(n, textures); }
+API GLboolean APIENTRY glIsTextureEXT(GLuint texture) { return glIsTexture(texture); }
+API GLboolean APIENTRY glAreTexturesResidentEXT(GLsizei n, const GLuint* textures, GLboolean* residences) {
+    return glAreTexturesResident(n, textures, residences);
+}

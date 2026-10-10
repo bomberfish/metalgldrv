@@ -938,3 +938,27 @@ TEST(compat_array_element) {
     glDisableClientState(GL_COLOR_ARRAY);
     CHECK_GL();
 }
+
+// GL_EXT_vertex_array: the EXT pointer calls (with their count) and glDrawArraysEXT / glArrayElementEXT.
+TEST(compat_ext_vertex_array) {
+    auto vertexPointer = (void (*)(GLint, GLenum, GLsizei, GLsizei, const void*))eglGetProcAddress("glVertexPointerEXT");
+    auto colorPointer = (void (*)(GLint, GLenum, GLsizei, GLsizei, const void*))eglGetProcAddress("glColorPointerEXT");
+    auto drawArrays = (void (*)(GLenum, GLint, GLsizei))eglGetProcAddress("glDrawArraysEXT");
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    float pos[] = {-1, -1, 1, -1, 1, 1, -1, 1};
+    float col[] = {1, 0.5f, 0, 1, 1, 0.5f, 0, 1, 1, 0.5f, 0, 1, 1, 0.5f, 0, 1};
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    vertexPointer(2, GL_FLOAT, 0, 4, pos);
+    colorPointer(4, GL_FLOAT, 0, 4, col);
+    drawArrays(GL_QUADS, 0, 4);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    CHECK_PIXEL(32, 32, 255, 128, 0, 255);
+    CHECK_GL();
+}
