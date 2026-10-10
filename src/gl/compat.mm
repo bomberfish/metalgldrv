@@ -2784,3 +2784,81 @@ API void APIENTRY glPrimitiveRestartNV(void) {
     RECORD(primitiveRestart(ctx));
     primitiveRestart(ctx);
 }
+
+// ---------------------------------------------------------------------------
+// Immediate-mode type variants (generated from gl.xml): converted to the float entry points; color and
+// normal integers normalize as GL 4.6 compatibility §10.2.1 / Table 10.3 specifies.
+// ---------------------------------------------------------------------------
+API void APIENTRY glColor3bv(const GLbyte * v) { glColor4f(bn(v[0]), bn(v[1]), bn(v[2]), 1.0f); }
+API void APIENTRY glColor3iv(const GLint * v) { glColor4f(in_(v[0]), in_(v[1]), in_(v[2]), 1.0f); }
+API void APIENTRY glColor3sv(const GLshort * v) { glColor4f(sn(v[0]), sn(v[1]), sn(v[2]), 1.0f); }
+API void APIENTRY glColor3uiv(const GLuint * v) { glColor4f(ui(v[0]), ui(v[1]), ui(v[2]), 1.0f); }
+API void APIENTRY glColor3usv(const GLushort * v) { glColor4f(us(v[0]), us(v[1]), us(v[2]), 1.0f); }
+API void APIENTRY glColor4bv(const GLbyte * v) { glColor4f(bn(v[0]), bn(v[1]), bn(v[2]), bn(v[3])); }
+API void APIENTRY glColor4iv(const GLint * v) { glColor4f(in_(v[0]), in_(v[1]), in_(v[2]), in_(v[3])); }
+API void APIENTRY glColor4sv(const GLshort * v) { glColor4f(sn(v[0]), sn(v[1]), sn(v[2]), sn(v[3])); }
+API void APIENTRY glColor4uiv(const GLuint * v) { glColor4f(ui(v[0]), ui(v[1]), ui(v[2]), ui(v[3])); }
+API void APIENTRY glColor4usv(const GLushort * v) { glColor4f(us(v[0]), us(v[1]), us(v[2]), us(v[3])); }
+API void APIENTRY glFogCoorddv(const GLdouble * coord) { glFogCoordf((GLfloat)coord[0]); }
+API void APIENTRY glMultiTexCoord1d(GLenum target, GLdouble s) { glMultiTexCoord4f(target, (GLfloat)s, 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord1dv(GLenum target, const GLdouble * v) { glMultiTexCoord4f(target, (GLfloat)v[0], 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord1fv(GLenum target, const GLfloat * v) { glMultiTexCoord4f(target, (GLfloat)v[0], 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord1i(GLenum target, GLint s) { glMultiTexCoord4f(target, (GLfloat)s, 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord1iv(GLenum target, const GLint * v) { glMultiTexCoord4f(target, (GLfloat)v[0], 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord1s(GLenum target, GLshort s) { glMultiTexCoord4f(target, (GLfloat)s, 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord1sv(GLenum target, const GLshort * v) { glMultiTexCoord4f(target, (GLfloat)v[0], 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord2dv(GLenum target, const GLdouble * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord2iv(GLenum target, const GLint * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord2sv(GLenum target, const GLshort * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord3d(GLenum target, GLdouble s, GLdouble t, GLdouble r) { glMultiTexCoord4f(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, 1.0f); }
+API void APIENTRY glMultiTexCoord3dv(GLenum target, const GLdouble * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glMultiTexCoord3fv(GLenum target, const GLfloat * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glMultiTexCoord3i(GLenum target, GLint s, GLint t, GLint r) { glMultiTexCoord4f(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, 1.0f); }
+API void APIENTRY glMultiTexCoord3iv(GLenum target, const GLint * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glMultiTexCoord3s(GLenum target, GLshort s, GLshort t, GLshort r) { glMultiTexCoord4f(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, 1.0f); }
+API void APIENTRY glMultiTexCoord3sv(GLenum target, const GLshort * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glMultiTexCoord4d(GLenum target, GLdouble s, GLdouble t, GLdouble r, GLdouble q) { glMultiTexCoord4f(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, (GLfloat)q); }
+API void APIENTRY glMultiTexCoord4dv(GLenum target, const GLdouble * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glMultiTexCoord4i(GLenum target, GLint s, GLint t, GLint r, GLint q) { glMultiTexCoord4f(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, (GLfloat)q); }
+API void APIENTRY glMultiTexCoord4iv(GLenum target, const GLint * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glMultiTexCoord4s(GLenum target, GLshort s, GLshort t, GLshort r, GLshort q) { glMultiTexCoord4f(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, (GLfloat)q); }
+API void APIENTRY glMultiTexCoord4sv(GLenum target, const GLshort * v) { glMultiTexCoord4f(target, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glNormal3bv(const GLbyte * v) { glNormal3f(bn(v[0]), bn(v[1]), bn(v[2])); }
+API void APIENTRY glNormal3iv(const GLint * v) { glNormal3f(in_(v[0]), in_(v[1]), in_(v[2])); }
+API void APIENTRY glNormal3sv(const GLshort * v) { glNormal3f(sn(v[0]), sn(v[1]), sn(v[2])); }
+API void APIENTRY glSecondaryColor3b(GLbyte red, GLbyte green, GLbyte blue) { glSecondaryColor3f(bn(red), bn(green), bn(blue)); }
+API void APIENTRY glSecondaryColor3bv(const GLbyte * v) { glSecondaryColor3f(bn(v[0]), bn(v[1]), bn(v[2])); }
+API void APIENTRY glSecondaryColor3d(GLdouble red, GLdouble green, GLdouble blue) { glSecondaryColor3f((GLfloat)red, (GLfloat)green, (GLfloat)blue); }
+API void APIENTRY glSecondaryColor3dv(const GLdouble * v) { glSecondaryColor3f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2]); }
+API void APIENTRY glSecondaryColor3i(GLint red, GLint green, GLint blue) { glSecondaryColor3f(in_(red), in_(green), in_(blue)); }
+API void APIENTRY glSecondaryColor3iv(const GLint * v) { glSecondaryColor3f(in_(v[0]), in_(v[1]), in_(v[2])); }
+API void APIENTRY glSecondaryColor3s(GLshort red, GLshort green, GLshort blue) { glSecondaryColor3f(sn(red), sn(green), sn(blue)); }
+API void APIENTRY glSecondaryColor3sv(const GLshort * v) { glSecondaryColor3f(sn(v[0]), sn(v[1]), sn(v[2])); }
+API void APIENTRY glSecondaryColor3ui(GLuint red, GLuint green, GLuint blue) { glSecondaryColor3f(ui(red), ui(green), ui(blue)); }
+API void APIENTRY glSecondaryColor3uiv(const GLuint * v) { glSecondaryColor3f(ui(v[0]), ui(v[1]), ui(v[2])); }
+API void APIENTRY glSecondaryColor3us(GLushort red, GLushort green, GLushort blue) { glSecondaryColor3f(us(red), us(green), us(blue)); }
+API void APIENTRY glSecondaryColor3usv(const GLushort * v) { glSecondaryColor3f(us(v[0]), us(v[1]), us(v[2])); }
+API void APIENTRY glTexCoord1dv(const GLdouble * v) { glTexCoord4f((GLfloat)v[0], 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glTexCoord1fv(const GLfloat * v) { glTexCoord4f((GLfloat)v[0], 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glTexCoord1iv(const GLint * v) { glTexCoord4f((GLfloat)v[0], 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glTexCoord1s(GLshort s) { glTexCoord4f((GLfloat)s, 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glTexCoord1sv(const GLshort * v) { glTexCoord4f((GLfloat)v[0], 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glTexCoord2iv(const GLint * v) { glTexCoord4f((GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glTexCoord2sv(const GLshort * v) { glTexCoord4f((GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glTexCoord3dv(const GLdouble * v) { glTexCoord4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glTexCoord3i(GLint s, GLint t, GLint r) { glTexCoord4f((GLfloat)s, (GLfloat)t, (GLfloat)r, 1.0f); }
+API void APIENTRY glTexCoord3iv(const GLint * v) { glTexCoord4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glTexCoord3s(GLshort s, GLshort t, GLshort r) { glTexCoord4f((GLfloat)s, (GLfloat)t, (GLfloat)r, 1.0f); }
+API void APIENTRY glTexCoord3sv(const GLshort * v) { glTexCoord4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glTexCoord4dv(const GLdouble * v) { glTexCoord4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glTexCoord4i(GLint s, GLint t, GLint r, GLint q) { glTexCoord4f((GLfloat)s, (GLfloat)t, (GLfloat)r, (GLfloat)q); }
+API void APIENTRY glTexCoord4iv(const GLint * v) { glTexCoord4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glTexCoord4s(GLshort s, GLshort t, GLshort r, GLshort q) { glTexCoord4f((GLfloat)s, (GLfloat)t, (GLfloat)r, (GLfloat)q); }
+API void APIENTRY glTexCoord4sv(const GLshort * v) { glTexCoord4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glVertex2sv(const GLshort * v) { glVertex4f((GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glVertex3sv(const GLshort * v) { glVertex4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glVertex4dv(const GLdouble * v) { glVertex4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glVertex4i(GLint x, GLint y, GLint z, GLint w) { glVertex4f((GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w); }
+API void APIENTRY glVertex4iv(const GLint * v) { glVertex4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glVertex4s(GLshort x, GLshort y, GLshort z, GLshort w) { glVertex4f((GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w); }
+API void APIENTRY glVertex4sv(const GLshort * v) { glVertex4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }

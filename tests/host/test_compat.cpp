@@ -744,3 +744,41 @@ TEST(compat_ext_texture_env_add) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// Immediate-mode type variants: integer colors normalize, integer coordinates don't.
+TEST(compat_immediate_variants) {
+    GLshort c[3] = {32767, 0, 16384};
+    glColor3sv(c);
+    GLfloat cur[4] = {};
+    glGetFloatv(GL_CURRENT_COLOR, cur);
+    CHECK(cur[0] == 1.0f && cur[1] == 0 && fabsf(cur[2] - 0.5f) < 0.001f && cur[3] == 1.0f);
+    glTexCoord3i(2, 3, 4);
+    glGetFloatv(GL_CURRENT_TEXTURE_COORDS, cur);
+    CHECK(cur[0] == 2 && cur[1] == 3 && cur[2] == 4 && cur[3] == 1);
+    GLdouble mt[4] = {0.5, 0.25, 0, 2};
+    glMultiTexCoord4dv(GL_TEXTURE0, mt);
+    glGetFloatv(GL_CURRENT_TEXTURE_COORDS, cur);
+    CHECK(cur[0] == 0.5f && cur[3] == 2);
+    glSecondaryColor3ub(255, 0, 0);
+    glGetFloatv(GL_CURRENT_SECONDARY_COLOR, cur);
+    CHECK(cur[0] == 1.0f);
+    // vertices from integer variants
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, 64, 0, 64, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor3ub(0, 255, 0);
+    GLint v0[4] = {0, 0, 0, 1}, v1[4] = {32, 0, 0, 1}, v2[4] = {32, 32, 0, 1}, v3[4] = {0, 32, 0, 1};
+    glBegin(GL_QUADS);
+    glVertex4iv(v0);
+    glVertex4iv(v1);
+    glVertex4iv(v2);
+    glVertex4iv(v3);
+    glEnd();
+    CHECK_PIXEL(16, 16, 0, 255, 0, 255);
+    CHECK_PIXEL(48, 48, 0, 0, 0, 255);
+    CHECK_GL();
+}
