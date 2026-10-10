@@ -214,3 +214,12 @@ TEST(arb_program_coverage) {
     f.del(1, &vp);
     f.del(1, &fp);
 }
+
+TEST(arb_fragment_program_advertised) {
+    GLint n = 0;
+    bool fp = false;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+    for (GLint i = 0; i < n; i++)
+        if (!strcmp((const char*)glGetStringi(GL_EXTENSIONS, i), "GL_ARB_fragment_program")) fp = true;
+    CHECK(fp);
+}

@@ -20,7 +20,7 @@ const char* kExtensions[] = {
     "GL_ARB_depth_texture", "GL_ARB_derivative_control", "GL_ARB_direct_state_access", "GL_ARB_draw_buffers",
     "GL_ARB_draw_buffers_blend", "GL_ARB_draw_elements_base_vertex", "GL_ARB_draw_indirect", "GL_ARB_draw_instanced",
     "GL_ARB_enhanced_layouts", "GL_ARB_explicit_attrib_location", "GL_ARB_explicit_uniform_location",
-    "GL_ARB_fragment_coord_conventions", "GL_ARB_fragment_layer_viewport", "GL_ARB_fragment_shader",
+    "GL_ARB_fragment_coord_conventions", "GL_ARB_fragment_layer_viewport", "GL_ARB_fragment_program", "GL_ARB_fragment_shader",
     "GL_ARB_framebuffer_no_attachments", "GL_ARB_framebuffer_object", "GL_ARB_framebuffer_sRGB", "GL_ARB_geometry_shader4",
     "GL_ARB_get_program_binary", "GL_ARB_get_texture_sub_image", "GL_ARB_gl_spirv", "GL_ARB_gpu_shader5", "GL_ARB_gpu_shader_fp64", "GL_ARB_gpu_shader_int64",
     "GL_ARB_half_float_pixel", "GL_ARB_half_float_vertex", "GL_ARB_indirect_parameters", "GL_ARB_instanced_arrays",
