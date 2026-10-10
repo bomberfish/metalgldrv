@@ -903,3 +903,38 @@ TEST(compat_ext_compiled_vertex_array) {
     unlock();
     CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);
 }
+
+// glArrayElement: vertices from the enabled client arrays inside Begin/End, also compiled into a list.
+TEST(compat_array_element) {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    float pos[] = {-1, -1, 0, -1, 0, 1, -1, 1};
+    uint8_t col[] = {0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255};
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, pos);
+    glColorPointer(4, GL_UNSIGNED_BYTE, 0, col);
+    glBegin(GL_QUADS);
+    for (int i = 0; i < 4; i++) glArrayElement(i);
+    glEnd();
+    CHECK_PIXEL(16, 32, 0, 255, 0, 255);
+    GLuint list = glGenLists(1);
+    glNewList(list, GL_COMPILE);
+    glBegin(GL_QUADS);
+    for (int i = 0; i < 4; i++) glArrayElement(i);
+    glEnd();
+    glEndList();
+    for (auto& f : pos) f += (&f - pos) % 2 == 0 ? 1 : 0;  // move the arrays right: the list keeps the old ones
+    glClear(GL_COLOR_BUFFER_BIT);
+    glCallList(list);
+    CHECK_PIXEL(16, 32, 0, 255, 0, 255);
+    CHECK_PIXEL(48, 32, 0, 0, 0, 255);
+    glDeleteLists(list, 1);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    CHECK_GL();
+}

@@ -2920,3 +2920,127 @@ API void APIENTRY glUnlockArraysEXT(void) {
     cs->lockFirst = 0;
     cs->lockCount = 0;
 }
+
+// ---------------------------------------------------------------------------
+// glArrayElement: the vertex at index i of the enabled arrays (fixed-function and generic), inside Begin/End.
+// ---------------------------------------------------------------------------
+static float halfBits(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+    float v = e == 0 ? ldexpf((float)m, -24) : e == 31 ? (m ? NAN : INFINITY) : ldexpf(1.0f + m / 1024.0f, (int)e - 15);
+    return sign ? -v : v;
+}
+
+// Reads `size` components of `type` at p (GL_BGRA size: four, blue first); normalized integers map to [0,1] / [-1,1].
+static void readElement(const uint8_t* p, GLint size, GLenum type, bool normalized, float* out) {
+    int n = size == GL_BGRA ? 4 : size;
+    out[0] = out[1] = out[2] = 0;
+    out[3] = 1;
+    for (int k = 0; k < n; k++) {
+        float v = 0;
+        switch (type) {
+        case GL_BYTE: { int8_t x; memcpy(&x, p + k, 1); v = normalized ? std::max(-1.0f, x / 127.0f) : x; break; }
+        case GL_UNSIGNED_BYTE: v = normalized ? p[k] / 255.0f : p[k]; break;
+        case GL_SHORT: { int16_t x; memcpy(&x, p + 2 * k, 2); v = normalized ? std::max(-1.0f, x / 32767.0f) : x; break; }
+        case GL_UNSIGNED_SHORT: { uint16_t x; memcpy(&x, p + 2 * k, 2); v = normalized ? x / 65535.0f : x; break; }
+        case GL_INT: { int32_t x; memcpy(&x, p + 4 * k, 4); v = normalized ? std::max(-1.0f, (float)(x / 2147483647.0)) : (float)x; break; }
+        case GL_UNSIGNED_INT: { uint32_t x; memcpy(&x, p + 4 * k, 4); v = normalized ? (float)(x / 4294967295.0) : (float)x; break; }
+        case GL_FLOAT: memcpy(&v, p + 4 * k, 4); break;
+        case GL_DOUBLE: { double x; memcpy(&x, p + 8 * k, 8); v = (float)x; break; }
+        case GL_HALF_FLOAT: { uint16_t x; memcpy(&x, p + 2 * k, 2); v = halfBits(x); break; }
+        default: break;
+        }
+        out[k] = v;
+    }
+    if (size == GL_BGRA) std::swap(out[0], out[2]);
+}
+
+static int typeBytes(GLenum type) {
+    switch (type) {
+    case GL_BYTE: case GL_UNSIGNED_BYTE: return 1;
+    case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_HALF_FLOAT: return 2;
+    case GL_DOUBLE: return 8;
+    default: return 4;
+    }
+}
+
+static const uint8_t* clientElement(const ClientArray& a, GLint i) {
+    const uint8_t* base = a.buffer ? (a.buffer->cpu ? a.buffer->cpu + (uintptr_t)a.pointer : nullptr) : (const uint8_t*)a.pointer;
+    if (!base) return nullptr;
+    int comps = a.size == GL_BGRA ? 4 : a.size;
+    size_t stride = a.stride ? (size_t)a.stride : (size_t)comps * typeBytes(a.type);
+    return base + (size_t)i * stride;
+}
+
+static void arrayElement(Context* ctx, GLint i) {
+    CompatState* cs = compat(ctx);
+    for (int a = CA_COUNT - 1; a >= 0; a--) {  // the vertex last: it emits
+        if (a == CA_VERTEX) continue;
+        const ClientArray& arr = cs->arrays[a];
+        if (!arr.enabled) continue;
+        const uint8_t* p = clientElement(arr, i);
+        if (!p) continue;
+        bool norm = a == CA_COLOR || a == CA_SECONDARY || (a == CA_NORMAL && arr.type != GL_FLOAT && arr.type != GL_DOUBLE);
+        float v[4];
+        readElement(p, arr.size, arr.type, norm, v);
+        if (a == CA_NORMAL) v[3] = 1;
+        memcpy(cs->current[a], v, 16);
+    }
+    // generic attribute arrays of the bound vertex array object (client memory or buffers)
+    VertexArray* vao = ctx->vao.get();
+    for (int g = kMaxVertexAttribs - 1; g >= 1; g--) {
+        const VertexAttrib& va = vao->attribs[g];
+        if (!va.enabled) continue;
+        const VertexBinding& vb = vao->bindings[va.binding];
+        const uint8_t* base = va.clientPointer ? (const uint8_t*)va.clientPointer
+                              : vb.buffer && vb.buffer->cpu ? vb.buffer->cpu + vb.offset + va.relativeOffset
+                                                            : nullptr;
+        if (!base) continue;
+        int comps = va.size == GL_BGRA ? 4 : va.size;
+        size_t stride = vb.stride ? (size_t)vb.stride : (size_t)comps * typeBytes(va.type);
+        float v[4];
+        readElement(base + (size_t)i * stride, va.size, va.type, va.normalized, v);
+        glVertexAttrib4f((GLuint)g, v[0], v[1], v[2], v[3]);
+    }
+    if (cs->arrays[CA_VERTEX].enabled) {
+        if (const uint8_t* p = clientElement(cs->arrays[CA_VERTEX], i)) {
+            float v[4];
+            readElement(p, cs->arrays[CA_VERTEX].size, cs->arrays[CA_VERTEX].type, false, v);
+            emitVertex(ctx, v[0], v[1], v[2], v[3]);
+        }
+    }
+}
+
+API void APIENTRY glArrayElement(GLint i) {
+    MGL_CTX();
+    if (i < 0) return ctx->setError(GL_INVALID_VALUE);
+    CompatState* cs = compat(ctx);
+    if (cs->compilingList && cs->callDepth == 0) {
+        // Display lists hold the array values (client data is read when the list is compiled).
+        struct Value {
+            int attr;
+            float v[4];
+        };
+        std::vector<Value> vals;
+        for (int a = 0; a < CA_COUNT; a++) {
+            const ClientArray& arr = cs->arrays[a];
+            const uint8_t* p = arr.enabled ? clientElement(arr, i) : nullptr;
+            if (!p) continue;
+            Value val{a, {}};
+            bool norm = a == CA_COLOR || a == CA_SECONDARY || (a == CA_NORMAL && arr.type != GL_FLOAT && arr.type != GL_DOUBLE);
+            readElement(p, arr.size, arr.type, norm, val.v);
+            vals.push_back(val);
+        }
+        cs->listBuf.push_back([vals]() {
+            Context* c = currentContext();
+            CompatState* s = compat(c);
+            const float* pos = nullptr;
+            for (const Value& val : vals) {
+                if (val.attr == CA_VERTEX) pos = val.v;
+                else memcpy(s->current[val.attr], val.v, 16);
+            }
+            if (pos) emitVertex(c, pos[0], pos[1], pos[2], pos[3]);
+        });
+        if (cs->listMode == GL_COMPILE) return;
+    }
+    arrayElement(ctx, i);
+}
