@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 namespace mgl {
 
@@ -254,6 +255,7 @@ const FormatInfo* resolveInternalFormat(GLenum internalFormat, GLenum format, GL
         return formatInfo(isFloat ? GL_R32F : isHalf ? GL_R16F : isShortN ? GL_R16 : GL_R8);
     case 2: case GL_RG:
         return formatInfo(isFloat ? GL_RG32F : isHalf ? GL_RG16F : isShortN ? GL_RG16 : GL_RG8);
+    case GL_RGB_RAW_422_APPLE: return formatInfo(GL_RGB8);  // APPLE_rgb_422: unpacked at upload (convertToStorage)
     case 3: case GL_RGB:
         if (type == GL_UNSIGNED_INT_10F_11F_11F_REV) return formatInfo(GL_R11F_G11F_B10F);
         if (type == GL_UNSIGNED_INT_5_9_9_9_REV) return formatInfo(GL_RGB9_E5);
@@ -284,6 +286,9 @@ const FormatInfo* resolveInternalFormat(GLenum internalFormat, GLenum format, GL
 // ---------------------------------------------------------------------------
 // client formats
 // ---------------------------------------------------------------------------
+// GL_APPLE_rgb_422 / GL_APPLE_ycbcr_422 client formats: pairs of pixels share their chroma.
+static bool is422Format(GLenum format) { return format == GL_RGB_422_APPLE; }
+
 static int formatComponents(GLenum format) {
     switch (format) {
     case GL_RED: case GL_GREEN: case GL_BLUE: case GL_ALPHA: case GL_LUMINANCE: case GL_INTENSITY:
@@ -292,6 +297,7 @@ static int formatComponents(GLenum format) {
         return 1;
     case GL_RG: case GL_RG_INTEGER: case GL_LUMINANCE_ALPHA: case GL_DEPTH_STENCIL: return 2;
     case GL_RGB: case GL_BGR: case GL_RGB_INTEGER: case GL_BGR_INTEGER: return 3;
+    case GL_RGB_422_APPLE: return 3;  // two bytes per pixel (packedSize)
     case GL_RGBA: case GL_BGRA: case GL_RGBA_INTEGER: case GL_BGRA_INTEGER: return 4;
     default: return 0;
     }
@@ -316,6 +322,7 @@ static int packedSize(GLenum type, int& comps) {
     case GL_UNSIGNED_INT_10_10_10_2: case GL_UNSIGNED_INT_2_10_10_10_REV: comps = 4; return 4;
     case GL_UNSIGNED_INT_10F_11F_11F_REV: case GL_UNSIGNED_INT_5_9_9_9_REV: comps = 3; return 4;
     case GL_UNSIGNED_INT_24_8: comps = 2; return 4;
+    case GL_UNSIGNED_SHORT_8_8_APPLE: case GL_UNSIGNED_SHORT_8_8_REV_APPLE: comps = 3; return 2;  // 4:2:2 pairs
     case GL_FLOAT_32_UNSIGNED_INT_24_8_REV: comps = 2; return 8;
     default: comps = 0; return 0;
     }
@@ -338,6 +345,9 @@ GLenum pixelFormatTypeError(GLenum format, GLenum type) {
     bool packed = packedSize(type, pc) != 0;
     if (!n || (!packed && !typeSize(type))) return GL_INVALID_ENUM;
     bool integer = isIntegerFormat(format);
+    // 4:2:2 formats and their types only go together
+    bool is422Type = type == GL_UNSIGNED_SHORT_8_8_APPLE || type == GL_UNSIGNED_SHORT_8_8_REV_APPLE;
+    if (is422Format(format) || is422Type) return is422Format(format) && is422Type ? 0 : GL_INVALID_OPERATION;
     switch (type) {
     case GL_UNSIGNED_BYTE_3_3_2: case GL_UNSIGNED_BYTE_2_3_3_REV:
     case GL_UNSIGNED_SHORT_5_6_5: case GL_UNSIGNED_SHORT_5_6_5_REV:
@@ -383,6 +393,8 @@ GLenum texImageFormatError(const FormatInfo* f, GLenum format, GLenum type, GLen
 bool isValidFormatType(GLenum format, GLenum type) {
     int n = formatComponents(format);
     if (!n) return false;
+    if (is422Format(format) || type == GL_UNSIGNED_SHORT_8_8_APPLE || type == GL_UNSIGNED_SHORT_8_8_REV_APPLE)
+        return is422Format(format) && (type == GL_UNSIGNED_SHORT_8_8_APPLE || type == GL_UNSIGNED_SHORT_8_8_REV_APPLE);
     int pc;
     if (packedSize(type, pc)) {
         if (type == GL_UNSIGNED_INT_24_8 || type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV) return format == GL_DEPTH_STENCIL;
@@ -990,11 +1002,91 @@ void encodeClient(GLenum format, GLenum type, const Px& px, uint8_t* p, bool swa
 
 }  // namespace
 
+// --- 4:2:2 (GL_APPLE_rgb_422, GL_APPLE_ycbcr_422) ---
+// Each pixel is one 16-bit unit holding its Y' and one chroma value: Cb for even pixels, Cr for odd ones.
+// UNSIGNED_SHORT_8_8_APPLE has Y' in the high byte (in little-endian memory: Cb Y0 Cr Y1, '2vuy'), the _REV
+// type in the low byte (Y0 Cb Y1 Cr, 'yuvs'). RGB_422 hands the components over unconverted (Cr, Y', Cb as
+// R, G, B); YCBCR_422 converts to RGB (BT.601, video range).
+static void ycc422ToRGB(GLenum format, float y, float cb, float cr, float* rgb) {
+    if (format == GL_RGB_422_APPLE) {
+        rgb[0] = cr / 255.0f;
+        rgb[1] = y / 255.0f;
+        rgb[2] = cb / 255.0f;
+        return;
+    }
+    float Y = (y - 16.0f) / 219.0f, Cb = (cb - 128.0f) / 224.0f, Cr = (cr - 128.0f) / 224.0f;
+    rgb[0] = std::clamp(Y + 1.402f * Cr, 0.0f, 1.0f);
+    rgb[1] = std::clamp(Y - 0.344136f * Cb - 0.714136f * Cr, 0.0f, 1.0f);
+    rgb[2] = std::clamp(Y + 1.772f * Cb, 0.0f, 1.0f);
+}
+
+static void rgbToYcc422(GLenum format, const float* rgb, float* y, float* cb, float* cr) {
+    float r = std::clamp(rgb[0], 0.0f, 1.0f), g = std::clamp(rgb[1], 0.0f, 1.0f), b = std::clamp(rgb[2], 0.0f, 1.0f);
+    if (format == GL_RGB_422_APPLE) {
+        *cr = r * 255.0f;
+        *y = g * 255.0f;
+        *cb = b * 255.0f;
+        return;
+    }
+    *y = 16.0f + 219.0f * (0.299f * r + 0.587f * g + 0.114f * b);
+    *cb = 128.0f + 224.0f * (-0.168736f * r - 0.331264f * g + 0.5f * b);
+    *cr = 128.0f + 224.0f * (0.5f * r - 0.418688f * g - 0.081312f * b);
+}
+
+static void unpack422Row(GLenum format, GLenum type, const uint8_t* s, int width, bool swap, std::vector<float>& rgb) {
+    rgb.assign((size_t)width * 3, 0);
+    auto unit = [&](int x, float* yv, float* c) {
+        uint16_t u = rd<uint16_t>(s + x * 2, swap);
+        uint8_t hi = u >> 8, lo = u & 0xff;
+        *yv = type == GL_UNSIGNED_SHORT_8_8_APPLE ? hi : lo;
+        *c = type == GL_UNSIGNED_SHORT_8_8_APPLE ? lo : hi;
+    };
+    for (int x = 0; x < width; x += 2) {
+        float y0, cb, y1 = 0, cr = 128;
+        unit(x, &y0, &cb);
+        if (x + 1 < width) unit(x + 1, &y1, &cr);
+        ycc422ToRGB(format, y0, cb, cr, &rgb[(size_t)x * 3]);
+        if (x + 1 < width) ycc422ToRGB(format, y1, cb, cr, &rgb[(size_t)(x + 1) * 3]);
+    }
+}
+
+static void pack422Row(GLenum format, GLenum type, const std::vector<float>& rgb, int width, bool swap, uint8_t* d) {
+    auto unit = [&](int x, float yv, float c) {
+        auto q = [](float v) { return (uint16_t)std::clamp((int)lroundf(v), 0, 255); };
+        uint16_t u = type == GL_UNSIGNED_SHORT_8_8_APPLE ? (uint16_t)(q(yv) << 8 | q(c)) : (uint16_t)(q(c) << 8 | q(yv));
+        if (swap) u = __builtin_bswap16(u);
+        memcpy(d + x * 2, &u, 2);
+    };
+    for (int x = 0; x < width; x += 2) {
+        float y0, cb0, cr0, y1 = 0, cb1 = 0, cr1 = 0;
+        rgbToYcc422(format, &rgb[(size_t)x * 3], &y0, &cb0, &cr0);
+        bool pair = x + 1 < width;
+        if (pair) rgbToYcc422(format, &rgb[(size_t)(x + 1) * 3], &y1, &cb1, &cr1);
+        float cb = pair ? (cb0 + cb1) / 2 : cb0, cr = pair ? (cr0 + cr1) / 2 : cr0;
+        unit(x, y0, cb);
+        if (pair) unit(x + 1, y1, cr);
+    }
+}
+
 void convertToStorage(const FormatInfo* f, GLenum format, GLenum type, const void* src, size_t srcRowStride,
                       size_t srcImageStride, void* dst, size_t dstRowStride, size_t dstImageStride, int width,
                       int height, int depth, bool swapBytes) {
     const uint8_t* s = (const uint8_t*)src;
     uint8_t* d = (uint8_t*)dst;
+    if (is422Format(format)) {
+        std::vector<float> rgb;
+        for (int z = 0; z < depth; z++)
+            for (int y = 0; y < height; y++) {
+                unpack422Row(format, type, s + z * srcImageStride + y * srcRowStride, width, swapBytes, rgb);
+                uint8_t* dr = d + z * dstImageStride + y * dstRowStride;
+                for (int x = 0; x < width; x++) {
+                    Px px;
+                    for (int k = 0; k < 3; k++) px.f[k] = rgb[(size_t)x * 3 + k];
+                    encodeStorage(f, px, dr + x * f->bytesPerPixel, GL_RGB);
+                }
+            }
+        return;
+    }
     if (directUploadCompatible(f, format, type) && !swapBytes) {
         size_t row = (size_t)width * f->bytesPerPixel;
         for (int z = 0; z < depth; z++)
@@ -1024,6 +1116,19 @@ void convertFromStorage(const FormatInfo* f, GLenum format, GLenum type, const v
     const uint8_t* s = (const uint8_t*)src;
     uint8_t* d = (uint8_t*)dst;
     bool needClamp = clampColor && f->kind != FmtKind::Unorm;  // unorm values are already in [0,1]
+    if (is422Format(format)) {
+        std::vector<float> rgb((size_t)width * 3);
+        for (int y = 0; y < height; y++) {
+            const uint8_t* sr = s + y * srcRowStride;
+            for (int x = 0; x < width; x++) {
+                Px px;
+                decodeStorage(f, sr + x * f->bytesPerPixel, px);
+                for (int k = 0; k < 3; k++) rgb[(size_t)x * 3 + k] = px.f[k];
+            }
+            pack422Row(format, type, rgb, width, swapBytes, d + y * dstRowStride);
+        }
+        return;
+    }
     if (!needClamp && directUploadCompatible(f, format, type) && !swapBytes && f->baseFormat != GL_LUMINANCE &&
         f->baseFormat != GL_LUMINANCE_ALPHA && f->baseFormat != GL_INTENSITY && f->baseFormat != GL_ALPHA) {
         size_t row = (size_t)width * f->bytesPerPixel;

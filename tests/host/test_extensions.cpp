@@ -567,3 +567,30 @@ TEST(apple_pixel_buffer) {
     CHECK(d[0] == 1 && d[1] == 1);
     CHECK_GL();
 }
+
+// GL_APPLE_rgb_422: 4:2:2 data, sampled unconverted (Cr, Y', Cb as R, G, B) with the chroma shared by a pair.
+TEST(apple_rgb_422) {
+    CHECK(hasExtension("GL_APPLE_rgb_422"));
+    const GLenum RGB_422 = 0x8A1F, RGB_RAW_422 = 0x8A51, SHORT_8_8 = 0x85BA, SHORT_8_8_REV = 0x85BB;
+    uint8_t twovuy[8] = {0x40, 0x80, 0xC0, 0x20, 0x10, 0xFF, 0xF0, 0x00};  // Cb Y0 Cr Y1, two pairs
+    GLuint tex, fbo;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, RGB_RAW_422, 4, 1, 0, RGB_422, SHORT_8_8, twovuy);
+    CHECK_GL();
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    CHECK_PIXEL(0, 0, 0xC0, 0x80, 0x40, 255);
+    CHECK_PIXEL(1, 0, 0xC0, 0x20, 0x40, 255);
+    CHECK_PIXEL(3, 0, 0xF0, 0x00, 0x10, 255);
+    uint8_t yuvs[8] = {};
+    glGetTexImage(GL_TEXTURE_2D, 0, RGB_422, SHORT_8_8_REV, yuvs);  // Y0 Cb Y1 Cr
+    CHECK(yuvs[0] == 0x80 && yuvs[1] == 0x40 && yuvs[2] == 0x20 && yuvs[3] == 0xC0);
+    glTexImage2D(GL_TEXTURE_2D, 0, RGB_RAW_422, 4, 1, 0, GL_RGB, SHORT_8_8, twovuy);
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);  // 4:2:2 types need the 4:2:2 format
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
