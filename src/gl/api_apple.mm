@@ -13,6 +13,7 @@ using namespace mgl;
 // and binding one that GenVertexArraysAPPLE didn't return creates it (unlike ARB_vertex_array_object).
 API void APIENTRY glBindVertexArrayAPPLE(GLuint array) {
     MGL_CTX();
+    auto lk = ctx->containerLock();
     if (array && !ctx->vaos.isName(array)) ctx->vaos.reserve(array);
     glBindVertexArray(array);
 }
@@ -80,7 +81,10 @@ static bool objectSerial(Context* ctx, GLenum object, GLuint name, uint64_t* ser
     }
     case GL_VERTEX_ARRAY:  // vertex array objects / ranges (also by their binding enum)
     case GL_VERTEX_ARRAY_BINDING_APPLE:
-        if (name && !ctx->vaos.get(name)) return false;
+        if (name) {
+            auto lk = ctx->containerLock();
+            if (!ctx->vaos.get(name)) return false;
+        }
         *serial = ctx->serial();  // everything recorded so far may read its arrays
         return true;
     case GL_DRAW_PIXELS_APPLE:

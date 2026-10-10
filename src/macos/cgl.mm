@@ -17,10 +17,12 @@
 #import <CoreGraphics/CoreGraphics.h>
 #include <atomic>
 #include <cstring>
+#include <strings.h>
 #include <map>
 #include <mutex>
 #include <set>
 #include <unordered_set>
+#include "gl/app_profile.h"
 #include "gl/winsys.h"
 #include "util/log.h"
 
@@ -537,6 +539,11 @@ CGL_EXPORT CGLError CGLCreateContext(CGLPixelFormatObj pix, CGLContextObj share,
         group = sc->ctx->share;
     } else {
         group = new ShareGroup();
+        // GL_APPLE_container_object_shareable, like Apple's OpenGL. Not for Windows programs under Wine, which
+        // expect Windows drivers' behaviour (app profiles opt into theirs: AppProfile::shareFramebuffers).
+        const std::string& exe = appProfile().exe;
+        bool windowsExe = exe.size() > 4 && strcasecmp(exe.c_str() + exe.size() - 4, ".exe") == 0;
+        group->shareContainers = !windowsExe;
     }
     bool core = pf->core();
     if (const char* p = getenv("METALGLDRV_PROFILE")) core = strcmp(p, "core") == 0;

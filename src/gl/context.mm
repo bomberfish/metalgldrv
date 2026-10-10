@@ -31,7 +31,7 @@ static thread_local Context* t_current = nullptr;
 Context* currentContext() { return t_current; }
 
 NameSpace<Framebuffer>& framebufferNames(ShareGroup* share, NameSpace<Framebuffer>& own) {
-    return share && appProfile().shareFramebuffers ? share->framebuffers : own;
+    return share && (appProfile().shareFramebuffers || share->shareContainers) ? share->framebuffers : own;
 }
 void setCurrentContext(Context* c) { t_current = c; }
 

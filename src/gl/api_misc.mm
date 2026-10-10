@@ -127,6 +127,7 @@ API void APIENTRY glPopDebugGroup(void) {
 API void APIENTRY glPopDebugGroupKHR(void) { glPopDebugGroup(); }
 
 static Object* labelTarget(Context* ctx, GLenum identifier, GLuint name) {
+    auto lk = ctx->containerLock();
     switch (identifier) {
     case GL_BUFFER: return ctx->share->buffers.get(name);
     case GL_SHADER: return dynamic_cast<ShaderObj*>(ctx->share->shaderPrograms.get(name));

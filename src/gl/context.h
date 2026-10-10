@@ -207,8 +207,9 @@ public:
     Ref<TransformFeedbackObj> xfb;
     Ref<TransformFeedbackObj> defaultXfb;
 
-    // per-context namespaces
-    NameSpace<VertexArray> vaos;
+    // per-context namespaces (vertex arrays and pipelines: the share group's with ShareGroup::shareContainers)
+    NameSpace<VertexArray> ownVaos;
+    NameSpace<VertexArray>& vaos = share && share->shareContainers ? share->vaos : ownVaos;
     // GL_APPLE_fence names: the serial SetFenceAPPLE recorded, 0 while generated but not set.
     std::unordered_map<GLuint, uint64_t> appleFences;
     // Framebuffer names: this context's own, or the share group's when the app profile shares them
@@ -217,7 +218,12 @@ public:
     NameSpace<Framebuffer>& framebuffers = framebufferNames(share.get(), ownFramebuffers);
     NameSpace<Query> queries;
     NameSpace<TransformFeedbackObj> xfbs;
-    NameSpace<ProgramPipelineObj> pipelines;
+    NameSpace<ProgramPipelineObj> ownPipelines;
+    NameSpace<ProgramPipelineObj>& pipelines = share && share->shareContainers ? share->pipelines : ownPipelines;
+    // Held while using container object names that the share group owns (ShareGroup::shareContainers).
+    std::unique_lock<std::recursive_mutex> containerLock() {
+        return share && share->shareContainers ? std::unique_lock<std::recursive_mutex>(share->mutex) : std::unique_lock<std::recursive_mutex>();
+    }
 
     // ---- fixed function state ----
     float viewport[kMaxViewports][4];

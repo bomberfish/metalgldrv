@@ -8,6 +8,7 @@ using namespace mgl;
 
 API void APIENTRY glGenVertexArrays(GLsizei n, GLuint* arrays) {
     MGL_CTX();
+    auto lk = ctx->containerLock();
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) arrays[i] = ctx->vaos.genName();
 }
@@ -20,6 +21,7 @@ static VertexArray* newVao() {
 
 API void APIENTRY glCreateVertexArrays(GLsizei n, GLuint* arrays) {
     MGL_CTX();
+    auto lk = ctx->containerLock();
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) {
         arrays[i] = ctx->vaos.genName();
@@ -29,6 +31,7 @@ API void APIENTRY glCreateVertexArrays(GLsizei n, GLuint* arrays) {
 
 API void APIENTRY glDeleteVertexArrays(GLsizei n, const GLuint* arrays) {
     MGL_CTX();
+    auto lk = ctx->containerLock();
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) {
         VertexArray* v = ctx->vaos.get(arrays[i]);
@@ -39,11 +42,13 @@ API void APIENTRY glDeleteVertexArrays(GLsizei n, const GLuint* arrays) {
 
 API GLboolean APIENTRY glIsVertexArray(GLuint array) {
     MGL_CTX_RET(GL_FALSE);
+    auto lk = ctx->containerLock();
     return array && ctx->vaos.get(array) != nullptr;
 }
 
 API void APIENTRY glBindVertexArray(GLuint array) {
     MGL_CTX();
+    auto lk = ctx->containerLock();
     if (!array) {
         ctx->vao = ctx->defaultVao;
         return;
@@ -70,6 +75,7 @@ static VertexArray* specVao(Context* ctx) {
 }
 
 static VertexArray* namedVao(Context* ctx, GLuint name) {
+    auto lk = ctx->containerLock();
     VertexArray* v = name ? ctx->vaos.get(name) : nullptr;
     if (!v) ctx->setError(GL_INVALID_OPERATION);
     return v;

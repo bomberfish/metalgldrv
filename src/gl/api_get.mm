@@ -115,11 +115,13 @@ void videoMemoryKB(Context* ctx, int64_t* total, int64_t* avail) {
     *avail = (int64_t)std::min<uint64_t>((bytes > used ? bytes - used : 0) >> 10, INT32_MAX);
 }
 
+// Two lists: contexts made through CGL / NSOpenGL also have Apple's container object sharing.
 const ExtensionList& extensions(Context* ctx) {
-    static const ExtensionList l = [ctx] {
+    auto build = [ctx](bool appleSharing) {
         ExtensionList r;
         const AppProfile& app = appProfile();
         r.names.assign(std::begin(kExtensions), std::end(kExtensions));
+        if (appleSharing) r.names.push_back("GL_APPLE_container_object_shareable");
         for (const char* e : mglDeviceExtensions(ctx->dev->caps)) r.names.push_back(e);
         std::erase_if(r.names, [&](const char* e) { return app.hidden(e); });
         for (const auto& e : app.extraExtensions)
@@ -138,7 +140,12 @@ const ExtensionList& extensions(Context* ctx) {
             r.joined += e;
         }
         return r;
-    }();
+    };
+    if (ctx->share && ctx->share->shareContainers) {
+        static const ExtensionList apple = build(true);
+        return apple;
+    }
+    static const ExtensionList l = build(false);
     return l;
 }
 

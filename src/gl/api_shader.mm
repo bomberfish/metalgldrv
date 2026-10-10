@@ -1745,12 +1745,14 @@ API GLuint APIENTRY glCreateShaderProgramv(GLenum type, GLsizei count, const GLc
 
 API void APIENTRY glGenProgramPipelines(GLsizei n, GLuint* pipelines) {
     MGL_CTX();
+    auto lk = ctx->containerLock();
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) pipelines[i] = ctx->pipelines.genName();
 }
 
 API void APIENTRY glCreateProgramPipelines(GLsizei n, GLuint* pipelines) {
     MGL_CTX();
+    auto lk = ctx->containerLock();
     if (n < 0) return ctx->setError(GL_INVALID_VALUE);
     for (int i = 0; i < n; i++) {
         pipelines[i] = ctx->pipelines.genName();
@@ -1760,6 +1762,7 @@ API void APIENTRY glCreateProgramPipelines(GLsizei n, GLuint* pipelines) {
 
 API void APIENTRY glDeleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
     MGL_CTX();
+    auto lk = ctx->containerLock();
     for (int i = 0; i < n; i++) {
         ProgramPipelineObj* pp = ctx->pipelines.get(pipelines[i]);
         if (pp && ctx->pipeline.get() == pp) ctx->pipeline = nullptr;
@@ -1769,10 +1772,12 @@ API void APIENTRY glDeleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
 
 API GLboolean APIENTRY glIsProgramPipeline(GLuint pipeline) {
     MGL_CTX_RET(GL_FALSE);
+    auto lk = ctx->containerLock();
     return pipeline && ctx->pipelines.get(pipeline) != nullptr;
 }
 
 static ProgramPipelineObj* pipelineObj(Context* ctx, GLuint name, bool create, GLenum err = GL_INVALID_OPERATION) {
+    auto lk = ctx->containerLock();
     ProgramPipelineObj* pp = ctx->pipelines.get(name);
     if (!pp && create && ctx->pipelines.isName(name)) pp = ctx->pipelines.create(name, new ProgramPipelineObj());
     if (!pp) ctx->setError(err);

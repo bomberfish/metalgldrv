@@ -352,6 +352,39 @@ int main(int argc, char** argv) {
             if ([l isKindOfClass:[CAMetalLayer class]]) layers++;
         CHECK(layers == 1);
 
+        // GL_APPLE_container_object_shareable: framebuffers, vertex arrays and program pipelines are shared
+        // between CGL contexts of a share group, as on Apple's OpenGL (queries aren't).
+        {
+            auto genFb = gl<void (*)(GLsizei, GLuint*)>("glGenFramebuffers");
+            auto bindFb = gl<void (*)(GLenum, GLuint)>("glBindFramebuffer");
+            auto isFb = gl<GLboolean (*)(GLuint)>("glIsFramebuffer");
+            auto genVao = gl<void (*)(GLsizei, GLuint*)>("glGenVertexArrays");
+            auto bindVao = gl<void (*)(GLuint)>("glBindVertexArray");
+            auto isVao = gl<GLboolean (*)(GLuint)>("glIsVertexArray");
+            auto getStringi = gl<const GLubyte* (*)(GLenum, GLuint)>("glGetStringi");
+            [ctx makeCurrentContext];
+            GLuint fb = 0, vao = 0;
+            genFb(1, &fb);
+            bindFb(GL_FRAMEBUFFER, fb);
+            bindFb(GL_FRAMEBUFFER, 0);
+            genVao(1, &vao);
+            bindVao(vao);
+            bindVao(0);
+            [shared makeCurrentContext];
+            CHECK(isFb(fb));
+            CHECK(isVao(vao));
+            GLuint fb2 = 0;
+            genFb(1, &fb2);
+            CHECK(fb2 != fb);
+            GLint n = 0;
+            bool listed = false;
+            glGetIntegerv_(GL_NUM_EXTENSIONS, &n);
+            for (GLint i = 0; i < n; i++)
+                if (!strcmp((const char*)getStringi(GL_EXTENSIONS, i), "GL_APPLE_container_object_shareable")) listed = true;
+            CHECK(listed);
+            [ctx makeCurrentContext];
+        }
+
         // Wine wraps CGL contexts: -initWithCGLContextObj: on one of ours.
         NSOpenGLContext* wrap = [[NSOpenGLContext alloc] initWithCGLContextObj:ctx.CGLContextObj];
         CHECK(wrap.CGLContextObj == ctx.CGLContextObj);

@@ -297,8 +297,10 @@ API void APIENTRY glGetNamedRenderbufferParameteriv(GLuint rb, GLenum pname, GLi
 // its own names from 1 and a name means the same object in every context of the group: AMD's Windows driver
 // behaves this way, and DOOM (2016) relies on it (its render context generates names and binds them without
 // attaching anything, getting the framebuffers its loading context generated and attached under those names).
+// With Apple's container sharing (ShareGroup::shareContainers) names are generated across the share group, as
+// Apple's OpenGL does.
 static GLuint genFramebufferName(Context* ctx) {
-    if (&ctx->framebuffers == &ctx->ownFramebuffers) return ctx->framebuffers.genName();
+    if (&ctx->framebuffers == &ctx->ownFramebuffers || ctx->share->shareContainers) return ctx->framebuffers.genName();
     GLuint name = ctx->ownFramebuffers.genName();  // the own namespace only holds this context's reservations
     ctx->framebuffers.reserve(name);
     return name;

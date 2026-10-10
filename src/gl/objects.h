@@ -495,6 +495,12 @@ public:
     std::unordered_map<SyncObj*, Ref<SyncObj>> syncs;
     // Framebuffers, when the app profile shares them (AppProfile::shareFramebuffers); per context otherwise.
     NameSpace<Framebuffer> framebuffers;
+    // GL_APPLE_container_object_shareable (contexts made through CGL / NSOpenGL): framebuffers, vertex arrays
+    // and program pipelines belong to the share group, as on Apple's OpenGL, instead of one context. Uses of
+    // these names then hold `mutex` (Context::containerLock).
+    bool shareContainers = false;
+    NameSpace<VertexArray> vaos;
+    NameSpace<ProgramPipelineObj> pipelines;
     // Display lists (compat) live here too in the future.
     ShaderObj* shader(GLuint n) { return dynamic_cast<ShaderObj*>(shaderPrograms.get(n)); }
     ProgramObj* program(GLuint n) { return dynamic_cast<ProgramObj*>(shaderPrograms.get(n)); }
