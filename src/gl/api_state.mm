@@ -627,6 +627,9 @@ API void APIENTRY glHint(GLenum target, GLenum mode) {
         if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM, "glHint(0x%x)", target);
         ctx->hints[4] = mode;
         break;
+    // GL_APPLE_transform_hint: FASTEST would allow algebraic shortcuts in vertex transformation; we always
+    // transform identically, which every mode allows.
+    case GL_TRANSFORM_HINT_APPLE: ctx->hints[5] = mode; break;
     default: ctx->setError(GL_INVALID_ENUM, "glHint(0x%x)", target);
     }
 }

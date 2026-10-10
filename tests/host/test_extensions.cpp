@@ -536,3 +536,16 @@ TEST(apple_texture_range) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_APPLE_transform_hint: a glHint target, DONT_CARE by default.
+TEST(apple_transform_hint) {
+    CHECK(hasExtension("GL_APPLE_transform_hint"));
+    const GLenum TRANSFORM_HINT = 0x85B1;
+    GLint v = 0;
+    glGetIntegerv(TRANSFORM_HINT, &v);
+    CHECK_EQ(v, GL_DONT_CARE);
+    glHint(TRANSFORM_HINT, GL_FASTEST);
+    glGetIntegerv(TRANSFORM_HINT, &v);
+    CHECK_EQ(v, GL_FASTEST);
+    CHECK_GL();
+}
