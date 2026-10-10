@@ -139,3 +139,43 @@ TEST(compat_lighting) {
     glDisable(GL_LIGHTING);
     CHECK_GL();
 }
+
+// GL_APPLE_element_array: client index array, drawn from index `first`.
+TEST(compat_apple_element_array) {
+    auto elementPointer = (void (*)(GLenum, const void*))eglGetProcAddress("glElementPointerAPPLE");
+    auto drawElementArray = (void (*)(GLenum, GLint, GLsizei))eglGetProcAddress("glDrawElementArrayAPPLE");
+    auto multiDraw = (void (*)(GLenum, const GLint*, const GLsizei*, GLsizei))eglGetProcAddress("glMultiDrawElementArrayAPPLE");
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    // left half (x -1..0) and right half (0..1) quads
+    float pos[] = {-1, -1, 0, -1, -1, 1, 0, 1, 0, -1, 1, -1, 0, 1, 1, 1};
+    uint16_t idx[] = {9, 9, 0, 1, 2, 2, 1, 3, 4, 5, 6, 6, 5, 7};  // two junk indices first
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, pos);
+    glEnableClientState(0x8A0C /* GL_ELEMENT_ARRAY_APPLE */);
+    elementPointer(GL_UNSIGNED_SHORT, idx);
+    CHECK(glIsEnabled(0x8A0C));
+    GLint type = 0;
+    glGetIntegerv(0x8A0D /* GL_ELEMENT_ARRAY_TYPE_APPLE */, &type);
+    CHECK_EQ(type, GL_UNSIGNED_SHORT);
+    void* p = nullptr;
+    glGetPointerv(0x8A0E /* GL_ELEMENT_ARRAY_POINTER_APPLE */, &p);
+    CHECK(p == idx);
+    glColor3f(1, 0, 0);
+    drawElementArray(GL_TRIANGLES, 2, 6);  // left half
+    CHECK_PIXEL(16, 32, 255, 0, 0, 255);
+    CHECK_PIXEL(48, 32, 0, 0, 0, 255);
+    glColor3f(0, 1, 0);
+    GLint firsts[] = {2, 8};
+    GLsizei counts[] = {6, 6};
+    multiDraw(GL_TRIANGLES, firsts, counts, 2);
+    CHECK_PIXEL(16, 32, 0, 255, 0, 255);
+    CHECK_PIXEL(48, 32, 0, 255, 0, 255);
+    glDisableClientState(0x8A0C);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    CHECK_GL();
+}

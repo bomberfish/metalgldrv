@@ -11,7 +11,7 @@ using namespace mgl;
 namespace {
 
 const char* kExtensions[] = {
-    "GL_APPLE_fence", "GL_APPLE_flush_buffer_range", "GL_APPLE_vertex_array_object", "GL_ARB_ES2_compatibility", "GL_ARB_ES3_compatibility", "GL_ARB_ES3_1_compatibility", "GL_ARB_arrays_of_arrays",
+    "GL_APPLE_element_array", "GL_APPLE_fence", "GL_APPLE_flush_buffer_range", "GL_APPLE_vertex_array_object", "GL_ARB_ES2_compatibility", "GL_ARB_ES3_compatibility", "GL_ARB_ES3_1_compatibility", "GL_ARB_arrays_of_arrays",
     "GL_ARB_base_instance", "GL_ARB_blend_func_extended", "GL_ARB_buffer_storage", "GL_ARB_clear_buffer_object",
     "GL_ARB_clear_texture", "GL_ARB_clip_control", "GL_ARB_color_buffer_float", "GL_ARB_compressed_texture_pixel_storage",
     "GL_ARB_compute_shader", "GL_ARB_conditional_render_inverted", "GL_ARB_conservative_depth", "GL_ARB_copy_buffer",
@@ -181,6 +181,7 @@ const std::vector<std::string>& mgl::mglDeviceGlslExtensions(const DeviceCaps& c
 
 bool mglIsEnabled(Context* ctx, GLenum cap, int index, bool* out);
 bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat);  // compat.mm
+bool mglCompatGetPointer(Context* ctx, GLenum pname, void** out);                    // compat.mm
 
 static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     const int idx = index < 0 ? 0 : index;
@@ -807,10 +808,7 @@ API void APIENTRY glGetPointerv(GLenum pname, void** params) {
     case GL_DEBUG_CALLBACK_FUNCTION: *params = (void*)ctx->debugCallback; break;
     case GL_DEBUG_CALLBACK_USER_PARAM: *params = (void*)ctx->debugUserParam; break;
     default:
-        if (!ctx->coreProfile) {
-            *params = nullptr;  // client array pointers handled in compat
-            return;
-        }
+        if (!ctx->coreProfile && mglCompatGetPointer(ctx, pname, params)) return;
         ctx->setError(GL_INVALID_ENUM);
     }
 }

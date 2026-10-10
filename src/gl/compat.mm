@@ -172,6 +172,10 @@ struct mgl::CompatState {
 
     ClientArray arrays[CA_COUNT];
     GLuint clientActiveTexture = 0;
+    // GL_APPLE_element_array
+    bool elementArrayEnabled = false;
+    GLenum elementArrayType = GL_UNSIGNED_INT;
+    const void* elementArrayPointer = nullptr;
 
     // immediate mode
     bool inBegin = false;
@@ -310,6 +314,7 @@ bool mglCompatIsEnabled(Context* ctx, GLenum cap, bool* out) {
     case GL_SECONDARY_COLOR_ARRAY: *out = cs->arrays[CA_SECONDARY].enabled; return true;
     case GL_FOG_COORD_ARRAY: *out = cs->arrays[CA_FOG].enabled; return true;
     case GL_TEXTURE_COORD_ARRAY: *out = cs->arrays[CA_TEX0 + std::min<int>(cs->clientActiveTexture, 7)].enabled; return true;
+    case GL_ELEMENT_ARRAY_APPLE: *out = cs->elementArrayEnabled; return true;
     case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
         *out = cs->texGen[std::min<int>(ctx->activeTexture, 7)].enabled[cap - GL_TEXTURE_GEN_S];
         return true;
@@ -361,6 +366,7 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
     case GL_CURRENT_TEXTURE_COORDS: return vec(cs->current[CA_TEX0 + unit], 4);
     case GL_CURRENT_FOG_COORD: return one(cs->current[CA_FOG][0], true);
     case GL_SHADE_MODEL: return one(cs->shadeModel, false);
+    case GL_ELEMENT_ARRAY_TYPE_APPLE: return one(cs->elementArrayType, false);
     case GL_ALPHA_TEST_FUNC: return one(cs->alphaFunc, false);
     case GL_ALPHA_TEST_REF: return one(cs->alphaRef, true);
     case GL_FOG_MODE: return one(cs->fogMode, false);
@@ -1051,6 +1057,10 @@ static int arrayForCap(Context* ctx, GLenum cap) {
 
 API void APIENTRY glEnableClientState(GLenum cap) {
     MGL_CTX();
+    if (cap == GL_ELEMENT_ARRAY_APPLE) {
+        compat(ctx)->elementArrayEnabled = true;
+        return;
+    }
     int a = arrayForCap(ctx, cap);
     if (a == -1) return ctx->setError(GL_INVALID_ENUM);
     if (a >= 0) compat(ctx)->arrays[a].enabled = true;
@@ -1058,6 +1068,10 @@ API void APIENTRY glEnableClientState(GLenum cap) {
 
 API void APIENTRY glDisableClientState(GLenum cap) {
     MGL_CTX();
+    if (cap == GL_ELEMENT_ARRAY_APPLE) {
+        compat(ctx)->elementArrayEnabled = false;
+        return;
+    }
     int a = arrayForCap(ctx, cap);
     if (a == -1) return ctx->setError(GL_INVALID_ENUM);
     if (a >= 0) compat(ctx)->arrays[a].enabled = false;
@@ -1943,4 +1957,64 @@ static void drawImmediate(Context* ctx, GLenum mode, const std::vector<ImmVertex
     for (int i = 0; i < CA_COUNT; i++) cs->arrays[i] = saved[i];
     ctx->arrayBuffer = savedArrayBuffer;
     ctx->vao = savedVao;
+}
+
+// Client array pointers (glGetPointerv).
+bool mglCompatGetPointer(Context* ctx, GLenum pname, void** out) {
+    CompatState* cs = compat(ctx);
+    switch (pname) {
+    case GL_VERTEX_ARRAY_POINTER: *out = (void*)cs->arrays[CA_VERTEX].pointer; return true;
+    case GL_NORMAL_ARRAY_POINTER: *out = (void*)cs->arrays[CA_NORMAL].pointer; return true;
+    case GL_COLOR_ARRAY_POINTER: *out = (void*)cs->arrays[CA_COLOR].pointer; return true;
+    case GL_SECONDARY_COLOR_ARRAY_POINTER: *out = (void*)cs->arrays[CA_SECONDARY].pointer; return true;
+    case GL_FOG_COORD_ARRAY_POINTER: *out = (void*)cs->arrays[CA_FOG].pointer; return true;
+    case GL_TEXTURE_COORD_ARRAY_POINTER: *out = (void*)cs->arrays[CA_TEX0 + std::min<int>(cs->clientActiveTexture, 7)].pointer; return true;
+    case GL_ELEMENT_ARRAY_POINTER_APPLE: *out = (void*)cs->elementArrayPointer; return true;
+    default: return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GL_APPLE_element_array: an index array set like the other client arrays (an offset into the bound
+// element array buffer, if any); the draws are glDrawElements on it from index `first`.
+// ---------------------------------------------------------------------------
+static size_t indexSize(GLenum type) { return type == GL_UNSIGNED_BYTE ? 1 : type == GL_UNSIGNED_SHORT ? 2 : 4; }
+
+static const void* elementsAt(CompatState* cs, GLint first) {
+    return (const uint8_t*)cs->elementArrayPointer + (ptrdiff_t)first * (ptrdiff_t)indexSize(cs->elementArrayType);
+}
+
+API void APIENTRY glElementPointerAPPLE(GLenum type, const void* pointer) {
+    MGL_CTX();
+    if (type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) return ctx->setError(GL_INVALID_ENUM);
+    CompatState* cs = compat(ctx);
+    cs->elementArrayType = type;
+    cs->elementArrayPointer = pointer;
+}
+
+API void APIENTRY glDrawElementArrayAPPLE(GLenum mode, GLint first, GLsizei count) {
+    MGL_CTX();
+    if (first < 0) return ctx->setError(GL_INVALID_VALUE);
+    CompatState* cs = compat(ctx);
+    glDrawElements(mode, count, cs->elementArrayType, elementsAt(cs, first));
+}
+
+API void APIENTRY glDrawRangeElementArrayAPPLE(GLenum mode, GLuint start, GLuint end, GLint first, GLsizei count) {
+    MGL_CTX();
+    if (first < 0) return ctx->setError(GL_INVALID_VALUE);
+    CompatState* cs = compat(ctx);
+    glDrawRangeElements(mode, start, end, count, cs->elementArrayType, elementsAt(cs, first));
+}
+
+API void APIENTRY glMultiDrawElementArrayAPPLE(GLenum mode, const GLint* first, const GLsizei* count, GLsizei primcount) {
+    MGL_CTX();
+    if (primcount < 0) return ctx->setError(GL_INVALID_VALUE);
+    for (GLsizei i = 0; i < primcount; i++) glDrawElementArrayAPPLE(mode, first[i], count[i]);
+}
+
+API void APIENTRY glMultiDrawRangeElementArrayAPPLE(GLenum mode, GLuint start, GLuint end, const GLint* first, const GLsizei* count,
+                                                    GLsizei primcount) {
+    MGL_CTX();
+    if (primcount < 0) return ctx->setError(GL_INVALID_VALUE);
+    for (GLsizei i = 0; i < primcount; i++) glDrawRangeElementArrayAPPLE(mode, start, end, first[i], count[i]);
 }
