@@ -109,8 +109,9 @@ struct TexEnv {
     GLenum mode = GL_MODULATE;
     float color[4] = {0, 0, 0, 0};
     GLenum combineRGB = GL_MODULATE, combineA = GL_MODULATE;
-    GLenum srcRGB[3] = {GL_TEXTURE, GL_PREVIOUS, GL_CONSTANT}, srcA[3] = {GL_TEXTURE, GL_PREVIOUS, GL_CONSTANT};
-    GLenum opRGB[3] = {GL_SRC_COLOR, GL_SRC_COLOR, GL_SRC_ALPHA}, opA[3] = {GL_SRC_ALPHA, GL_SRC_ALPHA, GL_SRC_ALPHA};
+    // [3]: GL_NV_texture_env_combine4's fourth argument
+    GLenum srcRGB[4] = {GL_TEXTURE, GL_PREVIOUS, GL_CONSTANT, GL_ZERO}, srcA[4] = {GL_TEXTURE, GL_PREVIOUS, GL_CONSTANT, GL_ZERO};
+    GLenum opRGB[4] = {GL_SRC_COLOR, GL_SRC_COLOR, GL_SRC_ALPHA, GL_SRC_COLOR}, opA[4] = {GL_SRC_ALPHA, GL_SRC_ALPHA, GL_SRC_ALPHA, GL_SRC_ALPHA};
     float scaleRGB = 1, scaleA = 1;
     float lodBias = 0;
 };
@@ -1029,6 +1030,10 @@ API void APIENTRY glTexEnvfv(GLenum target, GLenum pname, const GLfloat* params)
     case GL_OPERAND0_ALPHA: case GL_OPERAND1_ALPHA: case GL_OPERAND2_ALPHA: e.opA[pname - GL_OPERAND0_ALPHA] = v; break;
     case GL_RGB_SCALE: e.scaleRGB = params[0]; break;
     case GL_ALPHA_SCALE: e.scaleA = params[0]; break;
+    case GL_SOURCE3_RGB_NV: e.srcRGB[3] = v; break;
+    case GL_SOURCE3_ALPHA_NV: e.srcA[3] = v; break;
+    case GL_OPERAND3_RGB_NV: e.opRGB[3] = v; break;
+    case GL_OPERAND3_ALPHA_NV: e.opA[3] = v; break;
     default: ctx->setError(GL_INVALID_ENUM);
     }
 }
@@ -1058,6 +1063,10 @@ API void APIENTRY glGetTexEnvfv(GLenum target, GLenum pname, GLfloat* params) {
     case GL_OPERAND0_ALPHA: case GL_OPERAND1_ALPHA: case GL_OPERAND2_ALPHA: params[0] = (float)e.opA[pname - GL_OPERAND0_ALPHA]; break;
     case GL_RGB_SCALE: params[0] = e.scaleRGB; break;
     case GL_ALPHA_SCALE: params[0] = e.scaleA; break;
+    case GL_SOURCE3_RGB_NV: params[0] = (float)e.srcRGB[3]; break;
+    case GL_SOURCE3_ALPHA_NV: params[0] = (float)e.srcA[3]; break;
+    case GL_OPERAND3_RGB_NV: params[0] = (float)e.opRGB[3]; break;
+    case GL_OPERAND3_ALPHA_NV: params[0] = (float)e.opA[3]; break;
     default: ctx->setError(GL_INVALID_ENUM);
     }
 }
@@ -1602,10 +1611,10 @@ static std::string ffKey(Context* ctx, CompatState* cs, bool* usedUnits) {
         if (!target) continue;
         const TexEnv& te = cs->texEnv[u];
         add(te.mode);
-        if (te.mode == GL_COMBINE) {
+        if (te.mode == GL_COMBINE || te.mode == GL_COMBINE4_NV) {
             add(te.combineRGB);
             add(te.combineA);
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 4; i++) {
                 add(te.srcRGB[i]);
                 add(te.srcA[i]);
                 add(te.opRGB[i]);
@@ -1652,6 +1661,7 @@ static std::string combineSrc(GLenum src, GLenum op, bool alpha, int u) {
     case GL_CONSTANT: base = "gl_TextureEnvColor[" + std::to_string(u) + "]"; break;
     case GL_PRIMARY_COLOR: base = "gl_Color"; break;
     case GL_PREVIOUS: base = "c"; break;
+    case GL_ZERO: base = "vec4(0.0)"; break;  // NV_texture_env_combine4
     default:
         if (src >= GL_TEXTURE0 && src < GL_TEXTURE0 + 8) base = "tx" + std::to_string(src - GL_TEXTURE0);
         else base = "t";
@@ -1837,6 +1847,19 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
             float scaleRGB = extDot ? 1.0f : e.scaleRGB, scaleA = extDot && dotAlpha ? 1.0f : e.scaleA;
             fs += "    vec3 rr = " + r + "; float aa = " + (dotAlpha ? std::string("rr.r") : a) + ";\n";
             fs += "    c = clamp(vec4(rr * " + std::to_string(scaleRGB) + ", aa * " + std::to_string(scaleA) + "), 0.0, 1.0);\n";
+            break;
+        }
+        case GL_COMBINE4_NV: {  // NV_texture_env_combine4: Arg0 * Arg1 + Arg2 * Arg3 (- 0.5 for ADD_SIGNED)
+            auto four = [&](bool alpha) {
+                const GLenum* src = alpha ? e.srcA : e.srcRGB;
+                const GLenum* op = alpha ? e.opA : e.opRGB;
+                std::string x = combineSrc(src[0], op[0], alpha, u) + " * " + combineSrc(src[1], op[1], alpha, u) + " + " +
+                                combineSrc(src[2], op[2], alpha, u) + " * " + combineSrc(src[3], op[3], alpha, u);
+                if ((alpha ? e.combineA : e.combineRGB) == GL_ADD_SIGNED) x += alpha ? " - 0.5" : " - vec3(0.5)";
+                return x;
+            };
+            fs += "    vec3 rr = " + four(false) + "; float aa = " + four(true) + ";\n";
+            fs += "    c = clamp(vec4(rr * " + std::to_string(e.scaleRGB) + ", aa * " + std::to_string(e.scaleA) + "), 0.0, 1.0);\n";
             break;
         }
         default:  // MODULATE

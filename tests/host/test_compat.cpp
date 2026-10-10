@@ -1042,3 +1042,29 @@ TEST(compat_ati_texture_env_combine3) {
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     CHECK_GL();
 }
+
+// GL_NV_texture_env_combine4: Arg0 * Arg1 + Arg2 * Arg3.
+TEST(compat_nv_texture_env_combine4) {
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, 0x8503 /* GL_COMBINE4_NV */);
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_ADD);
+    glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_TEXTURE);
+    glTexEnvi(GL_TEXTURE_ENV, GL_SRC1_RGB, GL_CONSTANT);
+    glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND1_RGB, GL_SRC_COLOR);
+    glTexEnvi(GL_TEXTURE_ENV, GL_SRC2_RGB, GL_PRIMARY_COLOR);
+    glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND2_RGB, GL_SRC_COLOR);  // the default is SRC_ALPHA
+    glTexEnvi(GL_TEXTURE_ENV, 0x8583 /* GL_SOURCE3_RGB_NV */, GL_ZERO);
+    glTexEnvi(GL_TEXTURE_ENV, 0x8593 /* GL_OPERAND3_RGB_NV */, GL_ONE_MINUS_SRC_COLOR);  // 1 - 0 = 1
+    float k[4] = {0.5f, 0.5f, 0.5f, 1};
+    glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, k);
+    uint8_t t[4] = {255, 128, 0, 255};
+    combineQuad(t, 0, 0, 0.5f, 1);  // (1, 0.5, 0) * 0.5 + (0, 0, 0.5) * 1 = (0.5, 0.25, 0.5)
+    uint8_t p[4];
+    readPixel(32, 32, p);
+    CHECK(abs(p[0] - 128) <= 3 && abs(p[1] - 64) <= 3 && abs(p[2] - 128) <= 3);
+    GLint v = 0;
+    glGetTexEnviv(GL_TEXTURE_ENV, 0x8593, &v);
+    CHECK_EQ(v, GL_ONE_MINUS_SRC_COLOR);
+    glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND1_RGB, GL_SRC_COLOR);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    CHECK_GL();
+}
