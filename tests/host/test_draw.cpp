@@ -625,3 +625,27 @@ void main() { s_frag_color = vec4(1); s_frag_data_0 = vec4(1); })");
     glDeleteVertexArrays(1, &vao);
     CHECK_GL();
 }
+
+// SRC1 blend factors with a shader that has no index-1 output: undefined in GL but must still draw
+// (Metal rejects the pipeline); the second source reads as zero.
+TEST(blend_src1_without_output) {
+    GLuint p = compileProgram(R"(#version 330 core
+void main() { gl_Position = vec4(vec2(gl_VertexID & 1, gl_VertexID >> 1) * 2.0 - 1.0, 0, 1); })",
+                              R"(#version 330 core
+out vec4 o; void main() { o = vec4(0, 1, 0, 1); })");
+    GLuint vao;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(p);
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_SRC1_COLOR);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_BLEND);
+    CHECK_PIXEL(32, 32, 0, 255, 0, 255);
+    glUseProgram(0);
+    glDeleteProgram(p);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}

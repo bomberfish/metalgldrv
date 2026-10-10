@@ -1123,8 +1123,20 @@ static const char* advancedBlendError(Context* ctx, ProgramObj* prog) {
     return nullptr;
 }
 
+// Dual-source factors with no index-1 output: undefined in GL, a pipeline error in Metal. Blend as if
+// the second source were zero (Unigine Heaven leaves SRC1 factors set for shaders without one).
+static MTLBlendFactor withoutSource1(MTLBlendFactor f) {
+    switch (f) {
+    case MTLBlendFactorSource1Color: case MTLBlendFactorSource1Alpha: return MTLBlendFactorZero;
+    case MTLBlendFactorOneMinusSource1Color: case MTLBlendFactorOneMinusSource1Alpha: return MTLBlendFactorOne;
+    default: return f;
+    }
+}
+
 static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Reflection& refl) {
     const PassDesc& p = ctx->curPass;
+    bool source1 = false;
+    for (auto& o : refl.fragOutputs) source1 |= o.index == 1;
     for (int i = 0; i < kMaxDrawBuffers; i++) {
         if (!p.color[i].tex) continue;
         MTLPixelFormat pf = p.color[i].tex.pixelFormat;
@@ -1148,6 +1160,8 @@ static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Refle
             bk.dstA = blendFactor(b.dstA);
             bk.eqRGB = blendOp(b.eqRGB);
             bk.eqA = blendOp(b.eqA);
+            if (!source1)
+                for (uint8_t* f : {&bk.srcRGB, &bk.dstRGB, &bk.srcA, &bk.dstA}) *f = (uint8_t)withoutSource1((MTLBlendFactor)*f);
         }
         bk.writeMask = p.color[i].noAlpha ? b.colorMask & ~8u : b.colorMask;
         // A fragment output must exist for the attachment; if the shader doesn't
