@@ -782,3 +782,23 @@ TEST(compat_immediate_variants) {
     CHECK_PIXEL(48, 48, 0, 0, 0, 255);
     CHECK_GL();
 }
+
+// GL_EXT_secondary_color: the EXT entry points, and the secondary color added with COLOR_SUM.
+TEST(compat_ext_secondary_color) {
+    auto sec3f = (void (*)(GLfloat, GLfloat, GLfloat))eglGetProcAddress("glSecondaryColor3fEXT");
+    auto sec3ub = (void (*)(GLubyte, GLubyte, GLubyte))eglGetProcAddress("glSecondaryColor3ubEXT");
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glEnable(GL_COLOR_SUM);
+    glColor3f(1, 0, 0);
+    sec3f(0, 0, 1);
+    glRectf(-1, -1, 0, 1);
+    sec3ub(0, 255, 0);
+    glRectf(0, -1, 1, 1);
+    glDisable(GL_COLOR_SUM);
+    CHECK_PIXEL(16, 32, 255, 0, 255, 255);
+    CHECK_PIXEL(48, 32, 255, 255, 0, 255);
+    CHECK_GL();
+}

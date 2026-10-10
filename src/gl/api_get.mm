@@ -55,7 +55,7 @@ const char* kExtensions[] = {
     "GL_EXT_framebuffer_blit", "GL_EXT_framebuffer_multisample", "GL_EXT_framebuffer_object", "GL_EXT_framebuffer_sRGB",
     "GL_EXT_gpu_program_parameters", "GL_EXT_gpu_shader4", "GL_EXT_mesh_shader", "GL_EXT_multi_draw_arrays", "GL_EXT_packed_depth_stencil",
     "GL_EXT_packed_float", "GL_EXT_packed_pixels", "GL_EXT_pixel_buffer_object", "GL_EXT_polygon_offset_clamp",
-    "GL_EXT_provoking_vertex", "GL_EXT_rescale_normal", "GL_EXT_separate_specular_color", "GL_EXT_shader_integer_mix",
+    "GL_EXT_provoking_vertex", "GL_EXT_rescale_normal", "GL_EXT_secondary_color", "GL_EXT_separate_specular_color", "GL_EXT_shader_integer_mix",
     "GL_EXT_shadow_funcs", "GL_EXT_stencil_two_side", "GL_EXT_stencil_wrap", "GL_EXT_texture3D", "GL_EXT_texture_cube_map", "GL_EXT_texture_array",
     "GL_EXT_texture_compression_dxt1", "GL_EXT_texture_compression_rgtc", "GL_EXT_texture_compression_s3tc",
     "GL_EXT_texture_edge_clamp", "GL_EXT_texture_env_add", "GL_EXT_texture_filter_anisotropic", "GL_EXT_texture_integer", "GL_EXT_texture_lod_bias",
