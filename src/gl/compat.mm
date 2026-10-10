@@ -143,6 +143,7 @@ const char* kAttrNames[CA_COUNT] = {"gl_Vertex", "gl_Normal", "gl_Color", "gl_Se
                                     "mgl_PointSizeAPPLE"};
 
 // GL_APPLE_vertex_point_size (Apple's glext.h; not in the Khronos registry)
+constexpr GLenum GL_RASTER_POSITION_UNCLIPPED_IBM = 0x19262;  // GL_IBM_rasterpos_clip (not in the Khronos registry)
 constexpr GLenum GL_VERTEX_POINT_SIZE_APPLE = 0x8A26, GL_CURRENT_POINT_SIZE_APPLE = 0x8A27, GL_POINT_SIZE_ARRAY_APPLE = 0x8B9C,
                  GL_POINT_SIZE_ARRAY_TYPE_APPLE = 0x898A, GL_POINT_SIZE_ARRAY_STRIDE_APPLE = 0x898B,
                  GL_POINT_SIZE_ARRAY_POINTER_APPLE = 0x898C, GL_POINT_SIZE_ARRAY_BUFFER_BINDING_APPLE = 0x8B9F;
@@ -347,6 +348,7 @@ bool mglCompatCap(Context* ctx, GLenum cap, bool v) {
     case GL_POINT_SPRITE: cs->pointSprite = v; return true;
     case GL_COLOR_SUM: cs->colorSum = v; return true;
     case GL_VERTEX_POINT_SIZE_APPLE: cs->vertexPointSize = v; return true;
+    case GL_RASTER_POSITION_UNCLIPPED_IBM: cs->rasterUnclippedIBM = v; return true;
     case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
         cs->texGen[std::min<int>(ctx->activeTexture, 7)].enabled[cap - GL_TEXTURE_GEN_S] = v;
         return true;
@@ -394,6 +396,7 @@ bool mglCompatIsEnabled(Context* ctx, GLenum cap, bool* out) {
     case GL_ELEMENT_ARRAY_APPLE: *out = cs->elementArrayEnabled; return true;
     case GL_VERTEX_ARRAY_RANGE_APPLE: *out = cs->varEnabled; return true;
     case GL_VERTEX_POINT_SIZE_APPLE: *out = cs->vertexPointSize; return true;
+    case GL_RASTER_POSITION_UNCLIPPED_IBM: *out = cs->rasterUnclippedIBM; return true;
     case GL_POINT_SIZE_ARRAY_APPLE: *out = cs->arrays[CA_POINTSIZE].enabled; return true;
     case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
         *out = cs->texGen[std::min<int>(ctx->activeTexture, 7)].enabled[cap - GL_TEXTURE_GEN_S];

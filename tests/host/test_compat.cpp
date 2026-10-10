@@ -1235,3 +1235,25 @@ TEST(compat_copy_pixels) {
     CHECK_PIXEL(42, 42, 0, 0, 0, 255);
     CHECK_GL();
 }
+
+// GL_IBM_rasterpos_clip: unclipped raster positions stay valid outside the view volume.
+TEST(compat_ibm_rasterpos_clip) {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, 64, 0, 64, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(0x19262 /* GL_RASTER_POSITION_UNCLIPPED_IBM */);
+    glColor3f(0, 1, 0);  // the raster color is taken at glRasterPos
+    glRasterPos2i(-4, 8);  // left of the window
+    GLboolean valid = GL_FALSE;
+    glGetBooleanv(GL_CURRENT_RASTER_POSITION_VALID, &valid);
+    CHECK(valid);
+    GLubyte bits[1] = {0xFF};
+    glBitmap(8, 1, 0, 0, 0, 0, bits);  // its right half lands in the window
+    CHECK_PIXEL(2, 8, 0, 255, 0, 255);
+    glDisable(0x19262);
+    CHECK_GL();
+}
