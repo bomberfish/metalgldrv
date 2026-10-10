@@ -34,6 +34,12 @@ endif()
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   # NSOpenGL replacement against real AppKit (turns the hooks on itself; loads the
   # driver with dlopen so the constructor sees METALGLDRV_HOOK_NSOPENGL=1).
+  # An app linked against libmetalgldrv instead of OpenGL.framework (docs/porting.md).
+  add_executable(linktest link/link_test.mm)
+  target_link_libraries(linktest PRIVATE metalgldrv::metalgldrv "-framework AppKit")
+  target_compile_options(linktest PRIVATE -fobjc-arc)
+  target_compile_definitions(linktest PRIVATE GL_SILENCE_DEPRECATION)
+  set_target_properties(linktest PROPERTIES BUILD_RPATH "$<TARGET_FILE_DIR:metalgldrv>")
   add_executable(nsgltest nsgl/nsgl_test.mm)
   target_link_libraries(nsgltest PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreFoundation")
   target_compile_options(nsgltest PRIVATE -fno-objc-arc)

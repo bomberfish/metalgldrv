@@ -1,0 +1,10 @@
+# Relocatable: paths relative to this file (<prefix>/@CMAKE_INSTALL_LIBDIR@/pkgconfig).
+prefix=${pcfiledir}/../..
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: metalgldrv
+Description: OpenGL 4.6 (core and compatibility) and EGL 1.5 on Metal 4
+Version: @MGL_PC_VERSION@
+Libs: -L${libdir} -Wl,-rpath,${libdir} -lmetalgldrv
+Cflags: -I${includedir}

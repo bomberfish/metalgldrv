@@ -1,0 +1,5 @@
+# find_package(metalgldrv): the imported target metalgldrv::metalgldrv (the shared library, with the
+# GL / EGL / KHR / metalgldrv headers on its include path). See docs/porting.md.
+@PACKAGE_INIT@
+include("${CMAKE_CURRENT_LIST_DIR}/metalgldrvTargets.cmake")
+check_required_components(metalgldrv)

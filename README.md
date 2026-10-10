@@ -62,6 +62,13 @@ OS shader packs see. Otherwise edit the instance's `config/metalgldrv.properties
 [mods/fabric/README.md](mods/fabric/README.md) and [docs/minecraft-macos.md](docs/minecraft-macos.md),
 which also describes manual setups without the mod.
 
+### Your own app
+
+Link `libmetalgldrv.dylib` in place of OpenGL.framework (CGL, NSOpenGL, GLFW and SDL code keeps
+working unchanged), switch to it at run time with `metalgldrv_activate()`, or use EGL (macOS and iOS).
+`cmake --install` provides headers, a CMake package (`find_package(metalgldrv)`) and pkg-config. See
+[docs/porting.md](docs/porting.md).
+
 ### Minecraft on iOS (Amethyst)
 
 `demo/amethyst` builds Amethyst with the driver embedded and selectable as a renderer. The repo contains
@@ -138,6 +145,7 @@ Every `METALGLDRV_*` variable is listed in [docs/ARCHITECTURE.md](docs/ARCHITECT
 
 ```sh
 ./build/tests/mgltest                       # GL-level host tests
+./build/tests/linktest                      # an app linked in place of OpenGL.framework
 tests/cts/run.sh                            # Khronos CTS (tests/cts/setup.sh fetches and builds it)
 tests/cts/run.sh -l gl46-khr-single         # other case lists; --ios runs on a connected device
 tests/fabric-mod/run.sh                     # Fabric mod loader scenarios
@@ -147,6 +155,7 @@ tests/fabric-mod/run.sh                     # Fabric mod loader scenarios
 
 | Document | Contents |
 |---|---|
+| [docs/porting.md](docs/porting.md) | Using the driver in your own application (macOS and iOS) |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layout, design, every subsystem, environment variables, application profiles |
 | [docs/glsl-compiler.md](docs/glsl-compiler.md) | The GLSL → MSL compiler |
 | [docs/minecraft-macos.md](docs/minecraft-macos.md) | Minecraft on macOS |

@@ -247,6 +247,44 @@ void loadConfFile() {
     fclose(f);
 }
 
+bool haveMetal4(std::string* why);  // below
+
+// The install name (LC_ID_DYLIB) of an image, or "".
+std::string installName(const mach_header* mh) {
+    if (!mh || mh->magic != MH_MAGIC_64) return "";
+    const load_command* lc = (const load_command*)((const mach_header_64*)mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const load_command*)((const char*)lc + lc->cmdsize))
+        if (lc->cmd == LC_ID_DYLIB) {
+            const dylib_command* d = (const dylib_command*)lc;
+            return (const char*)d + d->dylib.name.offset;
+        }
+    return "";
+}
+
+// Whether the process's main executable links this library itself (an app ported by linking libmetalgldrv
+// in place of OpenGL.framework), as opposed to loading it with dlopen, through Wine's winemac.so or from Java.
+bool linkedByMainExecutable() {
+    Dl_info self{};
+    if (!dladdr((const void*)&installName, &self) || !self.dli_fbase) return false;
+    std::string id = installName((const mach_header*)self.dli_fbase);
+    const char* idBase = strrchr(id.c_str(), '/');
+    idBase = idBase ? idBase + 1 : id.c_str();
+    for (uint32_t i = 0, n = _dyld_image_count(); i < n; i++) {
+        const mach_header* mh = _dyld_get_image_header(i);
+        if (!mh || mh->filetype != MH_EXECUTE || mh->magic != MH_MAGIC_64) continue;
+        const load_command* lc = (const load_command*)((const mach_header_64*)mh + 1);
+        for (uint32_t c = 0; c < mh->ncmds; c++, lc = (const load_command*)((const char*)lc + lc->cmdsize)) {
+            if (lc->cmd != LC_LOAD_DYLIB && lc->cmd != LC_LOAD_WEAK_DYLIB && lc->cmd != LC_REEXPORT_DYLIB) continue;
+            const dylib_command* d = (const dylib_command*)lc;
+            const char* name = (const char*)d + d->dylib.name.offset;
+            const char* base = strrchr(name, '/');
+            if (id == name || (*idBase && !strcmp(base ? base + 1 : name, idBase))) return true;
+        }
+        return false;  // only the main executable
+    }
+    return false;
+}
+
 __attribute__((constructor)) void macosInit() {
     loadConfFile();
     // May run before log.mm's initializer; same value it computes.
@@ -254,7 +292,16 @@ __attribute__((constructor)) void macosInit() {
     g_logUnsupported = envFlag("METALGLDRV_LOG_UNSUPPORTED");
     statsRefreshFromEnv();
     macos::ownPath();  // resolve (dladdr) now, outside any dyld callback
-    if (envFlag("METALGLDRV_HOOK_NSOPENGL")) macos::activateReplacement("METALGLDRV_HOOK_NSOPENGL");
+    if (envFlag("METALGLDRV_HOOK_NSOPENGL")) {
+        macos::activateReplacement("METALGLDRV_HOOK_NSOPENGL");
+    } else if (envFlag("METALGLDRV_HOOK_NSOPENGL", true) && linkedByMainExecutable()) {
+        // An app linked against libmetalgldrv instead of OpenGL.framework: its CGL calls bind to us already;
+        // NSOpenGL (GLFW, SDL, NSOpenGLView) and bundled libraries that still look for OpenGL.framework need
+        // the replacement too. METALGLDRV_HOOK_NSOPENGL=0 turns it off.
+        std::string why;
+        if (haveMetal4(&why)) macos::activateReplacement("linked by the app");
+        else MGL_WARN("%s; the app links metalgldrv but can't use it", why.c_str());
+    }
     // Called for every image already loaded (winemac.so when it is what loaded us)
     // and for every image loaded later.
     _dyld_register_func_for_add_image(onImageAdded);

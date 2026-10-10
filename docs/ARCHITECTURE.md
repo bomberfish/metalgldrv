@@ -319,7 +319,10 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   (see Tessellation; for comparisons and debugging).
 * `METALGLDRV_PROFILE=core` – EGL and CGL create core instead of compatibility contexts.
 * `METALGLDRV_HOOK_NSOPENGL=1` – macOS replacement mode (NSOpenGL hooks + import
-  rebinding, see above) without the JVMTI agent.
+  rebinding, see above) without the JVMTI agent. It also turns on by itself when the process's
+  main executable links libmetalgldrv (an app ported by linking it in place of OpenGL.framework,
+  docs/porting.md); `METALGLDRV_HOOK_NSOPENGL=0` prevents that. Apps can call
+  `metalgldrv_activate()` (include/metalgldrv/metalgldrv.h) instead.
 * `METALGLDRV_DUMP_GLSL=<substring|#program>`, `METALGLDRV_DUMP_MSL=<1|substring|#program>`, `METALGLDRV_DUMP_SPIRV`,
   `METALGLDRV_DUMP_FAILED_GLSL`, `METALGLDRV_DUMP_FAILED_MSL` – shader dumps.
 * `METALGLDRV_USE_METALFX=1` – window surfaces present at the display's native resolution, upscaled

@@ -19,6 +19,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+include(GNUInstallDirs)
 
 set(GEN_DIR ${CMAKE_BINARY_DIR}/gen)
 
@@ -67,7 +68,8 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
 endif()
 add_library(metalgldrv SHARED ${DRV_SOURCES} ${GEN_DIR}/gl_stubs.cpp ${GEN_DIR}/gl_procs.cpp)
 add_dependencies(metalgldrv mgl_version)
-target_include_directories(metalgldrv PRIVATE src ${GEN_DIR} include)
+target_include_directories(metalgldrv PRIVATE src ${GEN_DIR}
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(metalgldrv PRIVATE mglsl "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework CoreGraphics" "-framework ImageIO" "-framework MetalFX")
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   target_link_libraries(metalgldrv PRIVATE "-framework UIKit")
@@ -82,6 +84,22 @@ set_target_properties(metalgldrv PROPERTIES
   MACHO_CURRENT_VERSION 1.0.0
   INSTALL_NAME_DIR "@rpath"
   BUILD_WITH_INSTALL_NAME_DIR ON)
+
+# --- install / packaging (docs/porting.md) ---
+# cmake --install <build> --prefix <dir>: lib/libmetalgldrv.dylib, include/{GL,EGL,KHR,metalgldrv},
+# lib/cmake/metalgldrv (find_package -> metalgldrv::metalgldrv) and lib/pkgconfig/metalgldrv.pc.
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+add_library(metalgldrv::metalgldrv ALIAS metalgldrv)  # the same name inside a parent project (add_subdirectory)
+install(TARGETS metalgldrv EXPORT metalgldrvTargets LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT metalgldrvTargets NAMESPACE metalgldrv:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/metalgldrv)
+configure_package_config_file(cmake/metalgldrvConfig.cmake.in ${CMAKE_BINARY_DIR}/metalgldrvConfig.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/metalgldrv)
+install(FILES ${CMAKE_BINARY_DIR}/metalgldrvConfig.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/metalgldrv)
+set(MGL_PC_VERSION 0.1.0)
+configure_file(cmake/metalgldrv.pc.in ${CMAKE_BINARY_DIR}/metalgldrv.pc @ONLY)
+install(FILES ${CMAKE_BINARY_DIR}/metalgldrv.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
 option(MGL_BUILD_TESTS "Build host tests" ON)
 if(MGL_BUILD_TESTS)
