@@ -1017,3 +1017,28 @@ TEST(compat_ext_texture_env_dot3) {
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     CHECK_GL();
 }
+
+// GL_ATI_texture_env_combine3: Arg0 * Arg2 + Arg1 (and the signed / subtract forms).
+TEST(compat_ati_texture_env_combine3) {
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, 0x8744 /* GL_MODULATE_ADD_ATI */);
+    glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_TEXTURE);
+    glTexEnvi(GL_TEXTURE_ENV, GL_SRC1_RGB, GL_PRIMARY_COLOR);
+    glTexEnvi(GL_TEXTURE_ENV, GL_SRC2_RGB, GL_CONSTANT);
+    glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND2_RGB, GL_SRC_COLOR);
+    float k[4] = {0.5f, 0.5f, 0.5f, 1};
+    glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, k);
+    uint8_t t[4] = {255, 0, 128, 255};
+    combineQuad(t, 0, 0.25f, 0.25f, 1);  // (1, 0, 0.5) * 0.5 + (0, 0.25, 0.25) = (0.5, 0.25, 0.5)
+    uint8_t p[4];
+    readPixel(32, 32, p);
+    CHECK(abs(p[0] - 128) <= 3 && abs(p[1] - 64) <= 3 && abs(p[2] - 128) <= 3);
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, 0x8746 /* GL_MODULATE_SUBTRACT_ATI */);
+    combineQuad(t, 0, 0.25f, 0.25f, 1);  // (0.5, -0.25, 0) clamped
+    readPixel(32, 32, p);
+    CHECK(abs(p[0] - 128) <= 3 && p[1] <= 2 && p[2] <= 2);
+    glTexEnvi(GL_TEXTURE_ENV, GL_SRC2_RGB, GL_CONSTANT);
+    glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND2_RGB, GL_SRC_ALPHA);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    CHECK_GL();
+}

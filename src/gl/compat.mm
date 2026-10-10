@@ -1673,6 +1673,10 @@ static std::string combineExpr(GLenum fn, const std::string& a0, const std::stri
     case GL_ADD_SIGNED: return a0 + " + " + a1 + " - " + half;
     case GL_INTERPOLATE: return "mix(" + a1 + ", " + a0 + ", " + a2 + ")";
     case GL_SUBTRACT: return a0 + " - " + a1;
+    // GL_ATI_texture_env_combine3
+    case GL_MODULATE_ADD_ATI: return a0 + " * " + a2 + " + " + a1;
+    case GL_MODULATE_SIGNED_ADD_ATI: return a0 + " * " + a2 + " + " + a1 + " - " + half;
+    case GL_MODULATE_SUBTRACT_ATI: return a0 + " * " + a2 + " - " + a1;
     case GL_DOT3_RGB: case GL_DOT3_RGBA: case GL_DOT3_RGB_EXT: case GL_DOT3_RGBA_EXT:
         return alpha ? a0 : "vec3(4.0 * dot(" + a0 + " - vec3(0.5), " + a1 + " - vec3(0.5)))";
     default: return a0 + " * " + a1;
