@@ -1046,10 +1046,20 @@ API void APIENTRY glTexEnviv(GLenum target, GLenum pname, const GLint* params) {
 API void APIENTRY glGetTexEnvfv(GLenum target, GLenum pname, GLfloat* params) {
     MGL_CTX();
     TexEnv& e = compat(ctx)->texEnv[std::min<int>(ctx->activeTexture, 7)];
-    if (pname == GL_TEXTURE_ENV_COLOR) memcpy(params, e.color, 16);
-    else if (pname == GL_TEXTURE_ENV_MODE) params[0] = (float)e.mode;
-    else if (pname == GL_TEXTURE_LOD_BIAS) params[0] = e.lodBias;
-    else params[0] = 0;
+    switch (pname) {
+    case GL_TEXTURE_ENV_COLOR: memcpy(params, e.color, 16); break;
+    case GL_TEXTURE_ENV_MODE: params[0] = (float)e.mode; break;
+    case GL_TEXTURE_LOD_BIAS: params[0] = e.lodBias; break;
+    case GL_COMBINE_RGB: params[0] = (float)e.combineRGB; break;
+    case GL_COMBINE_ALPHA: params[0] = (float)e.combineA; break;
+    case GL_SRC0_RGB: case GL_SRC1_RGB: case GL_SRC2_RGB: params[0] = (float)e.srcRGB[pname - GL_SRC0_RGB]; break;
+    case GL_SRC0_ALPHA: case GL_SRC1_ALPHA: case GL_SRC2_ALPHA: params[0] = (float)e.srcA[pname - GL_SRC0_ALPHA]; break;
+    case GL_OPERAND0_RGB: case GL_OPERAND1_RGB: case GL_OPERAND2_RGB: params[0] = (float)e.opRGB[pname - GL_OPERAND0_RGB]; break;
+    case GL_OPERAND0_ALPHA: case GL_OPERAND1_ALPHA: case GL_OPERAND2_ALPHA: params[0] = (float)e.opA[pname - GL_OPERAND0_ALPHA]; break;
+    case GL_RGB_SCALE: params[0] = e.scaleRGB; break;
+    case GL_ALPHA_SCALE: params[0] = e.scaleA; break;
+    default: ctx->setError(GL_INVALID_ENUM);
+    }
 }
 API void APIENTRY glGetTexEnviv(GLenum target, GLenum pname, GLint* params) {
     float f[4] = {};
@@ -1663,7 +1673,7 @@ static std::string combineExpr(GLenum fn, const std::string& a0, const std::stri
     case GL_ADD_SIGNED: return a0 + " + " + a1 + " - " + half;
     case GL_INTERPOLATE: return "mix(" + a1 + ", " + a0 + ", " + a2 + ")";
     case GL_SUBTRACT: return a0 + " - " + a1;
-    case GL_DOT3_RGB: case GL_DOT3_RGBA:
+    case GL_DOT3_RGB: case GL_DOT3_RGBA: case GL_DOT3_RGB_EXT: case GL_DOT3_RGBA_EXT:
         return alpha ? a0 : "vec3(4.0 * dot(" + a0 + " - vec3(0.5), " + a1 + " - vec3(0.5)))";
     default: return a0 + " * " + a1;
     }
@@ -1817,8 +1827,12 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
                                         combineSrc(e.srcRGB[2], e.opRGB[2], false, u), false);
             std::string a = combineExpr(e.combineA, combineSrc(e.srcA[0], e.opA[0], true, u), combineSrc(e.srcA[1], e.opA[1], true, u),
                                         combineSrc(e.srcA[2], e.opA[2], true, u), true);
-            fs += "    vec3 rr = " + r + "; float aa = " + a + ";\n";
-            fs += "    c = clamp(vec4(rr * " + std::to_string(e.scaleRGB) + ", aa * " + std::to_string(e.scaleA) + "), 0.0, 1.0);\n";
+            // DOT3_RGBA puts the dot product in alpha too; EXT_texture_env_dot3's forms ignore the scales.
+            bool dotAlpha = e.combineRGB == GL_DOT3_RGBA || e.combineRGB == GL_DOT3_RGBA_EXT;
+            bool extDot = e.combineRGB == GL_DOT3_RGB_EXT || e.combineRGB == GL_DOT3_RGBA_EXT;
+            float scaleRGB = extDot ? 1.0f : e.scaleRGB, scaleA = extDot && dotAlpha ? 1.0f : e.scaleA;
+            fs += "    vec3 rr = " + r + "; float aa = " + (dotAlpha ? std::string("rr.r") : a) + ";\n";
+            fs += "    c = clamp(vec4(rr * " + std::to_string(scaleRGB) + ", aa * " + std::to_string(scaleA) + "), 0.0, 1.0);\n";
             break;
         }
         default:  // MODULATE

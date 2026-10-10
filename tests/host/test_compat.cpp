@@ -978,3 +978,42 @@ TEST(compat_sgis_generate_mipmap) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// Texture environment combine helper: a 1x1 texture of `texel` on a full-screen quad colored `color`.
+static void combineQuad(const uint8_t* texel, float r, float g, float b, float a) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texel);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glEnable(GL_TEXTURE_2D);
+    glColor4f(r, g, b, a);
+    glRectf(-1, -1, 1, 1);
+    glDisable(GL_TEXTURE_2D);
+    glDeleteTextures(1, &tex);
+}
+
+// GL_EXT_texture_env_dot3: unscaled dot products; DOT3_RGBA also writes alpha.
+TEST(compat_ext_texture_env_dot3) {
+    glDisable(GL_BLEND);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, 0x8741 /* GL_DOT3_RGBA_EXT */);
+    glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_TEXTURE);
+    glTexEnvi(GL_TEXTURE_ENV, GL_SRC1_RGB, GL_PRIMARY_COLOR);
+    glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 4);  // ignored by the EXT forms
+    uint8_t n[4] = {128, 128, 255, 255};  // normal (0, 0, 1)
+    combineQuad(n, 0.5f, 0.5f, 0.75f, 1);  // light (0, 0, 0.5): dot = 4 * 0.5 * 0.25 = 0.5
+    uint8_t p[4];
+    readPixel(32, 32, p);
+    CHECK(abs(p[0] - 128) <= 3 && abs(p[3] - 128) <= 3);
+    GLint v = 0;
+    glGetTexEnviv(GL_TEXTURE_ENV, GL_COMBINE_RGB, &v);
+    CHECK_EQ(v, 0x8741);
+    glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 1);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    CHECK_GL();
+}
