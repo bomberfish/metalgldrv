@@ -594,3 +594,31 @@ TEST(apple_rgb_422) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_APPLE_ycbcr_422: 4:2:2 Y'CbCr converted to RGB (BT.601, video range) when uploaded.
+TEST(apple_ycbcr_422) {
+    CHECK(hasExtension("GL_APPLE_ycbcr_422"));
+    const GLenum YCBCR_422 = 0x85B9, SHORT_8_8_REV = 0x85BB;
+    // yuvs (Y0 Cb Y1 Cr): white (235,128,128) then black (16,128,128); then pure red (81,90,240) twice
+    uint8_t yuvs[8] = {235, 128, 16, 128, 81, 90, 81, 240};
+    GLuint tex, fbo;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, 4, 1, 0, YCBCR_422, SHORT_8_8_REV, yuvs);
+    CHECK_GL();
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    CHECK_PIXEL(0, 0, 255, 255, 255, 255);
+    CHECK_PIXEL(1, 0, 0, 0, 0, 255);
+    uint8_t p[4];
+    readPixel(2, 0, p);
+    CHECK(p[0] >= 250 && p[1] <= 4 && p[2] <= 4);
+    uint8_t back[8] = {};
+    glGetTexImage(GL_TEXTURE_2D, 0, YCBCR_422, SHORT_8_8_REV, back);
+    CHECK(abs(back[0] - 235) <= 1 && abs(back[2] - 16) <= 1 && abs(back[1] - 128) <= 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}

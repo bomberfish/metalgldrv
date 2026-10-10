@@ -287,7 +287,7 @@ const FormatInfo* resolveInternalFormat(GLenum internalFormat, GLenum format, GL
 // client formats
 // ---------------------------------------------------------------------------
 // GL_APPLE_rgb_422 / GL_APPLE_ycbcr_422 client formats: pairs of pixels share their chroma.
-static bool is422Format(GLenum format) { return format == GL_RGB_422_APPLE; }
+static bool is422Format(GLenum format) { return format == GL_RGB_422_APPLE || format == GL_YCBCR_422_APPLE; }
 
 static int formatComponents(GLenum format) {
     switch (format) {
@@ -297,7 +297,7 @@ static int formatComponents(GLenum format) {
         return 1;
     case GL_RG: case GL_RG_INTEGER: case GL_LUMINANCE_ALPHA: case GL_DEPTH_STENCIL: return 2;
     case GL_RGB: case GL_BGR: case GL_RGB_INTEGER: case GL_BGR_INTEGER: return 3;
-    case GL_RGB_422_APPLE: return 3;  // two bytes per pixel (packedSize)
+    case GL_RGB_422_APPLE: case GL_YCBCR_422_APPLE: return 3;  // two bytes per pixel (packedSize)
     case GL_RGBA: case GL_BGRA: case GL_RGBA_INTEGER: case GL_BGRA_INTEGER: return 4;
     default: return 0;
     }
