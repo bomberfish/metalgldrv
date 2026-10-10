@@ -80,6 +80,10 @@ public:
     GLenum usage = GL_STATIC_DRAW;
     GLbitfield storageFlags = 0;  // glBufferStorage flags (0 = mutable)
     bool immutable = false;
+    // GL_APPLE_flush_buffer_range (glBufferParameteriAPPLE), for glMapBuffer: when off, mapping doesn't wait
+    // for the GPU (serializedModify) / only ranges flushed with glFlushMappedBufferRangeAPPLE are written
+    // (flushingUnmap).
+    bool appleSerializedModify = true, appleFlushingUnmap = true;
     uint64_t lastUse = 0;         // serial of last command buffer referencing mtl
     uint64_t lastGpuWrite = 0;    // serial of last GPU write (SSBO/xfb/copy) for read-back sync
     // mapping

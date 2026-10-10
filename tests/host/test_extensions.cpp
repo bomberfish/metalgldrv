@@ -330,3 +330,41 @@ TEST(apple_fence) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_APPLE_flush_buffer_range: with BUFFER_FLUSHING_UNMAP_APPLE off, glMapBuffer writes only the flushed ranges.
+TEST(apple_flush_buffer_range) {
+    CHECK(hasExtension("GL_APPLE_flush_buffer_range"));
+    auto param = (void (*)(GLenum, GLenum, GLint))eglGetProcAddress("glBufferParameteriAPPLE");
+    auto flush = (void (*)(GLenum, GLintptr, GLsizeiptr))eglGetProcAddress("glFlushMappedBufferRangeAPPLE");
+    GLuint b;
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_ARRAY_BUFFER, b);
+    uint8_t init[16] = {};
+    glBufferData(GL_ARRAY_BUFFER, 16, init, GL_DYNAMIC_DRAW);
+    param(GL_ARRAY_BUFFER, 0x8A13 /* GL_BUFFER_FLUSHING_UNMAP_APPLE */, GL_FALSE);
+    param(GL_ARRAY_BUFFER, 0x8A12 /* GL_BUFFER_SERIALIZED_MODIFY_APPLE */, GL_FALSE);
+    GLint v = 1;
+    glGetBufferParameteriv(GL_ARRAY_BUFFER, 0x8A13, &v);
+    CHECK_EQ(v, 0);
+    auto* p = (uint8_t*)glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+    CHECK(p != nullptr);
+    if (!p) return;
+    for (int i = 0; i < 16; i++) p[i] = 0x40 + i;
+    flush(GL_ARRAY_BUFFER, 4, 4);
+    CHECK(glUnmapBuffer(GL_ARRAY_BUFFER));
+    uint8_t out[16];
+    glGetBufferSubData(GL_ARRAY_BUFFER, 0, 16, out);
+    CHECK_EQ(out[4], 0x44);
+    CHECK_EQ(out[7], 0x47);
+    CHECK_GL();
+    // Defaults: the whole mapping is written at unmap.
+    param(GL_ARRAY_BUFFER, 0x8A13, GL_TRUE);
+    p = (uint8_t*)glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+    p[15] = 0x99;
+    flush(GL_ARRAY_BUFFER, 0, 4);  // allowed, nothing to do
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+    glGetBufferSubData(GL_ARRAY_BUFFER, 0, 16, out);
+    CHECK_EQ(out[15], 0x99);
+    glDeleteBuffers(1, &b);
+    CHECK_GL();
+}

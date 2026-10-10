@@ -515,12 +515,21 @@ static GLbitfield accessFromEnum(GLenum access) {
     }
 }
 
+// GL_APPLE_flush_buffer_range's buffer parameters as map flags.
+static GLbitfield appleMapFlags(const Buffer* b, GLbitfield a) {
+    if (!(a & GL_MAP_WRITE_BIT)) return a;
+    if (!b->appleFlushingUnmap) a |= GL_MAP_FLUSH_EXPLICIT_BIT;
+    if (!b->appleSerializedModify && !(a & GL_MAP_READ_BIT)) a |= GL_MAP_UNSYNCHRONIZED_BIT;
+    return a;
+}
+
 API void* APIENTRY glMapBuffer(GLenum target, GLenum access) {
     MGL_CTX_RET(nullptr);
     Buffer* b = boundBuffer(ctx, target);
     if (!b) return nullptr;
     GLbitfield a = accessFromEnum(access);
     if (!a) return ctx->setError(GL_INVALID_ENUM), nullptr;
+    a = appleMapFlags(b, a);
     if (b->size == 0) return ctx->setError(GL_INVALID_OPERATION), nullptr;
     void* p = mapRange(ctx, b, 0, b->size, a);
     return p;
@@ -532,7 +541,7 @@ API void* APIENTRY glMapNamedBuffer(GLuint buffer, GLenum access) {
     if (!b) return ctx->setError(GL_INVALID_OPERATION), nullptr;
     GLbitfield a = accessFromEnum(access);
     if (!a) return ctx->setError(GL_INVALID_ENUM), nullptr;
-    return mapRange(ctx, b, 0, b->size, a);
+    return mapRange(ctx, b, 0, b->size, appleMapFlags(b, a));
 }
 
 API GLboolean APIENTRY glUnmapBuffer(GLenum target) {
@@ -721,6 +730,8 @@ static bool bufferParam(Context* ctx, Buffer* b, GLenum pname, int64_t* out) {
     case GL_BUFFER_MAP_LENGTH: *out = b->mapLength; return true;
     case GL_BUFFER_IMMUTABLE_STORAGE: *out = b->immutable; return true;
     case GL_BUFFER_STORAGE_FLAGS: *out = b->storageFlags; return true;
+    case GL_BUFFER_SERIALIZED_MODIFY_APPLE: *out = b->appleSerializedModify; return true;
+    case GL_BUFFER_FLUSHING_UNMAP_APPLE: *out = b->appleFlushingUnmap; return true;
     default: ctx->setError(GL_INVALID_ENUM); return false;
     }
 }
@@ -785,4 +796,27 @@ API void APIENTRY glBindBufferOffsetEXT(GLenum target, GLuint index, GLuint buff
     bb.buffer = b;
     bb.offset = b ? offset : 0;
     bb.size = 0;
+}
+
+// --- GL_APPLE_flush_buffer_range ---
+API void APIENTRY glBufferParameteriAPPLE(GLenum target, GLenum pname, GLint param) {
+    MGL_CTX();
+    Buffer* b = boundBuffer(ctx, target);
+    if (!b) return;
+    switch (pname) {
+    case GL_BUFFER_SERIALIZED_MODIFY_APPLE: b->appleSerializedModify = param != 0; return;
+    case GL_BUFFER_FLUSHING_UNMAP_APPLE: b->appleFlushingUnmap = param != 0; return;
+    default: return ctx->setError(GL_INVALID_ENUM);
+    }
+}
+
+// Like glFlushMappedBufferRange, for buffers mapped with glMapBuffer while BUFFER_FLUSHING_UNMAP_APPLE is off
+// (offsets are from the start of the buffer, which glMapBuffer maps whole). With it on, the whole mapping is
+// written at unmap anyway, so flushing has nothing to do.
+API void APIENTRY glFlushMappedBufferRangeAPPLE(GLenum target, GLintptr offset, GLsizeiptr size) {
+    MGL_CTX();
+    Buffer* b = boundBuffer(ctx, target);
+    if (!b) return;
+    if (!b->mapped) return ctx->setError(GL_INVALID_OPERATION);
+    if (b->mapAccess & GL_MAP_FLUSH_EXPLICIT_BIT) flushRange(ctx, b, offset - b->mapOffset, size);
 }
