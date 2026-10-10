@@ -99,6 +99,9 @@ struct LightState {
     float constantAtt = 1, linearAtt = 0, quadraticAtt = 0;
 };
 
+// Shininess and spot exponents go up to this (GL_NV_light_max_exponent; GL itself stops at 128).
+constexpr float kMaxLightExponent = 1024;
+
 struct MaterialState {
     float ambient[4] = {0.2f, 0.2f, 0.2f, 1}, diffuse[4] = {0.8f, 0.8f, 0.8f, 1}, specular[4] = {0, 0, 0, 1};
     float emission[4] = {0, 0, 0, 1};
@@ -436,6 +439,7 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
     case GL_CURRENT_FOG_COORD: return one(cs->current[CA_FOG][0], true);
     case GL_SHADE_MODEL: return one(cs->shadeModel, false);
     case GL_MAX_EVAL_ORDER: return one(kMaxEvalOrder, false);
+    case GL_MAX_SHININESS_NV: case GL_MAX_SPOT_EXPONENT_NV: return one(kMaxLightExponent, true);
     case GL_MAP1_GRID_SEGMENTS: return one(cs->grid1N, false);
     case GL_MAP1_GRID_DOMAIN: return vec(cs->grid1U, 2);
     case GL_MAP2_GRID_SEGMENTS: {
@@ -867,8 +871,14 @@ static void lightParam(Context* ctx, GLenum light, GLenum pname, const float* p)
     case GL_SPOT_DIRECTION:
         for (int r = 0; r < 3; r++) L.spotDirection[r] = mv.at(r, 0) * p[0] + mv.at(r, 1) * p[1] + mv.at(r, 2) * p[2];
         break;
-    case GL_SPOT_EXPONENT: L.spotExponent = p[0]; break;
-    case GL_SPOT_CUTOFF: L.spotCutoff = p[0]; break;
+    case GL_SPOT_EXPONENT:
+        if (p[0] < 0 || p[0] > kMaxLightExponent) return ctx->setError(GL_INVALID_VALUE);
+        L.spotExponent = p[0];
+        break;
+    case GL_SPOT_CUTOFF:
+        if ((p[0] < 0 || p[0] > 90) && p[0] != 180) return ctx->setError(GL_INVALID_VALUE);
+        L.spotCutoff = p[0];
+        break;
     case GL_CONSTANT_ATTENUATION: L.constantAtt = p[0]; break;
     case GL_LINEAR_ATTENUATION: L.linearAtt = p[0]; break;
     case GL_QUADRATIC_ATTENUATION: L.quadraticAtt = p[0]; break;
@@ -900,6 +910,7 @@ API void APIENTRY glLightiv(GLenum light, GLenum pname, const GLint* params) {
 
 static void materialParam(Context* ctx, GLenum face, GLenum pname, const float* p) {
     CompatState* cs = compat(ctx);
+    if (pname == GL_SHININESS && (p[0] < 0 || p[0] > kMaxLightExponent)) return ctx->setError(GL_INVALID_VALUE);
     for (int f = 0; f < 2; f++) {
         if ((f == 0 && face == GL_BACK) || (f == 1 && face == GL_FRONT)) continue;
         MaterialState& m = cs->material[f];

@@ -1068,3 +1068,18 @@ TEST(compat_nv_texture_env_combine4) {
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     CHECK_GL();
 }
+
+// GL_NV_light_max_exponent: shininess and spot exponents above 128, up to the reported maximum.
+TEST(compat_nv_light_max_exponent) {
+    GLfloat maxShine = 0;
+    glGetFloatv(0x8504 /* GL_MAX_SHININESS_NV */, &maxShine);
+    CHECK(maxShine >= 512);
+    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 500);
+    CHECK_GL();
+    glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 300);
+    CHECK_GL();
+    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, maxShine + 1);
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_VALUE);
+    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0);
+    glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 0);
+}
