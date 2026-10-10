@@ -816,3 +816,13 @@ TEST(sgis_texture_params) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_EXT_clip_volume_hint
+TEST(ext_clip_volume_hint) {
+    CHECK(hasExtension("GL_EXT_clip_volume_hint"));
+    glHint(0x80F0 /* GL_CLIP_VOLUME_CLIPPING_HINT_EXT */, GL_FASTEST);
+    GLint v = 0;
+    glGetIntegerv(0x80F0, &v);
+    CHECK_EQ(v, GL_FASTEST);
+    CHECK_GL();
+}

@@ -51,7 +51,7 @@ const char* kExtensions[] = {
     "GL_ARB_vertex_buffer_object", "GL_ARB_vertex_program", "GL_ARB_vertex_shader", "GL_ARB_vertex_type_10f_11f_11f_rev",
     "GL_ARB_vertex_type_2_10_10_10_rev", "GL_ARB_viewport_array", "GL_ARB_window_pos", "GL_EXT_abgr", "GL_EXT_bgra",
     "GL_EXT_blend_color", "GL_EXT_blend_equation_separate", "GL_EXT_blend_func_separate", "GL_EXT_blend_minmax",
-    "GL_EXT_blend_subtract", "GL_EXT_compiled_vertex_array", "GL_EXT_draw_buffers2", "GL_EXT_draw_instanced", "GL_EXT_draw_range_elements", "GL_EXT_fog_coord",
+    "GL_EXT_blend_subtract", "GL_EXT_clip_volume_hint", "GL_EXT_compiled_vertex_array", "GL_EXT_draw_buffers2", "GL_EXT_draw_instanced", "GL_EXT_draw_range_elements", "GL_EXT_fog_coord",
     "GL_EXT_framebuffer_blit", "GL_EXT_framebuffer_multisample", "GL_EXT_framebuffer_object", "GL_EXT_framebuffer_sRGB",
     "GL_EXT_gpu_program_parameters", "GL_EXT_gpu_shader4", "GL_EXT_mesh_shader", "GL_EXT_multi_draw_arrays", "GL_EXT_packed_depth_stencil",
     "GL_EXT_packed_float", "GL_EXT_packed_pixels", "GL_EXT_pixel_buffer_object", "GL_EXT_point_parameters", "GL_EXT_polygon_offset", "GL_EXT_polygon_offset_clamp",
@@ -662,6 +662,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_TEXTURE_COMPRESSION_HINT: v = E(ctx->hints[2]); return true;
     case GL_FRAGMENT_SHADER_DERIVATIVE_HINT: v = E(ctx->hints[3]); return true;
     case GL_TRANSFORM_HINT_APPLE: v = E(ctx->hints[5]); return true;
+    case GL_CLIP_VOLUME_CLIPPING_HINT_EXT: v = E(ctx->hints[6]); return true;
     case GL_PACK_SWAP_BYTES: v = B(ctx->pack.swapBytes); return true;
     case GL_PACK_LSB_FIRST: v = B(ctx->pack.lsbFirst); return true;
     case GL_PACK_ROW_LENGTH: v = I(ctx->pack.rowLength); return true;

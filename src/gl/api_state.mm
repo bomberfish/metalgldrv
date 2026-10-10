@@ -682,6 +682,9 @@ API void APIENTRY glHint(GLenum target, GLenum mode) {
     // GL_APPLE_transform_hint: FASTEST would allow algebraic shortcuts in vertex transformation; we always
     // transform identically, which every mode allows.
     case GL_TRANSFORM_HINT_APPLE: ctx->hints[5] = mode; break;
+    // GL_EXT_clip_volume_hint: FASTEST allows skipping clipping for geometry the app knows is inside; clipping
+    // always happens, which every mode allows.
+    case GL_CLIP_VOLUME_CLIPPING_HINT_EXT: ctx->hints[6] = mode; break;
     default: ctx->setError(GL_INVALID_ENUM, "glHint(0x%x)", target);
     }
 }
