@@ -1,6 +1,8 @@
 // Apple's vendor extensions (GL_APPLE_*), as Apple's OpenGL exposes them, so code written against it runs
 // unchanged. Most map onto the core features they were the precursors of.
 #import "gl/context.h"
+#import "gl/winsys.h"
+#include <TargetConditionals.h>
 #include "util/log.h"
 
 using namespace mgl;
@@ -123,4 +125,29 @@ API void APIENTRY glFinishObjectAPPLE(GLenum object, GLint name) {
                                  ? GL_INVALID_OPERATION
                                  : GL_INVALID_ENUM);
     ctx->waitForResource(serial);
+}
+
+// --- GL_APPLE_flush_render ------------------------------------------------------------------------------
+// Not in the Khronos registry: exported here and listed in procs.cpp's kExtraProcs.
+// FlushRender submits the work without presenting; SwapAPPLE presents the current drawable.
+API void APIENTRY glFlushRenderAPPLE(void) { glFlush(); }
+
+API void APIENTRY glFinishRenderAPPLE(void) { glFinish(); }
+
+#if !TARGET_OS_IPHONE
+extern "C" int CGLFlushDrawable(void* ctx);
+extern "C" void* CGLGetCurrentContext(void);
+#endif
+
+API void APIENTRY glSwapAPPLE(void) {
+    MGL_CTX();
+#if !TARGET_OS_IPHONE
+    if (void* cgl = CGLGetCurrentContext()) {
+        CGLFlushDrawable(cgl);
+        return;
+    }
+#endif
+    Surface* s = ctx->drawSurface.get();
+    if (s && s->layer) presentWindowSurface(ctx, s);
+    else ctx->flush();
 }

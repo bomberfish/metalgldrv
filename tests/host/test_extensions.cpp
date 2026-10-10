@@ -428,3 +428,20 @@ TEST(apple_row_bytes) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_APPLE_flush_render: the entry points resolve and submit work.
+TEST(apple_flush_render) {
+    CHECK(hasExtension("GL_APPLE_flush_render"));
+    auto flushRender = (void (*)())eglGetProcAddress("glFlushRenderAPPLE");
+    auto finishRender = (void (*)())eglGetProcAddress("glFinishRenderAPPLE");
+    auto swap = (void (*)())eglGetProcAddress("glSwapAPPLE");
+    CHECK(flushRender && finishRender && swap);
+    if (!flushRender || !finishRender || !swap) return;
+    glClearColor(0, 1, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    flushRender();
+    finishRender();
+    swap();  // a pbuffer: just a flush
+    CHECK_PIXEL(4, 4, 0, 255, 0, 255);
+    CHECK_GL();
+}
