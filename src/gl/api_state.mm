@@ -650,6 +650,8 @@ API void APIENTRY glPixelStorei(GLenum pname, GLint param) {
     case GL_PACK_LSB_FIRST: case GL_UNPACK_LSB_FIRST: ps->lsbFirst = param; break;
     case GL_PACK_ROW_LENGTH: case GL_UNPACK_ROW_LENGTH: ps->rowLength = param; break;
     case GL_PACK_ROW_BYTES_APPLE: case GL_UNPACK_ROW_BYTES_APPLE: ps->rowBytes = param; break;
+    // A hint that the app keeps the memory: copying it is still correct, so uploads stay as they are.
+    case GL_UNPACK_CLIENT_STORAGE_APPLE: ps->clientStorage = param != 0; break;
     case GL_PACK_IMAGE_HEIGHT: case GL_UNPACK_IMAGE_HEIGHT: ps->imageHeight = param; break;
     case GL_PACK_SKIP_ROWS: case GL_UNPACK_SKIP_ROWS: ps->skipRows = param; break;
     case GL_PACK_SKIP_PIXELS: case GL_UNPACK_SKIP_PIXELS: ps->skipPixels = param; break;

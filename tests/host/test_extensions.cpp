@@ -486,3 +486,28 @@ TEST(apple_object_purgeable) {
     glDeleteBuffers(1, &b);
     CHECK_GL();
 }
+
+// GL_APPLE_client_storage: the pixel store flag is accepted and uploads behave as usual.
+TEST(apple_client_storage) {
+    CHECK(hasExtension("GL_APPLE_client_storage"));
+    const GLenum UNPACK_CLIENT_STORAGE = 0x85B2;
+    glPixelStorei(UNPACK_CLIENT_STORAGE, GL_TRUE);
+    GLboolean on = GL_FALSE;
+    glGetBooleanv(UNPACK_CLIENT_STORAGE, &on);
+    CHECK(on);
+    uint32_t px[4] = {0xFF0000FF, 0xFF0000FF, 0xFF0000FF, 0xFF0000FF};
+    GLuint tex, fbo;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    memset(px, 0, sizeof px);  // the app may not do this with client storage, but a copy doesn't mind
+    glPixelStorei(UNPACK_CLIENT_STORAGE, GL_FALSE);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    CHECK_PIXEL(1, 1, 255, 0, 0, 255);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}

@@ -63,6 +63,7 @@ bool copyImageCompatible(const FormatInfo* a, const FormatInfo* b);
 // --- client pixel layout ---------------------------------------------------
 struct PixelStore {
     int alignment = 4, rowLength = 0, imageHeight = 0, skipPixels = 0, skipRows = 0, skipImages = 0;
+    bool clientStorage = false;  // GL_APPLE_client_storage: allowed to keep using the app's memory (we copy)
     int rowBytes = 0;  // GL_APPLE_row_bytes: the row stride in bytes when nonzero (overrides rowLength and alignment)
     bool swapBytes = false, lsbFirst = false;
     // compressed block params (GL 4.2)
