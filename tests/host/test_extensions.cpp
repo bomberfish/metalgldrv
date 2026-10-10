@@ -699,3 +699,27 @@ TEST(ati_separate_stencil) {
     CHECK_EQ(v, GL_DECR);
     CHECK_GL();
 }
+
+// GL_ATI_draw_buffers: glDrawBuffersATI is glDrawBuffers.
+TEST(ati_draw_buffers) {
+    CHECK(hasExtension("GL_ATI_draw_buffers"));
+    auto drawBuffers = (void (*)(GLsizei, const GLenum*))eglGetProcAddress("glDrawBuffersATI");
+    GLuint fbo, tex[2];
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(2, tex);
+    for (int i = 0; i < 2; i++) {
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, tex[i], 0);
+    }
+    GLenum bufs[2] = {GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT0};
+    drawBuffers(2, bufs);
+    GLint v = 0;
+    glGetIntegerv(GL_DRAW_BUFFER0, &v);
+    CHECK_EQ(v, GL_COLOR_ATTACHMENT1);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(2, tex);
+    CHECK_GL();
+}
