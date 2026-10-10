@@ -877,3 +877,29 @@ TEST(compat_ext_point_parameters) {
     pfv(0x8129, d);
     CHECK_GL();
 }
+
+// GL_EXT_compiled_vertex_array: lock / unlock around draws of the locked range.
+TEST(compat_ext_compiled_vertex_array) {
+    auto lock = (void (*)(GLint, GLsizei))eglGetProcAddress("glLockArraysEXT");
+    auto unlock = (void (*)())eglGetProcAddress("glUnlockArraysEXT");
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    float pos[] = {-1, -1, 1, -1, 1, 1, -1, 1};
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, pos);
+    lock(0, 4);
+    GLint v = 0;
+    glGetIntegerv(0x81A9 /* GL_ARRAY_ELEMENT_LOCK_COUNT_EXT */, &v);
+    CHECK_EQ(v, 4);
+    glColor3f(1, 0, 1);
+    glDrawArrays(GL_QUADS, 0, 4);
+    unlock();
+    glDisableClientState(GL_VERTEX_ARRAY);
+    CHECK_PIXEL(32, 32, 255, 0, 255, 255);
+    unlock();
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);
+}

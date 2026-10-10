@@ -208,6 +208,9 @@ struct mgl::CompatState {
     GLsizei varLength = 0;
     const void* varPointer = nullptr;
     GLenum varStorageHint = GL_STORAGE_SHARED_APPLE;
+    // GL_EXT_compiled_vertex_array: the locked range (draws read the arrays as they are either way)
+    GLint lockFirst = 0;
+    GLsizei lockCount = 0;
     // GL_APPLE_element_array
     bool elementArrayEnabled = false;
     GLenum elementArrayType = GL_UNSIGNED_INT;
@@ -446,6 +449,8 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
         return vec(d, 4);
     }
     case GL_ELEMENT_ARRAY_TYPE_APPLE: return one(cs->elementArrayType, false);
+    case GL_ARRAY_ELEMENT_LOCK_FIRST_EXT: return one(cs->lockFirst, false);
+    case GL_ARRAY_ELEMENT_LOCK_COUNT_EXT: return one(cs->lockCount, false);
     case GL_POINT_SIZE_MIN: return one(cs->pointSizeMin, true);
     case GL_POINT_SIZE_MAX: return one(cs->pointSizeMax, true);
     case GL_POINT_DISTANCE_ATTENUATION: return vec(cs->pointAtt, 3);
@@ -2893,4 +2898,25 @@ bool mglCompatPointParam(Context* ctx, GLenum pname, const GLfloat* v) {
     case GL_POINT_DISTANCE_ATTENUATION: memcpy(cs->pointAtt, v, 12); return true;
     default: return false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// GL_EXT_compiled_vertex_array: locking promises the arrays won't change, which lets drivers transform them
+// once; draws here read client arrays as they are, so the lock is only recorded.
+// ---------------------------------------------------------------------------
+API void APIENTRY glLockArraysEXT(GLint first, GLsizei count) {
+    MGL_CTX();
+    CompatState* cs = compat(ctx);
+    if (first < 0 || count <= 0) return ctx->setError(GL_INVALID_VALUE);
+    if (cs->lockCount) return ctx->setError(GL_INVALID_OPERATION);  // already locked
+    cs->lockFirst = first;
+    cs->lockCount = count;
+}
+
+API void APIENTRY glUnlockArraysEXT(void) {
+    MGL_CTX();
+    CompatState* cs = compat(ctx);
+    if (!cs->lockCount) return ctx->setError(GL_INVALID_OPERATION);
+    cs->lockFirst = 0;
+    cs->lockCount = 0;
 }
