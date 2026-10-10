@@ -98,6 +98,8 @@ public:
     uint64_t reserveSerial();
     // The most recently reserved serial: work recorded so far completes with it at the latest.
     uint64_t lastReservedSerial();
+    // (watermark, completed serials above it, oldest submitted serial still pending, next serial): for stats
+    void completionState(uint64_t out[4]);
     bool isComplete(uint64_t serial);
     void waitFor(uint64_t serial);
     void waitIdle();

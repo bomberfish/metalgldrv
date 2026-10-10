@@ -119,6 +119,12 @@ void statMaybeReport() {
         char gpu[96];
         snprintf(gpu, sizeof gpu, ", GPU busy %.0f ms (%.0f%%)", busy * 1000, busy / 5 * 100);
         out += gpu;
+        // command buffers: everything up to the watermark is complete (and its resources reusable)
+        uint64_t c[4];
+        d->completionState(c);
+        snprintf(gpu, sizeof gpu, ", serials: complete <= %llu (+%llu above), oldest pending %llu, next %llu", (unsigned long long)c[0],
+                 (unsigned long long)c[1], (unsigned long long)c[2], (unsigned long long)c[3]);
+        out += gpu;
     }
     if (g_profilePasses) out += profileReport();
     for (size_t i = 0; i < v.size() && i < 25; i++) out += "\n  " + std::to_string(v[i].second) + "  " + v[i].first;

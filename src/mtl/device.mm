@@ -144,6 +144,14 @@ bool Device::gpuTimes(uint64_t serial, double* start, double* end) {
     return true;
 }
 
+void Device::completionState(uint64_t out[4]) {
+    std::lock_guard<std::mutex> g(mutex_);
+    out[0] = watermark_;
+    out[1] = completedAbove_.size();
+    out[2] = submitted_.empty() ? 0 : *submitted_.begin();
+    out[3] = nextSerial_;
+}
+
 bool Device::isComplete(uint64_t serial) {
     std::lock_guard<std::mutex> g(mutex_);
     return isCompleteLocked(serial);

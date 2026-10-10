@@ -2,6 +2,7 @@
 #pragma once
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <deque>
 #include <array>
 #include <functional>
 #include <vector>
@@ -348,6 +349,11 @@ public:
     void endEncoder();
     // Submits the command buffer. present: drawable to present after it.
     void flush(id<CAMetalDrawable> present = nil);
+    // The command buffer flush() submitted last (its serial).
+    uint64_t lastSubmittedSerial() const { return serial_; }
+    // Serials of the last frames presented to window surfaces (presentWindowSurface keeps the CPU at most
+    // kMaxFramesInFlight frames ahead of the GPU).
+    std::deque<uint64_t> frameSerials;
     void finish();
     // Submits the open command buffer if it is the one recorded under `serial`.
     void flushIfPending(uint64_t serial) {

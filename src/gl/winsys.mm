@@ -218,6 +218,15 @@ void presentWindowSurface(Context* ctx, Surface* surf) {
         } else {
             ctx->flush();
         }
+        // At most kMaxFramesInFlight frames queued on the GPU. nextDrawable doesn't always hold the CPU back: when
+        // the display sleeps or the window is hidden, drawables come back at once, and a GPU-bound app (Unigine
+        // Heaven) then queued command buffers, and the memory they hold, without limit.
+        constexpr size_t kMaxFramesInFlight = 3;
+        ctx->frameSerials.push_back(ctx->lastSubmittedSerial());
+        while (ctx->frameSerials.size() > kMaxFramesInFlight) {
+            ctx->dev->waitFor(ctx->frameSerials.front());
+            ctx->frameSerials.pop_front();
+        }
         // Pick up layer size / scale changes for the next frame.
         if (surf->layer) {
             followSuperlayer(surf->layer);
