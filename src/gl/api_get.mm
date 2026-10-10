@@ -479,6 +479,7 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
         v = B(f && f->kind == FmtKind::Float);
         return true;
     }
+    case GL_ACTIVE_STENCIL_FACE_EXT: v = E(ctx->activeStencilFaceEXT); return true;
     case GL_DOUBLEBUFFER: v = B(true); return true;
     // GL_APPLE_aux_depth_stencil: whether aux buffers have their own depth/stencil. There are no aux buffers
     // (GL_AUX_BUFFERS is 0), even with kCGLPFAAuxDepthStencil, which pixel formats accept.

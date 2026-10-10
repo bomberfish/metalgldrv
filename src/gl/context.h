@@ -239,6 +239,11 @@ public:
     GLenum depthFunc = GL_LESS;
     bool stencilTest = false;
     StencilFace stencil[2];  // front, back
+    // GL_EXT_stencil_two_side: glStencilFunc/Op/Mask set the active face. With two-side stencil off, back faces
+    // render with the front state (stencil[1] mirrors stencil[0]) and the back state waits in extStencilBack.
+    bool stencilTwoSideEXT = false;
+    GLenum activeStencilFaceEXT = GL_FRONT;
+    StencilFace extStencilBack;
     bool cullFace = false;
     GLenum cullMode = GL_BACK, frontFace = GL_CCW;
     GLenum polygonMode = GL_FILL;

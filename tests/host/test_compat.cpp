@@ -550,3 +550,49 @@ TEST(compat_arb_shader_objects) {
     delObj(f);
     CHECK_GL();
 }
+
+// GL_EXT_stencil_two_side: the active face's state for front- and back-facing primitives.
+TEST(compat_ext_stencil_two_side) {
+    auto activeFace = (void (*)(GLenum))eglGetProcAddress("glActiveStencilFaceEXT");
+    const GLenum TWO_SIDE = 0x8910, ACTIVE_FACE = 0x8911;
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    auto quads = [] {  // left: counter-clockwise (front), right: clockwise (back)
+        glBegin(GL_QUADS);
+        glVertex2f(-1, -1); glVertex2f(0, -1); glVertex2f(0, 1); glVertex2f(-1, 1);
+        glVertex2f(0, -1); glVertex2f(0, 1); glVertex2f(1, 1); glVertex2f(1, -1);
+        glEnd();
+    };
+    glEnable(GL_STENCIL_TEST);
+    glEnable(TWO_SIDE);
+    activeFace(GL_BACK);
+    glStencilFunc(GL_ALWAYS, 2, 0xff);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+    activeFace(GL_FRONT);
+    glStencilFunc(GL_ALWAYS, 1, 0xff);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+    GLint face = 0;
+    glGetIntegerv(ACTIVE_FACE, &face);
+    CHECK_EQ(face, GL_FRONT);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    quads();
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(TWO_SIDE);  // both faces now use the front state
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    glStencilFunc(GL_EQUAL, 1, 0xff);
+    glColor3f(0, 1, 0);
+    quads();
+    glStencilFunc(GL_EQUAL, 2, 0xff);
+    glColor3f(0, 0, 1);
+    quads();
+    glDisable(GL_STENCIL_TEST);
+    CHECK_PIXEL(16, 32, 0, 255, 0, 255);  // front quad wrote 1
+    CHECK_PIXEL(48, 32, 0, 0, 255, 255);  // back quad wrote 2
+    CHECK(!glIsEnabled(TWO_SIDE));
+    CHECK_GL();
+}

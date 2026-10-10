@@ -60,6 +60,17 @@ static bool setCap(Context* ctx, GLenum cap, bool v, int index = -1) {
     switch (cap) {
     case GL_DEPTH_TEST: ctx->depthTest = v; return true;
     case GL_STENCIL_TEST: ctx->stencilTest = v; return true;
+    case GL_STENCIL_TEST_TWO_SIDE_EXT:
+        if (v != ctx->stencilTwoSideEXT) {
+            if (v) {
+                ctx->stencil[1] = ctx->extStencilBack;
+            } else {
+                ctx->extStencilBack = ctx->stencil[1];
+                ctx->stencil[1] = ctx->stencil[0];
+            }
+            ctx->stencilTwoSideEXT = v;
+        }
+        return true;
     case GL_CULL_FACE: ctx->cullFace = v; return true;
     case GL_POLYGON_OFFSET_FILL: ctx->polygonOffsetFill = v; return true;
     case GL_POLYGON_OFFSET_LINE: ctx->polygonOffsetLine = v; return true;
@@ -141,6 +152,7 @@ bool mglIsEnabled(Context* ctx, GLenum cap, int index, bool* out) {
     switch (cap) {
     case GL_DEPTH_TEST: *out = ctx->depthTest; return true;
     case GL_STENCIL_TEST: *out = ctx->stencilTest; return true;
+    case GL_STENCIL_TEST_TWO_SIDE_EXT: *out = ctx->stencilTwoSideEXT; return true;
     case GL_CULL_FACE: *out = ctx->cullFace; return true;
     case GL_POLYGON_OFFSET_FILL: *out = ctx->polygonOffsetFill; return true;
     case GL_POLYGON_OFFSET_LINE: *out = ctx->polygonOffsetLine; return true;
@@ -437,7 +449,31 @@ API void APIENTRY glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLu
     }
 }
 
-API void APIENTRY glStencilFunc(GLenum func, GLint ref, GLuint mask) { glStencilFuncSeparate(GL_FRONT_AND_BACK, func, ref, mask); }
+// The faces glStencilFunc / Op / Mask set (GL_EXT_stencil_two_side's active face). Back-face state set while
+// two-side stencil is off is kept aside (extStencilBack): `apply` runs on it in place of stencil[1].
+template <typename F>
+static void legacyStencil(Context* ctx, F apply) {
+    if (ctx->activeStencilFaceEXT == GL_BACK && !ctx->stencilTwoSideEXT) {
+        StencilFace mirror = ctx->stencil[1];
+        ctx->stencil[1] = ctx->extStencilBack;
+        apply(GL_BACK);
+        ctx->extStencilBack = ctx->stencil[1];
+        ctx->stencil[1] = mirror;
+        return;
+    }
+    apply(!ctx->stencilTwoSideEXT ? GL_FRONT_AND_BACK : ctx->activeStencilFaceEXT);
+}
+
+API void APIENTRY glStencilFunc(GLenum func, GLint ref, GLuint mask) {
+    MGL_CTX();
+    legacyStencil(ctx, [&](GLenum face) { glStencilFuncSeparate(face, func, ref, mask); });
+}
+
+API void APIENTRY glActiveStencilFaceEXT(GLenum face) {
+    MGL_CTX();
+    if (face != GL_FRONT && face != GL_BACK) return ctx->setError(GL_INVALID_ENUM);
+    ctx->activeStencilFaceEXT = face;
+}
 
 API void APIENTRY glStencilOpSeparate(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass) {
     MGL_CTX();
@@ -451,7 +487,10 @@ API void APIENTRY glStencilOpSeparate(GLenum face, GLenum sfail, GLenum dpfail, 
     }
 }
 
-API void APIENTRY glStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass) { glStencilOpSeparate(GL_FRONT_AND_BACK, sfail, dpfail, dppass); }
+API void APIENTRY glStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass) {
+    MGL_CTX();
+    legacyStencil(ctx, [&](GLenum face) { glStencilOpSeparate(face, sfail, dpfail, dppass); });
+}
 
 API void APIENTRY glStencilMaskSeparate(GLenum face, GLuint mask) {
     MGL_CTX();
@@ -460,7 +499,10 @@ API void APIENTRY glStencilMaskSeparate(GLenum face, GLuint mask) {
     if (face != GL_FRONT) ctx->stencil[1].writeMask = mask;
 }
 
-API void APIENTRY glStencilMask(GLuint mask) { glStencilMaskSeparate(GL_FRONT_AND_BACK, mask); }
+API void APIENTRY glStencilMask(GLuint mask) {
+    MGL_CTX();
+    legacyStencil(ctx, [&](GLenum face) { glStencilMaskSeparate(face, mask); });
+}
 
 // --- rasterization ---
 API void APIENTRY glCullFace(GLenum mode) {
