@@ -558,3 +558,12 @@ TEST(apple_aux_depth_stencil) {
     CHECK(!b);
     CHECK_GL();
 }
+
+// GL_APPLE_pixel_buffer: the minimum pbuffer viewport query.
+TEST(apple_pixel_buffer) {
+    CHECK(hasExtension("GL_APPLE_pixel_buffer"));
+    GLint d[2] = {0, 0};
+    glGetIntegerv(0x8A10 /* GL_MIN_PBUFFER_VIEWPORT_DIMS_APPLE */, d);
+    CHECK(d[0] == 1 && d[1] == 1);
+    CHECK_GL();
+}
