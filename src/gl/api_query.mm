@@ -595,8 +595,6 @@ API void APIENTRY glGetOcclusionQueryivNV(GLuint id, GLenum pname, GLint* params
 }
 
 // --- GL_HP_occlusion_test (not in the Khronos registry): whether any fragment passed while it was enabled ---
-constexpr GLenum kOcclusionTestHP = 0x8165, kOcclusionTestResultHP = 0x8166;
-
 void mglHPOcclusionTest(Context* ctx, bool on) {
     if (on == ctx->hpOcclusionTest) return;
     ctx->hpOcclusionTest = on;

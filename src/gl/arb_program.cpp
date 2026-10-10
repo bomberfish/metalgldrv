@@ -21,7 +21,7 @@
 namespace mgl {
 namespace {
 
-constexpr unsigned kVertexProgram = 0x8620, kFragmentProgram = 0x8804;
+constexpr unsigned kVertexProgram = 0x8620;  // GL_VERTEX_PROGRAM_ARB (GL_FRAGMENT_PROGRAM_ARB otherwise)
 
 struct Token {
     enum Kind { Ident, Number, Punct, End } kind = End;
