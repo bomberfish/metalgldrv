@@ -860,3 +860,20 @@ TEST(compat_point_parameters) {
     glPointSize(1);
     CHECK_GL();
 }
+
+// GL_EXT_point_parameters: the EXT entry points and enums (the GL 1.4 values).
+TEST(compat_ext_point_parameters) {
+    auto pf = (void (*)(GLenum, GLfloat))eglGetProcAddress("glPointParameterfEXT");
+    auto pfv = (void (*)(GLenum, const GLfloat*))eglGetProcAddress("glPointParameterfvEXT");
+    pf(0x8127 /* GL_POINT_SIZE_MAX_EXT */, 20);
+    float att[3] = {1, 0.5f, 0};
+    pfv(0x8129 /* GL_DISTANCE_ATTENUATION_EXT */, att);
+    float v = 0, a[3] = {};
+    glGetFloatv(GL_POINT_SIZE_MAX, &v);
+    glGetFloatv(GL_POINT_DISTANCE_ATTENUATION, a);
+    CHECK(v == 20 && a[1] == 0.5f);
+    pf(0x8127, 511);
+    float d[3] = {1, 0, 0};
+    pfv(0x8129, d);
+    CHECK_GL();
+}
