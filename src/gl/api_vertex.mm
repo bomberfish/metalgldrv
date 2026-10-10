@@ -6,6 +6,8 @@
 using namespace mgl;
 #define API extern "C" __attribute__((visibility("default")))
 
+bool mglCompatGetAttribMap(Context* ctx, GLuint index, GLenum pname, double* out, int* n);  // compat.mm
+
 API void APIENTRY glGenVertexArrays(GLsizei n, GLuint* arrays) {
     MGL_CTX();
     auto lk = ctx->containerLock();
@@ -372,6 +374,14 @@ static bool vaoAttribParam(Context* ctx, VertexArray* v, GLuint index, GLenum pn
 
 API void APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params) {
     MGL_CTX();
+    if (!ctx->coreProfile) {  // GL_APPLE_vertex_program_evaluators map queries
+        double m[30 * 30 * 4];
+        int n;
+        if (mglCompatGetAttribMap(ctx, index, pname, m, &n)) {
+            for (int k = 0; k < n; k++) params[k] = (GLint)lround(m[k]);
+            return;
+        }
+    }
     if (pname == GL_CURRENT_VERTEX_ATTRIB) {
         if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
         for (int k = 0; k < 4; k++) params[k] = (GLint)ctx->currentAttrib[index][k];
@@ -384,6 +394,14 @@ API void APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params)
 
 API void APIENTRY glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat* params) {
     MGL_CTX();
+    if (!ctx->coreProfile) {  // GL_APPLE_vertex_program_evaluators map queries
+        double m[30 * 30 * 4];
+        int n;
+        if (mglCompatGetAttribMap(ctx, index, pname, m, &n)) {
+            for (int k = 0; k < n; k++) params[k] = (GLfloat)(m[k]);
+            return;
+        }
+    }
     if (pname == GL_CURRENT_VERTEX_ATTRIB) {
         if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
         for (int k = 0; k < 4; k++) params[k] = ctx->currentAttrib[index][k];
@@ -396,6 +414,14 @@ API void APIENTRY glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat* param
 
 API void APIENTRY glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble* params) {
     MGL_CTX();
+    if (!ctx->coreProfile) {  // GL_APPLE_vertex_program_evaluators map queries
+        double m[30 * 30 * 4];
+        int n;
+        if (mglCompatGetAttribMap(ctx, index, pname, m, &n)) {
+            for (int k = 0; k < n; k++) params[k] = (m[k]);
+            return;
+        }
+    }
     if (pname == GL_CURRENT_VERTEX_ATTRIB) {
         if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
         for (int k = 0; k < 4; k++) params[k] = ctx->currentAttrib[index][k];

@@ -196,6 +196,10 @@ struct mgl::CompatState {
     // evaluators
     EvalMap map1[kEvalTargets], map2[kEvalTargets];
     bool map1Enabled[kEvalTargets] = {}, map2Enabled[kEvalTargets] = {}, autoNormal = false;
+    // GL_APPLE_vertex_program_evaluators: maps for the generic attributes (size = components, 1..4)
+    EvalMap attribMap1[kMaxVertexAttribs], attribMap2[kMaxVertexAttribs];
+    int attribMap1Size[kMaxVertexAttribs] = {}, attribMap2Size[kMaxVertexAttribs] = {};
+    bool attribMap1On[kMaxVertexAttribs] = {}, attribMap2On[kMaxVertexAttribs] = {};
     int grid1N = 1, grid2UN = 1, grid2VN = 1;
     float grid1U[2] = {0, 1}, grid2U[2] = {0, 1}, grid2V[2] = {0, 1};
     // GL_APPLE_vertex_array_range: client arrays are read at draw time (always current), so the range, its
@@ -2276,8 +2280,32 @@ static void evalEmit(Context* ctx, bool two, float u, float v) {
         eval(2, r, nullptr, nullptr);
         memcpy(cs->current[CA_NORMAL], r, 12);
     }
+    // Generic attribute maps (GL_APPLE_vertex_program_evaluators); attribute 0 is the vertex.
+    float savedGeneric[kMaxVertexAttribs][4];
+    memcpy(savedGeneric, ctx->currentAttrib, sizeof savedGeneric);
+    const EvalMap* amaps = two ? cs->attribMap2 : cs->attribMap1;
+    const int* asize = two ? cs->attribMap2Size : cs->attribMap1Size;
+    const bool* aon = two ? cs->attribMap2On : cs->attribMap1On;
+    bool attrib0 = false;
+    float a0[4] = {0, 0, 0, 1};
+    for (int i = 0; i < kMaxVertexAttribs; i++) {
+        if (!aon[i] || !asize[i]) continue;
+        float r4[4] = {0, 0, 0, 1};
+        if (two) evalMap2(amaps[i], asize[i], u, v, r4, nullptr, nullptr);
+        else evalMap1(amaps[i], asize[i], u, r4);
+        if (i == 0) {
+            attrib0 = true;
+            memcpy(a0, r4, 16);
+        } else {
+            memcpy(ctx->currentAttrib[i], r4, 16);
+            cs->immGeneric |= 1u << i;
+        }
+    }
     int vi = on[8] ? 8 : on[7] ? 7 : -1;
-    if (vi >= 0) {
+    if (attrib0) {
+        cs->immGeneric |= 1u;
+        emitVertex(ctx, a0[0], a0[1], a0[2], a0[3]);
+    } else if (vi >= 0) {
         float p[4] = {0, 0, 0, 1}, du[4] = {}, dv[4] = {};
         eval(vi, p, two ? du : nullptr, two ? dv : nullptr);
         if (two && cs->autoNormal) {
@@ -2298,6 +2326,7 @@ static void evalEmit(Context* ctx, bool two, float u, float v) {
         emitVertex(ctx, p[0], p[1], p[2], vi == 8 ? p[3] : 1.0f);
     }
     memcpy(cs->current, saved, sizeof saved);
+    memcpy(ctx->currentAttrib, savedGeneric, sizeof savedGeneric);
 }
 
 static void defineMap(Context* ctx, GLenum target, float u1, float u2, int ustride, int uorder, float v1, float v2, int vstride,
@@ -2525,5 +2554,118 @@ bool mglCompatImmAttrib(Context* ctx, GLuint index, float x, float y, float z, f
     cs->immGeneric |= 1u << index;
     if (index != 0) return false;
     emitVertex(ctx, x, y, z, w);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL_APPLE_vertex_program_evaluators: evaluator maps for generic vertex attributes, evaluated by
+// glEvalCoord / glEvalMesh with the classic maps (attribute 0 produces the vertex).
+// ---------------------------------------------------------------------------
+static void defineAttribMap(Context* ctx, GLuint index, int size, float u1, float u2, int ustride, int uorder, float v1, float v2,
+                            int vstride, int vorder, const std::vector<float>& src, bool two) {
+    if (index >= kMaxVertexAttribs || size < 1 || size > 4) return ctx->setError(GL_INVALID_VALUE);
+    if (u1 == u2 || (two && v1 == v2)) return ctx->setError(GL_INVALID_VALUE);
+    if (uorder < 1 || uorder > kMaxEvalOrder || (two && (vorder < 1 || vorder > kMaxEvalOrder))) return ctx->setError(GL_INVALID_VALUE);
+    if (ustride < size || (two && vstride < size)) return ctx->setError(GL_INVALID_VALUE);
+    CompatState* cs = compat(ctx);
+    EvalMap& m = two ? cs->attribMap2[index] : cs->attribMap1[index];
+    (two ? cs->attribMap2Size : cs->attribMap1Size)[index] = size;
+    m.u1 = u1;
+    m.u2 = u2;
+    m.v1 = v1;
+    m.v2 = v2;
+    m.uorder = uorder;
+    m.vorder = two ? vorder : 1;
+    m.pts.resize((size_t)m.uorder * m.vorder * size);
+    for (int a = 0; a < m.uorder; a++)
+        for (int b = 0; b < m.vorder; b++)
+            for (int k = 0; k < size; k++) m.pts[((size_t)a * m.vorder + b) * size + k] = src[(size_t)a * ustride + (size_t)b * vstride + k];
+}
+
+#define MAPATTRIB1_IMPL(Name, T)                                                                                  \
+    API void APIENTRY Name(GLuint index, GLuint size, T u1, T u2, GLint stride, GLint order, const T* points) {   \
+        MGL_CTX();                                                                                                \
+        std::vector<float> pts = mapPoints(points, stride, order, 0, 1, (int)std::min(size, 4u));                 \
+        float a = (float)u1, b = (float)u2;                                                                       \
+        RECORD(defineAttribMap(ctx, index, (int)size, a, b, stride, order, 0, 1, 0, 1, pts, false));              \
+        defineAttribMap(ctx, index, (int)size, a, b, stride, order, 0, 1, 0, 1, pts, false);                      \
+    }
+MAPATTRIB1_IMPL(glMapVertexAttrib1fAPPLE, GLfloat)
+MAPATTRIB1_IMPL(glMapVertexAttrib1dAPPLE, GLdouble)
+
+#define MAPATTRIB2_IMPL(Name, T)                                                                                        \
+    API void APIENTRY Name(GLuint index, GLuint size, T u1, T u2, GLint ustride, GLint uorder, T v1, T v2, GLint vstride, \
+                           GLint vorder, const T* points) {                                                             \
+        MGL_CTX();                                                                                                      \
+        std::vector<float> pts = mapPoints(points, ustride, uorder, vstride, vorder, (int)std::min(size, 4u));          \
+        float a = (float)u1, b = (float)u2, c = (float)v1, d = (float)v2;                                               \
+        RECORD(defineAttribMap(ctx, index, (int)size, a, b, ustride, uorder, c, d, vstride, vorder, pts, true));        \
+        defineAttribMap(ctx, index, (int)size, a, b, ustride, uorder, c, d, vstride, vorder, pts, true);                \
+    }
+MAPATTRIB2_IMPL(glMapVertexAttrib2fAPPLE, GLfloat)
+MAPATTRIB2_IMPL(glMapVertexAttrib2dAPPLE, GLdouble)
+
+static bool* attribMapEnable(Context* ctx, GLuint index, GLenum pname) {
+    if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE), nullptr;
+    CompatState* cs = compat(ctx);
+    if (pname == GL_VERTEX_ATTRIB_MAP1_APPLE) return &cs->attribMap1On[index];
+    if (pname == GL_VERTEX_ATTRIB_MAP2_APPLE) return &cs->attribMap2On[index];
+    ctx->setError(GL_INVALID_ENUM);
+    return nullptr;
+}
+API void APIENTRY glEnableVertexAttribAPPLE(GLuint index, GLenum pname) {
+    MGL_CTX();
+    if (bool* b = attribMapEnable(ctx, index, pname)) *b = true;
+}
+API void APIENTRY glDisableVertexAttribAPPLE(GLuint index, GLenum pname) {
+    MGL_CTX();
+    if (bool* b = attribMapEnable(ctx, index, pname)) *b = false;
+}
+API GLboolean APIENTRY glIsVertexAttribEnabledAPPLE(GLuint index, GLenum pname) {
+    MGL_CTX_RET(GL_FALSE);
+    bool* b = attribMapEnable(ctx, index, pname);
+    return b && *b;
+}
+
+// glGetVertexAttrib*(index, VERTEX_ATTRIB_MAP{1,2}_{SIZE,COEFF,ORDER,DOMAIN}_APPLE); false for other pnames.
+bool mglCompatGetAttribMap(Context* ctx, GLuint index, GLenum pname, double* out, int* n) {
+    bool two;
+    switch (pname) {
+    case GL_VERTEX_ATTRIB_MAP1_SIZE_APPLE: case GL_VERTEX_ATTRIB_MAP1_COEFF_APPLE: case GL_VERTEX_ATTRIB_MAP1_ORDER_APPLE:
+    case GL_VERTEX_ATTRIB_MAP1_DOMAIN_APPLE:
+        two = false;
+        break;
+    case GL_VERTEX_ATTRIB_MAP2_SIZE_APPLE: case GL_VERTEX_ATTRIB_MAP2_COEFF_APPLE: case GL_VERTEX_ATTRIB_MAP2_ORDER_APPLE:
+    case GL_VERTEX_ATTRIB_MAP2_DOMAIN_APPLE:
+        two = true;
+        break;
+    default: return false;
+    }
+    *n = 0;
+    if (index >= kMaxVertexAttribs) {
+        ctx->setError(GL_INVALID_VALUE);
+        return true;
+    }
+    CompatState* cs = compat(ctx);
+    const EvalMap& m = two ? cs->attribMap2[index] : cs->attribMap1[index];
+    int size = two ? cs->attribMap2Size[index] : cs->attribMap1Size[index];
+    switch (pname) {
+    case GL_VERTEX_ATTRIB_MAP1_SIZE_APPLE: case GL_VERTEX_ATTRIB_MAP2_SIZE_APPLE: out[(*n)++] = size; break;
+    case GL_VERTEX_ATTRIB_MAP1_COEFF_APPLE: case GL_VERTEX_ATTRIB_MAP2_COEFF_APPLE:
+        if (size)
+            for (float f : m.pts) out[(*n)++] = f;
+        break;
+    case GL_VERTEX_ATTRIB_MAP1_ORDER_APPLE: case GL_VERTEX_ATTRIB_MAP2_ORDER_APPLE:
+        out[(*n)++] = size ? m.uorder : 0;
+        if (two) out[(*n)++] = size ? m.vorder : 0;
+        break;
+    default:  // domain
+        out[(*n)++] = m.u1;
+        out[(*n)++] = m.u2;
+        if (two) {
+            out[(*n)++] = m.v1;
+            out[(*n)++] = m.v2;
+        }
+    }
     return true;
 }

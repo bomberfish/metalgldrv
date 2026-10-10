@@ -433,3 +433,55 @@ TEST(compat_immediate_generic_attribs) {
     glDeleteShader(f);
     CHECK_GL();
 }
+
+// GL_APPLE_vertex_program_evaluators: maps for generic attributes; attribute 0 makes the vertices.
+TEST(compat_apple_vertex_program_evaluators) {
+    auto map2 = (void (*)(GLuint, GLuint, GLfloat, GLfloat, GLint, GLint, GLfloat, GLfloat, GLint, GLint, const GLfloat*))
+        eglGetProcAddress("glMapVertexAttrib2fAPPLE");
+    auto enable = (void (*)(GLuint, GLenum))eglGetProcAddress("glEnableVertexAttribAPPLE");
+    auto disable = (void (*)(GLuint, GLenum))eglGetProcAddress("glDisableVertexAttribAPPLE");
+    auto isEnabled = (GLboolean(*)(GLuint, GLenum))eglGetProcAddress("glIsVertexAttribEnabledAPPLE");
+    const GLenum MAP2 = 0x8A01, MAP2_ORDER = 0x8A08, MAP2_SIZE = 0x8A06;
+    const char* vs = "#version 120\nattribute vec4 pos;\nattribute vec4 col;\nvarying vec4 c;\n"
+                     "void main() { gl_Position = pos; c = col; }";
+    const char* fs = "#version 120\nvarying vec4 c;\nvoid main() { gl_FragColor = c; }";
+    GLuint v = glCreateShader(GL_VERTEX_SHADER), f = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(v, 1, &vs, nullptr);
+    glShaderSource(f, 1, &fs, nullptr);
+    glCompileShader(v);
+    glCompileShader(f);
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glBindAttribLocation(p, 0, "pos");
+    glBindAttribLocation(p, 3, "col");
+    glLinkProgram(p);
+    glUseProgram(p);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    float pos[2][2][2] = {{{-1, -1}, {-1, 1}}, {{1, -1}, {1, 1}}};                                // [u][v] xy
+    float col[2][2][4] = {{{1, 0, 0, 1}, {1, 0, 0, 1}}, {{0, 1, 0, 1}, {0, 1, 0, 1}}};            // red at u=0, green at u=1
+    map2(0, 2, 0, 1, 4, 2, 0, 1, 2, 2, &pos[0][0][0]);
+    map2(3, 4, 0, 1, 8, 2, 0, 1, 4, 2, &col[0][0][0]);
+    enable(0, MAP2);
+    enable(3, MAP2);
+    CHECK(isEnabled(3, MAP2));
+    GLint order[2] = {}, size = 0;
+    glGetVertexAttribiv(3, MAP2_ORDER, order);
+    glGetVertexAttribiv(3, MAP2_SIZE, &size);
+    CHECK(order[0] == 2 && order[1] == 2 && size == 4);
+    glMapGrid2f(8, 0, 1, 8, 0, 1);
+    glEvalMesh2(GL_FILL, 0, 8, 0, 8);
+    uint8_t px[4];
+    readPixel(2, 32, px);
+    CHECK(px[0] > 230 && px[1] < 25);
+    readPixel(61, 32, px);
+    CHECK(px[1] > 230 && px[0] < 25);
+    disable(0, MAP2);
+    disable(3, MAP2);
+    glUseProgram(0);
+    glDeleteProgram(p);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    CHECK_GL();
+}
