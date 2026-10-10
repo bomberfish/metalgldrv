@@ -213,7 +213,10 @@ public:
     // GL_APPLE_fence names: the serial SetFenceAPPLE recorded, 0 while generated but not set.
     std::unordered_map<GLuint, uint64_t> appleFences;
     std::unordered_map<GLuint, uint64_t> nvFences;  // GL_NV_fence, likewise
-    int extMarkerDepth = 0;  // GL_EXT_debug_marker groups pushed (popping more is ignored)
+    int extMarkerDepth = 0;
+    // GL_HP_occlusion_test: an ANY_SAMPLES_PASSED_CONSERVATIVE query runs while it is enabled (api_query.mm)
+    bool hpOcclusionTest = false, hpOcclusionResult = false;
+    GLuint hpOcclusionQuery = 0;  // GL_EXT_debug_marker groups pushed (popping more is ignored)
     // Framebuffer names: this context's own, or the share group's when the app profile shares them
     // (AppProfile::shareFramebuffers).
     NameSpace<Framebuffer> ownFramebuffers;

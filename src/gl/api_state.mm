@@ -60,6 +60,11 @@ static bool setCap(Context* ctx, GLenum cap, bool v, int index = -1) {
     switch (cap) {
     case GL_DEPTH_TEST: ctx->depthTest = v; return true;
     case GL_STENCIL_TEST: ctx->stencilTest = v; return true;
+    case 0x8165: {  // GL_OCCLUSION_TEST_HP
+        void mglHPOcclusionTest(Context*, bool);
+        mglHPOcclusionTest(ctx, v);
+        return true;
+    }
     case GL_STENCIL_TEST_TWO_SIDE_EXT:
         if (v != ctx->stencilTwoSideEXT) {
             if (v) {
@@ -153,6 +158,7 @@ bool mglIsEnabled(Context* ctx, GLenum cap, int index, bool* out) {
     case GL_DEPTH_TEST: *out = ctx->depthTest; return true;
     case GL_STENCIL_TEST: *out = ctx->stencilTest; return true;
     case GL_STENCIL_TEST_TWO_SIDE_EXT: *out = ctx->stencilTwoSideEXT; return true;
+    case 0x8165: *out = ctx->hpOcclusionTest; return true;  // GL_OCCLUSION_TEST_HP
     case GL_CULL_FACE: *out = ctx->cullFace; return true;
     case GL_POLYGON_OFFSET_FILL: *out = ctx->polygonOffsetFill; return true;
     case GL_POLYGON_OFFSET_LINE: *out = ctx->polygonOffsetLine; return true;

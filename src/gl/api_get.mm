@@ -61,7 +61,7 @@ const char* kExtensions[] = {
     "GL_EXT_texture_edge_clamp", "GL_EXT_texture_env_add", "GL_EXT_texture_filter_anisotropic", "GL_EXT_texture_integer", "GL_EXT_texture_lod_bias",
     "GL_EXT_texture_mirror_clamp", "GL_EXT_texture_object", "GL_EXT_texture_rectangle", "GL_EXT_texture_sRGB", "GL_EXT_texture_sRGB_decode",
     "GL_EXT_texture_shadow_lod", "GL_EXT_texture_shared_exponent", "GL_EXT_texture_snorm", "GL_EXT_texture_swizzle", "GL_EXT_timer_query",
-    "GL_EXT_transform_feedback", "GL_EXT_vertex_array", "GL_EXT_vertex_array_bgra", "GL_IBM_texture_mirrored_repeat", "GL_KHR_context_flush_control",
+    "GL_EXT_transform_feedback", "GL_EXT_vertex_array", "GL_EXT_vertex_array_bgra", "GL_HP_occlusion_test", "GL_IBM_texture_mirrored_repeat", "GL_KHR_context_flush_control",
     "GL_KHR_debug", "GL_KHR_no_error", "GL_KHR_parallel_shader_compile", "GL_KHR_robust_buffer_access_behavior",
     "GL_KHR_robustness", "GL_KHR_shader_subgroup", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
     "GL_NV_depth_clamp", "GL_NV_fence", "GL_NV_occlusion_query", "GL_NV_packed_depth_stencil", "GL_NV_primitive_restart", "GL_NV_texgen_reflection", "GL_NV_texture_rectangle", "GL_NV_shader_subgroup_partitioned", "GL_NV_texture_barrier", "GL_SGIS_generate_mipmap", "GL_SGIS_texture_edge_clamp", "GL_SGIS_texture_border_clamp", "GL_SGIS_texture_lod",
@@ -480,6 +480,11 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
         return true;
     }
     case GL_ACTIVE_STENCIL_FACE_EXT: v = E(ctx->activeStencilFaceEXT); return true;
+    case 0x8166: {  // GL_OCCLUSION_TEST_RESULT_HP
+        bool mglHPOcclusionResult(Context*);
+        v = B(mglHPOcclusionResult(ctx));
+        return true;
+    }
     case GL_POLYGON_OFFSET_BIAS_EXT: v = F(ctx->polygonOffsetUnits / 16777216.0); return true;  // EXT_polygon_offset
     case GL_PIXEL_COUNTER_BITS_NV: v = I(64); return true;  // GL_NV_occlusion_query
     case GL_CURRENT_OCCLUSION_QUERY_ID_NV: {

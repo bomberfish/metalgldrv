@@ -890,3 +890,30 @@ TEST(ext_debug_marker) {
     pop();  // ignored
     CHECK_GL();
 }
+
+// GL_HP_occlusion_test
+TEST(hp_occlusion_test) {
+    CHECK(hasExtension("GL_HP_occlusion_test"));
+    const char* vs = "#version 450 core\nin vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0, 1); }";
+    const char* fs = "#version 450 core\nout vec4 c;\nvoid main() { c = vec4(1); }";
+    GLuint prog = compileProgram(vs, fs);
+    glUseProgram(prog);
+    glEnable(0x8165);
+    drawQuad(prog);
+    glDisable(0x8165);
+    GLboolean r = GL_FALSE;
+    glGetBooleanv(0x8166, &r);
+    CHECK(r);
+    glGetBooleanv(0x8166, &r);  // reset by the read
+    CHECK(!r);
+    glEnable(0x8165);
+    glEnable(GL_RASTERIZER_DISCARD);
+    drawQuad(prog);
+    glDisable(GL_RASTERIZER_DISCARD);
+    glGetBooleanv(0x8166, &r);
+    CHECK(!r);
+    glDisable(0x8165);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    CHECK_GL();
+}

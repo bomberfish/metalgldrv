@@ -593,3 +593,37 @@ API void APIENTRY glGetOcclusionQueryivNV(GLuint id, GLenum pname, GLint* params
     glGetOcclusionQueryuivNV(id, pname, &v);
     *params = (GLint)std::min<GLuint>(v, INT32_MAX);
 }
+
+// --- GL_HP_occlusion_test (not in the Khronos registry): whether any fragment passed while it was enabled ---
+constexpr GLenum kOcclusionTestHP = 0x8165, kOcclusionTestResultHP = 0x8166;
+
+void mglHPOcclusionTest(Context* ctx, bool on) {
+    if (on == ctx->hpOcclusionTest) return;
+    ctx->hpOcclusionTest = on;
+    if (!ctx->hpOcclusionQuery) glGenQueries(1, &ctx->hpOcclusionQuery);
+    if (on) {
+        ctx->hpOcclusionResult = false;
+        glBeginQuery(GL_ANY_SAMPLES_PASSED_CONSERVATIVE, ctx->hpOcclusionQuery);
+    } else {
+        glEndQuery(GL_ANY_SAMPLES_PASSED_CONSERVATIVE);
+    }
+}
+
+// Reading the result resets it (and restarts the test while enabled).
+bool mglHPOcclusionResult(Context* ctx) {
+    GLuint any = 0;
+    if (ctx->hpOcclusionTest) {
+        glEndQuery(GL_ANY_SAMPLES_PASSED_CONSERVATIVE);
+        glGetQueryObjectuiv(ctx->hpOcclusionQuery, GL_QUERY_RESULT, &any);
+        glBeginQuery(GL_ANY_SAMPLES_PASSED_CONSERVATIVE, ctx->hpOcclusionQuery);
+    } else if (ctx->hpOcclusionQuery) {
+        glGetQueryObjectuiv(ctx->hpOcclusionQuery, GL_QUERY_RESULT, &any);
+    }
+    bool r = ctx->hpOcclusionResult || any;
+    ctx->hpOcclusionResult = false;
+    if (!ctx->hpOcclusionTest && ctx->hpOcclusionQuery) {
+        glDeleteQueries(1, &ctx->hpOcclusionQuery);  // a fresh one next time, so the old result is gone
+        ctx->hpOcclusionQuery = 0;
+    }
+    return r;
+}
