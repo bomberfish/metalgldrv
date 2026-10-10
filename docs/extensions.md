@@ -37,10 +37,18 @@ All of Apple's OpenGL extensions, including two older ones its current driver no
 NVIDIA: `fence`, `fog_distance`, `half_float`, `light_max_exponent`, `occlusion_query`,
 `packed_depth_stencil`, `primitive_restart`, `texgen_reflection`, `texture_env_combine4`,
 `texture_rectangle` (plus `blend_square`, `conditional_render`, `depth_clamp`, `texture_barrier`).
+
 ATI: `draw_buffers`, `separate_stencil`, `texture_compression_3dc`, `texture_env_combine3`,
-`texture_float`, `texture_mirror_once`, `meminfo`. HP: `occlusion_test`. IBM: `rasterpos_clip`.
+`texture_float`, `texture_mirror_once`, `meminfo`. 
+
+HP: `occlusion_test`. 
+
+IBM: `rasterpos_clip`.
+
 SGI: `SGIS_generate_mipmap`, `SGIS_texture_edge_clamp`, `SGIS_texture_border_clamp`, `SGIS_texture_lod`,
-`SGIX_depth_texture`, `SGIX_shadow`. Multi-vendor EXT ones of the same era: `compiled_vertex_array`,
+`SGIX_depth_texture`, `SGIX_shadow`. 
+
+Multi-vendor EXT ones of the same era: `compiled_vertex_array`,
 `debug_label`, `debug_marker`, `fog_coord`, `framebuffer_multisample_blit_scaled`, `geometry_shader4`,
 `point_parameters`, `polygon_offset`, `secondary_color`, `texture_compression_latc`,
 `texture_cube_map`, `texture_env_add`, `texture_env_combine`, `texture_env_dot3`, `texture_object`,
