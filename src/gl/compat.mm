@@ -252,6 +252,8 @@ struct mgl::CompatState {
 
     // generated fixed-function programs
     std::unordered_map<std::string, Ref<ProgramObj>> ffPrograms;
+    // ARB_vertex_program / ARB_fragment_program pairs (with fixed-function stages where only one is enabled)
+    std::unordered_map<std::string, Ref<ProgramObj>> arbPrograms;
     // cached uniform indices per program: name -> index
     std::unordered_map<ProgramObj*, std::pair<uint32_t, std::unordered_map<std::string, int>>> uniformIdx;
 
@@ -348,6 +350,8 @@ bool mglCompatCap(Context* ctx, GLenum cap, bool v) {
     case GL_POINT_SPRITE: cs->pointSprite = v; return true;
     case GL_COLOR_SUM: cs->colorSum = v; return true;
     case GL_VERTEX_POINT_SIZE_APPLE: cs->vertexPointSize = v; return true;
+    case GL_VERTEX_PROGRAM_ARB: ctx->arbVertexProgram = v; return true;
+    case GL_FRAGMENT_PROGRAM_ARB: ctx->arbFragmentProgram = v; return true;
     case GL_RASTER_POSITION_UNCLIPPED_IBM: cs->rasterUnclippedIBM = v; return true;
     case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
         cs->texGen[std::min<int>(ctx->activeTexture, 7)].enabled[cap - GL_TEXTURE_GEN_S] = v;
@@ -396,6 +400,8 @@ bool mglCompatIsEnabled(Context* ctx, GLenum cap, bool* out) {
     case GL_ELEMENT_ARRAY_APPLE: *out = cs->elementArrayEnabled; return true;
     case GL_VERTEX_ARRAY_RANGE_APPLE: *out = cs->varEnabled; return true;
     case GL_VERTEX_POINT_SIZE_APPLE: *out = cs->vertexPointSize; return true;
+    case GL_VERTEX_PROGRAM_ARB: *out = ctx->arbVertexProgram; return true;
+    case GL_FRAGMENT_PROGRAM_ARB: *out = ctx->arbFragmentProgram; return true;
     case GL_RASTER_POSITION_UNCLIPPED_IBM: *out = cs->rasterUnclippedIBM; return true;
     case GL_POINT_SIZE_ARRAY_APPLE: *out = cs->arrays[CA_POINTSIZE].enabled; return true;
     case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
@@ -1724,8 +1730,12 @@ static std::string combineExpr(GLenum fn, const std::string& a0, const std::stri
     }
 }
 
-static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool* units) {
-    std::string vs = "#version 120\n", fs = "#version 120\n";
+// The fixed-function vertex and fragment shaders for the current state (GLSL 1.20 compatibility).
+// allTexcoords: the vertex shader passes every unit's texture coordinates (for an ARB fragment program, which
+// reads fragment.texcoord[n] whether or not fixed-function texturing is enabled on unit n).
+static void ffSources(Context* ctx, CompatState* cs, std::string& vs, std::string& fs, bool allTexcoords = false) {
+    vs = "#version 120\n";
+    fs = "#version 120\n";
     int targets[8] = {};
     for (int u = 0; u < 8; u++) {
         uint32_t e = cs->texEnabled[u];
@@ -1802,7 +1812,7 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
         vs += "  gl_FrontColor = gl_Color;\n  gl_BackColor = gl_Color;\n  gl_FrontSecondaryColor = gl_SecondaryColor;\n";
     }
     for (int u = 0; u < 8; u++) {
-        if (!targets[u]) continue;
+        if (!targets[u] && !allTexcoords) continue;
         std::string us = std::to_string(u);
         const TexGen& g = cs->texGen[u];
         vs += "  { vec4 tc = gl_MultiTexCoord" + us + ";\n";
@@ -1914,7 +1924,10 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
         fs += "  c.rgb = mix(gl_Fog.color.rgb, c.rgb, clamp(f, 0.0, 1.0));\n";
     }
     fs += "  gl_FragColor = c;\n}\n";
+}
 
+// Compiles and links a vertex / fragment pair of compatibility GLSL; sampler uniforms named texN use unit N.
+static Ref<ProgramObj> linkCompatProgram(const std::string& vs, const std::string& fs, const std::map<std::string, int>& attribBindings = {}) {
     glsl::CompileOptions opts;
     opts.compatibilityProfile = true;
     glsl::CompileResult v = glsl::compile(glsl::Stage::Vertex, {vs}, opts);
@@ -1926,6 +1939,7 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
     }
     glsl::LinkInput li;
     li.shaders = {v.shader, f.shader};
+    li.attribBindings = attribBindings;
     glsl::LinkResult lr = glsl::link(li);
     if (!lr.program) {
         MGL_ERR("fixed-function program failed to link:\n%s", lr.infoLog.c_str());
@@ -1942,9 +1956,15 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
         if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Sampler && sl.kind != glsl::SlotKind::LodBias &&
             sl.kind != glsl::SlotKind::SamplerBorder) continue;
         const std::string& n = p->refl.uniforms[sl.index].name;
-        if (n.size() == 4 && n.compare(0, 3, "tex") == 0) p->samplerUnits[s] = n[3] - '0';
+        if (n.size() >= 4 && n.size() <= 5 && n.compare(0, 3, "tex") == 0 && isdigit((unsigned char)n[3])) p->samplerUnits[s] = atoi(n.c_str() + 3);
     }
     return p;
+}
+
+static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool* units) {
+    std::string vs, fs;
+    ffSources(ctx, cs, vs, fs);
+    return linkCompatProgram(vs, fs);
 }
 
 // ---------------------------------------------------------------------------
@@ -1957,7 +1977,7 @@ static int findUniform(CompatState* cs, ProgramObj* p, const std::string& name) 
         entry.second.clear();
         for (size_t i = 0; i < p->refl.uniforms.size(); i++) {
             const auto& u = p->refl.uniforms[i];
-            if (u.blockIndex >= 0 || u.name.compare(0, 3, "gl_") != 0) continue;
+            if (u.blockIndex >= 0 || (u.name.compare(0, 3, "gl_") != 0 && u.name.compare(0, 4, "mgl_") != 0)) continue;
             entry.second[u.name] = (int)i;
             // "gl_TextureMatrix[0]" also reachable as "gl_TextureMatrix"
             if (u.name.size() > 3 && u.name.compare(u.name.size() - 3, 3, "[0]") == 0) entry.second[u.name.substr(0, u.name.size() - 3)] = (int)i;
@@ -2164,9 +2184,77 @@ static void bindCompatAttribs(Context* ctx, CompatState* cs, ProgramObj* p) {
     }
 }
 
+ArbProgram* mglArbProgram(Context* ctx, bool vertex);  // api_arb_program.mm
+
+// Copies `count` vec4s into uniform array `name` of p (when the program has it).
+static void writeArray(CompatState* cs, ProgramObj* p, const char* name, const float (*v)[4], int count) {
+    int idx = findUniform(cs, p, name);
+    if (idx < 0 || count <= 0) return;
+    const glsl::Uniform& u = p->refl.uniforms[idx];
+    if (u.offset < 0) return;
+    size_t stride = u.arrayStride ? (size_t)u.arrayStride : 16;
+    for (int i = 0; i < count; i++) {
+        size_t off = (size_t)u.offset + i * stride;
+        if (off + 16 > p->uniformData.size()) break;
+        memcpy(&p->uniformData[off], v[i], 16);
+    }
+}
+
+// The program for enabled ARB vertex / fragment programs (a fixed-function shader for a stage without one), or
+// nullptr with an error when an enabled program isn't valid.
+static ProgramObj* arbDrawProgram(Context* ctx, CompatState* cs, ArbProgram* avp, ArbProgram* afp) {
+    if ((avp && !avp->tr.ok) || (afp && !afp->tr.ok)) {
+        ctx->setError(GL_INVALID_OPERATION, "the enabled ARB program is not valid");
+        return nullptr;
+    }
+    std::string key = "v" + std::to_string(avp ? avp->version : 0) + "f" + std::to_string(afp ? afp->version : 0);
+    bool units[8] = {};
+    if (!avp || !afp) key += (afp ? "T" : "") + ffKey(ctx, cs, units);
+    auto it = cs->arbPrograms.find(key);
+    if (it == cs->arbPrograms.end()) {
+        std::string vs, fs;
+        if (!avp || !afp) ffSources(ctx, cs, vs, fs, afp != nullptr);
+        std::map<std::string, int> attribs;
+        if (avp) {
+            vs = avp->tr.glsl;
+            for (int n = 1; n < kArbMaxAttribs; n++)
+                if (avp->tr.genericAttribs & (1u << n)) attribs["mgl_attrib" + std::to_string(n)] = n;
+        }
+        if (afp) fs = afp->tr.glsl;
+        it = cs->arbPrograms.emplace(key, linkCompatProgram(vs, fs, attribs)).first;
+    }
+    ProgramObj* p = it->second.get();
+    if (!p) {
+        ctx->setError(GL_INVALID_OPERATION, "the ARB program couldn't be compiled for this GPU");
+        return nullptr;
+    }
+    feedUniforms(ctx, cs, p);
+    if (avp) {
+        writeArray(cs, p, "mgl_vpEnv", ctx->arbVPEnv, avp->tr.envUsed);
+        writeArray(cs, p, "mgl_vpLocal", avp->local, avp->tr.localUsed);
+    }
+    if (afp) {
+        writeArray(cs, p, "mgl_fpEnv", ctx->arbFPEnv, afp->tr.envUsed);
+        writeArray(cs, p, "mgl_fpLocal", afp->local, afp->tr.localUsed);
+    }
+    p->uniformVersion++;
+    return p;
+}
+
 ProgramObj* mglCompatPrepareDraw(Context* ctx, ProgramObj* prog) {
     CompatState* cs = compat(ctx);
     const bool userProg = prog != nullptr;
+    ArbProgram* avp = !prog ? mglArbProgram(ctx, true) : nullptr;
+    ArbProgram* afp = !prog ? mglArbProgram(ctx, false) : nullptr;
+    if (avp || afp) {
+        prog = arbDrawProgram(ctx, cs, avp, afp);
+        if (!prog) return nullptr;
+        ctx->compatVertexPointSize = false;
+        bindCompatAttribs(ctx, cs, prog);
+        ctx->compatAlphaFunc = cs->alphaTest ? cs->alphaFunc : GL_ALWAYS;
+        ctx->compatAlphaRef = cs->alphaRef;
+        return prog;
+    }
     if (!prog) {
         bool units[8] = {};
         std::string key = ffKey(ctx, cs, units);

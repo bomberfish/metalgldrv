@@ -11,6 +11,7 @@
 #include <vector>
 #include "glapi.h"
 #include "glsl/glsl.h"
+#include "gl/arb_program.h"
 #include "mtl/device.h"
 #include "mtl/formats.h"
 
@@ -489,6 +490,17 @@ private:
     GLuint next_ = 1;
 };
 
+// GL_ARB_vertex_program / GL_ARB_fragment_program program objects (api_arb_program.mm): the source, its GLSL
+// translation (arb_program.h) and the local parameters.
+class ArbProgram : public Object {
+public:
+    GLenum target = 0;  // set by the first bind
+    std::string source;
+    ArbTranslation tr;  // tr.ok: a valid program has been loaded
+    float local[kArbMaxLocalParams][4] = {};
+    uint64_t version = 0;  // bumped by glProgramStringARB (the linked programs are cached by it)
+};
+
 // Objects shared between contexts.
 class ShareGroup : public RefCounted {
 public:
@@ -507,6 +519,7 @@ public:
     bool shareContainers = false;
     NameSpace<VertexArray> vaos;
     NameSpace<ProgramPipelineObj> pipelines;
+    NameSpace<ArbProgram> arbPrograms;  // ARB_vertex_program / ARB_fragment_program
     // Display lists (compat) live here too in the future.
     ShaderObj* shader(GLuint n) { return dynamic_cast<ShaderObj*>(shaderPrograms.get(n)); }
     ProgramObj* program(GLuint n) { return dynamic_cast<ProgramObj*>(shaderPrograms.get(n)); }

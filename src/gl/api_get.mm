@@ -316,6 +316,10 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS: v = I(kMaxTextureUnits); return true;
     case GL_MAX_TEXTURE_UNITS: v = I(8); return true;  // compat fixed-function
     case GL_MAX_TEXTURE_COORDS: v = I(8); return true;
+    // ARB_vertex_program / ARB_fragment_program
+    case GL_PROGRAM_ERROR_POSITION_ARB: v = I(ctx->arbErrorPos); return true;
+    case GL_MAX_PROGRAM_MATRICES_ARB: v = I(8); return true;
+    case GL_MAX_PROGRAM_MATRIX_STACK_DEPTH_ARB: v = I(1); return true;
     case GL_MAX_IMAGE_UNITS: v = I(kMaxImageUnits); return true;
     case GL_MAX_VERTEX_IMAGE_UNIFORMS: case GL_MAX_FRAGMENT_IMAGE_UNIFORMS: case GL_MAX_COMPUTE_IMAGE_UNIFORMS:
     case GL_MAX_GEOMETRY_IMAGE_UNIFORMS: case GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS: case GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS:
@@ -805,6 +809,7 @@ API const GLubyte* APIENTRY glGetString(GLenum name) {
         if (!app.version.empty()) return (const GLubyte*)app.version.c_str();
         return (const GLubyte*)(ctx->coreProfile ? "4.6.0 Core Profile metalgldrv " MGL_VERSION_STRING
                                                  : "4.6.0 Compatibility Profile metalgldrv " MGL_VERSION_STRING);
+    case GL_PROGRAM_ERROR_STRING_ARB: return (const GLubyte*)ctx->arbErrorString.c_str();  // ARB programs' last load error
     case GL_SHADING_LANGUAGE_VERSION: return (const GLubyte*)(app.glslVersion.empty() ? "4.60 metalgldrv" : app.glslVersion.c_str());
     case GL_EXTENSIONS:
         // Removed from core profiles (use glGetStringi). Clients whose GLFW shim still calls this,

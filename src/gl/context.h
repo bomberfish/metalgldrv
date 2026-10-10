@@ -214,6 +214,13 @@ public:
     std::unordered_map<GLuint, uint64_t> appleFences;
     std::unordered_map<GLuint, uint64_t> nvFences;  // GL_NV_fence, likewise
     int extMarkerDepth = 0;
+    // GL_ARB_vertex_program / GL_ARB_fragment_program: enables, bound programs (program 0 is this context's own
+    // default object), environment parameters, the last load's error
+    bool arbVertexProgram = false, arbFragmentProgram = false;
+    Ref<ArbProgram> arbVP, arbFP, arbDefaultVP, arbDefaultFP;
+    float arbVPEnv[kArbMaxEnvParams][4] = {}, arbFPEnv[kArbMaxEnvParams][4] = {};
+    std::string arbErrorString;
+    GLint arbErrorPos = -1;
     // GL_HP_occlusion_test: an ANY_SAMPLES_PASSED_CONSERVATIVE query runs while it is enabled (api_query.mm)
     bool hpOcclusionTest = false, hpOcclusionResult = false;
     GLuint hpOcclusionQuery = 0;  // GL_EXT_debug_marker groups pushed (popping more is ignored)
