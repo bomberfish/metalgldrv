@@ -596,3 +596,25 @@ TEST(compat_ext_stencil_two_side) {
     CHECK(!glIsEnabled(TWO_SIDE));
     CHECK_GL();
 }
+
+// ARB_vertex_type_2_10_10_10_rev immediate mode: packed positions (unnormalized) and colors (normalized).
+TEST(compat_packed_immediate) {
+    auto vertexP2 = (void (*)(GLenum, GLuint))eglGetProcAddress("glVertexP2ui");
+    auto colorP4 = (void (*)(GLenum, GLuint))eglGetProcAddress("glColorP4ui");
+    auto pack = [](int x, int y) { return (GLuint)((x & 1023) | (y & 1023) << 10); };  // signed 10-bit x, y
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBegin(GL_QUADS);
+    colorP4(GL_UNSIGNED_INT_2_10_10_10_REV, 0u | 1023u << 10 | 0u << 20 | 3u << 30);  // green, alpha 1
+    vertexP2(GL_INT_2_10_10_10_REV, pack(-1, -1));
+    vertexP2(GL_INT_2_10_10_10_REV, pack(1, -1));
+    vertexP2(GL_INT_2_10_10_10_REV, pack(1, 1));
+    vertexP2(GL_INT_2_10_10_10_REV, pack(-1, 1));
+    glEnd();
+    CHECK_PIXEL(32, 32, 0, 255, 0, 255);
+    CHECK_GL();
+}

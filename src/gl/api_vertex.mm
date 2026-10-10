@@ -620,8 +620,9 @@ VA_I(4usv, GLuint, GL_UNSIGNED_INT, (GLuint i, const GLushort* p), p[0], p[1], p
 // Packed attribute setters (GL 3.3)
 static float unpackSnorm10(int v) { return std::max(-1.f, v / 511.f); }
 // glVertexAttribP{1,2,3,4}ui: the first n unpacked components, the rest (0, 0, 1).
-static void setAttribP(Context* ctx, GLuint index, int n, GLenum type, GLboolean normalized, GLuint value) {
-    float c[4];
+// Decodes a packed attribute value (also for the compatibility glVertexP* family, compat.mm); false for a
+// type that isn't packed. Missing components get 0, 0, 0, 1.
+bool mglDecodePacked(GLenum type, int n, bool normalized, GLuint value, float* c) {
     if (type == GL_UNSIGNED_INT_2_10_10_10_REV) {
         uint32_t r = value & 1023, g = (value >> 10) & 1023, b = (value >> 20) & 1023, a = value >> 30;
         if (normalized) {
@@ -650,10 +651,17 @@ static void setAttribP(Context* ctx, GLuint index, int n, GLenum type, GLboolean
         c[2] = uf(value >> 22, 5);
         c[3] = 1;
     } else {
-        return ctx->setError(GL_INVALID_ENUM, "glVertexAttribP%dui(type 0x%x)", n, type);
+        return false;
     }
     static const float kDefault[4] = {0, 0, 0, 1};
     for (int k = n; k < 4; k++) c[k] = kDefault[k];
+    return true;
+}
+
+static void setAttribP(Context* ctx, GLuint index, int n, GLenum type, GLboolean normalized, GLuint value) {
+    float c[4];
+    if (!mglDecodePacked(type, n, normalized, value, c))
+        return ctx->setError(GL_INVALID_ENUM, "glVertexAttribP%dui(type 0x%x)", n, type);
     setAttrib(ctx, index, c[0], c[1], c[2], c[3]);
 }
 API void APIENTRY glVertexAttribP1ui(GLuint i, GLenum type, GLboolean norm, GLuint v) { MGL_CTX(); setAttribP(ctx, i, 1, type, norm, v); }

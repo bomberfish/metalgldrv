@@ -2669,3 +2669,52 @@ bool mglCompatGetAttribMap(Context* ctx, GLuint index, GLenum pname, double* out
     }
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// GL_ARB_vertex_type_2_10_10_10_rev: packed immediate-mode values (positions and texture coordinates
+// unnormalized, normals and colors normalized)
+// ---------------------------------------------------------------------------
+bool mglDecodePacked(GLenum type, int n, bool normalized, GLuint value, float* c);  // api_vertex.mm
+
+static bool packedType(Context* ctx, GLenum type, bool allowFloat11) {
+    if (type == GL_INT_2_10_10_10_REV || type == GL_UNSIGNED_INT_2_10_10_10_REV) return true;
+    if (allowFloat11 && type == GL_UNSIGNED_INT_10F_11F_11F_REV) return true;
+    ctx->setError(GL_INVALID_ENUM);
+    return false;
+}
+
+#define PACKED_IMPL(Suffix, N, Norm, Float11, Call)                                         \
+    API void APIENTRY gl##Suffix##ui(GLenum type, GLuint value) {                          \
+        MGL_CTX();                                                                         \
+        float c[4];                                                                        \
+        if (!packedType(ctx, type, Float11) || !mglDecodePacked(type, N, Norm, value, c))  \
+            return;                                                                        \
+        Call;                                                                              \
+    }                                                                                      \
+    API void APIENTRY gl##Suffix##uiv(GLenum type, const GLuint* value) { gl##Suffix##ui(type, *value); }
+PACKED_IMPL(VertexP2, 2, false, false, glVertex4f(c[0], c[1], c[2], c[3]))
+PACKED_IMPL(VertexP3, 3, false, false, glVertex4f(c[0], c[1], c[2], c[3]))
+PACKED_IMPL(VertexP4, 4, false, false, glVertex4f(c[0], c[1], c[2], c[3]))
+PACKED_IMPL(TexCoordP1, 1, false, false, glTexCoord4f(c[0], c[1], c[2], c[3]))
+PACKED_IMPL(TexCoordP2, 2, false, false, glTexCoord4f(c[0], c[1], c[2], c[3]))
+PACKED_IMPL(TexCoordP3, 3, false, false, glTexCoord4f(c[0], c[1], c[2], c[3]))
+PACKED_IMPL(TexCoordP4, 4, false, false, glTexCoord4f(c[0], c[1], c[2], c[3]))
+PACKED_IMPL(NormalP3, 3, true, false, glNormal3f(c[0], c[1], c[2]))
+PACKED_IMPL(ColorP3, 3, true, false, glColor4f(c[0], c[1], c[2], 1.0f))
+PACKED_IMPL(ColorP4, 4, true, false, glColor4f(c[0], c[1], c[2], c[3]))
+PACKED_IMPL(SecondaryColorP3, 3, true, false, glSecondaryColor3f(c[0], c[1], c[2]))
+
+#define MTPACKED_IMPL(N)                                                                            \
+    API void APIENTRY glMultiTexCoordP##N##ui(GLenum texture, GLenum type, GLuint value) {         \
+        MGL_CTX();                                                                                 \
+        float c[4];                                                                                \
+        if (!packedType(ctx, type, false) || !mglDecodePacked(type, N, false, value, c)) return;   \
+        glMultiTexCoord4f(texture, c[0], c[1], c[2], c[3]);                                        \
+    }                                                                                              \
+    API void APIENTRY glMultiTexCoordP##N##uiv(GLenum texture, GLenum type, const GLuint* value) { \
+        glMultiTexCoordP##N##ui(texture, type, *value);                                            \
+    }
+MTPACKED_IMPL(1)
+MTPACKED_IMPL(2)
+MTPACKED_IMPL(3)
+MTPACKED_IMPL(4)
