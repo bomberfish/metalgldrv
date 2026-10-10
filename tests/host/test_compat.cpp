@@ -675,3 +675,35 @@ TEST(compat_ati_texture_float) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_ATI_texture_mirror_once: MIRROR_CLAMP_TO_EDGE_ATI mirrors once around 0, then clamps.
+TEST(compat_ati_texture_mirror_once) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_1D, tex);
+    uint8_t px[8] = {255, 0, 0, 255, 0, 255, 0, 255};  // red, green
+    glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA8, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, 0x8743 /* GL_MIRROR_CLAMP_TO_EDGE_ATI */);
+    GLint w = 0;
+    glGetTexParameteriv(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, &w);
+    CHECK_EQ(w, 0x8743);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glEnable(GL_TEXTURE_1D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glBegin(GL_QUADS);  // s from -1.5 (left) to 0 (right)
+    glTexCoord1f(-1.5f); glVertex2f(-1, -1);
+    glTexCoord1f(0); glVertex2f(1, -1);
+    glTexCoord1f(0); glVertex2f(1, 1);
+    glTexCoord1f(-1.5f); glVertex2f(-1, 1);
+    glEnd();
+    glDisable(GL_TEXTURE_1D);
+    CHECK_PIXEL(2, 32, 0, 255, 0, 255);   // |s| > 1: clamped to the last texel
+    CHECK_PIXEL(52, 32, 255, 0, 0, 255);  // s in (-0.5, 0): mirrored into the first texel
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
