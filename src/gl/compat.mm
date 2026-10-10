@@ -166,6 +166,7 @@ struct mgl::CompatState {
     MaterialState material[2];
     float lightModelAmbient[4] = {0.2f, 0.2f, 0.2f, 1};
     bool localViewer = false, twoSide = false;
+    bool specularVector = false;  // GL_APPLE_specular_vector: Phong (reflection vector) specular
     GLenum colorControl = GL_SINGLE_COLOR;
     GLenum shadeModel = GL_SMOOTH;
     GLenum fogMode = GL_EXP, fogCoordSrc = GL_FRAGMENT_DEPTH;
@@ -394,6 +395,7 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
     case GL_LIGHT_MODEL_AMBIENT: return vec(cs->lightModelAmbient, 4);
     case GL_LIGHT_MODEL_TWO_SIDE: return one(cs->twoSide, false);
     case GL_LIGHT_MODEL_LOCAL_VIEWER: return one(cs->localViewer, false);
+    case GL_LIGHT_MODEL_SPECULAR_VECTOR_APPLE: return one(cs->specularVector, false);
     case GL_LIGHT_MODEL_COLOR_CONTROL: return one(cs->colorControl, false);
     case GL_COLOR_MATERIAL_FACE: return one(cs->colorMaterialFace, false);
     case GL_COLOR_MATERIAL_PARAMETER: return one(cs->colorMaterialMode, false);
@@ -859,6 +861,7 @@ API void APIENTRY glLightModelfv(GLenum pname, const GLfloat* params) {
     switch (pname) {
     case GL_LIGHT_MODEL_AMBIENT: memcpy(cs->lightModelAmbient, params, 16); break;
     case GL_LIGHT_MODEL_LOCAL_VIEWER: cs->localViewer = params[0] != 0; break;
+    case GL_LIGHT_MODEL_SPECULAR_VECTOR_APPLE: cs->specularVector = params[0] != 0; break;
     case GL_LIGHT_MODEL_TWO_SIDE: cs->twoSide = params[0] != 0; break;
     case GL_LIGHT_MODEL_COLOR_CONTROL: cs->colorControl = (GLenum)params[0]; break;
     default: ctx->setError(GL_INVALID_ENUM);
@@ -1441,6 +1444,7 @@ static std::string ffKey(Context* ctx, CompatState* cs, bool* usedUnits) {
         add(cs->colorMaterial ? (int)cs->colorMaterialMode : 0);
         add(cs->twoSide);
         add(cs->localViewer);
+        add(cs->specularVector);
         add(cs->colorControl == GL_SEPARATE_SPECULAR_COLOR);
     }
     add(cs->normalize * 2 + cs->rescaleNormal);
@@ -1582,8 +1586,15 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
                               ".spotCosCutoff ? 0.0 : pow(max(sd, 0.0), " + ls + ".spotExponent);\n";
                 }
                 vs += "    float nl = max(dot(" + n + ", Ld), 0.0);\n";
-                vs += "    vec3 H = normalize(Ld + " + std::string(cs->localViewer ? "normalize(-eye.xyz)" : "vec3(0.0, 0.0, 1.0)") + ");\n";
-                vs += "    float sp = nl > 0.0 ? pow(max(dot(" + n + ", H), 0.0), " + std::string(mat) + ".shininess) : 0.0;\n";
+                std::string view = cs->localViewer ? "normalize(-eye.xyz)" : "vec3(0.0, 0.0, 1.0)";
+                if (cs->specularVector) {
+                    // GL_APPLE_specular_vector: the light reflected about the normal, against the view vector
+                    vs += "    float sp = nl > 0.0 ? pow(max(dot(reflect(-Ld, " + n + "), " + view + "), 0.0), " + std::string(mat) +
+                          ".shininess) : 0.0;\n";
+                } else {
+                    vs += "    vec3 H = normalize(Ld + " + view + ");\n";
+                    vs += "    float sp = nl > 0.0 ? pow(max(dot(" + n + ", H), 0.0), " + std::string(mat) + ".shininess) : 0.0;\n";
+                }
                 vs += "    sum += att * (" + ls + ".ambient.rgb * amb.rgb + nl * " + ls + ".diffuse.rgb * dif.rgb);\n";
                 vs += "    spec += att * sp * " + ls + ".specular.rgb * spc.rgb;\n  }\n";
             }

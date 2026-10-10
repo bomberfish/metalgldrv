@@ -247,3 +247,51 @@ TEST(compat_apple_vertex_point_size) {
     glDisable(0x8A26);
     CHECK_GL();
 }
+
+// GL_APPLE_specular_vector: Phong specular (light reflected about the normal) instead of the half vector.
+// Light 45 degrees off the normal, viewer straight on: the half vector is 22.5 degrees off the normal
+// (Blinn: cos 22.5 = 0.92), the reflection 45 degrees off the view vector (Phong: cos 45 = 0.71).
+TEST(compat_apple_specular_vector) {
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    float pos[] = {1, 0, 1, 0};  // directional, 45 degrees
+    float zero[] = {0, 0, 0, 1}, one[] = {1, 1, 1, 1};
+    glLightfv(GL_LIGHT0, GL_POSITION, pos);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, zero);
+    glLightfv(GL_LIGHT0, GL_AMBIENT, zero);
+    glLightfv(GL_LIGHT0, GL_SPECULAR, one);
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zero);
+    glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, one);
+    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, zero);
+    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, zero);
+    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 1);
+    auto quad = [] {
+        glBegin(GL_QUADS);
+        glNormal3f(0, 0, 1);
+        glVertex2f(-1, -1);
+        glVertex2f(1, -1);
+        glVertex2f(1, 1);
+        glVertex2f(-1, 1);
+        glEnd();
+    };
+    quad();
+    uint8_t blinn[4], phong[4];
+    readPixel(32, 32, blinn);
+    glLightModeli(0x85B0 /* GL_LIGHT_MODEL_SPECULAR_VECTOR_APPLE */, GL_TRUE);
+    GLint v = 0;
+    glGetIntegerv(0x85B0, &v);
+    CHECK_EQ(v, 1);
+    quad();
+    readPixel(32, 32, phong);
+    glLightModeli(0x85B0, GL_FALSE);
+    glDisable(GL_LIGHTING);
+    CHECK(abs(blinn[0] - 235) <= 3);  // 0.924
+    CHECK(abs(phong[0] - 180) <= 3);  // 0.707
+    CHECK_GL();
+}
