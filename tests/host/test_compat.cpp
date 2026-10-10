@@ -720,3 +720,27 @@ TEST(compat_nv_texgen_reflection) {
     CHECK_EQ(m, 0x8511);
     CHECK_GL();
 }
+
+// GL_EXT_texture_env_add: the ADD texture environment (ARB_texture_env_add's).
+TEST(compat_ext_texture_env_add) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    uint8_t px[4] = {0, 128, 0, 255};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD);
+    glColor3f(0.5f, 0.25f, 0);
+    glRectf(-1, -1, 1, 1);
+    glDisable(GL_TEXTURE_2D);
+    uint8_t p[4];
+    readPixel(32, 32, p);
+    CHECK(abs(p[0] - 128) <= 2 && abs(p[1] - 192) <= 2 && p[2] <= 2);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
