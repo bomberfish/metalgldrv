@@ -3126,3 +3126,61 @@ API GLboolean APIENTRY glIsTextureEXT(GLuint texture) { return glIsTexture(textu
 API GLboolean APIENTRY glAreTexturesResidentEXT(GLsizei n, const GLuint* textures, GLboolean* residences) {
     return glAreTexturesResident(n, textures, residences);
 }
+
+// ---------------------------------------------------------------------------
+// GL_NV_half_float: half-precision immediate-mode values (generated from gl.xml; the vertex weight one
+// belongs to EXT_vertex_weighting, which isn't supported). Arrays of HALF_FLOAT_NV are core half floats.
+// ---------------------------------------------------------------------------
+static float h(GLhalfNV v) { return halfBits(v); }
+API void APIENTRY glVertex2hNV(GLhalfNV x, GLhalfNV y) { glVertex4f(h(x), h(y), 0.0f, 1.0f); }
+API void APIENTRY glVertex2hvNV(const GLhalfNV * v) { glVertex4f(h(v[0]), h(v[1]), 0.0f, 1.0f); }
+API void APIENTRY glVertex3hNV(GLhalfNV x, GLhalfNV y, GLhalfNV z) { glVertex4f(h(x), h(y), h(z), 1.0f); }
+API void APIENTRY glVertex3hvNV(const GLhalfNV * v) { glVertex4f(h(v[0]), h(v[1]), h(v[2]), 1.0f); }
+API void APIENTRY glVertex4hNV(GLhalfNV x, GLhalfNV y, GLhalfNV z, GLhalfNV w) { glVertex4f(h(x), h(y), h(z), h(w)); }
+API void APIENTRY glVertex4hvNV(const GLhalfNV * v) { glVertex4f(h(v[0]), h(v[1]), h(v[2]), h(v[3])); }
+API void APIENTRY glNormal3hNV(GLhalfNV nx, GLhalfNV ny, GLhalfNV nz) { glNormal3f(h(nx), h(ny), h(nz)); }
+API void APIENTRY glNormal3hvNV(const GLhalfNV * v) { glNormal3f(h(v[0]), h(v[1]), h(v[2])); }
+API void APIENTRY glColor3hNV(GLhalfNV red, GLhalfNV green, GLhalfNV blue) { glColor4f(h(red), h(green), h(blue), 1.0f); }
+API void APIENTRY glColor3hvNV(const GLhalfNV * v) { glColor4f(h(v[0]), h(v[1]), h(v[2]), 1.0f); }
+API void APIENTRY glColor4hNV(GLhalfNV red, GLhalfNV green, GLhalfNV blue, GLhalfNV alpha) { glColor4f(h(red), h(green), h(blue), h(alpha)); }
+API void APIENTRY glColor4hvNV(const GLhalfNV * v) { glColor4f(h(v[0]), h(v[1]), h(v[2]), h(v[3])); }
+API void APIENTRY glTexCoord1hNV(GLhalfNV s) { glTexCoord4f(h(s), 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glTexCoord1hvNV(const GLhalfNV * v) { glTexCoord4f(h(v[0]), 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glTexCoord2hNV(GLhalfNV s, GLhalfNV t) { glTexCoord4f(h(s), h(t), 0.0f, 1.0f); }
+API void APIENTRY glTexCoord2hvNV(const GLhalfNV * v) { glTexCoord4f(h(v[0]), h(v[1]), 0.0f, 1.0f); }
+API void APIENTRY glTexCoord3hNV(GLhalfNV s, GLhalfNV t, GLhalfNV r) { glTexCoord4f(h(s), h(t), h(r), 1.0f); }
+API void APIENTRY glTexCoord3hvNV(const GLhalfNV * v) { glTexCoord4f(h(v[0]), h(v[1]), h(v[2]), 1.0f); }
+API void APIENTRY glTexCoord4hNV(GLhalfNV s, GLhalfNV t, GLhalfNV r, GLhalfNV q) { glTexCoord4f(h(s), h(t), h(r), h(q)); }
+API void APIENTRY glTexCoord4hvNV(const GLhalfNV * v) { glTexCoord4f(h(v[0]), h(v[1]), h(v[2]), h(v[3])); }
+API void APIENTRY glMultiTexCoord1hNV(GLenum target, GLhalfNV s) { glMultiTexCoord4f(target, h(s), 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord1hvNV(GLenum target, const GLhalfNV * v) { glMultiTexCoord4f(target, h(v[0]), 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord2hNV(GLenum target, GLhalfNV s, GLhalfNV t) { glMultiTexCoord4f(target, h(s), h(t), 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord2hvNV(GLenum target, const GLhalfNV * v) { glMultiTexCoord4f(target, h(v[0]), h(v[1]), 0.0f, 1.0f); }
+API void APIENTRY glMultiTexCoord3hNV(GLenum target, GLhalfNV s, GLhalfNV t, GLhalfNV r) { glMultiTexCoord4f(target, h(s), h(t), h(r), 1.0f); }
+API void APIENTRY glMultiTexCoord3hvNV(GLenum target, const GLhalfNV * v) { glMultiTexCoord4f(target, h(v[0]), h(v[1]), h(v[2]), 1.0f); }
+API void APIENTRY glMultiTexCoord4hNV(GLenum target, GLhalfNV s, GLhalfNV t, GLhalfNV r, GLhalfNV q) { glMultiTexCoord4f(target, h(s), h(t), h(r), h(q)); }
+API void APIENTRY glMultiTexCoord4hvNV(GLenum target, const GLhalfNV * v) { glMultiTexCoord4f(target, h(v[0]), h(v[1]), h(v[2]), h(v[3])); }
+API void APIENTRY glVertexAttrib1hNV(GLuint index, GLhalfNV x) { glVertexAttrib4f(index, h(x), 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glVertexAttrib1hvNV(GLuint index, const GLhalfNV * v) { glVertexAttrib4f(index, h(v[0]), 0.0f, 0.0f, 1.0f); }
+API void APIENTRY glVertexAttrib2hNV(GLuint index, GLhalfNV x, GLhalfNV y) { glVertexAttrib4f(index, h(x), h(y), 0.0f, 1.0f); }
+API void APIENTRY glVertexAttrib2hvNV(GLuint index, const GLhalfNV * v) { glVertexAttrib4f(index, h(v[0]), h(v[1]), 0.0f, 1.0f); }
+API void APIENTRY glVertexAttrib3hNV(GLuint index, GLhalfNV x, GLhalfNV y, GLhalfNV z) { glVertexAttrib4f(index, h(x), h(y), h(z), 1.0f); }
+API void APIENTRY glVertexAttrib3hvNV(GLuint index, const GLhalfNV * v) { glVertexAttrib4f(index, h(v[0]), h(v[1]), h(v[2]), 1.0f); }
+API void APIENTRY glVertexAttrib4hNV(GLuint index, GLhalfNV x, GLhalfNV y, GLhalfNV z, GLhalfNV w) { glVertexAttrib4f(index, h(x), h(y), h(z), h(w)); }
+API void APIENTRY glVertexAttrib4hvNV(GLuint index, const GLhalfNV * v) { glVertexAttrib4f(index, h(v[0]), h(v[1]), h(v[2]), h(v[3])); }
+API void APIENTRY glVertexAttribs1hvNV(GLuint index, GLsizei n, const GLhalfNV * v) {
+    for (GLsizei i = 0; i < n; i++) glVertexAttrib1hvNV(index + (GLuint)i, v + (size_t)i * 1);
+}
+API void APIENTRY glVertexAttribs2hvNV(GLuint index, GLsizei n, const GLhalfNV * v) {
+    for (GLsizei i = 0; i < n; i++) glVertexAttrib2hvNV(index + (GLuint)i, v + (size_t)i * 2);
+}
+API void APIENTRY glVertexAttribs3hvNV(GLuint index, GLsizei n, const GLhalfNV * v) {
+    for (GLsizei i = 0; i < n; i++) glVertexAttrib3hvNV(index + (GLuint)i, v + (size_t)i * 3);
+}
+API void APIENTRY glVertexAttribs4hvNV(GLuint index, GLsizei n, const GLhalfNV * v) {
+    for (GLsizei i = 0; i < n; i++) glVertexAttrib4hvNV(index + (GLuint)i, v + (size_t)i * 4);
+}
+API void APIENTRY glFogCoordhNV(GLhalfNV fog) { glFogCoordf(h(fog)); }
+API void APIENTRY glFogCoordhvNV(const GLhalfNV * fog) { glFogCoordf(h(fog[0])); }
+API void APIENTRY glSecondaryColor3hNV(GLhalfNV red, GLhalfNV green, GLhalfNV blue) { glSecondaryColor3f(h(red), h(green), h(blue)); }
+API void APIENTRY glSecondaryColor3hvNV(const GLhalfNV * v) { glSecondaryColor3f(h(v[0]), h(v[1]), h(v[2])); }

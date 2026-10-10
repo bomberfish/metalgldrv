@@ -1118,3 +1118,28 @@ TEST(compat_nv_fog_distance) {
     glDisable(GL_FOG);
     CHECK_GL();
 }
+
+// GL_NV_half_float: half-precision immediate-mode values.
+TEST(compat_nv_half_float) {
+    auto color3h = (void (*)(uint16_t, uint16_t, uint16_t))eglGetProcAddress("glColor3hNV");
+    auto vertex2hv = (void (*)(const uint16_t*))eglGetProcAddress("glVertex2hvNV");
+    auto attrib4h = (void (*)(GLuint, uint16_t, uint16_t, uint16_t, uint16_t))eglGetProcAddress("glVertexAttrib4hNV");
+    const uint16_t one = 0x3C00, half = 0x3800, zero = 0, minusOne = 0xBC00;
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    color3h(one, half, zero);
+    uint16_t v[4][2] = {{minusOne, minusOne}, {one, minusOne}, {one, one}, {minusOne, one}};
+    glBegin(GL_QUADS);
+    for (auto& p : v) vertex2hv(p);
+    glEnd();
+    CHECK_PIXEL(32, 32, 255, 128, 0, 255);
+    attrib4h(5, half, half, one, one);
+    float cur[4] = {};
+    glGetVertexAttribfv(5, GL_CURRENT_VERTEX_ATTRIB, cur);
+    CHECK(cur[0] == 0.5f && cur[2] == 1.0f);
+    CHECK_GL();
+}
