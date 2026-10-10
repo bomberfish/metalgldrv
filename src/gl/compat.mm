@@ -145,6 +145,7 @@ constexpr GLenum GL_VERTEX_POINT_SIZE_APPLE = 0x8A26, GL_CURRENT_POINT_SIZE_APPL
 
 struct ImmVertex {
     float v[CA_COUNT][4];
+    float g[kMaxVertexAttribs][4];  // generic attributes (glVertexAttrib between Begin and End)
 };
 
 using ListCmd = std::function<void()>;
@@ -211,6 +212,7 @@ struct mgl::CompatState {
     // immediate mode
     bool inBegin = false;
     GLenum beginMode = 0;
+    uint32_t immGeneric = 0;  // generic attributes set between Begin and End (drawn per vertex)
     std::vector<ImmVertex> imm;
 
     // display lists
@@ -780,6 +782,7 @@ static void emitVertex(Context* ctx, float x, float y, float z, float w) {
     if (!cs->inBegin) return;  // vertex outside Begin/End: undefined, ignore
     ImmVertex v;
     memcpy(v.v, cs->current, sizeof v.v);
+    memcpy(v.g, ctx->currentAttrib, sizeof v.g);
     v.v[CA_VERTEX][0] = x;
     v.v[CA_VERTEX][1] = y;
     v.v[CA_VERTEX][2] = z;
@@ -795,6 +798,7 @@ static void immBegin(Context* ctx, GLenum mode) {
     if (mode > GL_POLYGON) return ctx->setError(GL_INVALID_ENUM);
     cs->inBegin = true;
     cs->beginMode = mode;
+    cs->immGeneric = 0;
     cs->imm.clear();
 }
 
@@ -2071,8 +2075,33 @@ static void drawImmediate(Context* ctx, GLenum mode, const std::vector<ImmVertex
         a.pointer = verts[0].v[i];
         a.buffer = nullptr;
     }
+    // Generic attributes given per vertex: arrays of the default vertex array object for this draw.
+    VertexArray* vao = ctx->defaultVao.get();
+    VertexAttrib savedAttr[kMaxVertexAttribs];
+    VertexBinding savedBind[kMaxVertexAttribs];
+    for (int i = 0; i < kMaxVertexAttribs; i++) {
+        if (!(cs->immGeneric & (1u << i))) continue;
+        savedAttr[i] = vao->attribs[i];
+        savedBind[i] = vao->bindings[i];
+        VertexAttrib& va = vao->attribs[i];
+        va = VertexAttrib();
+        va.enabled = true;
+        va.binding = i;
+        va.clientPointer = i == 0 ? verts[0].v[CA_VERTEX] : verts[0].g[i];
+        vao->bindings[i] = VertexBinding();
+        vao->bindings[i].stride = sizeof(ImmVertex);
+    }
+    if (cs->immGeneric) vao->version++;
     extern void mglDrawArraysInternal(Context*, GLenum, GLint, GLsizei);
     mglDrawArraysInternal(ctx, mode, 0, (GLsizei)verts.size());
+    if (cs->immGeneric) {
+        for (int i = 0; i < kMaxVertexAttribs; i++)
+            if (cs->immGeneric & (1u << i)) {
+                vao->attribs[i] = savedAttr[i];
+                vao->bindings[i] = savedBind[i];
+            }
+        vao->version++;
+    }
     for (int i = 0; i < CA_COUNT; i++) cs->arrays[i] = saved[i];
     ctx->arrayBuffer = savedArrayBuffer;
     ctx->vao = savedVao;
@@ -2486,4 +2515,15 @@ API void APIENTRY glEvalMesh2(GLenum mode, GLint i1, GLint i2, GLint j1, GLint j
     MGL_CTX();
     RECORD(evalMesh2(ctx, mode, i1, i2, j1, j2));
     evalMesh2(ctx, mode, i1, i2, j1, j2);
+}
+
+// glVertexAttrib between Begin and End (compatibility profile): attribute 0 is a vertex, others are recorded
+// per vertex. Returns true when the call made a vertex.
+bool mglCompatImmAttrib(Context* ctx, GLuint index, float x, float y, float z, float w) {
+    CompatState* cs = ctx->compat;
+    if (!cs || !cs->inBegin) return false;
+    cs->immGeneric |= 1u << index;
+    if (index != 0) return false;
+    emitVertex(ctx, x, y, z, w);
+    return true;
 }

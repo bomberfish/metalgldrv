@@ -390,3 +390,46 @@ TEST(compat_evaluators) {
     CHECK_EQ(segs, 8);
     CHECK_GL();
 }
+
+// glVertexAttrib between Begin and End: generic attributes per vertex, attribute 0 makes the vertex.
+TEST(compat_immediate_generic_attribs) {
+    const char* vs = "#version 120\nattribute vec4 pos;\nattribute vec4 col;\nvarying vec4 c;\n"
+                     "void main() { gl_Position = pos; c = col; }";
+    const char* fs = "#version 120\nvarying vec4 c;\nvoid main() { gl_FragColor = c; }";
+    GLuint v = glCreateShader(GL_VERTEX_SHADER), f = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(v, 1, &vs, nullptr);
+    glShaderSource(f, 1, &fs, nullptr);
+    glCompileShader(v);
+    glCompileShader(f);
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glBindAttribLocation(p, 0, "pos");
+    glBindAttribLocation(p, 3, "col");
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+    glUseProgram(p);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBegin(GL_QUADS);  // left half red, right half green (flat per quad: all four vertices alike)
+    glVertexAttrib4f(3, 1, 0, 0, 1);
+    glVertexAttrib2f(0, -1, -1);
+    glVertexAttrib2f(0, 0, -1);
+    glVertexAttrib2f(0, 0, 1);
+    glVertexAttrib2f(0, -1, 1);
+    glVertexAttrib4f(3, 0, 1, 0, 1);
+    glVertexAttrib2f(0, 0, -1);
+    glVertexAttrib2f(0, 1, -1);
+    glVertexAttrib2f(0, 1, 1);
+    glVertexAttrib2f(0, 0, 1);
+    glEnd();
+    CHECK_PIXEL(16, 32, 255, 0, 0, 255);
+    CHECK_PIXEL(48, 32, 0, 255, 0, 255);
+    glUseProgram(0);
+    glDeleteProgram(p);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    CHECK_GL();
+}

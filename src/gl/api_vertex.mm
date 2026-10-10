@@ -476,8 +476,11 @@ API void APIENTRY glGetVertexArrayIndexed64iv(GLuint vaobj, GLuint index, GLenum
 }
 
 // --- generic attribute values ---
+bool mglCompatImmAttrib(Context* ctx, GLuint index, float x, float y, float z, float w);  // compat.mm
+
 static void setAttrib(Context* ctx, GLuint index, float x, float y, float z, float w) {
     if (index >= kMaxVertexAttribs) return ctx->setError(GL_INVALID_VALUE);
+    if (!ctx->coreProfile && mglCompatImmAttrib(ctx, index, x, y, z, w)) return;
     float* a = ctx->currentAttrib[index];
     a[0] = x;
     a[1] = y;
