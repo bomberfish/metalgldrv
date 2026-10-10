@@ -223,3 +223,37 @@ TEST(arb_fragment_program_advertised) {
         if (!strcmp((const char*)glGetStringi(GL_EXTENSIONS, i), "GL_ARB_fragment_program")) fp = true;
     CHECK(fp);
 }
+
+// GL_ARB_fragment_program_shadow: SHADOW2D compares against a depth texture.
+TEST(arb_fragment_program_shadow) {
+    ArbFns f = fns();
+    identity();
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    float d = 0.5f;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, 1, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+    GLuint fp = load(f, GL_FRAGMENT_PROGRAM_ARB,
+                     "!!ARBfp1.0\nOPTION ARB_fragment_program_shadow;\n"
+                     "TEMP c, r;\n"
+                     "MOV c, {0.5, 0.5, 0, 1};\n"
+                     "MOV c.z, program.local[0].x;\n"
+                     "TEX r, c, texture[0], SHADOW2D;\n"
+                     "MOV result.color, r.x;\n"
+                     "END\n");
+    glEnable(GL_FRAGMENT_PROGRAM_ARB);
+    f.local4f(GL_FRAGMENT_PROGRAM_ARB, 0, 0.25f, 0, 0, 0);  // 0.25 <= 0.5: passes
+    quad();
+    CHECK_PIXEL(32, 32, 255, 255, 255, 255);
+    f.local4f(GL_FRAGMENT_PROGRAM_ARB, 0, 0.75f, 0, 0, 0);  // fails
+    quad();
+    CHECK_PIXEL(32, 32, 0, 0, 0, 0);
+    glDisable(GL_FRAGMENT_PROGRAM_ARB);
+    f.del(1, &fp);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
