@@ -142,6 +142,9 @@ useful ones for porting:
 * `METALGLDRV_STRICT=1` / `METALGLDRV_SPEEDDEMON=1` and the other profiles (README).
 * `METALGLDRV_STATS=1`, `METALGLDRV_HITCH_MS=<n>`: performance diagnostics.
 
+Apple's own GL extensions (`GL_APPLE_*`) work as on Apple's OpenGL; docs/extensions.md lists them and the
+other vendor extensions.
+
 On macOS, `~/Library/Application Support/metalgldrv/metalgldrv.conf` holds `METALGLDRV_NAME=value`
 lines for apps whose environment is hard to set; `METALGLDRV_CONF=none` ignores it.
 
@@ -152,5 +155,4 @@ Applications can also select behaviour per executable name through application p
 
 * No IOSurface interop yet (`CGLTexImageIOSurface2D`). The legacy `CGLSetFullScreen*` modes do nothing;
   full-screen windows work normally.
-* Apple's GL-only extras such as `GL_APPLE_client_storage` aren't provided.
 * One GPU: the default Metal device. Renderer selection through CGL renderer IDs isn't supported.
