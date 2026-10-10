@@ -962,3 +962,19 @@ TEST(compat_ext_vertex_array) {
     CHECK_PIXEL(32, 32, 255, 128, 0, 255);
     CHECK_GL();
 }
+
+// GL_SGIS_generate_mipmap: GENERATE_MIPMAP_SGIS rebuilds the mipmaps when the base level changes.
+TEST(compat_sgis_generate_mipmap) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, 0x8191 /* GL_GENERATE_MIPMAP_SGIS */, GL_TRUE);
+    std::vector<uint32_t> px(16 * 16, 0xFF0000FF);  // red
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    uint32_t top[1] = {};
+    glGetTexImage(GL_TEXTURE_2D, 4, GL_RGBA, GL_UNSIGNED_BYTE, top);
+    CHECK_EQ(top[0], 0xFF0000FFu);
+    glHint(0x8192 /* GL_GENERATE_MIPMAP_HINT_SGIS */, GL_NICEST);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
