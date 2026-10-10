@@ -149,6 +149,17 @@ struct ImmVertex {
 
 using ListCmd = std::function<void()>;
 
+// Evaluators (GL 2.1 §5.1). Maps by target index: COLOR_4, INDEX, NORMAL, TEXTURE_COORD_1..4, VERTEX_3, VERTEX_4
+// (GL_MAP1_COLOR_4 + i, GL_MAP2_COLOR_4 + i).
+constexpr int kEvalTargets = 9;
+constexpr int kEvalDims[kEvalTargets] = {4, 1, 3, 1, 2, 3, 4, 3, 4};
+constexpr int kMaxEvalOrder = 30;
+struct EvalMap {
+    float u1 = 0, u2 = 1, v1 = 0, v2 = 1;
+    int uorder = 1, vorder = 1;
+    std::vector<float> pts;  // uorder x vorder points of the target's dimension, u-major
+};
+
 }  // namespace
 
 struct mgl::CompatState {
@@ -181,6 +192,11 @@ struct mgl::CompatState {
 
     ClientArray arrays[CA_COUNT];
     GLuint clientActiveTexture = 0;
+    // evaluators
+    EvalMap map1[kEvalTargets], map2[kEvalTargets];
+    bool map1Enabled[kEvalTargets] = {}, map2Enabled[kEvalTargets] = {}, autoNormal = false;
+    int grid1N = 1, grid2UN = 1, grid2VN = 1;
+    float grid1U[2] = {0, 1}, grid2U[2] = {0, 1}, grid2V[2] = {0, 1};
     // GL_APPLE_vertex_array_range: client arrays are read at draw time (always current), so the range, its
     // storage hint and flushes are only recorded
     bool varEnabled = false;
@@ -225,6 +241,12 @@ struct mgl::CompatState {
         }
         current[CA_NORMAL][2] = 1;
         current[CA_POINTSIZE][0] = 1;
+        // Initial maps: order 1, holding the default of what they produce.
+        static const float defaults[kEvalTargets][4] = {{1, 1, 1, 1}, {1}, {0, 0, 1}, {0}, {0, 0}, {0, 0, 0}, {0, 0, 0, 1}, {0, 0, 0}, {0, 0, 0, 1}};
+        for (int i = 0; i < kEvalTargets; i++) {
+            map1[i].pts.assign(defaults[i], defaults[i] + kEvalDims[i]);
+            map2[i].pts.assign(defaults[i], defaults[i] + kEvalDims[i]);
+        }
         current[CA_COLOR][0] = current[CA_COLOR][1] = current[CA_COLOR][2] = 1;
         lights[0].diffuse[0] = lights[0].diffuse[1] = lights[0].diffuse[2] = 1;
         lights[0].specular[0] = lights[0].specular[1] = lights[0].specular[2] = 1;
@@ -286,6 +308,14 @@ bool mglCompatCap(Context* ctx, GLenum cap, bool v) {
         cs->lights[cap - GL_LIGHT0].enabled = v;
         return true;
     }
+    if (cap >= GL_MAP1_COLOR_4 && cap < GL_MAP1_COLOR_4 + kEvalTargets) {
+        cs->map1Enabled[cap - GL_MAP1_COLOR_4] = v;
+        return true;
+    }
+    if (cap >= GL_MAP2_COLOR_4 && cap < GL_MAP2_COLOR_4 + kEvalTargets) {
+        cs->map2Enabled[cap - GL_MAP2_COLOR_4] = v;
+        return true;
+    }
     switch (cap) {
     case GL_LIGHTING: cs->lighting = v; return true;
     case GL_COLOR_MATERIAL: cs->colorMaterial = v; return true;
@@ -299,8 +329,8 @@ bool mglCompatCap(Context* ctx, GLenum cap, bool v) {
     case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
         cs->texGen[std::min<int>(ctx->activeTexture, 7)].enabled[cap - GL_TEXTURE_GEN_S] = v;
         return true;
-    case GL_POINT_SMOOTH: case GL_LINE_STIPPLE: case GL_POLYGON_STIPPLE: case GL_AUTO_NORMAL: case GL_MAP1_VERTEX_3:
-    case GL_MAP2_VERTEX_3: case GL_INDEX_LOGIC_OP: case GL_VERTEX_PROGRAM_TWO_SIDE:
+    case GL_AUTO_NORMAL: cs->autoNormal = v; return true;
+    case GL_POINT_SMOOTH: case GL_LINE_STIPPLE: case GL_POLYGON_STIPPLE: case GL_INDEX_LOGIC_OP: case GL_VERTEX_PROGRAM_TWO_SIDE:
         return true;  // accepted, no effect
     default: return false;
     }
@@ -316,7 +346,16 @@ bool mglCompatIsEnabled(Context* ctx, GLenum cap, bool* out) {
         *out = cs->lights[cap - GL_LIGHT0].enabled;
         return true;
     }
+    if (cap >= GL_MAP1_COLOR_4 && cap < GL_MAP1_COLOR_4 + kEvalTargets) {
+        *out = cs->map1Enabled[cap - GL_MAP1_COLOR_4];
+        return true;
+    }
+    if (cap >= GL_MAP2_COLOR_4 && cap < GL_MAP2_COLOR_4 + kEvalTargets) {
+        *out = cs->map2Enabled[cap - GL_MAP2_COLOR_4];
+        return true;
+    }
     switch (cap) {
+    case GL_AUTO_NORMAL: *out = cs->autoNormal; return true;
     case GL_LIGHTING: *out = cs->lighting; return true;
     case GL_COLOR_MATERIAL: *out = cs->colorMaterial; return true;
     case GL_NORMALIZE: *out = cs->normalize; return true;
@@ -386,6 +425,20 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
     case GL_CURRENT_TEXTURE_COORDS: return vec(cs->current[CA_TEX0 + unit], 4);
     case GL_CURRENT_FOG_COORD: return one(cs->current[CA_FOG][0], true);
     case GL_SHADE_MODEL: return one(cs->shadeModel, false);
+    case GL_MAX_EVAL_ORDER: return one(kMaxEvalOrder, false);
+    case GL_MAP1_GRID_SEGMENTS: return one(cs->grid1N, false);
+    case GL_MAP1_GRID_DOMAIN: return vec(cs->grid1U, 2);
+    case GL_MAP2_GRID_SEGMENTS: {
+        out[0] = cs->grid2UN;
+        out[1] = cs->grid2VN;
+        *n = 2;
+        *isFloat = false;
+        return true;
+    }
+    case GL_MAP2_GRID_DOMAIN: {
+        float d[4] = {cs->grid2U[0], cs->grid2U[1], cs->grid2V[0], cs->grid2V[1]};
+        return vec(d, 4);
+    }
     case GL_ELEMENT_ARRAY_TYPE_APPLE: return one(cs->elementArrayType, false);
     case GL_VERTEX_ARRAY_RANGE_LENGTH_APPLE: return one(cs->varLength, false);
     case GL_VERTEX_ARRAY_STORAGE_HINT_APPLE: return one(cs->varStorageHint, false);
@@ -736,9 +789,7 @@ static void emitVertex(Context* ctx, float x, float y, float z, float w) {
 
 static void drawImmediate(Context* ctx, GLenum mode, const std::vector<ImmVertex>& verts);
 
-API void APIENTRY glBegin(GLenum mode) {
-    MGL_CTX();
-    RECORD(glBegin(mode));
+static void immBegin(Context* ctx, GLenum mode) {
     CompatState* cs = compat(ctx);
     if (cs->inBegin) return ctx->setError(GL_INVALID_OPERATION);
     if (mode > GL_POLYGON) return ctx->setError(GL_INVALID_ENUM);
@@ -747,9 +798,7 @@ API void APIENTRY glBegin(GLenum mode) {
     cs->imm.clear();
 }
 
-API void APIENTRY glEnd(void) {
-    MGL_CTX();
-    RECORD(glEnd());
+static void immEnd(Context* ctx) {
     CompatState* cs = compat(ctx);
     if (!cs->inBegin) return ctx->setError(GL_INVALID_OPERATION);
     cs->inBegin = false;
@@ -758,6 +807,18 @@ API void APIENTRY glEnd(void) {
         verts.swap(cs->imm);
         drawImmediate(ctx, cs->beginMode, verts);
     }
+}
+
+API void APIENTRY glBegin(GLenum mode) {
+    MGL_CTX();
+    RECORD(glBegin(mode));
+    immBegin(ctx, mode);
+}
+
+API void APIENTRY glEnd(void) {
+    MGL_CTX();
+    RECORD(glEnd());
+    immEnd(ctx);
 }
 
 API void APIENTRY glRectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2) {
@@ -2102,4 +2163,327 @@ API void APIENTRY glVertexArrayParameteriAPPLE(GLenum pname, GLint param) {
     if (param != GL_STORAGE_CLIENT_APPLE && param != GL_STORAGE_CACHED_APPLE && param != GL_STORAGE_SHARED_APPLE)
         return ctx->setError(GL_INVALID_ENUM);
     compat(ctx)->varStorageHint = (GLenum)param;
+}
+
+// ---------------------------------------------------------------------------
+// Evaluators (GL 2.1 §5.1): maps are evaluated on the CPU into immediate-mode vertices.
+// ---------------------------------------------------------------------------
+static int evalTarget(GLenum target, bool* two) {
+    if (target >= GL_MAP1_COLOR_4 && target < GL_MAP1_COLOR_4 + kEvalTargets) {
+        *two = false;
+        return target - GL_MAP1_COLOR_4;
+    }
+    if (target >= GL_MAP2_COLOR_4 && target < GL_MAP2_COLOR_4 + kEvalTargets) {
+        *two = true;
+        return target - GL_MAP2_COLOR_4;
+    }
+    return -1;
+}
+
+// De Casteljau on `order` points of `dim` floats spaced `step` floats apart: the value at t and d/dt.
+static void bezier(const float* p, int step, int order, int dim, float t, float* out, float* deriv) {
+    float tmp[kMaxEvalOrder][4];
+    for (int i = 0; i < order; i++)
+        for (int k = 0; k < dim; k++) tmp[i][k] = p[i * step + k];
+    if (order == 1) {
+        for (int k = 0; k < dim; k++) {
+            out[k] = tmp[0][k];
+            if (deriv) deriv[k] = 0;
+        }
+        return;
+    }
+    for (int r = order - 1; r > 1; r--)
+        for (int i = 0; i < r; i++)
+            for (int k = 0; k < dim; k++) tmp[i][k] = (1 - t) * tmp[i][k] + t * tmp[i + 1][k];
+    for (int k = 0; k < dim; k++) {
+        out[k] = (1 - t) * tmp[0][k] + t * tmp[1][k];
+        if (deriv) deriv[k] = (order - 1) * (tmp[1][k] - tmp[0][k]);
+    }
+}
+
+static void evalMap1(const EvalMap& m, int dim, float u, float* out) {
+    float t = m.u2 != m.u1 ? (u - m.u1) / (m.u2 - m.u1) : 0;
+    bezier(m.pts.data(), dim, m.uorder, dim, t, out, nullptr);
+}
+
+// Value and partial derivatives (per unit of u and v) of a 2D map.
+static void evalMap2(const EvalMap& m, int dim, float u, float v, float* out, float* du, float* dv) {
+    float s = m.u2 != m.u1 ? (u - m.u1) / (m.u2 - m.u1) : 0, t = m.v2 != m.v1 ? (v - m.v1) / (m.v2 - m.v1) : 0;
+    float col[kMaxEvalOrder][4], colDv[kMaxEvalOrder][4];
+    for (int i = 0; i < m.uorder; i++)  // along v for each u row
+        bezier(m.pts.data() + (size_t)i * m.vorder * dim, dim, m.vorder, dim, t, col[i], colDv[i]);
+    bezier(&col[0][0], 4, m.uorder, dim, s, out, du);
+    if (dv) bezier(&colDv[0][0], 4, m.uorder, dim, s, dv, nullptr);
+    if (du && m.u2 != m.u1)
+        for (int k = 0; k < dim; k++) du[k] /= (m.u2 - m.u1);
+    if (dv && m.v2 != m.v1)
+        for (int k = 0; k < dim; k++) dv[k] /= (m.v2 - m.v1);
+}
+
+// The vertex an EvalCoord produces: evaluated attributes for this vertex only (the current values stay).
+static void evalEmit(Context* ctx, bool two, float u, float v) {
+    CompatState* cs = compat(ctx);
+    const EvalMap* maps = two ? cs->map2 : cs->map1;
+    const bool* on = two ? cs->map2Enabled : cs->map1Enabled;
+    float saved[CA_COUNT][4];
+    memcpy(saved, cs->current, sizeof saved);
+    auto eval = [&](int i, float* out, float* du, float* dv) {
+        if (two) evalMap2(maps[i], kEvalDims[i], u, v, out, du, dv);
+        else evalMap1(maps[i], kEvalDims[i], u, out);
+    };
+    float r[4];
+    if (on[0]) {
+        eval(0, r, nullptr, nullptr);
+        memcpy(cs->current[CA_COLOR], r, 16);
+    }
+    for (int i = 6; i >= 3; i--)  // the highest enabled texture coordinate map
+        if (on[i]) {
+            float tc[4] = {0, 0, 0, 1};
+            eval(i, tc, nullptr, nullptr);
+            memcpy(cs->current[CA_TEX0], tc, 16);
+            break;
+        }
+    if (on[2]) {
+        eval(2, r, nullptr, nullptr);
+        memcpy(cs->current[CA_NORMAL], r, 12);
+    }
+    int vi = on[8] ? 8 : on[7] ? 7 : -1;
+    if (vi >= 0) {
+        float p[4] = {0, 0, 0, 1}, du[4] = {}, dv[4] = {};
+        eval(vi, p, two ? du : nullptr, two ? dv : nullptr);
+        if (two && cs->autoNormal) {
+            if (vi == 8) {  // homogeneous: derivatives of x/w
+                for (int k = 0; k < 3; k++) {
+                    du[k] = du[k] * p[3] - p[k] * du[3];
+                    dv[k] = dv[k] * p[3] - p[k] * dv[3];
+                }
+            }
+            float nx = du[1] * dv[2] - du[2] * dv[1], ny = du[2] * dv[0] - du[0] * dv[2], nz = du[0] * dv[1] - du[1] * dv[0];
+            float l = sqrtf(nx * nx + ny * ny + nz * nz);
+            if (l > 0) {
+                cs->current[CA_NORMAL][0] = nx / l;
+                cs->current[CA_NORMAL][1] = ny / l;
+                cs->current[CA_NORMAL][2] = nz / l;
+            }
+        }
+        emitVertex(ctx, p[0], p[1], p[2], vi == 8 ? p[3] : 1.0f);
+    }
+    memcpy(cs->current, saved, sizeof saved);
+}
+
+static void defineMap(Context* ctx, GLenum target, float u1, float u2, int ustride, int uorder, float v1, float v2, int vstride,
+                      int vorder, const std::vector<float>& src, bool two) {
+    bool isTwo;
+    int i = evalTarget(target, &isTwo);
+    if (i < 0 || isTwo != two) return ctx->setError(GL_INVALID_ENUM);
+    int dim = kEvalDims[i];
+    if (u1 == u2 || (two && v1 == v2)) return ctx->setError(GL_INVALID_VALUE);
+    if (uorder < 1 || uorder > kMaxEvalOrder || (two && (vorder < 1 || vorder > kMaxEvalOrder))) return ctx->setError(GL_INVALID_VALUE);
+    if (ustride < dim || (two && vstride < dim)) return ctx->setError(GL_INVALID_VALUE);
+    CompatState* cs = compat(ctx);
+    EvalMap& m = two ? cs->map2[i] : cs->map1[i];
+    m.u1 = u1;
+    m.u2 = u2;
+    m.v1 = v1;
+    m.v2 = v2;
+    m.uorder = uorder;
+    m.vorder = two ? vorder : 1;
+    m.pts.resize((size_t)m.uorder * m.vorder * dim);
+    for (int a = 0; a < m.uorder; a++)
+        for (int b = 0; b < m.vorder; b++)
+            for (int k = 0; k < dim; k++) m.pts[((size_t)a * m.vorder + b) * dim + k] = src[(size_t)a * ustride + (size_t)b * vstride + k];
+}
+
+// The client points as floats: enough for `order` points `stride` apart (and `vorder` rows `vstride` apart).
+template <typename T>
+static std::vector<float> mapPoints(const T* p, int ustride, int uorder, int vstride, int vorder, int dim) {
+    if (!p || uorder < 1 || vorder < 1) return {};
+    size_t n = (size_t)(uorder - 1) * std::max(ustride, 0) + (size_t)(vorder - 1) * std::max(vstride, 0) + dim;
+    return std::vector<float>(p, p + n);
+}
+
+static int mapDim(GLenum target) {
+    bool two;
+    int i = evalTarget(target, &two);
+    return i < 0 ? 4 : kEvalDims[i];
+}
+
+#define MAP1_IMPL(Name, T)                                                                                   \
+    API void APIENTRY Name(GLenum target, T u1, T u2, GLint stride, GLint order, const T* points) {          \
+        MGL_CTX();                                                                                           \
+        std::vector<float> pts = mapPoints(points, stride, order, 0, 1, mapDim(target));                     \
+        float a = (float)u1, b = (float)u2;                                                                  \
+        RECORD(defineMap(ctx, target, a, b, stride, order, 0, 1, 0, 1, pts, false));                         \
+        defineMap(ctx, target, a, b, stride, order, 0, 1, 0, 1, pts, false);                                 \
+    }
+MAP1_IMPL(glMap1f, GLfloat)
+MAP1_IMPL(glMap1d, GLdouble)
+
+#define MAP2_IMPL(Name, T)                                                                                               \
+    API void APIENTRY Name(GLenum target, T u1, T u2, GLint ustride, GLint uorder, T v1, T v2, GLint vstride, GLint vorder, \
+                           const T* points) {                                                                            \
+        MGL_CTX();                                                                                                       \
+        std::vector<float> pts = mapPoints(points, ustride, uorder, vstride, vorder, mapDim(target));                     \
+        float a = (float)u1, b = (float)u2, c = (float)v1, d = (float)v2;                                                \
+        RECORD(defineMap(ctx, target, a, b, ustride, uorder, c, d, vstride, vorder, pts, true));                         \
+        defineMap(ctx, target, a, b, ustride, uorder, c, d, vstride, vorder, pts, true);                                 \
+    }
+MAP2_IMPL(glMap2f, GLfloat)
+MAP2_IMPL(glMap2d, GLdouble)
+
+static void getMap(Context* ctx, GLenum target, GLenum query, double* out, int* n) {
+    *n = 0;
+    bool two;
+    int i = evalTarget(target, &two);
+    if (i < 0) return ctx->setError(GL_INVALID_ENUM);
+    CompatState* cs = compat(ctx);
+    const EvalMap& m = two ? cs->map2[i] : cs->map1[i];
+    switch (query) {
+    case GL_COEFF:
+        for (float f : m.pts) out[(*n)++] = f;
+        break;
+    case GL_ORDER:
+        out[(*n)++] = m.uorder;
+        if (two) out[(*n)++] = m.vorder;
+        break;
+    case GL_DOMAIN:
+        out[(*n)++] = m.u1;
+        out[(*n)++] = m.u2;
+        if (two) {
+            out[(*n)++] = m.v1;
+            out[(*n)++] = m.v2;
+        }
+        break;
+    default: ctx->setError(GL_INVALID_ENUM);
+    }
+}
+
+#define GETMAP_IMPL(Name, T)                                            \
+    API void APIENTRY Name(GLenum target, GLenum query, T* v) {         \
+        MGL_CTX();                                                      \
+        double out[kMaxEvalOrder * kMaxEvalOrder * 4];                  \
+        int n;                                                          \
+        getMap(ctx, target, query, out, &n);                            \
+        for (int k = 0; k < n; k++) v[k] = (T)out[k];                   \
+    }
+GETMAP_IMPL(glGetMapfv, GLfloat)
+GETMAP_IMPL(glGetMapdv, GLdouble)
+API void APIENTRY glGetMapiv(GLenum target, GLenum query, GLint* v) {
+    MGL_CTX();
+    double out[kMaxEvalOrder * kMaxEvalOrder * 4];
+    int n;
+    getMap(ctx, target, query, out, &n);
+    for (int k = 0; k < n; k++) v[k] = (GLint)lround(out[k]);
+}
+
+static void mapGrid1(Context* ctx, int un, float u1, float u2) {
+    if (un <= 0) return ctx->setError(GL_INVALID_VALUE);
+    CompatState* cs = compat(ctx);
+    cs->grid1N = un;
+    cs->grid1U[0] = u1;
+    cs->grid1U[1] = u2;
+}
+static void mapGrid2(Context* ctx, int un, float u1, float u2, int vn, float v1, float v2) {
+    if (un <= 0 || vn <= 0) return ctx->setError(GL_INVALID_VALUE);
+    CompatState* cs = compat(ctx);
+    cs->grid2UN = un;
+    cs->grid2U[0] = u1;
+    cs->grid2U[1] = u2;
+    cs->grid2VN = vn;
+    cs->grid2V[0] = v1;
+    cs->grid2V[1] = v2;
+}
+API void APIENTRY glMapGrid1f(GLint un, GLfloat u1, GLfloat u2) { MGL_CTX(); RECORD(mapGrid1(ctx, un, u1, u2)); mapGrid1(ctx, un, u1, u2); }
+API void APIENTRY glMapGrid1d(GLint un, GLdouble u1, GLdouble u2) { glMapGrid1f(un, (float)u1, (float)u2); }
+API void APIENTRY glMapGrid2f(GLint un, GLfloat u1, GLfloat u2, GLint vn, GLfloat v1, GLfloat v2) {
+    MGL_CTX();
+    RECORD(mapGrid2(ctx, un, u1, u2, vn, v1, v2));
+    mapGrid2(ctx, un, u1, u2, vn, v1, v2);
+}
+API void APIENTRY glMapGrid2d(GLint un, GLdouble u1, GLdouble u2, GLint vn, GLdouble v1, GLdouble v2) {
+    glMapGrid2f(un, (float)u1, (float)u2, vn, (float)v1, (float)v2);
+}
+
+#define EVAL1(Name, Params, U)                         \
+    API void APIENTRY Name Params {                    \
+        MGL_CTX();                                     \
+        float u_ = (float)(U);                         \
+        RECORD(evalEmit(ctx, false, u_, 0));           \
+        evalEmit(ctx, false, u_, 0);                   \
+    }
+#define EVAL2(Name, Params, U, V)                      \
+    API void APIENTRY Name Params {                    \
+        MGL_CTX();                                     \
+        float u_ = (float)(U), v_ = (float)(V);        \
+        RECORD(evalEmit(ctx, true, u_, v_));           \
+        evalEmit(ctx, true, u_, v_);                   \
+    }
+EVAL1(glEvalCoord1f, (GLfloat u), u)
+EVAL1(glEvalCoord1d, (GLdouble u), u)
+EVAL1(glEvalCoord1fv, (const GLfloat* u), u[0])
+EVAL1(glEvalCoord1dv, (const GLdouble* u), u[0])
+EVAL2(glEvalCoord2f, (GLfloat u, GLfloat v), u, v)
+EVAL2(glEvalCoord2d, (GLdouble u, GLdouble v), u, v)
+EVAL2(glEvalCoord2fv, (const GLfloat* u), u[0], u[1])
+EVAL2(glEvalCoord2dv, (const GLdouble* u), u[0], u[1])
+
+// Grid point i of n over [a, b], exactly b at i == n.
+static float gridAt(int i, int n, const float* d) { return i == n ? d[1] : d[0] + i * (d[1] - d[0]) / n; }
+
+static void evalPoint1(Context* ctx, int i) {
+    CompatState* cs = compat(ctx);
+    evalEmit(ctx, false, gridAt(i, cs->grid1N, cs->grid1U), 0);
+}
+static void evalPoint2(Context* ctx, int i, int j) {
+    CompatState* cs = compat(ctx);
+    evalEmit(ctx, true, gridAt(i, cs->grid2UN, cs->grid2U), gridAt(j, cs->grid2VN, cs->grid2V));
+}
+API void APIENTRY glEvalPoint1(GLint i) { MGL_CTX(); RECORD(evalPoint1(ctx, i)); evalPoint1(ctx, i); }
+API void APIENTRY glEvalPoint2(GLint i, GLint j) { MGL_CTX(); RECORD(evalPoint2(ctx, i, j)); evalPoint2(ctx, i, j); }
+
+static void evalMesh1(Context* ctx, GLenum mode, int i1, int i2) {
+    if (mode != GL_POINT && mode != GL_LINE) return ctx->setError(GL_INVALID_ENUM);
+    immBegin(ctx, mode == GL_POINT ? GL_POINTS : GL_LINE_STRIP);
+    for (int i = i1; i <= i2; i++) evalPoint1(ctx, i);
+    immEnd(ctx);
+}
+
+static void evalMesh2(Context* ctx, GLenum mode, int i1, int i2, int j1, int j2) {
+    switch (mode) {
+    case GL_FILL:
+        for (int j = j1; j < j2; j++) {
+            immBegin(ctx, GL_QUAD_STRIP);
+            for (int i = i1; i <= i2; i++) {
+                evalPoint2(ctx, i, j);
+                evalPoint2(ctx, i, j + 1);
+            }
+            immEnd(ctx);
+        }
+        break;
+    case GL_LINE:
+        for (int j = j1; j <= j2; j++) {
+            immBegin(ctx, GL_LINE_STRIP);
+            for (int i = i1; i <= i2; i++) evalPoint2(ctx, i, j);
+            immEnd(ctx);
+        }
+        for (int i = i1; i <= i2; i++) {
+            immBegin(ctx, GL_LINE_STRIP);
+            for (int j = j1; j <= j2; j++) evalPoint2(ctx, i, j);
+            immEnd(ctx);
+        }
+        break;
+    case GL_POINT:
+        immBegin(ctx, GL_POINTS);
+        for (int j = j1; j <= j2; j++)
+            for (int i = i1; i <= i2; i++) evalPoint2(ctx, i, j);
+        immEnd(ctx);
+        break;
+    default: ctx->setError(GL_INVALID_ENUM);
+    }
+}
+API void APIENTRY glEvalMesh1(GLenum mode, GLint i1, GLint i2) { MGL_CTX(); RECORD(evalMesh1(ctx, mode, i1, i2)); evalMesh1(ctx, mode, i1, i2); }
+API void APIENTRY glEvalMesh2(GLenum mode, GLint i1, GLint i2, GLint j1, GLint j2) {
+    MGL_CTX();
+    RECORD(evalMesh2(ctx, mode, i1, i2, j1, j2));
+    evalMesh2(ctx, mode, i1, i2, j1, j2);
 }

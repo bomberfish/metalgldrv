@@ -335,3 +335,58 @@ TEST(compat_apple_vertex_array_range) {
     glDisableClientState(GL_VERTEX_ARRAY);
     CHECK_GL();
 }
+
+// Evaluators: a 1D vertex map drawn as a line mesh, a 2D vertex + color map drawn as a filled mesh.
+TEST(compat_evaluators) {
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    // 2D: the left half (x -1..0), red at v=0 (bottom) to blue at v=1 (top)
+    float patch[2][2][3] = {{{-1, -1, 0}, {-1, 1, 0}}, {{0, -1, 0}, {0, 1, 0}}};  // [u][v]
+    float colors[2][2][4] = {{{1, 0, 0, 1}, {0, 0, 1, 1}}, {{1, 0, 0, 1}, {0, 0, 1, 1}}};
+    glMap2f(GL_MAP2_VERTEX_3, 0, 1, 6, 2, 0, 1, 3, 2, &patch[0][0][0]);
+    glMap2f(GL_MAP2_COLOR_4, 0, 1, 8, 2, 0, 1, 4, 2, &colors[0][0][0]);
+    glEnable(GL_MAP2_VERTEX_3);
+    glEnable(GL_MAP2_COLOR_4);
+    glMapGrid2f(4, 0, 1, 4, 0, 1);
+    glEvalMesh2(GL_FILL, 0, 4, 0, 4);
+    glDisable(GL_MAP2_VERTEX_3);
+    glDisable(GL_MAP2_COLOR_4);
+    uint8_t p[4];
+    readPixel(16, 2, p);
+    CHECK(p[0] > 230 && p[2] < 25);  // near v=0: red
+    readPixel(16, 61, p);
+    CHECK(p[2] > 230 && p[0] < 25);  // near v=1: blue
+    readPixel(16, 32, p);
+    CHECK(abs(p[0] - 128) < 12 && abs(p[2] - 128) < 12);
+    // 1D: a horizontal line across the right half at y = 0.5 (pixel row 48)
+    float line[2][3] = {{0, 0.515625f, 0}, {1, 0.515625f, 0}};  // through pixel centers of row 48
+    glMap1f(GL_MAP1_VERTEX_3, 0, 1, 3, 2, &line[0][0]);
+    glEnable(GL_MAP1_VERTEX_3);
+    glColor3f(0, 1, 0);
+    glMapGrid1f(8, 0, 1);
+    glEvalMesh1(GL_LINE, 0, 8);
+    CHECK_PIXEL(48, 48, 0, 255, 0, 255);
+    CHECK_PIXEL(48, 40, 0, 0, 0, 255);
+    // A quadratic map evaluated directly: the midpoint of (0,0) (1,2) (2,0) is (1,1).
+    float quad[3][3] = {{0, 0, 0}, {1, 2, 0}, {2, 0, 0}};
+    glMap1f(GL_MAP1_VERTEX_3, 0, 1, 3, 3, &quad[0][0]);
+    GLint order = 0;
+    glGetMapiv(GL_MAP1_VERTEX_3, GL_ORDER, &order);
+    CHECK_EQ(order, 3);
+    float dom[2] = {};
+    glGetMapfv(GL_MAP1_VERTEX_3, GL_DOMAIN, dom);
+    CHECK(dom[0] == 0 && dom[1] == 1);
+    float coeff[9] = {};
+    glGetMapfv(GL_MAP1_VERTEX_3, GL_COEFF, coeff);
+    CHECK(coeff[4] == 2);
+    glDisable(GL_MAP1_VERTEX_3);
+    CHECK(!glIsEnabled(GL_MAP1_VERTEX_3));
+    GLint segs = 0;
+    glGetIntegerv(GL_MAP1_GRID_SEGMENTS, &segs);
+    CHECK_EQ(segs, 8);
+    CHECK_GL();
+}
