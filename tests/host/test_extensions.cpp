@@ -622,3 +622,32 @@ TEST(apple_ycbcr_422) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_NV_fence
+TEST(nv_fence) {
+    CHECK(hasExtension("GL_NV_fence"));
+    auto gen = (void (*)(GLsizei, GLuint*))eglGetProcAddress("glGenFencesNV");
+    auto set = (void (*)(GLuint, GLenum))eglGetProcAddress("glSetFenceNV");
+    auto isFence = (GLboolean(*)(GLuint))eglGetProcAddress("glIsFenceNV");
+    auto finish = (void (*)(GLuint))eglGetProcAddress("glFinishFenceNV");
+    auto test = (GLboolean(*)(GLuint))eglGetProcAddress("glTestFenceNV");
+    auto getiv = (void (*)(GLuint, GLenum, GLint*))eglGetProcAddress("glGetFenceivNV");
+    auto del = (void (*)(GLsizei, const GLuint*))eglGetProcAddress("glDeleteFencesNV");
+    GLuint f = 0;
+    gen(1, &f);
+    CHECK(!isFence(f));
+    test(f);
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);  // not set yet
+    glClear(GL_COLOR_BUFFER_BIT);
+    set(f, 0x84F2 /* GL_ALL_COMPLETED_NV */);
+    CHECK(isFence(f));
+    finish(f);
+    CHECK(test(f));
+    GLint v = 0;
+    getiv(f, 0x84F3 /* GL_FENCE_STATUS_NV */, &v);
+    CHECK_EQ(v, 1);
+    getiv(f, 0x84F4 /* GL_FENCE_CONDITION_NV */, &v);
+    CHECK_EQ(v, 0x84F2);
+    del(1, &f);
+    CHECK_GL();
+}

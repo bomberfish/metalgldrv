@@ -1,5 +1,6 @@
 // Apple's vendor extensions (GL_APPLE_*), as Apple's OpenGL exposes them, so code written against it runs
-// unchanged. Most map onto the core features they were the precursors of.
+// unchanged, and GL_NV_fence, which works like GL_APPLE_fence. Most map onto the core features they were the
+// precursors of.
 #import "gl/context.h"
 #import "gl/winsys.h"
 #include <TargetConditionals.h>
@@ -223,4 +224,63 @@ API void APIENTRY glGetObjectParameterivAPPLE(GLenum objectType, GLuint name, GL
     GLenum* flag = nullptr;
     if (!name || !purgeableTarget(ctx, objectType, name, &res, &flag)) return ctx->setError(GL_INVALID_VALUE);
     *params = *flag ? GL_TRUE : GL_FALSE;
+}
+
+// --- GL_NV_fence: GL_APPLE_fence with a completion condition (only ALL_COMPLETED_NV) and status queries ---
+API void APIENTRY glGenFencesNV(GLsizei n, GLuint* fences) {
+    MGL_CTX();
+    if (n < 0) return ctx->setError(GL_INVALID_VALUE);
+    GLuint next = 1;
+    for (int i = 0; i < n; i++) {
+        while (ctx->nvFences.count(next)) next++;
+        ctx->nvFences[next] = 0;
+        fences[i] = next;
+    }
+}
+
+API void APIENTRY glDeleteFencesNV(GLsizei n, const GLuint* fences) {
+    MGL_CTX();
+    if (n < 0) return ctx->setError(GL_INVALID_VALUE);
+    for (int i = 0; i < n; i++) ctx->nvFences.erase(fences[i]);
+}
+
+API GLboolean APIENTRY glIsFenceNV(GLuint fence) {
+    MGL_CTX_RET(GL_FALSE);
+    auto it = ctx->nvFences.find(fence);
+    return it != ctx->nvFences.end() && it->second != 0;
+}
+
+API void APIENTRY glSetFenceNV(GLuint fence, GLenum condition) {
+    MGL_CTX();
+    if (condition != GL_ALL_COMPLETED_NV) return ctx->setError(GL_INVALID_ENUM);
+    if (!fence) return ctx->setError(GL_INVALID_OPERATION);
+    ctx->nvFences[fence] = ctx->serial();
+}
+
+static uint64_t* nvFence(Context* ctx, GLuint fence) {
+    auto it = ctx->nvFences.find(fence);
+    if (it == ctx->nvFences.end() || !it->second) return ctx->setError(GL_INVALID_OPERATION), nullptr;  // not set
+    return &it->second;
+}
+
+API GLboolean APIENTRY glTestFenceNV(GLuint fence) {
+    MGL_CTX_RET(GL_TRUE);
+    uint64_t* s = nvFence(ctx, fence);
+    return s ? testSerial(ctx, *s) : GL_TRUE;
+}
+
+API void APIENTRY glFinishFenceNV(GLuint fence) {
+    MGL_CTX();
+    if (uint64_t* s = nvFence(ctx, fence)) ctx->waitForResource(*s);
+}
+
+API void APIENTRY glGetFenceivNV(GLuint fence, GLenum pname, GLint* params) {
+    MGL_CTX();
+    uint64_t* s = nvFence(ctx, fence);
+    if (!s) return;
+    switch (pname) {
+    case GL_FENCE_STATUS_NV: *params = testSerial(ctx, *s); break;
+    case GL_FENCE_CONDITION_NV: *params = GL_ALL_COMPLETED_NV; break;
+    default: ctx->setError(GL_INVALID_ENUM);
+    }
 }
