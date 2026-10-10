@@ -653,12 +653,18 @@ API void APIENTRY glLinkProgram(GLuint program) {
         std::string all;
         for (auto& sh : p->attached)
             for (auto& src : sh->sources) all += src;
-        if (dump[0] == '#' ? strtoul(dump + 1, nullptr, 10) == p->name : all.find(dump) != std::string::npos)
+        if (dump[0] == '#' ? strtoul(dump + 1, nullptr, 10) == p->name : all.find(dump) != std::string::npos) {
+            std::string outs;
+            for (auto& o : r.reflection.fragOutputs)
+                outs += " " + o.name + "=" + std::to_string(o.location) + (o.index ? "/1" : "") +
+                        (p->fragDataBindings.count(o.name) ? "(bound)" : "");
+            if (!outs.empty()) MGL_INFO("program %u fragment outputs:%s", p->name, outs.c_str());
             for (auto& sh : p->attached) {
                 std::string src;
                 for (auto& part : sh->sources) src += part;
                 MGL_INFO("program %u shader type %x GLSL:\n%s", p->name, sh->type, src.c_str());
             }
+        }
     }
     p->program = r.program;
     p->refl = std::move(r.reflection);

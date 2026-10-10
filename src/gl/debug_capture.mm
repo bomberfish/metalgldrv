@@ -92,6 +92,32 @@ void debugCaptureBeforeDraw(Context* ctx, ProgramObj* prog) {
     last[prog->name] = now;
     const char* dd = getenv("METALGLDRV_DUMP_DIR");
     std::string dir = dd && *dd ? std::string(dd) + "/" : std::string(getenv("HOME") ? getenv("HOME") : ".") + "/Documents/";
+    {
+        Framebuffer* fb = ctx->fbForTarget(GL_DRAW_FRAMEBUFFER);
+        const BlendState& b = ctx->blend[0];
+        const StencilFace& sf = ctx->stencil[0];
+        MGL_INFO("capture prog %u state: fb %u (%dx%d pass), depth test %d func %x write %d, stencil test %d func %x ref %d mask %x "
+                 "ops %x/%x/%x, blend %d %x %x %x %x eq %x, color mask %x, cull %d %x front %x, draw buffers %x %x %x %x",
+                 prog->name, fb ? fb->name : 0, ctx->curPass.width, ctx->curPass.height, ctx->depthTest, ctx->depthFunc,
+                 ctx->depthWrite, ctx->stencilTest, sf.func, sf.ref, sf.valueMask, sf.sfail, sf.dpfail, sf.dppass, b.enabled,
+                 b.srcRGB, b.dstRGB, b.srcA, b.dstA, b.eqRGB, b.colorMask, ctx->cullFace, ctx->cullMode, ctx->frontFace,
+                 fb ? fb->drawBuffers[0] : 0, fb ? fb->drawBuffers[1] : 0, fb ? fb->drawBuffers[2] : 0, fb ? fb->drawBuffers[3] : 0);
+        if (fb) {
+            std::string atts;
+            for (int i = 0; i < kNumAttachments; i++) {
+                const Attachment& a = fb->att[i];
+                if (a.type == GL_NONE) continue;
+                atts += " " + std::to_string(i) + "=" + (a.tex ? "tex " + std::to_string(a.tex->name) : a.rb ? "rb " + std::to_string(a.rb->name) : "default");
+            }
+            MGL_INFO("capture prog %u attachments:%s", prog->name, atts.c_str());
+        }
+    }
+    // METALGLDRV_CAPTURE_TARGET=1: also save color attachment 0 as it is before this draw.
+    if (getenv("METALGLDRV_CAPTURE_TARGET")) {
+        Framebuffer* fb = ctx->drawFb.get();
+        if (fb && fb->att[0].tex && fb->att[0].tex->mtl)
+            dumpTexture(ctx, fb->att[0].tex->mtl, dir + "capture_p" + std::to_string(prog->name) + "_target", fb->att[0].level);
+    }
     const glsl::Reflection& r = prog->refl;
     for (size_t i = 0; i < r.slots.size(); i++) {
         const glsl::Slot& s = r.slots[i];
