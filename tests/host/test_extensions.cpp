@@ -1046,3 +1046,17 @@ TEST(arb_geometry_shader4_program_parameters) {
     glDeleteProgram(p);
     CHECK_GL();
 }
+
+// GL_SGIX_depth_texture: the depth formats under SGI's names.
+TEST(sgix_depth_texture) {
+    CHECK(hasExtension("GL_SGIX_depth_texture"));
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, 0x81A6 /* GL_DEPTH_COMPONENT24_SGIX */, 4, 4, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+    GLint d = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_DEPTH_SIZE, &d);
+    CHECK(d >= 24);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
