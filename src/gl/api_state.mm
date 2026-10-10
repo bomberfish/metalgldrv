@@ -956,3 +956,9 @@ API void APIENTRY glClampColor(GLenum target, GLenum clamp) {
     if (target == GL_CLAMP_READ_COLOR) ctx->clampReadColor = clamp;
     else if (ctx->coreProfile || (target != GL_CLAMP_VERTEX_COLOR && target != GL_CLAMP_FRAGMENT_COLOR)) ctx->setError(GL_INVALID_ENUM);
 }
+
+// GL_ATI_separate_stencil (glStencilOpSeparateATI is glStencilOpSeparate): both faces' functions at once.
+API void APIENTRY glStencilFuncSeparateATI(GLenum frontfunc, GLenum backfunc, GLint ref, GLuint mask) {
+    glStencilFuncSeparate(GL_FRONT, frontfunc, ref, mask);
+    glStencilFuncSeparate(GL_BACK, backfunc, ref, mask);
+}

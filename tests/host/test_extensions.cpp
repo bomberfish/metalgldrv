@@ -680,3 +680,22 @@ TEST(nv_occlusion_query) {
     glDeleteProgram(prog);
     CHECK_GL();
 }
+
+// GL_ATI_separate_stencil
+TEST(ati_separate_stencil) {
+    CHECK(hasExtension("GL_ATI_separate_stencil"));
+    auto funcSep = (void (*)(GLenum, GLenum, GLint, GLuint))eglGetProcAddress("glStencilFuncSeparateATI");
+    auto opSep = (void (*)(GLenum, GLenum, GLenum, GLenum))eglGetProcAddress("glStencilOpSeparateATI");
+    funcSep(GL_LESS, GL_GREATER, 3, 0x7f);
+    opSep(GL_BACK, GL_KEEP, GL_INCR, GL_DECR);
+    GLint v = 0;
+    glGetIntegerv(GL_STENCIL_FUNC, &v);
+    CHECK_EQ(v, GL_LESS);
+    glGetIntegerv(GL_STENCIL_BACK_FUNC, &v);
+    CHECK_EQ(v, GL_GREATER);
+    glGetIntegerv(GL_STENCIL_BACK_REF, &v);
+    CHECK_EQ(v, 3);
+    glGetIntegerv(GL_STENCIL_BACK_PASS_DEPTH_PASS, &v);
+    CHECK_EQ(v, GL_DECR);
+    CHECK_GL();
+}
