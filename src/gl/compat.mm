@@ -3184,3 +3184,62 @@ API void APIENTRY glFogCoordhNV(GLhalfNV fog) { glFogCoordf(h(fog)); }
 API void APIENTRY glFogCoordhvNV(const GLhalfNV * fog) { glFogCoordf(h(fog[0])); }
 API void APIENTRY glSecondaryColor3hNV(GLhalfNV red, GLhalfNV green, GLhalfNV blue) { glSecondaryColor3f(h(red), h(green), h(blue)); }
 API void APIENTRY glSecondaryColor3hvNV(const GLhalfNV * v) { glSecondaryColor3f(h(v[0]), h(v[1]), h(v[2])); }
+
+// ---------------------------------------------------------------------------
+// glGetLight / glGetMaterial (positions and spot directions are in eye coordinates, as stored)
+// ---------------------------------------------------------------------------
+static int getLight(Context* ctx, GLenum light, GLenum pname, float* out) {
+    if (light < GL_LIGHT0 || light >= GL_LIGHT0 + 8) return ctx->setError(GL_INVALID_ENUM), 0;
+    const LightState& L = compat(ctx)->lights[light - GL_LIGHT0];
+    switch (pname) {
+    case GL_AMBIENT: memcpy(out, L.ambient, 16); return 4;
+    case GL_DIFFUSE: memcpy(out, L.diffuse, 16); return 4;
+    case GL_SPECULAR: memcpy(out, L.specular, 16); return 4;
+    case GL_POSITION: memcpy(out, L.position, 16); return 4;
+    case GL_SPOT_DIRECTION: memcpy(out, L.spotDirection, 12); return 3;
+    case GL_SPOT_EXPONENT: out[0] = L.spotExponent; return 1;
+    case GL_SPOT_CUTOFF: out[0] = L.spotCutoff; return 1;
+    case GL_CONSTANT_ATTENUATION: out[0] = L.constantAtt; return 1;
+    case GL_LINEAR_ATTENUATION: out[0] = L.linearAtt; return 1;
+    case GL_QUADRATIC_ATTENUATION: out[0] = L.quadraticAtt; return 1;
+    default: ctx->setError(GL_INVALID_ENUM); return 0;
+    }
+}
+API void APIENTRY glGetLightfv(GLenum light, GLenum pname, GLfloat* params) {
+    MGL_CTX();
+    float v[4];
+    int n = getLight(ctx, light, pname, v);
+    memcpy(params, v, n * 4);
+}
+API void APIENTRY glGetLightiv(GLenum light, GLenum pname, GLint* params) {
+    MGL_CTX();
+    float v[4];
+    int n = getLight(ctx, light, pname, v);
+    bool color = pname == GL_AMBIENT || pname == GL_DIFFUSE || pname == GL_SPECULAR;
+    for (int k = 0; k < n; k++) params[k] = color ? (GLint)lround(std::clamp(v[k], -1.0f, 1.0f) * 2147483647.0) : (GLint)lroundf(v[k]);
+}
+
+static int getMaterial(Context* ctx, GLenum face, GLenum pname, float* out) {
+    if (face != GL_FRONT && face != GL_BACK) return ctx->setError(GL_INVALID_ENUM), 0;
+    const MaterialState& m = compat(ctx)->material[face == GL_BACK];
+    switch (pname) {
+    case GL_AMBIENT: memcpy(out, m.ambient, 16); return 4;
+    case GL_DIFFUSE: memcpy(out, m.diffuse, 16); return 4;
+    case GL_SPECULAR: memcpy(out, m.specular, 16); return 4;
+    case GL_EMISSION: memcpy(out, m.emission, 16); return 4;
+    case GL_SHININESS: out[0] = m.shininess; return 1;
+    default: ctx->setError(GL_INVALID_ENUM); return 0;
+    }
+}
+API void APIENTRY glGetMaterialfv(GLenum face, GLenum pname, GLfloat* params) {
+    MGL_CTX();
+    float v[4];
+    int n = getMaterial(ctx, face, pname, v);
+    memcpy(params, v, n * 4);
+}
+API void APIENTRY glGetMaterialiv(GLenum face, GLenum pname, GLint* params) {
+    MGL_CTX();
+    float v[4];
+    int n = getMaterial(ctx, face, pname, v);
+    for (int k = 0; k < n; k++) params[k] = pname == GL_SHININESS ? (GLint)lroundf(v[k]) : (GLint)lround(std::clamp(v[k], -1.0f, 1.0f) * 2147483647.0);
+}

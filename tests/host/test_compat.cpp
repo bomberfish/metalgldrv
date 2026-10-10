@@ -1143,3 +1143,26 @@ TEST(compat_nv_half_float) {
     CHECK(cur[0] == 0.5f && cur[2] == 1.0f);
     CHECK_GL();
 }
+
+// glGetLight / glGetMaterial
+TEST(compat_get_light_material) {
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glTranslatef(1, 0, 0);
+    float pos[4] = {0, 2, 0, 1};
+    glLightfv(GL_LIGHT1, GL_POSITION, pos);
+    float out[4] = {};
+    glGetLightfv(GL_LIGHT1, GL_POSITION, out);
+    CHECK(out[0] == 1 && out[1] == 2 && out[3] == 1);  // eye coordinates
+    glLightf(GL_LIGHT1, GL_SPOT_CUTOFF, 30);
+    glGetLightfv(GL_LIGHT1, GL_SPOT_CUTOFF, out);
+    CHECK(out[0] == 30);
+    float diff[4] = {0.25f, 0.5f, 0.75f, 1};
+    glMaterialfv(GL_BACK, GL_DIFFUSE, diff);
+    glGetMaterialfv(GL_BACK, GL_DIFFUSE, out);
+    CHECK(out[2] == 0.75f);
+    glGetMaterialfv(GL_FRONT, GL_DIFFUSE, out);
+    CHECK(fabsf(out[0] - 0.8f) < 1e-6f);  // front untouched (default 0.8)
+    glLoadIdentity();
+    CHECK_GL();
+}
