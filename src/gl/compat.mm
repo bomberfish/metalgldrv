@@ -186,6 +186,7 @@ struct mgl::CompatState {
     GLenum colorControl = GL_SINGLE_COLOR;
     GLenum shadeModel = GL_SMOOTH;
     GLenum fogMode = GL_EXP, fogCoordSrc = GL_FRAGMENT_DEPTH;
+    GLenum fogDistance = GL_EYE_PLANE_ABSOLUTE_NV;  // GL_NV_fog_distance
     float fogDensity = 1, fogStart = 0, fogEnd = 1, fogColor[4] = {0, 0, 0, 0}, fogIndex = 0;
     GLenum alphaFunc = GL_ALWAYS;
     float alphaRef = 0;
@@ -473,6 +474,7 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
     case GL_FOG_END: return one(cs->fogEnd, true);
     case GL_FOG_COLOR: return vec(cs->fogColor, 4);
     case GL_FOG_COORD_SRC: return one(cs->fogCoordSrc, false);
+    case GL_FOG_DISTANCE_MODE_NV: return one(cs->fogDistance, false);
     case GL_LIGHT_MODEL_AMBIENT: return vec(cs->lightModelAmbient, 4);
     case GL_LIGHT_MODEL_TWO_SIDE: return one(cs->twoSide, false);
     case GL_LIGHT_MODEL_LOCAL_VIEWER: return one(cs->localViewer, false);
@@ -1003,7 +1005,12 @@ API void APIENTRY glFogfv(GLenum pname, const GLfloat* params) {
     case GL_FOG_COLOR: memcpy(cs->fogColor, params, 16); break;
     case GL_FOG_INDEX: cs->fogIndex = params[0]; break;
     case GL_FOG_COORD_SRC: cs->fogCoordSrc = (GLenum)params[0]; break;
-    case 0x855A /* GL_FOG_DISTANCE_MODE_NV */: break;
+    case GL_FOG_DISTANCE_MODE_NV: {
+        GLenum m = (GLenum)params[0];
+        if (m != GL_EYE_RADIAL_NV && m != GL_EYE_PLANE && m != GL_EYE_PLANE_ABSOLUTE_NV) return ctx->setError(GL_INVALID_ENUM);
+        cs->fogDistance = m;
+        break;
+    }
     default: ctx->setError(GL_INVALID_ENUM);
     }
 }
@@ -1609,6 +1616,7 @@ static std::string ffKey(Context* ctx, CompatState* cs, bool* usedUnits) {
     add(cs->normalize * 2 + cs->rescaleNormal);
     add(cs->fog ? (int)cs->fogMode : 0);
     if (cs->fog) add(cs->fogCoordSrc == GL_FOG_COORD);
+    if (cs->fog) add(cs->fogDistance);
     add(cs->colorSum);
     add(cs->pointSprite);
     add(cs->vertexPointSize);
@@ -1815,7 +1823,11 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
         }
         vs += "    gl_TexCoord[" + us + "] = gl_TextureMatrix[" + us + "] * tc; }\n";
     }
-    if (cs->fog) vs += cs->fogCoordSrc == GL_FOG_COORD ? "  gl_FogFragCoord = gl_FogCoord;\n" : "  gl_FogFragCoord = abs(eye.z);\n";
+    if (cs->fog) {
+        // fragment depth per GL_NV_fog_distance: |z| (the default), radial distance, or signed -z
+        const char* dist = cs->fogDistance == GL_EYE_RADIAL_NV ? "length(eye.xyz)" : cs->fogDistance == GL_EYE_PLANE ? "-eye.z" : "abs(eye.z)";
+        vs += cs->fogCoordSrc == GL_FOG_COORD ? std::string("  gl_FogFragCoord = gl_FogCoord;\n") : std::string("  gl_FogFragCoord = ") + dist + ";\n";
+    }
     vs += "}\n";
     // --- fragment ---
     fs += "void main() {\n  vec4 c = gl_Color;\n";

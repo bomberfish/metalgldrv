@@ -1083,3 +1083,38 @@ TEST(compat_nv_light_max_exponent) {
     glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0);
     glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 0);
 }
+
+// GL_NV_fog_distance: EYE_RADIAL_NV fogs by distance from the eye, EYE_PLANE_ABSOLUTE_NV by |z|.
+TEST(compat_nv_fog_distance) {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(-1, 1, -1, 1, 0, 10);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glEnable(GL_FOG);
+    glFogi(GL_FOG_MODE, GL_LINEAR);
+    glFogf(GL_FOG_START, 0);
+    glFogf(GL_FOG_END, 2);
+    float fogColor[4] = {0, 0, 0, 1};
+    glFogfv(GL_FOG_COLOR, fogColor);
+    glColor3f(1, 1, 1);
+    auto quad = [] {  // corners at z = -1, x and y = +-1: |z| = 1, radial distance sqrt(3) (fog is per vertex)
+        glBegin(GL_QUADS);
+        glVertex3f(-1, -1, -1); glVertex3f(1, -1, -1); glVertex3f(1, 1, -1); glVertex3f(-1, 1, -1);
+        glEnd();
+    };
+    quad();
+    uint8_t plane[4], radial[4];
+    readPixel(32, 32, plane);
+    CHECK(abs(plane[0] - 128) <= 3);  // (2 - 1) / 2
+    glFogi(0x855A /* GL_FOG_DISTANCE_MODE_NV */, 0x855B /* GL_EYE_RADIAL_NV */);
+    quad();
+    readPixel(32, 32, radial);
+    CHECK(abs(radial[0] - 34) <= 4);  // (2 - sqrt(3)) / 2
+    GLint m = 0;
+    glGetIntegerv(0x855A, &m);
+    CHECK_EQ(m, 0x855B);
+    glFogi(0x855A, 0x855C /* GL_EYE_PLANE_ABSOLUTE_NV */);
+    glDisable(GL_FOG);
+    CHECK_GL();
+}
