@@ -826,3 +826,34 @@ TEST(ext_clip_volume_hint) {
     CHECK_EQ(v, GL_FASTEST);
     CHECK_GL();
 }
+
+// GL_EXT_framebuffer_multisample_blit_scaled: resolve a multisample framebuffer into a larger one.
+TEST(ext_framebuffer_multisample_blit_scaled) {
+    CHECK(hasExtension("GL_EXT_framebuffer_multisample_blit_scaled"));
+    GLuint rb, msFbo, tex, fbo;
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_RGBA8, 8, 8);
+    glGenFramebuffers(1, &msFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, msFbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 32, 32);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, msFbo);
+    glBlitFramebuffer(0, 0, 8, 8, 0, 0, 32, 32, GL_COLOR_BUFFER_BIT, 0x90BB /* GL_SCALED_RESOLVE_NICEST_EXT */);
+    CHECK_GL();
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    CHECK_PIXEL(30, 30, 0, 0, 255, 255);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteFramebuffers(1, &msFbo);
+    glDeleteTextures(1, &tex);
+    glDeleteRenderbuffers(1, &rb);
+    CHECK_GL();
+}

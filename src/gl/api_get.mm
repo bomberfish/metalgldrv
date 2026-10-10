@@ -52,7 +52,7 @@ const char* kExtensions[] = {
     "GL_ARB_vertex_type_2_10_10_10_rev", "GL_ARB_viewport_array", "GL_ARB_window_pos", "GL_EXT_abgr", "GL_EXT_bgra",
     "GL_EXT_blend_color", "GL_EXT_blend_equation_separate", "GL_EXT_blend_func_separate", "GL_EXT_blend_minmax",
     "GL_EXT_blend_subtract", "GL_EXT_clip_volume_hint", "GL_EXT_compiled_vertex_array", "GL_EXT_draw_buffers2", "GL_EXT_draw_instanced", "GL_EXT_draw_range_elements", "GL_EXT_fog_coord",
-    "GL_EXT_framebuffer_blit", "GL_EXT_framebuffer_multisample", "GL_EXT_framebuffer_object", "GL_EXT_framebuffer_sRGB",
+    "GL_EXT_framebuffer_blit", "GL_EXT_framebuffer_multisample", "GL_EXT_framebuffer_multisample_blit_scaled", "GL_EXT_framebuffer_object", "GL_EXT_framebuffer_sRGB",
     "GL_EXT_gpu_program_parameters", "GL_EXT_gpu_shader4", "GL_EXT_mesh_shader", "GL_EXT_multi_draw_arrays", "GL_EXT_packed_depth_stencil",
     "GL_EXT_packed_float", "GL_EXT_packed_pixels", "GL_EXT_pixel_buffer_object", "GL_EXT_point_parameters", "GL_EXT_polygon_offset", "GL_EXT_polygon_offset_clamp",
     "GL_EXT_provoking_vertex", "GL_EXT_rescale_normal", "GL_EXT_secondary_color", "GL_EXT_separate_specular_color", "GL_EXT_shader_integer_mix",

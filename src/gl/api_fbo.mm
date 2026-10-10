@@ -1197,6 +1197,12 @@ API void APIENTRY glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, 
                                     GLenum filter) {
     MGL_CTX();
     if (mask & ~(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) return ctx->setError(GL_INVALID_VALUE);
+    // GL_EXT_framebuffer_multisample_blit_scaled: resolve and scale in one blit. A multisample source is
+    // resolved before filtering anyway (resolveForRead), so both qualities are a linear filter of the resolve.
+    if (filter == GL_SCALED_RESOLVE_FASTEST_EXT || filter == GL_SCALED_RESOLVE_NICEST_EXT) {
+        if (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) return ctx->setError(GL_INVALID_OPERATION);
+        filter = GL_LINEAR;
+    }
     if (filter != GL_NEAREST && filter != GL_LINEAR) return ctx->setError(GL_INVALID_ENUM);
     if (filter == GL_LINEAR && (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT))) return ctx->setError(GL_INVALID_OPERATION);
     Framebuffer* rfb = ctx->readFb.get();
