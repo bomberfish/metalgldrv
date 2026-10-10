@@ -257,3 +257,30 @@ TEST(arb_fragment_program_shadow) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_SGIX_shadow: TEXTURE_COMPARE_SGIX / TEXTURE_COMPARE_OPERATOR_SGIX drive the depth comparison.
+TEST(sgix_shadow) {
+    ArbFns f = fns();
+    identity();
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    float d = 0.5f;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, 1, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, 0x819A /* GL_TEXTURE_COMPARE_SGIX */, GL_TRUE);
+    glTexParameteri(GL_TEXTURE_2D, 0x819B /* GL_TEXTURE_COMPARE_OPERATOR_SGIX */, 0x819D /* GL_TEXTURE_GEQUAL_R_SGIX */);
+    GLint v = 0;
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, &v);
+    CHECK_EQ(v, GL_GEQUAL);
+    GLuint fp = load(f, GL_FRAGMENT_PROGRAM_ARB,
+                     "!!ARBfp1.0\nOPTION ARB_fragment_program_shadow;\nTEMP r;\n"
+                     "TEX r, {0.5, 0.5, 0.75, 1}, texture[0], SHADOW2D;\nMOV result.color, r.x;\nEND\n");
+    glEnable(GL_FRAGMENT_PROGRAM_ARB);
+    quad();  // 0.75 >= 0.5: passes
+    glDisable(GL_FRAGMENT_PROGRAM_ARB);
+    CHECK_PIXEL(32, 32, 255, 255, 255, 255);
+    f.del(1, &fp);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}

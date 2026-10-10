@@ -721,6 +721,10 @@ static bool samplerParam(Context* ctx, SamplerState& s, GLenum pname, const doub
     }
 }
 
+// GL_SGIX_shadow (SGIX enums aren't in the generated header)
+constexpr GLenum GL_TEXTURE_COMPARE_SGIX = 0x819A, GL_TEXTURE_COMPARE_OPERATOR_SGIX = 0x819B, GL_TEXTURE_LEQUAL_R_SGIX = 0x819C,
+                 GL_TEXTURE_GEQUAL_R_SGIX = 0x819D;
+
 static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, int count, bool isIntVec, bool isIntegerBorder = false, bool dsa = false) {
     bool rect = t->target == GL_TEXTURE_RECTANGLE;
     bool ms = t->target == GL_TEXTURE_2D_MULTISAMPLE || t->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
@@ -780,6 +784,18 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
     case GL_GENERATE_MIPMAP:
         if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM);
         t->generateMipmapHint = v[0] != 0;
+        break;
+    // GL_SGIX_shadow: the comparison as an enable and an operator (r <= texel / r >= texel)
+    case GL_TEXTURE_COMPARE_SGIX:
+        if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM);
+        t->sampler.compareMode = v[0] != 0 ? GL_COMPARE_REF_TO_TEXTURE : GL_NONE;
+        t->dropViews();
+        break;
+    case GL_TEXTURE_COMPARE_OPERATOR_SGIX:
+        if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM);
+        if (e != GL_TEXTURE_LEQUAL_R_SGIX && e != GL_TEXTURE_GEQUAL_R_SGIX) return ctx->setError(GL_INVALID_ENUM);
+        t->sampler.compareFunc = e == GL_TEXTURE_LEQUAL_R_SGIX ? GL_LEQUAL : GL_GEQUAL;
+        t->dropViews();
         break;
     case GL_TEXTURE_STORAGE_HINT_APPLE:
         if (e != GL_STORAGE_PRIVATE_APPLE && e != GL_STORAGE_CACHED_APPLE && e != GL_STORAGE_SHARED_APPLE) return ctx->setError(GL_INVALID_ENUM);
@@ -891,6 +907,8 @@ static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int
     case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE: out[0] = GL_IMAGE_FORMAT_COMPATIBILITY_BY_SIZE; return true;
     case GL_GENERATE_MIPMAP: out[0] = t->generateMipmapHint; return !ctx->coreProfile;
     case GL_TEXTURE_STORAGE_HINT_APPLE: out[0] = t->appleStorageHint; return true;
+    case GL_TEXTURE_COMPARE_SGIX: out[0] = s.compareMode == GL_COMPARE_REF_TO_TEXTURE; return !ctx->coreProfile;
+    case GL_TEXTURE_COMPARE_OPERATOR_SGIX: out[0] = s.compareFunc == GL_GEQUAL ? GL_TEXTURE_GEQUAL_R_SGIX : GL_TEXTURE_LEQUAL_R_SGIX; return !ctx->coreProfile;
     case GL_TEXTURE_RANGE_LENGTH_APPLE: out[0] = t->appleRangeLength; return true;
     case GL_TEXTURE_RESIDENT: out[0] = 1; return !ctx->coreProfile;
     case GL_TEXTURE_PRIORITY: out[0] = 1; return !ctx->coreProfile;
