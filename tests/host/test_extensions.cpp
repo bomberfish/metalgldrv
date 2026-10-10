@@ -985,3 +985,64 @@ TEST(ati_texture_compression_3dc) {
     glDeleteProgram(prog);
     CHECK_GL();
 }
+
+// GL_ARB_geometry_shader4 / GL_EXT_geometry_shader4: program-parameter geometry shaders (GLSL 1.20 style).
+TEST(arb_geometry_shader4_program_parameters) {
+    const char* vs = "#version 120\nattribute vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0.0, 1.0); }";
+    const char* gs = "#version 120\n#extension GL_EXT_geometry_shader4 : require\nvarying out vec4 color;\n"
+                     "void main() { for (int i = 0; i < gl_VerticesIn; i++) { gl_Position = gl_PositionIn[i]; color = vec4(0.0, 1.0, 0.0, 1.0);"
+                     " EmitVertex(); } EndPrimitive(); }";
+    const char* fs = "#version 120\nvarying vec4 color;\nvoid main() { gl_FragColor = color; }";
+    GLuint p = glCreateProgram();
+    const char* src[3] = {vs, gs, fs};
+    GLenum types[3] = {GL_VERTEX_SHADER, GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER};
+    for (int i = 0; i < 3; i++) {
+        GLuint s = glCreateShader(types[i]);
+        glShaderSource(s, 1, &src[i], nullptr);
+        glCompileShader(s);
+        GLint ok = 0;
+        glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[1024] = {};
+            glGetShaderInfoLog(s, sizeof log, nullptr, log);
+            fprintf(stderr, "  compile %d: %s\n", i, log);
+        }
+        CHECK(ok);
+        glAttachShader(p, s);
+    }
+    glProgramParameteri(p, GL_GEOMETRY_INPUT_TYPE_ARB, GL_TRIANGLES);
+    glProgramParameteri(p, GL_GEOMETRY_OUTPUT_TYPE_ARB, GL_TRIANGLE_STRIP);
+    glProgramParameteri(p, GL_GEOMETRY_VERTICES_OUT_ARB, 3);
+    GLint v = 0;
+    glGetProgramiv(p, GL_GEOMETRY_VERTICES_OUT_ARB, &v);
+    CHECK_EQ(v, 3);
+    glBindAttribLocation(p, 0, "pos");
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024] = {};
+        glGetProgramInfoLog(p, sizeof log, nullptr, log);
+        fprintf(stderr, "  link: %s\n", log);
+    }
+    CHECK(ok);
+    glUseProgram(p);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    float tri[] = {-1, -1, 3, -1, -1, 3};
+    GLuint vao, vbo;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glEnableVertexAttribArray(0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_PIXEL(32, 32, 0, 255, 0, 255);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glUseProgram(0);
+    glDeleteProgram(p);
+    CHECK_GL();
+}

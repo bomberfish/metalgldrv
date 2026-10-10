@@ -339,6 +339,9 @@ public:
     // ARB_gl_spirv: module from glShaderBinary (SPIR_V_BINARY state); compiled once specialized.
     bool spirvBinary = false;
     bool specialized = false;
+    // A GLSL 1.20-style geometry shader of ARB/EXT_geometry_shader4 (no input layout): compiled again at link
+    // time with the program's GEOMETRY_*_ARB parameters (api_shader.mm, gs4Source).
+    bool gs4Legacy = false;
     std::shared_ptr<const glsl::SpirvModule> spirvModule;
 };
 
@@ -352,6 +355,9 @@ public:
     std::vector<std::string> xfbVaryings;
     GLenum xfbBufferMode = GL_INTERLEAVED_ATTRIBS;
     bool separable = false, retrievableHint = false;
+    // ARB/EXT_geometry_shader4 program parameters for legacy geometry shaders (ShaderObj::gs4Legacy)
+    GLenum gs4InputType = GL_TRIANGLES, gs4OutputType = GL_TRIANGLE_STRIP;
+    int gs4VerticesOut = 0;
     bool linkedSeparable = false;  // PROGRAM_SEPARABLE as of the last successful link (what queries report)
     bool linkedSpirv = false;      // linked from SPIR-V shaders: reflection carries no names
 

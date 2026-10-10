@@ -1,4 +1,5 @@
 #include <limits>
+#include <regex>
 #include <type_traits>
 #include <cmath>
 // Shader & program objects, uniforms, program interface queries, pipelines.
@@ -165,13 +166,7 @@ API void APIENTRY glShaderSource(GLuint shader, GLsizei count, const GLchar* con
     }
 }
 
-API void APIENTRY glCompileShader(GLuint shader) {
-    MGL_CTX();
-    ShaderObj* s = getShader(ctx, shader);
-    if (!s) return;
-    if (s->spirvBinary) return ctx->setError(GL_INVALID_OPERATION, "CompileShader on a SPIR-V shader");
-    bool ok;
-    glsl::Stage st = stageForType(s->type, &ok);
+static glsl::CompileOptions compileOptions(Context* ctx) {
     glsl::CompileOptions opts;
     opts.compatibilityProfile = !ctx->coreProfile;
     opts.sparseTexture = ctx->dev->caps.sparse;
@@ -180,7 +175,76 @@ API void APIENTRY glCompileShader(GLuint shader) {
     const AppProfile& app = appProfile();
     if (!app.hideExtensions.empty()) opts.hiddenExtensions = &app.hideExtensions;
     opts.quirks = app.glsl;
-    glsl::CompileResult r = glsl::compile(st, s->sources, opts);
+    return opts;
+}
+
+// --- ARB/EXT_geometry_shader4: GLSL 1.20-style geometry shaders ---
+// They take their input / output primitives and vertex count from program parameters, read gl_PositionIn[]
+// and gl_VerticesIn, and declare `varying in` / `varying out`. They are compiled as GLSL 1.50 compatibility
+// geometry shaders with those layouts, gl_VerticesIn as a constant and gl_PositionIn / gl_PointSizeIn filled
+// from gl_in[] before the shader's main runs.
+static bool isGS4Legacy(const std::string& src) {
+    static const std::regex ext(R"(#\s*extension\s+GL_(ARB|EXT)_geometry_shader4)");
+    static const std::regex inLayout(R"(layout\s*\(\s*(points|lines|lines_adjacency|triangles|triangles_adjacency)\s*(,[^)]*)?\)\s*in\s*;)");
+    return std::regex_search(src, ext) && !std::regex_search(src, inLayout);
+}
+
+static int gs4InputVertices(GLenum in) {
+    switch (in) {
+    case GL_POINTS: return 1;
+    case GL_LINES: return 2;
+    case GL_LINES_ADJACENCY: return 4;
+    case GL_TRIANGLES_ADJACENCY: return 6;
+    default: return 3;
+    }
+}
+
+static std::string gs4Source(const std::string& src, GLenum in, GLenum out, int maxVertices) {
+    const char* inName = in == GL_POINTS ? "points" : in == GL_LINES ? "lines" : in == GL_LINES_ADJACENCY ? "lines_adjacency"
+                         : in == GL_TRIANGLES_ADJACENCY ? "triangles_adjacency" : "triangles";
+    const char* outName = out == GL_POINTS ? "points" : out == GL_LINE_STRIP ? "line_strip" : "triangle_strip";
+    int n = gs4InputVertices(in);
+    // the #version / #extension header stays first; the shims follow it
+    std::string body = std::regex_replace(src, std::regex(R"(\bvarying\s+in\b)"), "in");
+    body = std::regex_replace(body, std::regex(R"(\bvarying\s+out\b)"), "out");
+    body = std::regex_replace(body, std::regex(R"(#\s*version[^\n]*)"), "");
+    size_t pos = 0;
+    int line = 1;
+    for (;;) {  // past leading blank, comment-free #extension lines
+        size_t eol = body.find('\n', pos);
+        std::string l = body.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos);
+        size_t f = l.find_first_not_of(" \t\r");
+        if (eol == std::string::npos || (f != std::string::npos && l.compare(f, 1, "#") != 0)) break;
+        if (f != std::string::npos && l.find("extension") == std::string::npos) break;
+        pos = eol + 1;
+        line++;
+    }
+    std::string head = body.substr(0, pos), rest = body.substr(pos);
+    std::string k = std::to_string(n);
+    std::string shim = "layout(" + std::string(inName) + ") in;\nlayout(" + outName + ", max_vertices = " + std::to_string(std::max(1, maxVertices)) +
+                       ") out;\n#define gl_VerticesIn " + k + "\nvec4 mgl_PositionIn[" + k + "];\nfloat mgl_PointSizeIn[" + k +
+                       "];\n#define gl_PositionIn mgl_PositionIn\n#define gl_PointSizeIn mgl_PointSizeIn\n#define main mgl_gs4_main\n#line " +
+                       std::to_string(line) + "\n";
+    std::string tail = "\n#undef main\nvoid main() {\n  for (int i = 0; i < " + k +
+                       "; i++) { mgl_PositionIn[i] = gl_in[i].gl_Position; mgl_PointSizeIn[i] = gl_in[i].gl_PointSize; }\n  mgl_gs4_main();\n}\n";
+    return "#version 150 compatibility\n" + head + shim + rest + tail;
+}
+
+API void APIENTRY glCompileShader(GLuint shader) {
+    MGL_CTX();
+    ShaderObj* s = getShader(ctx, shader);
+    if (!s) return;
+    if (s->spirvBinary) return ctx->setError(GL_INVALID_OPERATION, "CompileShader on a SPIR-V shader");
+    bool ok;
+    glsl::Stage st = stageForType(s->type, &ok);
+    glsl::CompileOptions opts = compileOptions(ctx);
+    const AppProfile& app = appProfile();
+    std::string joined;
+    for (auto& x : s->sources) joined += x;
+    s->gs4Legacy = s->type == GL_GEOMETRY_SHADER && isGS4Legacy(joined);
+    // legacy geometry shaders: checked here with default parameters, compiled for real when linked
+    glsl::CompileResult r = s->gs4Legacy ? glsl::compile(st, {gs4Source(joined, GL_TRIANGLES, GL_TRIANGLE_STRIP, 1)}, opts)
+                                         : glsl::compile(st, s->sources, opts);
     s->shader = r.shader;
     s->compiled = r.shader != nullptr;
     s->infoLog = r.infoLog;
@@ -469,6 +533,22 @@ API void APIENTRY glProgramParameteri(GLuint program, GLenum pname, GLint value)
     MGL_CTX();
     ProgramObj* p = getProgram(ctx, program);
     if (!p) return;
+    switch (pname) {  // ARB/EXT_geometry_shader4 parameters (used by the next link)
+    case GL_GEOMETRY_INPUT_TYPE_ARB:
+        if (value != GL_POINTS && value != GL_LINES && value != GL_LINES_ADJACENCY && value != GL_TRIANGLES && value != GL_TRIANGLES_ADJACENCY)
+            return ctx->setError(GL_INVALID_VALUE);
+        p->gs4InputType = (GLenum)value;
+        return;
+    case GL_GEOMETRY_OUTPUT_TYPE_ARB:
+        if (value != GL_POINTS && value != GL_LINE_STRIP && value != GL_TRIANGLE_STRIP) return ctx->setError(GL_INVALID_VALUE);
+        p->gs4OutputType = (GLenum)value;
+        return;
+    case GL_GEOMETRY_VERTICES_OUT_ARB:
+        if (value < 0 || value > 1024) return ctx->setError(GL_INVALID_VALUE);
+        p->gs4VerticesOut = value;
+        return;
+    default: break;
+    }
     if (pname != GL_PROGRAM_SEPARABLE && pname != GL_PROGRAM_BINARY_RETRIEVABLE_HINT) return ctx->setError(GL_INVALID_ENUM);
     if (value != GL_TRUE && value != GL_FALSE) return ctx->setError(GL_INVALID_VALUE);
     if (pname == GL_PROGRAM_SEPARABLE) p->separable = value;
@@ -483,10 +563,26 @@ API void APIENTRY glLinkProgram(GLuint program) {
     glsl::LinkInput in;
     bool allCompiled = true;
     int spirvShaders = 0;
+    std::string gs4Error;
     for (auto& s : p->attached) {
         if (s->spirvBinary) spirvShaders++;
-        if (!s->compiled || !s->shader) allCompiled = false;
-        else in.shaders.push_back(s->shader);
+        if (!s->compiled || !s->shader) {
+            allCompiled = false;
+        } else if (s->gs4Legacy) {
+            // ARB/EXT_geometry_shader4: compiled with this program's parameters
+            if (p->gs4VerticesOut <= 0) {
+                gs4Error = "error: GEOMETRY_VERTICES_OUT_ARB is 0 for a GL_ARB_geometry_shader4 geometry shader\n";
+                continue;
+            }
+            std::string joined;
+            for (auto& x : s->sources) joined += x;
+            glsl::CompileResult r = glsl::compile(glsl::Stage::Geometry, {gs4Source(joined, p->gs4InputType, p->gs4OutputType, p->gs4VerticesOut)},
+                                                  compileOptions(ctx));
+            if (!r.shader) gs4Error = r.infoLog;
+            else in.shaders.push_back(r.shader);
+        } else {
+            in.shaders.push_back(s->shader);
+        }
     }
     if (spirvShaders && spirvShaders != (int)p->attached.size()) {
         // GL 4.6 §7.3: all attached shaders must have the same SPIR_V_BINARY state
@@ -506,6 +602,11 @@ API void APIENTRY glLinkProgram(GLuint program) {
     p->linkGeneration++;
     // A failed (re)link keeps the previous executable (p->program, refl, variants): GL keeps
     // using it while the program stays current (§7.3); only LINK_STATUS turns false.
+    if (!gs4Error.empty()) {
+        p->linked = false;
+        p->infoLog = gs4Error;
+        return;
+    }
     if (!allCompiled || in.shaders.empty()) {
         p->linked = false;
         p->infoLog = in.shaders.empty() ? "error: no shaders attached\n" : "error: attached shader not successfully compiled\n";
@@ -648,6 +749,9 @@ API void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
     case GL_TRANSFORM_FEEDBACK_VARYINGS: *params = p->linked ? (GLint)r.xfbVaryings.size() : 0; break;
     case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH: *params = maxLen(r.xfbVaryings, [](auto& a) -> const std::string& { return a.name; }); break;
     // GL 4.6 7.13: stage-specific queries need a linked program containing that stage
+    case GL_GEOMETRY_INPUT_TYPE_ARB: *params = p->gs4InputType; break;  // ARB/EXT_geometry_shader4 parameters
+    case GL_GEOMETRY_OUTPUT_TYPE_ARB: *params = p->gs4OutputType; break;
+    case GL_GEOMETRY_VERTICES_OUT_ARB: *params = p->gs4VerticesOut; break;
     case GL_GEOMETRY_VERTICES_OUT: case GL_GEOMETRY_INPUT_TYPE: case GL_GEOMETRY_OUTPUT_TYPE: case GL_GEOMETRY_SHADER_INVOCATIONS:
     case GL_TESS_CONTROL_OUTPUT_VERTICES: case GL_TESS_GEN_MODE: case GL_TESS_GEN_SPACING: case GL_TESS_GEN_VERTEX_ORDER:
     case GL_TESS_GEN_POINT_MODE: {
