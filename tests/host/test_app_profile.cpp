@@ -303,3 +303,13 @@ TEST(pbo_upload_after_compute) {
     glDeleteTextures(1, &tex);
     glDeleteBuffers(1, &pbo);
 }
+
+// METALGLDRV_EXTENSION_YEAR: the profile option, and the year table it uses.
+extern "C" int mglTestExtensionYear(const char* name);
+TEST(app_profile_extension_year) {
+    CHECK(contains(resolve("quake3.exe", {"METALGLDRV_EXTENSION_YEAR=2003"}), "extension string up to 2003"));
+    CHECK_EQ(mglTestExtensionYear("GL_ARB_multitexture"), 1998);
+    CHECK_EQ(mglTestExtensionYear("GL_ARB_compute_shader"), 2012);
+    CHECK_EQ(mglTestExtensionYear("GL_APPLE_fence"), 2002);
+    CHECK_EQ(mglTestExtensionYear("GL_NOT_an_extension"), 0);
+}

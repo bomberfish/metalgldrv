@@ -19,6 +19,10 @@ struct AppProfile {
     std::vector<std::string> hideExtensions;
     // Names advertised in addition to the supported ones (testing aid: nothing implements them).
     std::vector<std::string> extraExtensions;
+    // When nonzero, the glGetString(GL_EXTENSIONS) string lists only extensions published up to this year,
+    // oldest first (ext_years.cpp): games from around 1999-2005 copy it into a fixed-size buffer and crash
+    // on a long one. glGetStringi still lists everything.
+    int extensionYear = 0;
     // GL_NVX_gpu_memory_info / GL_ATI_meminfo: the total is Metal's recommendedMaxWorkingSetSize, at most
     // vramCapMB (profiles; 0 = no cap), or exactly vramMB (METALGLDRV_VRAM_MB; 0 = unset).
     uint64_t vramMB = 0, vramCapMB = 0;

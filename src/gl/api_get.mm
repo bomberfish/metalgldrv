@@ -3,6 +3,7 @@
 #include "mgl_version.h"
 #include <cmath>
 #include "gl/app_profile.h"
+#include "gl/ext_years.h"
 #include "util/log.h"
 
 using namespace mgl;
@@ -91,7 +92,7 @@ const DeviceExtension kDeviceExtensions[] = {
 // kExtensions plus the ones that depend on the GPU (mglDeviceExtensions), sorted.
 struct ExtensionList {
     std::vector<const char*> names;
-    std::string joined;
+    std::string joined;  // glGetString(GL_EXTENSIONS): limited by AppProfile::extensionYear, oldest first
 };
 
 // GL_NVX_gpu_memory_info (not in gl.xml)
@@ -125,7 +126,14 @@ const ExtensionList& extensions(Context* ctx) {
             if (std::find_if(r.names.begin(), r.names.end(), [&](const char* x) { return e == x; }) == r.names.end())
                 r.names.push_back(e.c_str());
         std::sort(r.names.begin(), r.names.end(), [](const char* a, const char* b) { return strcmp(a, b) < 0; });
-        for (auto e : r.names) {
+        std::vector<const char*> legacy = r.names;
+        if (app.extensionYear) {
+            // Unknown years count as new. Oldest first, so a truncating copy keeps the basics.
+            auto year = [](const char* e) { int y = extensionYear(e); return y ? y : 9999; };
+            std::erase_if(legacy, [&](const char* e) { return year(e) > app.extensionYear; });
+            std::stable_sort(legacy.begin(), legacy.end(), [&](const char* a, const char* b) { return year(a) < year(b); });
+        }
+        for (auto e : legacy) {
             if (!r.joined.empty()) r.joined += ' ';
             r.joined += e;
         }

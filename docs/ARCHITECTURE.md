@@ -301,7 +301,7 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   (default `$TMPDIR/metalgldrv-dumps`, one file per failure).
 * Application profiles (next section): `METALGLDRV_APP_PROFILE`, `METALGLDRV_VENDOR`,
   `METALGLDRV_RENDERER`, `METALGLDRV_VERSION_STRING`, `METALGLDRV_GLSL_VERSION_STRING`,
-  `METALGLDRV_HIDE_EXTENSIONS`, `METALGLDRV_EXTRA_EXTENSIONS`, `METALGLDRV_VRAM_MB`,
+  `METALGLDRV_HIDE_EXTENSIONS`, `METALGLDRV_EXTRA_EXTENSIONS`, `METALGLDRV_EXTENSION_YEAR`, `METALGLDRV_VRAM_MB`,
   `METALGLDRV_GLSL_QUIRKS`, `METALGLDRV_SHARE_FRAMEBUFFERS`.
 * `METALGLDRV_STATS=1` – per-function event counters and the GPU's busy time, logged every 5 s.
   `METALGLDRV_PROFILE_PASSES=1` adds GPU time per render pass / compute dispatch (each is committed
@@ -360,6 +360,7 @@ profile is the conformant driver.
 | `METALGLDRV_VENDOR`, `METALGLDRV_RENDERER`, `METALGLDRV_VERSION_STRING`, `METALGLDRV_GLSL_VERSION_STRING` | replace `glGetString(GL_VENDOR / GL_RENDERER / GL_VERSION / GL_SHADING_LANGUAGE_VERSION)`; `GL_MAJOR/MINOR_VERSION` and the context stay 4.6 |
 | `METALGLDRV_HIDE_EXTENSIONS="A B C*"` | remove extensions from `GL_EXTENSIONS` / `glGetStringi` and from GLSL (`#extension` rejects them, no predefined macro); a `*` suffix matches a prefix; space, comma or semicolon separated |
 | `METALGLDRV_EXTRA_EXTENSIONS="A B"` | advertise extra names (a testing aid for apps that refuse to start; nothing implements them, their entry points still report unimplemented) |
+| `METALGLDRV_EXTENSION_YEAR=<year>` | the `glGetString(GL_EXTENSIONS)` string lists only extensions published up to that year, oldest first (`src/gl/ext_years.cpp`, years from Mesa's table), for games from around 1999–2005 that copy it into a fixed-size buffer and crash on a long string (like NVIDIA's `__GL_ExtensionStringVersion`); `glGetStringi` still lists everything |
 | `METALGLDRV_VRAM_MB=<n>` | total video memory reported by `GL_NVX_gpu_memory_info` / `GL_ATI_meminfo` (default: Metal's `recommendedMaxWorkingSetSize`, capped by the profile) |
 | `METALGLDRV_GLSL_QUIRKS="q1,-q2"` | GLSL compiler leniency, Mesa driconf names (`-name` turns off one the profile sets): `force_glsl_extensions_warn` (an unsupported `#extension X : require` only warns), `vs_position_always_invariant` (`gl_Position` is invariant in every program) |
 

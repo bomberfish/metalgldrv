@@ -31,6 +31,7 @@ struct ProfileEntry {
     const char* extraExtensions = nullptr;
     const char* glslQuirks = nullptr;       // METALGLDRV_GLSL_QUIRKS syntax
     uint64_t vramCapMB = 0;                 // cap of the reported video memory
+    int extensionYear = 0;                  // AppProfile::extensionYear
     bool shareFramebuffers = false;         // AppProfile::shareFramebuffers
 };
 
@@ -112,6 +113,7 @@ std::string summary(const AppProfile& p) {
     };
     if (!p.hideExtensions.empty()) s += ", hide [" + list(p.hideExtensions) + "]";
     if (!p.extraExtensions.empty()) s += ", extra [" + list(p.extraExtensions) + "]";
+    if (p.extensionYear) s += ", extension string up to " + std::to_string(p.extensionYear);
     if (p.vramMB) s += ", VRAM " + std::to_string(p.vramMB) + " MB";
     else if (p.vramCapMB) s += ", VRAM at most " + std::to_string(p.vramCapMB) + " MB";
     std::string q = quirksSummary(p.glsl);
@@ -175,6 +177,7 @@ AppProfile resolveAppProfile(const std::string& exe, const char* (*env)(const ch
         for (const auto& q : splitList(entry->glslQuirks)) applyQuirk(p.glsl, q);
         p.vramCapMB = entry->vramCapMB;
         p.shareFramebuffers = entry->shareFramebuffers;
+        p.extensionYear = entry->extensionYear;
     }
     auto str = [&](const char* var, std::string& out) {
         const char* v = env(var);
@@ -191,6 +194,7 @@ AppProfile resolveAppProfile(const std::string& exe, const char* (*env)(const ch
         for (auto& x : splitList(v)) p.extraExtensions.push_back(x);
     }
     if (const char* v = env("METALGLDRV_VRAM_MB"); v && *v) p.vramMB = strtoull(v, nullptr, 10);
+    if (const char* v = env("METALGLDRV_EXTENSION_YEAR"); v && *v) p.extensionYear = atoi(v);
     if (const char* v = env("METALGLDRV_SHARE_FRAMEBUFFERS"); v && *v) p.shareFramebuffers = strcmp(v, "0") != 0;
     if (const char* v = env("METALGLDRV_GLSL_QUIRKS")) {
         for (auto& q : splitList(v))
@@ -274,3 +278,7 @@ extern "C" __attribute__((visibility("default"))) int mglTestResolveAppProfile(c
     snprintf(out, (size_t)outSize, "%s", s.c_str());
     return (int)s.size();
 }
+
+// Test hook: the year table (ext_years.cpp).
+#include "gl/ext_years.h"
+extern "C" __attribute__((visibility("default"))) int mglTestExtensionYear(const char* name) { return mgl::extensionYear(name); }
