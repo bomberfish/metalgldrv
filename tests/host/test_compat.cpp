@@ -802,3 +802,28 @@ TEST(compat_ext_secondary_color) {
     CHECK_PIXEL(48, 32, 255, 255, 0, 255);
     CHECK_GL();
 }
+
+// GL_EXT_fog_coord: fog from per-vertex fog coordinates (FOG_COORDINATE_SOURCE_EXT = FOG_COORDINATE_EXT).
+TEST(compat_ext_fog_coord) {
+    auto fogCoordf = (void (*)(GLfloat))eglGetProcAddress("glFogCoordfEXT");
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glEnable(GL_FOG);
+    glFogi(GL_FOG_MODE, GL_LINEAR);
+    glFogf(GL_FOG_START, 0);
+    glFogf(GL_FOG_END, 1);
+    float fogColor[4] = {0, 0, 1, 1};
+    glFogfv(GL_FOG_COLOR, fogColor);
+    glFogi(0x8450 /* GL_FOG_COORDINATE_SOURCE_EXT */, 0x8451 /* GL_FOG_COORDINATE_EXT */);
+    glColor3f(1, 0, 0);
+    glBegin(GL_QUADS);
+    fogCoordf(1);  // fully fogged
+    glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(1, 1); glVertex2f(-1, 1);
+    glEnd();
+    glDisable(GL_FOG);
+    glFogi(0x8450, GL_FRAGMENT_DEPTH);
+    CHECK_PIXEL(32, 32, 0, 0, 255, 255);
+    CHECK_GL();
+}
