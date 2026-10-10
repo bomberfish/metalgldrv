@@ -549,3 +549,12 @@ TEST(apple_transform_hint) {
     CHECK_EQ(v, GL_FASTEST);
     CHECK_GL();
 }
+
+// GL_APPLE_aux_depth_stencil: queryable (no aux buffers, so FALSE).
+TEST(apple_aux_depth_stencil) {
+    CHECK(hasExtension("GL_APPLE_aux_depth_stencil"));
+    GLboolean b = GL_TRUE;
+    glGetBooleanv(0x8A14 /* GL_AUX_DEPTH_STENCIL_APPLE */, &b);
+    CHECK(!b);
+    CHECK_GL();
+}
