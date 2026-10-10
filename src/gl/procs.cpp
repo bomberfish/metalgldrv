@@ -8,10 +8,14 @@
 extern "C" void APIENTRY glFinishRenderAPPLE(void);
 extern "C" void APIENTRY glFlushRenderAPPLE(void);
 extern "C" void APIENTRY glSwapAPPLE(void);
+extern "C" void APIENTRY glPointSizePointerAPPLE(GLenum type, GLsizei stride, const void* pointer);
+extern "C" void APIENTRY glVertexPointSizefAPPLE(GLfloat size);
 static const mgl_proc_entry kExtraProcs[] = {
     {"glFinishRenderAPPLE", (void (*)(void))&glFinishRenderAPPLE},
     {"glFlushRenderAPPLE", (void (*)(void))&glFlushRenderAPPLE},
+    {"glPointSizePointerAPPLE", (void (*)(void))&glPointSizePointerAPPLE},
     {"glSwapAPPLE", (void (*)(void))&glSwapAPPLE},
+    {"glVertexPointSizefAPPLE", (void (*)(void))&glVertexPointSizefAPPLE},
 };
 
 extern "C" void (*mgl_lookup_proc(const char* name))(void) {

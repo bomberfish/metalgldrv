@@ -206,3 +206,44 @@ TEST(compat_apple_float_pixels) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_APPLE_vertex_point_size: per-vertex point sizes (array or current value) in fixed-function drawing.
+TEST(compat_apple_vertex_point_size) {
+    auto sizePointer = (void (*)(GLenum, GLsizei, const void*))eglGetProcAddress("glPointSizePointerAPPLE");
+    auto vertexPointSize = (void (*)(GLfloat))eglGetProcAddress("glVertexPointSizefAPPLE");
+    CHECK(sizePointer && vertexPointSize);
+    if (!sizePointer || !vertexPointSize) return;
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glPointSize(1);
+    glEnable(0x8A26 /* GL_VERTEX_POINT_SIZE_APPLE */);
+    // two points: left one 1px, right one 9px (from the array)
+    float pos[] = {-0.5f, 0, 0.5f, 0};
+    float sizes[] = {1, 9};
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, pos);
+    glEnableClientState(0x8B9C /* GL_POINT_SIZE_ARRAY_APPLE */);
+    sizePointer(GL_FLOAT, 0, sizes);
+    glColor3f(1, 0, 0);
+    glDrawArrays(GL_POINTS, 0, 2);
+    glDisableClientState(0x8B9C);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    CHECK_PIXEL(48 + 3, 32 + 3, 255, 0, 0, 255);  // inside the 9px point
+    CHECK_PIXEL(16 + 3, 32 + 3, 0, 0, 0, 255);    // outside the 1px point
+    // immediate mode: current point size
+    glColor3f(0, 1, 0);
+    glBegin(GL_POINTS);
+    vertexPointSize(7);
+    glVertex2f(-0.5f, 0.5f);
+    glEnd();
+    CHECK_PIXEL(16 + 2, 48 + 2, 0, 255, 0, 255);
+    GLfloat cur = 0;
+    glGetFloatv(0x8A27 /* GL_CURRENT_POINT_SIZE_APPLE */, &cur);
+    CHECK(cur == 7.0f);
+    glDisable(0x8A26);
+    CHECK_GL();
+}

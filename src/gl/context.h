@@ -290,7 +290,8 @@ public:
 
     struct CompatState* compat = nullptr;
     GLenum compatAlphaFunc = GL_ALWAYS;  // legacy alpha test, applied by compat fragment shaders
-    float compatAlphaRef = 0;  // compatibility-profile fixed-function state (compat.mm)
+    float compatAlphaRef = 0;
+    bool compatVertexPointSize = false;  // fixed-function program writing gl_PointSize (APPLE_vertex_point_size)  // compatibility-profile fixed-function state (compat.mm)
 
     // ---- object helpers ----
     Texture* boundTexture(GLenum target);         // active unit

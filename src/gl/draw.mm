@@ -743,7 +743,7 @@ static uint64_t buildSys(Context* ctx, ProgramObj* prog, int drawID, GLint baseV
     s->clipDistanceMask = ctx->clipDistanceMask;
     for (int k = 0; k < 4; k++) s->viewport[k] = ctx->viewport[0][k];
     s->pointSize = ctx->pointSize;
-    s->flags = (ctx->programPointSize ? 1u : 0u) | (ctx->pointSpriteOrigin == GL_LOWER_LEFT ? 2u : 0u) | (ctx->clipOrigin == GL_UPPER_LEFT ? 4u : 0u) |
+    s->flags = (ctx->programPointSize || ctx->compatVertexPointSize ? 1u : 0u) | (ctx->pointSpriteOrigin == GL_LOWER_LEFT ? 2u : 0u) | (ctx->clipOrigin == GL_UPPER_LEFT ? 4u : 0u) |
                (ctx->sampleCoverage && ctx->sampleCoverageInvert ? 8u : 0u) |
                (indexed ? 0u : 16u);  // gl_BaseVertex is 0 for commands without a baseVertex parameter
     s->sampleCoverage = ctx->sampleCoverage ? ctx->sampleCoverageValue : 1.0f;

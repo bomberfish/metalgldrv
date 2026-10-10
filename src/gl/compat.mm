@@ -131,10 +131,17 @@ struct ClientArray {
     Ref<Buffer> buffer;
 };
 
-enum CompatAttr { CA_VERTEX, CA_NORMAL, CA_COLOR, CA_SECONDARY, CA_FOG, CA_TEX0, CA_COUNT = CA_TEX0 + 8 };
+// CA_POINTSIZE: GL_APPLE_vertex_point_size's per-vertex point size (an attribute of fixed-function programs).
+enum CompatAttr { CA_VERTEX, CA_NORMAL, CA_COLOR, CA_SECONDARY, CA_FOG, CA_TEX0, CA_POINTSIZE = CA_TEX0 + 8, CA_COUNT };
 const char* kAttrNames[CA_COUNT] = {"gl_Vertex", "gl_Normal", "gl_Color", "gl_SecondaryColor", "gl_FogCoord",
                                     "gl_MultiTexCoord0", "gl_MultiTexCoord1", "gl_MultiTexCoord2", "gl_MultiTexCoord3",
-                                    "gl_MultiTexCoord4", "gl_MultiTexCoord5", "gl_MultiTexCoord6", "gl_MultiTexCoord7"};
+                                    "gl_MultiTexCoord4", "gl_MultiTexCoord5", "gl_MultiTexCoord6", "gl_MultiTexCoord7",
+                                    "mgl_PointSizeAPPLE"};
+
+// GL_APPLE_vertex_point_size (Apple's glext.h; not in the Khronos registry)
+constexpr GLenum GL_VERTEX_POINT_SIZE_APPLE = 0x8A26, GL_CURRENT_POINT_SIZE_APPLE = 0x8A27, GL_POINT_SIZE_ARRAY_APPLE = 0x8B9C,
+                 GL_POINT_SIZE_ARRAY_TYPE_APPLE = 0x898A, GL_POINT_SIZE_ARRAY_STRIDE_APPLE = 0x898B,
+                 GL_POINT_SIZE_ARRAY_POINTER_APPLE = 0x898C, GL_POINT_SIZE_ARRAY_BUFFER_BINDING_APPLE = 0x8B9F;
 
 struct ImmVertex {
     float v[CA_COUNT][4];
@@ -153,6 +160,7 @@ struct mgl::CompatState {
     float current[CA_COUNT][4];
     bool lighting = false, colorMaterial = false, normalize = false, rescaleNormal = false, fog = false, alphaTest = false;
     bool pointSprite = false, colorSum = false;
+    bool vertexPointSize = false;  // GL_VERTEX_POINT_SIZE_APPLE
     GLenum colorMaterialFace = GL_FRONT_AND_BACK, colorMaterialMode = GL_AMBIENT_AND_DIFFUSE;
     LightState lights[8];
     MaterialState material[2];
@@ -209,6 +217,7 @@ struct mgl::CompatState {
             current[i][3] = 1;
         }
         current[CA_NORMAL][2] = 1;
+        current[CA_POINTSIZE][0] = 1;
         current[CA_COLOR][0] = current[CA_COLOR][1] = current[CA_COLOR][2] = 1;
         lights[0].diffuse[0] = lights[0].diffuse[1] = lights[0].diffuse[2] = 1;
         lights[0].specular[0] = lights[0].specular[1] = lights[0].specular[2] = 1;
@@ -279,6 +288,7 @@ bool mglCompatCap(Context* ctx, GLenum cap, bool v) {
     case GL_ALPHA_TEST: cs->alphaTest = v; return true;
     case GL_POINT_SPRITE: cs->pointSprite = v; return true;
     case GL_COLOR_SUM: cs->colorSum = v; return true;
+    case GL_VERTEX_POINT_SIZE_APPLE: cs->vertexPointSize = v; return true;
     case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
         cs->texGen[std::min<int>(ctx->activeTexture, 7)].enabled[cap - GL_TEXTURE_GEN_S] = v;
         return true;
@@ -315,6 +325,8 @@ bool mglCompatIsEnabled(Context* ctx, GLenum cap, bool* out) {
     case GL_FOG_COORD_ARRAY: *out = cs->arrays[CA_FOG].enabled; return true;
     case GL_TEXTURE_COORD_ARRAY: *out = cs->arrays[CA_TEX0 + std::min<int>(cs->clientActiveTexture, 7)].enabled; return true;
     case GL_ELEMENT_ARRAY_APPLE: *out = cs->elementArrayEnabled; return true;
+    case GL_VERTEX_POINT_SIZE_APPLE: *out = cs->vertexPointSize; return true;
+    case GL_POINT_SIZE_ARRAY_APPLE: *out = cs->arrays[CA_POINTSIZE].enabled; return true;
     case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
         *out = cs->texGen[std::min<int>(ctx->activeTexture, 7)].enabled[cap - GL_TEXTURE_GEN_S];
         return true;
@@ -367,6 +379,10 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
     case GL_CURRENT_FOG_COORD: return one(cs->current[CA_FOG][0], true);
     case GL_SHADE_MODEL: return one(cs->shadeModel, false);
     case GL_ELEMENT_ARRAY_TYPE_APPLE: return one(cs->elementArrayType, false);
+    case GL_CURRENT_POINT_SIZE_APPLE: return one(cs->current[CA_POINTSIZE][0], true);
+    case GL_POINT_SIZE_ARRAY_TYPE_APPLE: return one(cs->arrays[CA_POINTSIZE].type, false);
+    case GL_POINT_SIZE_ARRAY_STRIDE_APPLE: return one(cs->arrays[CA_POINTSIZE].stride, false);
+    case GL_POINT_SIZE_ARRAY_BUFFER_BINDING_APPLE: return one(cs->arrays[CA_POINTSIZE].buffer ? cs->arrays[CA_POINTSIZE].buffer->name : 0, false);
     case GL_ALPHA_TEST_FUNC: return one(cs->alphaFunc, false);
     case GL_ALPHA_TEST_REF: return one(cs->alphaRef, true);
     case GL_FOG_MODE: return one(cs->fogMode, false);
@@ -634,6 +650,7 @@ CUR(CA_NORMAL, glNormal3b, (GLbyte x, GLbyte y, GLbyte z), bn(x), bn(y), bn(z), 
 CUR(CA_NORMAL, glNormal3s, (GLshort x, GLshort y, GLshort z), sn(x), sn(y), sn(z), 1)
 CUR(CA_NORMAL, glNormal3i, (GLint x, GLint y, GLint z), in_(x), in_(y), in_(z), 1)
 CUR(CA_FOG, glFogCoordf, (GLfloat f), f, 0, 0, 1)
+CUR(CA_POINTSIZE, glVertexPointSizefAPPLE, (GLfloat s), s, 0, 0, 1)
 CUR(CA_FOG, glFogCoordd, (GLdouble f), (float)f, 0, 0, 1)
 CUR(CA_FOG, glFogCoordfv, (const GLfloat* f), f[0], 0, 0, 1)
 CUR(CA_TEX0, glTexCoord1f, (GLfloat s), s, 0, 0, 1)
@@ -1049,6 +1066,7 @@ static int arrayForCap(Context* ctx, GLenum cap) {
     case GL_COLOR_ARRAY: return CA_COLOR;
     case GL_SECONDARY_COLOR_ARRAY: return CA_SECONDARY;
     case GL_FOG_COORD_ARRAY: return CA_FOG;
+    case GL_POINT_SIZE_ARRAY_APPLE: return CA_POINTSIZE;
     case GL_TEXTURE_COORD_ARRAY: return CA_TEX0 + std::min<int>(cs->clientActiveTexture, 7);
     case GL_INDEX_ARRAY: case GL_EDGE_FLAG_ARRAY: return -2;
     default: return -1;
@@ -1099,6 +1117,11 @@ API void APIENTRY glNormalPointer(GLenum type, GLsizei stride, const void* ptr) 
 API void APIENTRY glColorPointer(GLint size, GLenum type, GLsizei stride, const void* ptr) { MGL_CTX(); setArray(ctx, CA_COLOR, size, type, stride, ptr); }
 API void APIENTRY glSecondaryColorPointer(GLint size, GLenum type, GLsizei stride, const void* ptr) { MGL_CTX(); setArray(ctx, CA_SECONDARY, size, type, stride, ptr); }
 API void APIENTRY glFogCoordPointer(GLenum type, GLsizei stride, const void* ptr) { MGL_CTX(); setArray(ctx, CA_FOG, 1, type, stride, ptr); }
+// GL_APPLE_vertex_point_size
+API void APIENTRY glPointSizePointerAPPLE(GLenum type, GLsizei stride, const void* ptr) {
+    MGL_CTX();
+    setArray(ctx, CA_POINTSIZE, 1, type, stride, ptr);
+}
 API void APIENTRY glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const void* ptr) {
     MGL_CTX();
     setArray(ctx, CA_TEX0 + std::min<int>(compat(ctx)->clientActiveTexture, 7), size, type, stride, ptr);
@@ -1425,6 +1448,7 @@ static std::string ffKey(Context* ctx, CompatState* cs, bool* usedUnits) {
     if (cs->fog) add(cs->fogCoordSrc == GL_FOG_COORD);
     add(cs->colorSum);
     add(cs->pointSprite);
+    add(cs->vertexPointSize);
     for (int u = 0; u < 8; u++) {
         uint32_t e = cs->texEnabled[u];
         int target = e & 8 ? 8 : e & 4 ? 4 : e & 16 ? 16 : e & 2 ? 2 : e & 1 ? 1 : 0;
@@ -1520,7 +1544,9 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
         if (targets[u]) fs += "uniform " + glslTexType(targets[u]) + " tex" + std::to_string(u) + ";\n";
     }
     // --- vertex ---
+    if (cs->vertexPointSize) vs += "attribute float mgl_PointSizeAPPLE;\n";
     vs += "void main() {\n  vec4 eye = gl_ModelViewMatrix * gl_Vertex;\n  gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n";
+    if (cs->vertexPointSize) vs += "  gl_PointSize = mgl_PointSizeAPPLE;\n";
     vs += "  gl_ClipVertex = eye;\n";
     if (cs->lighting) {
         vs += "  vec3 N = gl_NormalMatrix * gl_Normal;\n";
@@ -1870,7 +1896,8 @@ static void bindCompatAttribs(Context* ctx, CompatState* cs, ProgramObj* p) {
     VertexArray* vao = ctx->vao.get();
     bool isDefault = vao == ctx->defaultVao.get();
     for (const auto& a : p->refl.attributes) {
-        if (a.name.compare(0, 3, "gl_") != 0 || a.location < 0 || a.location >= kMaxVertexAttribs) continue;
+        if ((a.name.compare(0, 3, "gl_") != 0 && a.name != kAttrNames[CA_POINTSIZE]) || a.location < 0 || a.location >= kMaxVertexAttribs)
+            continue;
         int idx = -1;
         for (int k = 0; k < CA_COUNT; k++)
             if (a.name == kAttrNames[k]) idx = k;
@@ -1914,6 +1941,7 @@ static void bindCompatAttribs(Context* ctx, CompatState* cs, ProgramObj* p) {
 
 ProgramObj* mglCompatPrepareDraw(Context* ctx, ProgramObj* prog) {
     CompatState* cs = compat(ctx);
+    const bool userProg = prog != nullptr;
     if (!prog) {
         bool units[8] = {};
         std::string key = ffKey(ctx, cs, units);
@@ -1922,6 +1950,8 @@ ProgramObj* mglCompatPrepareDraw(Context* ctx, ProgramObj* prog) {
         prog = it->second.get();
         if (!prog) return nullptr;
     }
+    // GL_APPLE_vertex_point_size: fixed-function programs then write gl_PointSize, which the draw must use.
+    ctx->compatVertexPointSize = !userProg && cs->vertexPointSize;
     feedUniforms(ctx, cs, prog);
     bindCompatAttribs(ctx, cs, prog);
     // alpha test (applied in compat fragment shaders via MGLSys)
@@ -1946,7 +1976,7 @@ static void drawImmediate(Context* ctx, GLenum mode, const std::vector<ImmVertex
     for (int i = 0; i < CA_COUNT; i++) {
         ClientArray& a = cs->arrays[i];
         a.enabled = true;
-        a.size = i == CA_NORMAL ? 3 : i == CA_FOG ? 1 : 4;
+        a.size = i == CA_NORMAL ? 3 : i == CA_FOG || i == CA_POINTSIZE ? 1 : 4;
         a.type = GL_FLOAT;
         a.stride = sizeof(ImmVertex);
         a.pointer = verts[0].v[i];
@@ -1970,6 +2000,7 @@ bool mglCompatGetPointer(Context* ctx, GLenum pname, void** out) {
     case GL_FOG_COORD_ARRAY_POINTER: *out = (void*)cs->arrays[CA_FOG].pointer; return true;
     case GL_TEXTURE_COORD_ARRAY_POINTER: *out = (void*)cs->arrays[CA_TEX0 + std::min<int>(cs->clientActiveTexture, 7)].pointer; return true;
     case GL_ELEMENT_ARRAY_POINTER_APPLE: *out = (void*)cs->elementArrayPointer; return true;
+    case GL_POINT_SIZE_ARRAY_POINTER_APPLE: *out = (void*)cs->arrays[CA_POINTSIZE].pointer; return true;
     default: return false;
     }
 }
