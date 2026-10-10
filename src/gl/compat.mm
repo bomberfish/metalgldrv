@@ -1068,6 +1068,36 @@ API void APIENTRY glTexGenfv(GLenum coord, GLenum pname, const GLfloat* params) 
     }
 }
 API void APIENTRY glTexGenf(GLenum coord, GLenum pname, GLfloat param) { glTexGenfv(coord, pname, &param); }
+static void getTexGen(Context* ctx, GLenum coord, GLenum pname, double* out) {
+    if (coord < GL_S || coord > GL_Q) return ctx->setError(GL_INVALID_ENUM);
+    const TexGen& g = compat(ctx)->texGen[std::min<int>(ctx->activeTexture, 7)];
+    int c = coord - GL_S;
+    switch (pname) {
+    case GL_TEXTURE_GEN_MODE: out[0] = g.mode[c]; break;
+    case GL_OBJECT_PLANE: for (int k = 0; k < 4; k++) out[k] = g.objPlane[c][k]; break;
+    case GL_EYE_PLANE: for (int k = 0; k < 4; k++) out[k] = g.eyePlane[c][k]; break;
+    default: ctx->setError(GL_INVALID_ENUM);
+    }
+}
+API void APIENTRY glGetTexGendv(GLenum coord, GLenum pname, GLdouble* params) {
+    MGL_CTX();
+    double v[4] = {};
+    getTexGen(ctx, coord, pname, v);
+    for (int k = 0; k < (pname == GL_TEXTURE_GEN_MODE ? 1 : 4); k++) params[k] = v[k];
+}
+API void APIENTRY glGetTexGenfv(GLenum coord, GLenum pname, GLfloat* params) {
+    MGL_CTX();
+    double v[4] = {};
+    getTexGen(ctx, coord, pname, v);
+    for (int k = 0; k < (pname == GL_TEXTURE_GEN_MODE ? 1 : 4); k++) params[k] = (GLfloat)v[k];
+}
+API void APIENTRY glGetTexGeniv(GLenum coord, GLenum pname, GLint* params) {
+    MGL_CTX();
+    double v[4] = {};
+    getTexGen(ctx, coord, pname, v);
+    for (int k = 0; k < (pname == GL_TEXTURE_GEN_MODE ? 1 : 4); k++) params[k] = (GLint)lround(v[k]);
+}
+
 API void APIENTRY glTexGeni(GLenum coord, GLenum pname, GLint param) {
     float f = (float)param;
     glTexGenfv(coord, pname, &f);

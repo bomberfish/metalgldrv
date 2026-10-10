@@ -707,3 +707,16 @@ TEST(compat_ati_texture_mirror_once) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_NV_texgen_reflection: REFLECTION_MAP_NV / NORMAL_MAP_NV texgen modes. A normal facing the viewer
+// reflects straight back: NORMAL_MAP gives (0, 0, 1), REFLECTION_MAP (0, 0, 1) too (the eye looks down -Z).
+TEST(compat_nv_texgen_reflection) {
+    glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, 0x8512 /* GL_REFLECTION_MAP_NV */);
+    glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, 0x8511 /* GL_NORMAL_MAP_NV */);
+    GLint m = 0;
+    glGetTexGeniv(GL_S, GL_TEXTURE_GEN_MODE, &m);
+    CHECK_EQ(m, 0x8512);
+    glGetTexGeniv(GL_T, GL_TEXTURE_GEN_MODE, &m);
+    CHECK_EQ(m, 0x8511);
+    CHECK_GL();
+}
