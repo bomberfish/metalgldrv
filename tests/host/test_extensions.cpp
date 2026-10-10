@@ -752,3 +752,17 @@ TEST(nv_packed_depth_stencil) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_EXT_texture_cube_map: the ARB / core cube map enums.
+TEST(ext_texture_cube_map) {
+    CHECK(hasExtension("GL_EXT_texture_cube_map"));
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(0x8513 /* GL_TEXTURE_CUBE_MAP_EXT */, tex);
+    for (int f = 0; f < 6; f++) glTexImage2D(0x8515 /* POSITIVE_X_EXT */ + f, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    GLint b = 0;
+    glGetIntegerv(0x8514 /* GL_TEXTURE_BINDING_CUBE_MAP_EXT */, &b);
+    CHECK_EQ(b, (GLint)tex);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
