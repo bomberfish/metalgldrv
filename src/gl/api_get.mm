@@ -64,7 +64,7 @@ const char* kExtensions[] = {
     "GL_EXT_transform_feedback", "GL_EXT_vertex_array_bgra", "GL_IBM_texture_mirrored_repeat", "GL_KHR_context_flush_control",
     "GL_KHR_debug", "GL_KHR_no_error", "GL_KHR_parallel_shader_compile", "GL_KHR_robust_buffer_access_behavior",
     "GL_KHR_robustness", "GL_KHR_shader_subgroup", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
-    "GL_NV_depth_clamp", "GL_NV_fence", "GL_NV_occlusion_query", "GL_NV_primitive_restart", "GL_NV_texgen_reflection", "GL_NV_shader_subgroup_partitioned", "GL_NV_texture_barrier",
+    "GL_NV_depth_clamp", "GL_NV_fence", "GL_NV_occlusion_query", "GL_NV_primitive_restart", "GL_NV_texgen_reflection", "GL_NV_texture_rectangle", "GL_NV_shader_subgroup_partitioned", "GL_NV_texture_barrier",
     "GL_ATI_draw_buffers", "GL_ATI_meminfo", "GL_ATI_separate_stencil", "GL_ATI_texture_float", "GL_ATI_texture_mirror_once", "GL_NVX_gpu_memory_info",
 };
 struct DeviceExtension {

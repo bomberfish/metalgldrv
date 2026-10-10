@@ -723,3 +723,17 @@ TEST(ati_draw_buffers) {
     glDeleteTextures(2, tex);
     CHECK_GL();
 }
+
+// GL_NV_texture_rectangle: TEXTURE_RECTANGLE_NV is TEXTURE_RECTANGLE.
+TEST(nv_texture_rectangle) {
+    CHECK(hasExtension("GL_NV_texture_rectangle"));
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(0x84F5 /* GL_TEXTURE_RECTANGLE_NV */, tex);
+    glTexImage2D(0x84F5, 0, GL_RGBA8, 3, 5, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    GLint w = 0;
+    glGetTexLevelParameteriv(0x84F5, 0, GL_TEXTURE_WIDTH, &w);
+    CHECK_EQ(w, 3);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
