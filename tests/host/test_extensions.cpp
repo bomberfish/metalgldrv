@@ -511,3 +511,28 @@ TEST(apple_client_storage) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_APPLE_texture_range: the range and the storage hint are recorded per texture.
+TEST(apple_texture_range) {
+    CHECK(hasExtension("GL_APPLE_texture_range"));
+    auto range = (void (*)(GLenum, GLsizei, const void*))eglGetProcAddress("glTextureRangeAPPLE");
+    auto getPtr = (void (*)(GLenum, GLenum, void**))eglGetProcAddress("glGetTexParameterPointervAPPLE");
+    const GLenum RANGE_LENGTH = 0x85B7, RANGE_POINTER = 0x85B8, STORAGE_HINT = 0x85BC, STORAGE_CACHED = 0x85BE;
+    static uint8_t mem[4096];
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    range(GL_TEXTURE_2D, sizeof mem, mem);
+    glTexParameteri(GL_TEXTURE_2D, STORAGE_HINT, STORAGE_CACHED);
+    GLint v = 0;
+    glGetTexParameteriv(GL_TEXTURE_2D, RANGE_LENGTH, &v);
+    CHECK_EQ(v, (GLint)sizeof mem);
+    glGetTexParameteriv(GL_TEXTURE_2D, STORAGE_HINT, &v);
+    CHECK_EQ(v, (GLint)STORAGE_CACHED);
+    void* p = nullptr;
+    getPtr(GL_TEXTURE_2D, RANGE_POINTER, &p);
+    CHECK(p == mem);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, mem);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}

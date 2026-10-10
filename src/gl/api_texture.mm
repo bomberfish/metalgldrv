@@ -781,6 +781,10 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
         if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM);
         t->generateMipmapHint = v[0] != 0;
         break;
+    case GL_TEXTURE_STORAGE_HINT_APPLE:
+        if (e != GL_STORAGE_PRIVATE_APPLE && e != GL_STORAGE_CACHED_APPLE && e != GL_STORAGE_SHARED_APPLE) return ctx->setError(GL_INVALID_ENUM);
+        t->appleStorageHint = e;
+        break;
     case GL_TEXTURE_PRIORITY: case GL_DEPTH_TEXTURE_MODE: case GL_TEXTURE_COMPARE_FAIL_VALUE_ARB:
         if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM);
         break;
@@ -886,6 +890,8 @@ static bool getTexParam(Context* ctx, Texture* t, GLenum pname, double* out, int
     case GL_TEXTURE_TARGET: out[0] = t->target; return true;
     case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE: out[0] = GL_IMAGE_FORMAT_COMPATIBILITY_BY_SIZE; return true;
     case GL_GENERATE_MIPMAP: out[0] = t->generateMipmapHint; return !ctx->coreProfile;
+    case GL_TEXTURE_STORAGE_HINT_APPLE: out[0] = t->appleStorageHint; return true;
+    case GL_TEXTURE_RANGE_LENGTH_APPLE: out[0] = t->appleRangeLength; return true;
     case GL_TEXTURE_RESIDENT: out[0] = 1; return !ctx->coreProfile;
     case GL_TEXTURE_PRIORITY: out[0] = 1; return !ctx->coreProfile;
     case GL_DEPTH_TEXTURE_MODE: out[0] = GL_LUMINANCE; return !ctx->coreProfile;
@@ -2342,4 +2348,22 @@ API void APIENTRY glGetSamplerParameterIuiv(GLuint sampler, GLenum pname, GLuint
     int n;
     if (!getSamplerParam(ctx, sampler, pname, v, &n)) return;
     for (int k = 0; k < n; k++) params[k] = (GLuint)v[k];
+}
+
+// --- GL_APPLE_texture_range: the client memory range for client-storage textures (a hint: uploads copy) ---
+API void APIENTRY glTextureRangeAPPLE(GLenum target, GLsizei length, const void* pointer) {
+    MGL_CTX();
+    if (length < 0) return ctx->setError(GL_INVALID_VALUE);
+    Texture* t = paramTexForTarget(ctx, target);
+    if (!t) return;
+    t->appleRangeLength = length;
+    t->appleRangePointer = const_cast<void*>(pointer);
+}
+
+API void APIENTRY glGetTexParameterPointervAPPLE(GLenum target, GLenum pname, void** params) {
+    MGL_CTX();
+    if (pname != GL_TEXTURE_RANGE_POINTER_APPLE) return ctx->setError(GL_INVALID_ENUM);
+    Texture* t = paramTexForTarget(ctx, target);
+    if (!t) return;
+    *params = t->appleRangePointer;
 }

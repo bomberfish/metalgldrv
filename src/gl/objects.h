@@ -187,6 +187,11 @@ public:
     bool storageDirty = true;  // level specs changed -> (re)allocate and migrate
     bool needsShaderWrite = false;  // bound as an image -> storage needs ShaderWrite usage
     GLenum applePurgeable = 0;      // GL_APPLE_object_purgeable: VOLATILE_APPLE / RELEASED_APPLE while purgeable
+    // GL_APPLE_texture_range: where the app would like the storage (a hint; Metal storage stays private) and the
+    // client memory range it set aside for it.
+    GLenum appleStorageHint = GL_STORAGE_PRIVATE_APPLE;
+    GLsizei appleRangeLength = 0;
+    void* appleRangePointer = nullptr;
     // Data was uploaded or copied in, which GL keeps bit-exact: storage of the formats lossless compression
     // alters (losslessCompressionSafe) opts out of it from then on (requireBitExact). Render targets never
     // uploaded to keep it (SuperTuxKart's R11F_G11F_B10F light buffers).
