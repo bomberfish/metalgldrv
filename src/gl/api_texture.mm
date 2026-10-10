@@ -991,7 +991,10 @@ static bool getLevelParam(Context* ctx, Texture* t, int face, GLint level, GLenu
         return true;
     }
     case GL_TEXTURE_DEPTH_TYPE: *out = f && f->dBits ? (f->glType == GL_FLOAT ? GL_FLOAT : GL_UNSIGNED_NORMALIZED) : GL_NONE; return true;
-    case GL_TEXTURE_LUMINANCE_TYPE: case GL_TEXTURE_INTENSITY_TYPE: *out = GL_NONE; return true;
+    case GL_TEXTURE_LUMINANCE_TYPE:
+        *out = f && (f->baseFormat == GL_LUMINANCE || f->baseFormat == GL_LUMINANCE_ALPHA) ? f->glType : GL_NONE;
+        return true;
+    case GL_TEXTURE_INTENSITY_TYPE: *out = f && f->baseFormat == GL_INTENSITY ? f->glType : GL_NONE; return true;
     default: ctx->setError(GL_INVALID_ENUM); return false;
     }
 }

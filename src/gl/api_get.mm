@@ -11,7 +11,7 @@ using namespace mgl;
 namespace {
 
 const char* kExtensions[] = {
-    "GL_APPLE_element_array", "GL_APPLE_fence", "GL_APPLE_flush_buffer_range", "GL_APPLE_packed_pixels", "GL_APPLE_vertex_array_object", "GL_ARB_ES2_compatibility", "GL_ARB_ES3_compatibility", "GL_ARB_ES3_1_compatibility", "GL_ARB_arrays_of_arrays",
+    "GL_APPLE_element_array", "GL_APPLE_fence", "GL_APPLE_float_pixels", "GL_APPLE_flush_buffer_range", "GL_APPLE_packed_pixels", "GL_APPLE_vertex_array_object", "GL_ARB_ES2_compatibility", "GL_ARB_ES3_compatibility", "GL_ARB_ES3_1_compatibility", "GL_ARB_arrays_of_arrays",
     "GL_ARB_base_instance", "GL_ARB_blend_func_extended", "GL_ARB_buffer_storage", "GL_ARB_clear_buffer_object",
     "GL_ARB_clear_texture", "GL_ARB_clip_control", "GL_ARB_color_buffer_float", "GL_ARB_compressed_texture_pixel_storage",
     "GL_ARB_compute_shader", "GL_ARB_conditional_render_inverted", "GL_ARB_conservative_depth", "GL_ARB_copy_buffer",
@@ -453,6 +453,13 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_SAMPLES: {
         PassDesc p;
         v = I(ctx->resolvePass(p) && p.samples > 1 ? p.samples : 0);
+        return true;
+    }
+    case GL_COLOR_FLOAT_APPLE:  // APPLE_float_pixels / ARB_color_buffer_float: a floating-point color buffer
+    case GL_RGBA_FLOAT_MODE_ARB: {
+        PassDesc p;
+        const FormatInfo* f = ctx->resolvePass(p) && p.color[0].tex ? formatInfoForMTL(p.color[0].tex.pixelFormat) : nullptr;
+        v = B(f && f->kind == FmtKind::Float);
         return true;
     }
     case GL_DOUBLEBUFFER: v = B(true); return true;

@@ -98,6 +98,15 @@ static const FormatInfo kFormats[] = {
 {GL_LUMINANCE16_ALPHA16,    MTLPixelFormatRG16Unorm,               GL_LUMINANCE_ALPHA,    FmtKind::Unorm,   Comp::U16,   2, 4, 1, 1, 0, 1, 1, SWZ(Red, Red, Red, Green),    {0,3,1,2},16,16,16,16, 0, 0, UN},
 {GL_INTENSITY8,             MTLPixelFormatR8Unorm,                 GL_INTENSITY,          FmtKind::Unorm,   Comp::U8,    1, 1, 1, 1, 0, 1, 1, SWZ(Red, Red, Red, Red),      {0,1,2,3}, 8, 8, 8, 8, 0, 0, UN},
 {GL_INTENSITY16,            MTLPixelFormatR16Unorm,                GL_INTENSITY,          FmtKind::Unorm,   Comp::U16,   1, 2, 1, 1, 0, 1, 1, SWZ(Red, Red, Red, Red),      {0,1,2,3},16,16,16,16, 0, 0, UN},
+// ARB_texture_float / APPLE_float_pixels
+{GL_ALPHA16F_ARB,           MTLPixelFormatR16Float,                GL_ALPHA,              FmtKind::Float,   Comp::F16,   1, 2, 1, 1, 0, 1, 1, SWZ(Zero, Zero, Zero, Red),   {3,0,1,2}, 0, 0, 0,16, 0, 0, FL},
+{GL_ALPHA32F_ARB,           MTLPixelFormatR32Float,                GL_ALPHA,              FmtKind::Float,   Comp::F32,   1, 4, 1, 1, 0, 1, 1, SWZ(Zero, Zero, Zero, Red),   {3,0,1,2}, 0, 0, 0,32, 0, 0, FL},
+{GL_LUMINANCE16F_ARB,       MTLPixelFormatR16Float,                GL_LUMINANCE,          FmtKind::Float,   Comp::F16,   1, 2, 1, 1, 0, 1, 1, SWZ(Red, Red, Red, One),      {0,1,2,3},16,16,16, 0, 0, 0, FL},
+{GL_LUMINANCE32F_ARB,       MTLPixelFormatR32Float,                GL_LUMINANCE,          FmtKind::Float,   Comp::F32,   1, 4, 1, 1, 0, 1, 1, SWZ(Red, Red, Red, One),      {0,1,2,3},32,32,32, 0, 0, 0, FL},
+{GL_LUMINANCE_ALPHA16F_ARB, MTLPixelFormatRG16Float,               GL_LUMINANCE_ALPHA,    FmtKind::Float,   Comp::F16,   2, 4, 1, 1, 0, 1, 1, SWZ(Red, Red, Red, Green),    {0,3,1,2},16,16,16,16, 0, 0, FL},
+{GL_LUMINANCE_ALPHA32F_ARB, MTLPixelFormatRG32Float,               GL_LUMINANCE_ALPHA,    FmtKind::Float,   Comp::F32,   2, 8, 1, 1, 0, 1, 1, SWZ(Red, Red, Red, Green),    {0,3,1,2},32,32,32,32, 0, 0, FL},
+{GL_INTENSITY16F_ARB,       MTLPixelFormatR16Float,                GL_INTENSITY,          FmtKind::Float,   Comp::F16,   1, 2, 1, 1, 0, 1, 1, SWZ(Red, Red, Red, Red),      {0,1,2,3},16,16,16,16, 0, 0, FL},
+{GL_INTENSITY32F_ARB,       MTLPixelFormatR32Float,                GL_INTENSITY,          FmtKind::Float,   Comp::F32,   1, 4, 1, 1, 0, 1, 1, SWZ(Red, Red, Red, Red),      {0,1,2,3},32,32,32,32, 0, 0, FL},
 // compressed
 {GL_COMPRESSED_RGB_S3TC_DXT1_EXT,       MTLPixelFormatBC1_RGBA,         GL_RGB,  FmtKind::Unorm, Comp::Compressed, 4,  8, 4, 4, 0, 0, 1, RGB1, {0,1,2,3}, 0,0,0,0,0,0, UN},
 {GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,      MTLPixelFormatBC1_RGBA,         GL_RGBA, FmtKind::Unorm, Comp::Compressed, 4,  8, 4, 4, 0, 0, 1, IDENT,{0,1,2,3}, 0,0,0,0,0,0, UN},

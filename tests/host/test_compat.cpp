@@ -179,3 +179,30 @@ TEST(compat_apple_element_array) {
     glDisableClientState(GL_VERTEX_ARRAY);
     CHECK_GL();
 }
+
+// GL_APPLE_float_pixels / ARB_texture_float legacy formats: luminance-alpha and intensity floats keep values above 1.
+TEST(compat_apple_float_pixels) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    float la[2] = {2.5f, 0.25f};
+    glTexImage2D(GL_TEXTURE_2D, 0, 0x8819 /* GL_LUMINANCE_ALPHA_FLOAT32_APPLE */, 1, 1, 0, GL_LUMINANCE_ALPHA, GL_FLOAT, la);
+    CHECK_GL();
+    GLint fmt = 0, type = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &fmt);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_LUMINANCE_TYPE, &type);
+    CHECK_EQ(fmt, 0x8819);
+    CHECK_EQ(type, GL_FLOAT);
+    float out[4] = {};
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, out);
+    CHECK(out[0] == 2.5f && out[1] == 2.5f && out[2] == 2.5f && out[3] == 0.25f);
+    uint16_t half = 0x4500;  // 5.0
+    glTexImage2D(GL_TEXTURE_2D, 0, 0x881D /* GL_INTENSITY_FLOAT16_APPLE */, 1, 1, 0, GL_LUMINANCE, 0x140B /* GL_HALF_APPLE */, &half);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, out);
+    CHECK(out[0] == 5.0f && out[3] == 5.0f);
+    GLboolean isFloat = GL_TRUE;
+    glGetBooleanv(0x8A0F /* GL_COLOR_FLOAT_APPLE */, &isFloat);
+    CHECK(!isFloat);  // the RGBA8 window surface
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
