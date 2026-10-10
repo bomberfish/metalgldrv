@@ -972,3 +972,8 @@ API void APIENTRY glStencilFuncSeparateATI(GLenum frontfunc, GLenum backfunc, GL
     glStencilFuncSeparate(GL_FRONT, frontfunc, ref, mask);
     glStencilFuncSeparate(GL_BACK, backfunc, ref, mask);
 }
+
+// GL_EXT_polygon_offset: the bias is in depth units (a fraction of the depth range) rather than core's
+// multiples of the minimum resolvable difference, which is 2^-24 for the 24-bit depth buffers its users had.
+// POLYGON_OFFSET_EXT is POLYGON_OFFSET_FILL.
+API void APIENTRY glPolygonOffsetEXT(GLfloat factor, GLfloat bias) { glPolygonOffset(factor, bias * 16777216.0f); }

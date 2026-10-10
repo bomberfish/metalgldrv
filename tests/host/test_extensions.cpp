@@ -782,3 +782,19 @@ TEST(ext_texture_object) {
     CHECK(!isTex(t));
     CHECK_GL();
 }
+
+// GL_EXT_polygon_offset: bias in depth units.
+TEST(ext_polygon_offset) {
+    CHECK(hasExtension("GL_EXT_polygon_offset"));
+    auto offsetEXT = (void (*)(GLfloat, GLfloat))eglGetProcAddress("glPolygonOffsetEXT");
+    offsetEXT(1.5f, 0.001f);
+    GLfloat f = 0, units = 0, bias = 0;
+    glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &f);
+    glGetFloatv(GL_POLYGON_OFFSET_UNITS, &units);
+    glGetFloatv(0x8039 /* GL_POLYGON_OFFSET_BIAS_EXT */, &bias);
+    CHECK(f == 1.5f);
+    CHECK(fabsf(units - 16777.216f) < 0.01f);
+    CHECK(fabsf(bias - 0.001f) < 1e-6f);
+    glPolygonOffset(0, 0);
+    CHECK_GL();
+}
