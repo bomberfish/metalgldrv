@@ -737,3 +737,18 @@ TEST(nv_texture_rectangle) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_NV_packed_depth_stencil: DEPTH_STENCIL_NV / UNSIGNED_INT_24_8_NV are the EXT / core values.
+TEST(nv_packed_depth_stencil) {
+    CHECK(hasExtension("GL_NV_packed_depth_stencil"));
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    uint32_t d[4] = {0xFFFFFF01, 0xFFFFFF01, 0xFFFFFF01, 0xFFFFFF01};
+    glTexImage2D(GL_TEXTURE_2D, 0, 0x84F9 /* GL_DEPTH_STENCIL_NV */, 2, 2, 0, 0x84F9, 0x84FA /* GL_UNSIGNED_INT_24_8_NV */, d);
+    GLint f = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_STENCIL_SIZE, &f);
+    CHECK_EQ(f, 8);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
