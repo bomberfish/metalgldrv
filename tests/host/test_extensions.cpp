@@ -766,3 +766,19 @@ TEST(ext_texture_cube_map) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_EXT_texture_object
+TEST(ext_texture_object) {
+    CHECK(hasExtension("GL_EXT_texture_object"));
+    auto gen = (void (*)(GLsizei, GLuint*))eglGetProcAddress("glGenTexturesEXT");
+    auto bind = (void (*)(GLenum, GLuint))eglGetProcAddress("glBindTextureEXT");
+    auto isTex = (GLboolean(*)(GLuint))eglGetProcAddress("glIsTextureEXT");
+    auto del = (void (*)(GLsizei, const GLuint*))eglGetProcAddress("glDeleteTexturesEXT");
+    GLuint t = 0;
+    gen(1, &t);
+    bind(GL_TEXTURE_2D, t);
+    CHECK(isTex(t));
+    del(1, &t);
+    CHECK(!isTex(t));
+    CHECK_GL();
+}
