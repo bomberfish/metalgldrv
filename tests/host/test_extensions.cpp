@@ -874,3 +874,19 @@ TEST(ext_debug_label) {
     glDeleteBuffers(1, &b);
     CHECK_GL();
 }
+
+// GL_EXT_debug_marker
+TEST(ext_debug_marker) {
+    CHECK(hasExtension("GL_EXT_debug_marker"));
+    auto insert = (void (*)(GLsizei, const char*))eglGetProcAddress("glInsertEventMarkerEXT");
+    auto push = (void (*)(GLsizei, const char*))eglGetProcAddress("glPushGroupMarkerEXT");
+    auto pop = (void (*)())eglGetProcAddress("glPopGroupMarkerEXT");
+    push(0, "frame");
+    insert(0, "draw");
+    GLint depth = 0;
+    glGetIntegerv(GL_DEBUG_GROUP_STACK_DEPTH, &depth);
+    CHECK_EQ(depth, 2);
+    pop();
+    pop();  // ignored
+    CHECK_GL();
+}

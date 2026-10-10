@@ -481,3 +481,22 @@ API void APIENTRY glGetObjectLabelEXT(GLenum type, GLuint object, GLsizei bufSiz
     if (!id) return ctx->setError(GL_INVALID_ENUM);
     glGetObjectLabel(id, object, bufSize, length, label);
 }
+
+// --- GL_EXT_debug_marker: annotations as KHR_debug groups and markers ---
+API void APIENTRY glInsertEventMarkerEXT(GLsizei length, const GLchar* marker) {
+    MGL_CTX();
+    if (!marker) return;
+    glDebugMessageInsert(GL_DEBUG_SOURCE_APPLICATION, GL_DEBUG_TYPE_MARKER, 0, GL_DEBUG_SEVERITY_NOTIFICATION, length == 0 ? -1 : length,
+                         marker);
+}
+API void APIENTRY glPushGroupMarkerEXT(GLsizei length, const GLchar* marker) {
+    MGL_CTX();
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, length == 0 ? -1 : length, marker ? marker : "");
+    ctx->extMarkerDepth++;
+}
+API void APIENTRY glPopGroupMarkerEXT(void) {
+    MGL_CTX();
+    if (ctx->extMarkerDepth <= 0) return;  // unbalanced pops are ignored, not errors
+    ctx->extMarkerDepth--;
+    glPopDebugGroup();
+}
