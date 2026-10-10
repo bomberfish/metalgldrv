@@ -392,3 +392,39 @@ TEST(apple_packed_pixels) {
     glDeleteTextures(1, &tex);
     CHECK_GL();
 }
+
+// GL_APPLE_row_bytes: row strides in bytes for uploads and readbacks, overriding row length and alignment.
+TEST(apple_row_bytes) {
+    CHECK(hasExtension("GL_APPLE_row_bytes"));
+    const GLenum UNPACK_ROW_BYTES = 0x8A16, PACK_ROW_BYTES = 0x8A15;
+    // 2x2 RGBA8 with a 12-byte stride (4 bytes of padding per row)
+    uint8_t src[24] = {1, 2, 3, 4, 5, 6, 7, 8, 0xEE, 0xEE, 0xEE, 0xEE, 9, 10, 11, 12, 13, 14, 15, 16, 0xEE, 0xEE, 0xEE, 0xEE};
+    GLuint tex, fbo;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 7);  // ignored while ROW_BYTES is set
+    glPixelStorei(UNPACK_ROW_BYTES, 12);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+    glPixelStorei(UNPACK_ROW_BYTES, 0);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    GLint v = -1;
+    glGetIntegerv(UNPACK_ROW_BYTES, &v);
+    CHECK_EQ(v, 0);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    uint8_t out[32];
+    memset(out, 0xAA, sizeof out);
+    glPixelStorei(PACK_ROW_BYTES, 16);
+    glReadPixels(0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, out);
+    glPixelStorei(PACK_ROW_BYTES, 0);
+    CHECK_EQ(out[0], 1);
+    CHECK_EQ(out[7], 8);
+    CHECK_EQ(out[8], 0xAA);  // padding untouched
+    CHECK_EQ(out[16], 9);
+    CHECK_EQ(out[23], 16);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}

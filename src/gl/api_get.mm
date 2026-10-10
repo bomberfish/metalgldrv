@@ -11,7 +11,7 @@ using namespace mgl;
 namespace {
 
 const char* kExtensions[] = {
-    "GL_APPLE_element_array", "GL_APPLE_fence", "GL_APPLE_float_pixels", "GL_APPLE_flush_buffer_range", "GL_APPLE_packed_pixels", "GL_APPLE_vertex_array_object", "GL_ARB_ES2_compatibility", "GL_ARB_ES3_compatibility", "GL_ARB_ES3_1_compatibility", "GL_ARB_arrays_of_arrays",
+    "GL_APPLE_element_array", "GL_APPLE_fence", "GL_APPLE_float_pixels", "GL_APPLE_flush_buffer_range", "GL_APPLE_packed_pixels", "GL_APPLE_row_bytes", "GL_APPLE_vertex_array_object", "GL_ARB_ES2_compatibility", "GL_ARB_ES3_compatibility", "GL_ARB_ES3_1_compatibility", "GL_ARB_arrays_of_arrays",
     "GL_ARB_base_instance", "GL_ARB_blend_func_extended", "GL_ARB_buffer_storage", "GL_ARB_clear_buffer_object",
     "GL_ARB_clear_texture", "GL_ARB_clip_control", "GL_ARB_color_buffer_float", "GL_ARB_compressed_texture_pixel_storage",
     "GL_ARB_compute_shader", "GL_ARB_conditional_render_inverted", "GL_ARB_conservative_depth", "GL_ARB_copy_buffer",
@@ -635,6 +635,8 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_PACK_SWAP_BYTES: v = B(ctx->pack.swapBytes); return true;
     case GL_PACK_LSB_FIRST: v = B(ctx->pack.lsbFirst); return true;
     case GL_PACK_ROW_LENGTH: v = I(ctx->pack.rowLength); return true;
+    case GL_PACK_ROW_BYTES_APPLE: v = I(ctx->pack.rowBytes); return true;
+    case GL_UNPACK_ROW_BYTES_APPLE: v = I(ctx->unpack.rowBytes); return true;
     case GL_PACK_IMAGE_HEIGHT: v = I(ctx->pack.imageHeight); return true;
     case GL_PACK_SKIP_ROWS: v = I(ctx->pack.skipRows); return true;
     case GL_PACK_SKIP_PIXELS: v = I(ctx->pack.skipPixels); return true;

@@ -639,6 +639,7 @@ API void APIENTRY glPixelStorei(GLenum pname, GLint param) {
     case GL_PACK_SWAP_BYTES: case GL_PACK_LSB_FIRST: case GL_PACK_ROW_LENGTH: case GL_PACK_IMAGE_HEIGHT: case GL_PACK_SKIP_ROWS:
     case GL_PACK_SKIP_PIXELS: case GL_PACK_SKIP_IMAGES: case GL_PACK_ALIGNMENT: case GL_PACK_COMPRESSED_BLOCK_WIDTH:
     case GL_PACK_COMPRESSED_BLOCK_HEIGHT: case GL_PACK_COMPRESSED_BLOCK_DEPTH: case GL_PACK_COMPRESSED_BLOCK_SIZE:
+    case GL_PACK_ROW_BYTES_APPLE:
         ps = &ctx->pack;
         break;
     default: ps = &ctx->unpack; break;
@@ -648,6 +649,7 @@ API void APIENTRY glPixelStorei(GLenum pname, GLint param) {
     case GL_PACK_SWAP_BYTES: case GL_UNPACK_SWAP_BYTES: ps->swapBytes = param; break;
     case GL_PACK_LSB_FIRST: case GL_UNPACK_LSB_FIRST: ps->lsbFirst = param; break;
     case GL_PACK_ROW_LENGTH: case GL_UNPACK_ROW_LENGTH: ps->rowLength = param; break;
+    case GL_PACK_ROW_BYTES_APPLE: case GL_UNPACK_ROW_BYTES_APPLE: ps->rowBytes = param; break;
     case GL_PACK_IMAGE_HEIGHT: case GL_UNPACK_IMAGE_HEIGHT: ps->imageHeight = param; break;
     case GL_PACK_SKIP_ROWS: case GL_UNPACK_SKIP_ROWS: ps->skipRows = param; break;
     case GL_PACK_SKIP_PIXELS: case GL_UNPACK_SKIP_PIXELS: ps->skipPixels = param; break;

@@ -409,6 +409,7 @@ ClientLayout clientLayout(GLenum format, GLenum type, int width, int height, con
     int elemSize = packedSize(type, pc) ? (int)l.pixelSize : std::max(1, typeSize(type));
     size_t align = ps.alignment;
     if (elemSize < (int)align) rowBytes = (rowBytes + align - 1) / align * align;
+    if (ps.rowBytes > 0) rowBytes = (size_t)ps.rowBytes;
     l.rowStride = rowBytes;
     int imgRows = ps.imageHeight > 0 ? ps.imageHeight : height;
     l.imageStride = rowBytes * imgRows;
