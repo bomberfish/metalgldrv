@@ -198,6 +198,13 @@ struct mgl::CompatState {
 
     ClientArray arrays[CA_COUNT];
     GLuint clientActiveTexture = 0;
+    // raster position (window coordinates) and the values it carries; pixel zoom; internal objects for
+    // glBitmap / glDrawPixels / glCopyPixels (created on first use)
+    float rasterPos[4] = {0, 0, 0, 1}, rasterColor[4] = {1, 1, 1, 1}, rasterSecondary[4] = {0, 0, 0, 1}, rasterTex[4] = {0, 0, 0, 1};
+    float rasterDistance = 0, zoomX = 1, zoomY = 1;
+    bool rasterValid = true, rasterUnclippedIBM = false;
+    GLuint metaProg = 0, metaVao = 0, metaVbo = 0, metaTex = 0;
+    GLint metaColorLoc = -1, metaModeLoc = -1;
     // evaluators
     EvalMap map1[kEvalTargets], map2[kEvalTargets];
     bool map1Enabled[kEvalTargets] = {}, map2Enabled[kEvalTargets] = {}, autoNormal = false;
@@ -440,6 +447,19 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
     case GL_CURRENT_FOG_COORD: return one(cs->current[CA_FOG][0], true);
     case GL_SHADE_MODEL: return one(cs->shadeModel, false);
     case GL_MAX_EVAL_ORDER: return one(kMaxEvalOrder, false);
+    case GL_CURRENT_RASTER_POSITION: return vec(cs->rasterPos, 4);
+    case GL_CURRENT_RASTER_POSITION_VALID: {
+        out[0] = cs->rasterValid;
+        *n = 1;
+        *isFloat = false;
+        return true;
+    }
+    case GL_CURRENT_RASTER_COLOR: return vec(cs->rasterColor, 4);
+    case GL_CURRENT_RASTER_SECONDARY_COLOR: return vec(cs->rasterSecondary, 4);
+    case GL_CURRENT_RASTER_TEXTURE_COORDS: return vec(cs->rasterTex, 4);
+    case GL_CURRENT_RASTER_DISTANCE: return one(cs->rasterDistance, true);
+    case GL_ZOOM_X: return one(cs->zoomX, true);
+    case GL_ZOOM_Y: return one(cs->zoomY, true);
     case GL_MAX_SHININESS_NV: case GL_MAX_SPOT_EXPONENT_NV: return one(kMaxLightExponent, true);
     case GL_MAP1_GRID_SEGMENTS: return one(cs->grid1N, false);
     case GL_MAP1_GRID_DOMAIN: return vec(cs->grid1U, 2);
@@ -1194,17 +1214,6 @@ API void APIENTRY glClearAccum(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {}
 API void APIENTRY glClearIndex(GLfloat c) {}
 API void APIENTRY glPixelTransferf(GLenum pname, GLfloat param) {}
 API void APIENTRY glPixelTransferi(GLenum pname, GLint param) {}
-API void APIENTRY glPixelZoom(GLfloat xfactor, GLfloat yfactor) {}
-API void APIENTRY glRasterPos2f(GLfloat x, GLfloat y) {}
-API void APIENTRY glRasterPos2i(GLint x, GLint y) {}
-API void APIENTRY glRasterPos3f(GLfloat x, GLfloat y, GLfloat z) {}
-API void APIENTRY glWindowPos2i(GLint x, GLint y) {}
-API void APIENTRY glBitmap(GLsizei w, GLsizei h, GLfloat xo, GLfloat yo, GLfloat xm, GLfloat ym, const GLubyte* bitmap) {}
-API void APIENTRY glDrawPixels(GLsizei w, GLsizei h, GLenum format, GLenum type, const void* pixels) {
-    static bool warned = false;
-    if (!warned) MGL_WARN("glDrawPixels not implemented");
-    warned = true;
-}
 API void APIENTRY glPrioritizeTextures(GLsizei n, const GLuint* textures, const GLfloat* priorities) {}
 API GLboolean APIENTRY glAreTexturesResident(GLsizei n, const GLuint* textures, GLboolean* residences) {
     for (int i = 0; i < n; i++) residences[i] = GL_TRUE;
@@ -3243,3 +3252,321 @@ API void APIENTRY glGetMaterialiv(GLenum face, GLenum pname, GLint* params) {
     int n = getMaterial(ctx, face, pname, v);
     for (int k = 0; k < n; k++) params[k] = pname == GL_SHININESS ? (GLint)lroundf(v[k]) : (GLint)lround(std::clamp(v[k], -1.0f, 1.0f) * 2147483647.0);
 }
+
+// ---------------------------------------------------------------------------
+// Raster position, glBitmap, glDrawPixels, glCopyPixels (GL 4.6 compatibility §14.7, §18.1)
+// ---------------------------------------------------------------------------
+static void setRasterFromCurrent(CompatState* cs) {
+    memcpy(cs->rasterColor, cs->current[CA_COLOR], 16);
+    memcpy(cs->rasterSecondary, cs->current[CA_SECONDARY], 16);
+    memcpy(cs->rasterTex, cs->current[CA_TEX0], 16);
+}
+
+static void rasterPos(Context* ctx, float x, float y, float z, float w) {
+    CompatState* cs = compat(ctx);
+    const Mat4& mv = cs->modelview.back();
+    const Mat4& pr = cs->projection.back();
+    float eye[4], clip[4];
+    for (int r = 0; r < 4; r++) eye[r] = mv.at(r, 0) * x + mv.at(r, 1) * y + mv.at(r, 2) * z + mv.at(r, 3) * w;
+    for (int r = 0; r < 4; r++) clip[r] = pr.at(r, 0) * eye[0] + pr.at(r, 1) * eye[1] + pr.at(r, 2) * eye[2] + pr.at(r, 3) * eye[3];
+    bool inside = clip[3] > 0;
+    for (int k = 0; k < 3 && inside; k++) inside = clip[k] >= -clip[3] && clip[k] <= clip[3];
+    // GL_IBM_rasterpos_clip: RASTER_POSITION_UNCLIPPED_IBM keeps positions outside the view volume (in front of the eye)
+    cs->rasterValid = inside || (cs->rasterUnclippedIBM && clip[3] > 0);
+    if (!cs->rasterValid) return;
+    const float* vp = ctx->viewport[0];
+    const float* dr = ctx->depthRange[0];
+    float nx = clip[0] / clip[3], ny = clip[1] / clip[3], nz = clip[2] / clip[3];
+    cs->rasterPos[0] = vp[0] + (nx + 1) * vp[2] / 2;
+    cs->rasterPos[1] = vp[1] + (ny + 1) * vp[3] / 2;
+    cs->rasterPos[2] = dr[0] + (nz + 1) / 2 * (dr[1] - dr[0]);
+    cs->rasterPos[3] = clip[3];
+    cs->rasterDistance = sqrtf(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]);
+    setRasterFromCurrent(cs);
+}
+
+static void windowPos(Context* ctx, float x, float y, float z) {
+    CompatState* cs = compat(ctx);
+    const float* dr = ctx->depthRange[0];
+    cs->rasterPos[0] = x;
+    cs->rasterPos[1] = y;
+    cs->rasterPos[2] = dr[0] + std::clamp(z, 0.0f, 1.0f) * (dr[1] - dr[0]);
+    cs->rasterPos[3] = 1;
+    cs->rasterValid = true;
+    cs->rasterDistance = 0;
+    setRasterFromCurrent(cs);
+}
+
+API void APIENTRY glRasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
+    MGL_CTX();
+    RECORD(rasterPos(ctx, x, y, z, w));
+    rasterPos(ctx, x, y, z, w);
+}
+API void APIENTRY glWindowPos3f(GLfloat x, GLfloat y, GLfloat z) {
+    MGL_CTX();
+    RECORD(windowPos(ctx, x, y, z));
+    windowPos(ctx, x, y, z);
+}
+API void APIENTRY glPixelZoom(GLfloat xfactor, GLfloat yfactor) {
+    MGL_CTX();
+    RECORD(glPixelZoom(xfactor, yfactor));
+    compat(ctx)->zoomX = xfactor;
+    compat(ctx)->zoomY = yfactor;
+}
+
+// The internal program and objects that draw rectangles of pixels at window coordinates. Rendering state
+// (depth / stencil tests, blending, alpha test, scissor, write masks) applies; the app's bindings and program
+// are restored afterwards.
+static bool metaEnsure(Context* ctx) {
+    CompatState* cs = compat(ctx);
+    if (cs->metaProg) return true;
+    const char* vs = "#version 330 core\nlayout(location = 0) in vec3 p;\nlayout(location = 1) in vec2 t;\nout vec2 uv;\n"
+                     "void main() { uv = t; gl_Position = vec4(p, 1.0); }\n";
+    const char* fs = "#version 330 core\nuniform sampler2D tex;\nuniform vec4 color;\nuniform int mode;\nin vec2 uv;\nout vec4 o;\n"
+                     "void main() { vec4 s = texture(tex, uv); if (mode == 0) { if (s.r == 0.0) discard; o = color; } else o = s; }\n";
+    GLuint v = glCreateShader(GL_VERTEX_SHADER), f = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(v, 1, &vs, nullptr);
+    glShaderSource(f, 1, &fs, nullptr);
+    glCompileShader(v);
+    glCompileShader(f);
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glLinkProgram(p);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        MGL_ERR("glBitmap / glDrawPixels: internal program failed to link");
+        glDeleteProgram(p);
+        return false;
+    }
+    cs->metaProg = p;
+    cs->metaColorLoc = glGetUniformLocation(p, "color");
+    cs->metaModeLoc = glGetUniformLocation(p, "mode");
+    glGenVertexArrays(1, &cs->metaVao);
+    glGenBuffers(1, &cs->metaVbo);
+    glGenTextures(1, &cs->metaTex);
+    return true;
+}
+
+// Uploads `w` x `h` texels of `internalFormat` from `format` / `type` data with default unpacking.
+static void metaUpload(Context* ctx, GLint internalFormat, int w, int h, GLenum format, GLenum type, const void* data) {
+    CompatState* cs = compat(ctx);
+    PixelStore saved = ctx->unpack;
+    Ref<Buffer> savedPbo = ctx->pixelUnpackBuffer;
+    ctx->unpack = PixelStore();
+    ctx->unpack.alignment = 1;
+    ctx->pixelUnpackBuffer = nullptr;
+    GLint savedActive = 0, savedTex = 0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &savedActive);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedTex);
+    glBindTexture(GL_TEXTURE_2D, cs->metaTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, w, h, 0, format, type, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)savedTex);
+    glActiveTexture((GLenum)savedActive);
+    ctx->unpack = saved;
+    ctx->pixelUnpackBuffer = savedPbo;
+}
+
+// Draws the meta texture over window rectangle (x0, y0)-(x1, y1) at window depth z: as a mask in `color`
+// (mode 0, glBitmap) or its colors (mode 1).
+static void metaDraw(Context* ctx, float x0, float y0, float x1, float y1, float z, int mode, const float* color) {
+    CompatState* cs = compat(ctx);
+    const float* vp = ctx->viewport[0];
+    const float* dr = ctx->depthRange[0];
+    if (vp[2] <= 0 || vp[3] <= 0) return;
+    auto nx = [&](float x) { return (x - vp[0]) / vp[2] * 2 - 1; };
+    auto ny = [&](float y) { return (y - vp[1]) / vp[3] * 2 - 1; };
+    float nz = dr[1] != dr[0] ? (z - dr[0]) / (dr[1] - dr[0]) * 2 - 1 : 0;
+    float quad[4][5] = {{nx(x0), ny(y0), nz, 0, 0}, {nx(x1), ny(y0), nz, 1, 0}, {nx(x0), ny(y1), nz, 0, 1}, {nx(x1), ny(y1), nz, 1, 1}};
+    // save
+    Ref<ProgramObj> savedProg = ctx->program;
+    GLint savedVao = 0, savedBuf = 0, savedActive = 0, savedTex = 0, savedSampler = 0, savedPoly[2] = {};
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &savedVao);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &savedBuf);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &savedActive);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedTex);
+    glGetIntegerv(GL_SAMPLER_BINDING, &savedSampler);
+    glGetIntegerv(GL_POLYGON_MODE, savedPoly);
+    GLboolean cull = glIsEnabled(GL_CULL_FACE);
+    // draw (the internal program replaces the current one directly, so the app's isn't released or reset)
+    {
+        std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
+        ctx->program = ctx->share->program(cs->metaProg);
+    }
+    glUniform4fv(cs->metaColorLoc, 1, color);
+    glUniform1i(cs->metaModeLoc, mode);
+    glBindVertexArray(cs->metaVao);
+    glBindBuffer(GL_ARRAY_BUFFER, cs->metaVbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STREAM_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 20, (const void*)0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 20, (const void*)12);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glBindTexture(GL_TEXTURE_2D, cs->metaTex);
+    glBindSampler(0, 0);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glDisable(GL_CULL_FACE);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // restore
+    if (cull) glEnable(GL_CULL_FACE);
+    glPolygonMode(GL_FRONT_AND_BACK, (GLenum)savedPoly[0]);
+    glBindSampler(0, (GLuint)savedSampler);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)savedTex);
+    glActiveTexture((GLenum)savedActive);
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)savedBuf);
+    glBindVertexArray((GLuint)savedVao);
+    ctx->program = savedProg;
+}
+
+// glBitmap with the bits already unpacked into one byte per pixel (0 / 1), rows bottom to top.
+static void bitmapDraw(Context* ctx, int w, int h, float xo, float yo, float xm, float ym, const std::vector<uint8_t>& bits) {
+    CompatState* cs = compat(ctx);
+    if (!cs->rasterValid) return;
+    if (w > 0 && h > 0 && metaEnsure(ctx)) {
+        metaUpload(ctx, GL_R8, w, h, GL_RED, GL_UNSIGNED_BYTE, bits.data());
+        float x0 = floorf(cs->rasterPos[0] - xo), y0 = floorf(cs->rasterPos[1] - yo);
+        metaDraw(ctx, x0, y0, x0 + w, y0 + h, cs->rasterPos[2], 0, cs->rasterColor);
+    }
+    cs->rasterPos[0] += xm;
+    cs->rasterPos[1] += ym;
+}
+
+// Client bitmap bits (pixel unpack state: alignment, row length, skips, LSB_FIRST; or the bound unpack buffer) as
+// 0 / 255 bytes.
+static std::vector<uint8_t> unpackBitmap(Context* ctx, int w, int h, const GLubyte* bitmap) {
+    std::vector<uint8_t> bits((size_t)std::max(w, 0) * std::max(h, 0));
+    const PixelStore& ps = ctx->unpack;
+    const uint8_t* base = (const uint8_t*)bitmap;
+    if (Buffer* pbo = ctx->pixelUnpackBuffer.get()) base = pbo->cpu ? pbo->cpu + (uintptr_t)bitmap : nullptr;
+    if (!base || bits.empty()) return bits;
+    int rowLen = ps.rowLength > 0 ? ps.rowLength : w;
+    size_t rowBytes = ((size_t)rowLen + 7) / 8;
+    rowBytes = (rowBytes + ps.alignment - 1) / ps.alignment * ps.alignment;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            size_t bit = (size_t)ps.skipPixels + x;
+            uint8_t byte = base[(size_t)(ps.skipRows + y) * rowBytes + bit / 8];
+            bool on = ps.lsbFirst ? (byte >> (bit % 8)) & 1 : (byte >> (7 - bit % 8)) & 1;
+            bits[(size_t)y * w + x] = on ? 255 : 0;
+        }
+    return bits;
+}
+
+API void APIENTRY glBitmap(GLsizei w, GLsizei h, GLfloat xo, GLfloat yo, GLfloat xm, GLfloat ym, const GLubyte* bitmap) {
+    MGL_CTX();
+    if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
+    std::vector<uint8_t> bits = unpackBitmap(ctx, w, h, bitmap);
+    RECORD(bitmapDraw(ctx, w, h, xo, yo, xm, ym, bits));  // lists keep the bits (wglUseFontBitmaps)
+    bitmapDraw(ctx, w, h, xo, yo, xm, ym, bits);
+}
+
+// glDrawPixels with the client data already converted to RGBA floats.
+static void drawPixelsRGBA(Context* ctx, int w, int h, const std::vector<float>& rgba) {
+    CompatState* cs = compat(ctx);
+    if (!cs->rasterValid || w <= 0 || h <= 0 || !metaEnsure(ctx)) return;
+    metaUpload(ctx, GL_RGBA32F, w, h, GL_RGBA, GL_FLOAT, rgba.data());
+    float x0 = cs->rasterPos[0], y0 = cs->rasterPos[1];
+    metaDraw(ctx, x0, y0, x0 + w * cs->zoomX, y0 + h * cs->zoomY, cs->rasterPos[2], 1, cs->rasterColor);
+}
+
+API void APIENTRY glDrawPixels(GLsizei w, GLsizei h, GLenum format, GLenum type, const void* pixels) {
+    MGL_CTX();
+    if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
+    if (format == GL_DEPTH_COMPONENT || format == GL_STENCIL_INDEX || format == GL_DEPTH_STENCIL || format == GL_COLOR_INDEX) {
+        static bool warned = false;
+        if (!warned) MGL_WARN("glDrawPixels: depth / stencil / color index data is not supported");
+        warned = true;
+        return;
+    }
+    if (GLenum e = pixelFormatTypeError(format, type)) return ctx->setError(e);
+    std::vector<float> rgba((size_t)w * h * 4);
+    const uint8_t* src = (const uint8_t*)pixels;
+    if (Buffer* pbo = ctx->pixelUnpackBuffer.get()) src = pbo->cpu ? pbo->cpu + (uintptr_t)pixels : nullptr;
+    if (src && w && h) {
+        ClientLayout l = clientLayout(format, type, w, h, ctx->unpack);
+        convertToStorage(formatInfo(GL_RGBA32F), format, type, src + l.skipBytes, l.rowStride, l.imageStride, rgba.data(), (size_t)w * 16,
+                         (size_t)w * h * 16, w, h, 1, ctx->unpack.swapBytes);
+    }
+    RECORD(drawPixelsRGBA(ctx, w, h, rgba));
+    drawPixelsRGBA(ctx, w, h, rgba);
+}
+
+static void copyPixels(Context* ctx, int x, int y, int w, int h, GLenum type) {
+    CompatState* cs = compat(ctx);
+    if (type != GL_COLOR) {
+        static bool warned = false;
+        if (!warned) MGL_WARN("glCopyPixels: depth / stencil copies are not supported");
+        warned = true;
+        return;
+    }
+    if (!cs->rasterValid || w <= 0 || h <= 0 || !metaEnsure(ctx)) return;
+    GLint savedActive = 0, savedTex = 0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &savedActive);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedTex);
+    glBindTexture(GL_TEXTURE_2D, cs->metaTex);
+    glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, x, y, w, h, 0);  // from the read framebuffer
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)savedTex);
+    glActiveTexture((GLenum)savedActive);
+    float x0 = cs->rasterPos[0], y0 = cs->rasterPos[1];
+    metaDraw(ctx, x0, y0, x0 + w * cs->zoomX, y0 + h * cs->zoomY, cs->rasterPos[2], 1, cs->rasterColor);
+}
+
+API void APIENTRY glCopyPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum type) {
+    MGL_CTX();
+    if (w < 0 || h < 0) return ctx->setError(GL_INVALID_VALUE);
+    if (type != GL_COLOR && type != GL_DEPTH && type != GL_STENCIL && type != GL_DEPTH_STENCIL_TO_RGBA_NV) return ctx->setError(GL_INVALID_ENUM);
+    RECORD(copyPixels(ctx, x, y, w, h, type));
+    copyPixels(ctx, x, y, w, h, type);
+}
+
+// glRasterPos / glWindowPos type variants (generated from gl.xml)
+API void APIENTRY glRasterPos2d(GLdouble x, GLdouble y) { glRasterPos4f((GLfloat)x, (GLfloat)y, 0.0f, 1.0f); }
+API void APIENTRY glRasterPos2dv(const GLdouble * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glRasterPos2f(GLfloat x, GLfloat y) { glRasterPos4f((GLfloat)x, (GLfloat)y, 0.0f, 1.0f); }
+API void APIENTRY glRasterPos2fv(const GLfloat * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glRasterPos2i(GLint x, GLint y) { glRasterPos4f((GLfloat)x, (GLfloat)y, 0.0f, 1.0f); }
+API void APIENTRY glRasterPos2iv(const GLint * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glRasterPos2s(GLshort x, GLshort y) { glRasterPos4f((GLfloat)x, (GLfloat)y, 0.0f, 1.0f); }
+API void APIENTRY glRasterPos2sv(const GLshort * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], 0.0f, 1.0f); }
+API void APIENTRY glRasterPos3d(GLdouble x, GLdouble y, GLdouble z) { glRasterPos4f((GLfloat)x, (GLfloat)y, (GLfloat)z, 1.0f); }
+API void APIENTRY glRasterPos3dv(const GLdouble * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glRasterPos3f(GLfloat x, GLfloat y, GLfloat z) { glRasterPos4f((GLfloat)x, (GLfloat)y, (GLfloat)z, 1.0f); }
+API void APIENTRY glRasterPos3fv(const GLfloat * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glRasterPos3i(GLint x, GLint y, GLint z) { glRasterPos4f((GLfloat)x, (GLfloat)y, (GLfloat)z, 1.0f); }
+API void APIENTRY glRasterPos3iv(const GLint * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glRasterPos3s(GLshort x, GLshort y, GLshort z) { glRasterPos4f((GLfloat)x, (GLfloat)y, (GLfloat)z, 1.0f); }
+API void APIENTRY glRasterPos3sv(const GLshort * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], 1.0f); }
+API void APIENTRY glRasterPos4d(GLdouble x, GLdouble y, GLdouble z, GLdouble w) { glRasterPos4f((GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w); }
+API void APIENTRY glRasterPos4dv(const GLdouble * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glRasterPos4fv(const GLfloat * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glRasterPos4i(GLint x, GLint y, GLint z, GLint w) { glRasterPos4f((GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w); }
+API void APIENTRY glRasterPos4iv(const GLint * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glRasterPos4s(GLshort x, GLshort y, GLshort z, GLshort w) { glRasterPos4f((GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w); }
+API void APIENTRY glRasterPos4sv(const GLshort * v) { glRasterPos4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+API void APIENTRY glWindowPos2d(GLdouble x, GLdouble y) { glWindowPos3f((GLfloat)x, (GLfloat)y, 0.0f); }
+API void APIENTRY glWindowPos2dv(const GLdouble * v) { glWindowPos3f((GLfloat)v[0], (GLfloat)v[1], 0.0f); }
+API void APIENTRY glWindowPos2f(GLfloat x, GLfloat y) { glWindowPos3f((GLfloat)x, (GLfloat)y, 0.0f); }
+API void APIENTRY glWindowPos2fv(const GLfloat * v) { glWindowPos3f((GLfloat)v[0], (GLfloat)v[1], 0.0f); }
+API void APIENTRY glWindowPos2i(GLint x, GLint y) { glWindowPos3f((GLfloat)x, (GLfloat)y, 0.0f); }
+API void APIENTRY glWindowPos2iv(const GLint * v) { glWindowPos3f((GLfloat)v[0], (GLfloat)v[1], 0.0f); }
+API void APIENTRY glWindowPos2s(GLshort x, GLshort y) { glWindowPos3f((GLfloat)x, (GLfloat)y, 0.0f); }
+API void APIENTRY glWindowPos2sv(const GLshort * v) { glWindowPos3f((GLfloat)v[0], (GLfloat)v[1], 0.0f); }
+API void APIENTRY glWindowPos3d(GLdouble x, GLdouble y, GLdouble z) { glWindowPos3f((GLfloat)x, (GLfloat)y, (GLfloat)z); }
+API void APIENTRY glWindowPos3dv(const GLdouble * v) { glWindowPos3f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2]); }
+API void APIENTRY glWindowPos3fv(const GLfloat * v) { glWindowPos3f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2]); }
+API void APIENTRY glWindowPos3i(GLint x, GLint y, GLint z) { glWindowPos3f((GLfloat)x, (GLfloat)y, (GLfloat)z); }
+API void APIENTRY glWindowPos3iv(const GLint * v) { glWindowPos3f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2]); }
+API void APIENTRY glWindowPos3s(GLshort x, GLshort y, GLshort z) { glWindowPos3f((GLfloat)x, (GLfloat)y, (GLfloat)z); }
+API void APIENTRY glWindowPos3sv(const GLshort * v) { glWindowPos3f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2]); }

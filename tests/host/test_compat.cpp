@@ -1166,3 +1166,72 @@ TEST(compat_get_light_material) {
     glLoadIdentity();
     CHECK_GL();
 }
+
+// Raster position, glBitmap (also from a display list, as wglUseFontBitmaps builds them) and glDrawPixels.
+TEST(compat_raster_bitmap_drawpixels) {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, 64, 0, 64, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor3f(1, 0, 0);
+    glRasterPos2i(8, 8);
+    GLfloat rp[4] = {};
+    glGetFloatv(GL_CURRENT_RASTER_POSITION, rp);
+    CHECK(rp[0] == 8 && rp[1] == 8);
+    GLboolean valid = GL_FALSE;
+    glGetBooleanv(GL_CURRENT_RASTER_POSITION_VALID, &valid);
+    CHECK(valid);
+    // an 8x2 bitmap: bottom row all set, top row only the leftmost bit
+    GLubyte bits[2] = {0xFF, 0x80};
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    GLuint list = glGenLists(1);
+    glNewList(list, GL_COMPILE);
+    glBitmap(8, 2, 0, 0, 10, 0, bits);
+    glEndList();
+    glCallList(list);
+    CHECK_PIXEL(8, 8, 255, 0, 0, 255);
+    CHECK_PIXEL(15, 8, 255, 0, 0, 255);
+    CHECK_PIXEL(8, 9, 255, 0, 0, 255);
+    CHECK_PIXEL(9, 9, 0, 0, 0, 255);
+    glGetFloatv(GL_CURRENT_RASTER_POSITION, rp);
+    CHECK(rp[0] == 18);  // advanced by xmove
+    glCallList(list);
+    CHECK_PIXEL(20, 8, 255, 0, 0, 255);
+    glDeleteLists(list, 1);
+    // glDrawPixels at a window position, zoomed 2x
+    glWindowPos2i(40, 40);
+    uint8_t px[2 * 2 * 3] = {0, 255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 255};  // bottom green, top blue
+    glPixelZoom(2, 2);
+    glDrawPixels(2, 2, GL_RGB, GL_UNSIGNED_BYTE, px);
+    glPixelZoom(1, 1);
+    CHECK_PIXEL(41, 41, 0, 255, 0, 255);
+    CHECK_PIXEL(43, 43, 0, 0, 255, 255);
+    CHECK_PIXEL(45, 45, 0, 0, 0, 255);
+    // positions outside the view volume make the raster position invalid; drawing then does nothing
+    glRasterPos2i(200, 8);
+    glGetBooleanv(GL_CURRENT_RASTER_POSITION_VALID, &valid);
+    CHECK(!valid);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    CHECK_GL();
+}
+
+// glCopyPixels: a color rectangle copied to the raster position.
+TEST(compat_copy_pixels) {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, 64, 0, 64, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor3f(1, 1, 0);
+    glRectf(0, 0, 8, 8);
+    glRasterPos2i(32, 32);
+    glCopyPixels(0, 0, 8, 8, GL_COLOR);
+    CHECK_PIXEL(35, 35, 255, 255, 0, 255);
+    CHECK_PIXEL(42, 42, 0, 0, 0, 255);
+    CHECK_GL();
+}
