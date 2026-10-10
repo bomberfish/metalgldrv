@@ -827,3 +827,36 @@ TEST(compat_ext_fog_coord) {
     CHECK_PIXEL(32, 32, 0, 0, 255, 255);
     CHECK_GL();
 }
+
+// Point parameters: distance attenuation and size bounds in fixed-function drawing.
+TEST(compat_point_parameters) {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(-1, 1, -1, 1, 0, 10);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glPointSize(16);
+    float att[3] = {0, 0, 1};  // size / distance
+    glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, att);
+    float got[3] = {};
+    glGetFloatv(GL_POINT_DISTANCE_ATTENUATION, got);
+    CHECK(got[2] == 1);
+    glColor3f(1, 1, 1);
+    glBegin(GL_POINTS);
+    glVertex3f(0, 0, -4);  // eye distance 4: 16 / 4 = 4 pixels
+    glEnd();
+    CHECK_PIXEL(32 + 1, 32 + 1, 255, 255, 255, 255);
+    CHECK_PIXEL(32 + 4, 32 + 4, 0, 0, 0, 255);
+    glPointParameterf(GL_POINT_SIZE_MIN, 10);  // now clamped up to 10
+    glBegin(GL_POINTS);
+    glVertex3f(0, 0, -4);
+    glEnd();
+    CHECK_PIXEL(32 + 4, 32 + 4, 255, 255, 255, 255);
+    float d[3] = {1, 0, 0};
+    glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, d);
+    glPointParameterf(GL_POINT_SIZE_MIN, 0);
+    glPointSize(1);
+    CHECK_GL();
+}

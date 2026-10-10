@@ -446,6 +446,9 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
         return vec(d, 4);
     }
     case GL_ELEMENT_ARRAY_TYPE_APPLE: return one(cs->elementArrayType, false);
+    case GL_POINT_SIZE_MIN: return one(cs->pointSizeMin, true);
+    case GL_POINT_SIZE_MAX: return one(cs->pointSizeMax, true);
+    case GL_POINT_DISTANCE_ATTENUATION: return vec(cs->pointAtt, 3);
     case GL_VERTEX_ARRAY_RANGE_LENGTH_APPLE: return one(cs->varLength, false);
     case GL_VERTEX_ARRAY_STORAGE_HINT_APPLE: return one(cs->varStorageHint, false);
     case GL_CURRENT_POINT_SIZE_APPLE: return one(cs->current[CA_POINTSIZE][0], true);
@@ -1551,6 +1554,11 @@ API void APIENTRY glPopClientAttrib(void) {}
 // ---------------------------------------------------------------------------
 // fixed-function program generation
 // ---------------------------------------------------------------------------
+// Distance attenuation or size bounds other than the defaults: fixed-function shaders compute the point size.
+static bool pointParamsActive(const CompatState* cs) {
+    return cs->pointAtt[0] != 1 || cs->pointAtt[1] != 0 || cs->pointAtt[2] != 0 || cs->pointSizeMin != 0 || cs->pointSizeMax != 511;
+}
+
 static std::string ffKey(Context* ctx, CompatState* cs, bool* usedUnits) {
     std::string k;
     auto add = [&](int v) { k += std::to_string(v) + ","; };
@@ -1569,6 +1577,7 @@ static std::string ffKey(Context* ctx, CompatState* cs, bool* usedUnits) {
     add(cs->colorSum);
     add(cs->pointSprite);
     add(cs->vertexPointSize);
+    add(pointParamsActive(cs));
     for (int u = 0; u < 8; u++) {
         uint32_t e = cs->texEnabled[u];
         int target = e & 8 ? 8 : e & 4 ? 4 : e & 16 ? 16 : e & 2 ? 2 : e & 1 ? 1 : 0;
@@ -1666,7 +1675,15 @@ static Ref<ProgramObj> buildFFProgram(Context* ctx, CompatState* cs, const bool*
     // --- vertex ---
     if (cs->vertexPointSize) vs += "attribute float mgl_PointSizeAPPLE;\n";
     vs += "void main() {\n  vec4 eye = gl_ModelViewMatrix * gl_Vertex;\n  gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n";
-    if (cs->vertexPointSize) vs += "  gl_PointSize = mgl_PointSizeAPPLE;\n";
+    if (cs->vertexPointSize || pointParamsActive(cs)) {
+        vs += std::string("  float psize = ") + (cs->vertexPointSize ? "mgl_PointSizeAPPLE" : "gl_Point.size") + ";\n";
+        if (pointParamsActive(cs)) {
+            vs += "  float pd = length(eye.xyz);\n";
+            vs += "  psize = clamp(psize * inversesqrt(gl_Point.distanceConstantAttenuation + gl_Point.distanceLinearAttenuation * pd +"
+                  " gl_Point.distanceQuadraticAttenuation * pd * pd), gl_Point.sizeMin, gl_Point.sizeMax);\n";
+        }
+        vs += "  gl_PointSize = psize;\n";
+    }
     vs += "  gl_ClipVertex = eye;\n";
     if (cs->lighting) {
         vs += "  vec3 N = gl_NormalMatrix * gl_Normal;\n";
@@ -2078,7 +2095,7 @@ ProgramObj* mglCompatPrepareDraw(Context* ctx, ProgramObj* prog) {
         if (!prog) return nullptr;
     }
     // GL_APPLE_vertex_point_size: fixed-function programs then write gl_PointSize, which the draw must use.
-    ctx->compatVertexPointSize = !userProg && cs->vertexPointSize;
+    ctx->compatVertexPointSize = !userProg && (cs->vertexPointSize || pointParamsActive(cs));
     feedUniforms(ctx, cs, prog);
     bindCompatAttribs(ctx, cs, prog);
     // alpha test (applied in compat fragment shaders via MGLSys)
@@ -2862,3 +2879,18 @@ API void APIENTRY glVertex4i(GLint x, GLint y, GLint z, GLint w) { glVertex4f((G
 API void APIENTRY glVertex4iv(const GLint * v) { glVertex4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
 API void APIENTRY glVertex4s(GLshort x, GLshort y, GLshort z, GLshort w) { glVertex4f((GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w); }
 API void APIENTRY glVertex4sv(const GLshort * v) { glVertex4f((GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
+
+// GL 1.4 / ARB_point_parameters (compatibility): point size bounds and distance attenuation, applied by
+// fixed-function vertex shaders. Returns false for other parameters.
+bool mglCompatPointParam(Context* ctx, GLenum pname, const GLfloat* v) {
+    CompatState* cs = compat(ctx);
+    switch (pname) {
+    case GL_POINT_SIZE_MIN:
+    case GL_POINT_SIZE_MAX:
+        if (v[0] < 0) return ctx->setError(GL_INVALID_VALUE), true;
+        (pname == GL_POINT_SIZE_MIN ? cs->pointSizeMin : cs->pointSizeMax) = v[0];
+        return true;
+    case GL_POINT_DISTANCE_ATTENUATION: memcpy(cs->pointAtt, v, 12); return true;
+    default: return false;
+    }
+}

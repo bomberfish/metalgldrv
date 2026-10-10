@@ -552,8 +552,17 @@ API void APIENTRY glPointSize(GLfloat s) {
     ctx->pointSize = s;
 }
 
+bool mglCompatPointParam(Context* ctx, GLenum pname, const GLfloat* v);  // compat.mm
+
+API void APIENTRY glPointParameterfv(GLenum pname, const GLfloat* p) {
+    MGL_CTX();
+    if (!ctx->coreProfile && mglCompatPointParam(ctx, pname, p)) return;
+    glPointParameterf(pname, p[0]);
+}
+
 API void APIENTRY glPointParameterf(GLenum pname, GLfloat param) {
     MGL_CTX();
+    if (!ctx->coreProfile && pname != GL_POINT_DISTANCE_ATTENUATION && mglCompatPointParam(ctx, pname, &param)) return;
     switch (pname) {
     case GL_POINT_FADE_THRESHOLD_SIZE:
         if (param < 0) return ctx->setError(GL_INVALID_VALUE);
@@ -564,14 +573,15 @@ API void APIENTRY glPointParameterf(GLenum pname, GLfloat param) {
         ctx->pointSpriteOrigin = (GLenum)param;
         break;
     default:
-        if (!ctx->coreProfile && (pname == GL_POINT_SIZE_MIN || pname == GL_POINT_SIZE_MAX || pname == GL_POINT_DISTANCE_ATTENUATION))
-            return;
         ctx->setError(GL_INVALID_ENUM);
     }
 }
 API void APIENTRY glPointParameteri(GLenum pname, GLint param) { glPointParameterf(pname, (GLfloat)param); }
-API void APIENTRY glPointParameterfv(GLenum pname, const GLfloat* p) { glPointParameterf(pname, p[0]); }
-API void APIENTRY glPointParameteriv(GLenum pname, const GLint* p) { glPointParameterf(pname, (GLfloat)p[0]); }
+API void APIENTRY glPointParameteriv(GLenum pname, const GLint* p) {
+    GLfloat f[3] = {(GLfloat)p[0], 0, 0};
+    if (pname == GL_POINT_DISTANCE_ATTENUATION) f[1] = (GLfloat)p[1], f[2] = (GLfloat)p[2];
+    glPointParameterfv(pname, f);
+}
 
 API void APIENTRY glPrimitiveRestartIndex(GLuint index) {
     MGL_CTX();
