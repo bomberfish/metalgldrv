@@ -951,3 +951,37 @@ TEST(ext_texture_compression_latc) {
     glDeleteProgram(prog);
     CHECK_GL();
 }
+
+// GL_ATI_texture_compression_3dc: the same blocks under ATI's format.
+TEST(ati_texture_compression_3dc) {
+    CHECK(hasExtension("GL_ATI_texture_compression_3dc"));
+    // two BC4 blocks, every texel at its endpoint 0: luminance 0xC0, alpha 0x40
+    uint8_t block[16] = {0xC0, 0xC0, 0, 0, 0, 0, 0, 0, 0x40, 0x40, 0, 0, 0, 0, 0, 0};
+    GLuint tex, fbo, rt;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, 0x8837 /* GL_COMPRESSED_LUMINANCE_ALPHA_3DC_ATI */, 4, 4, 0, 16, block);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    CHECK_GL();
+    const char* vs = "#version 450 core\nin vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0, 1); }";
+    const char* fs = "#version 450 core\nuniform sampler2D t;\nout vec4 c;\nvoid main() { c = texture(t, vec2(0.5)); }";
+    GLuint prog = compileProgram(vs, fs);
+    glGenTextures(1, &rt);
+    glBindTexture(GL_TEXTURE_2D, rt);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+    glViewport(0, 0, 4, 4);
+    glUseProgram(prog);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    drawQuad(prog);
+    CHECK_PIXEL(1, 1, 0xC0, 0xC0, 0xC0, 0x40);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &rt);
+    glDeleteTextures(1, &tex);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    CHECK_GL();
+}

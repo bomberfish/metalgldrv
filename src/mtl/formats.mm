@@ -13,6 +13,9 @@ namespace mgl {
 #define RG01 SWZ(Red, Green, Zero, One)
 #define R001 SWZ(Red, Zero, Zero, One)
 
+// GL_ATI_texture_compression_3dc (not in the Khronos registry): ATI2 / BC5 blocks as luminance-alpha, like LATC2.
+constexpr GLenum GL_COMPRESSED_LUMINANCE_ALPHA_3DC_ATI = 0x8837;
+
 static const GLenum UN = GL_UNSIGNED_NORMALIZED, SN = GL_SIGNED_NORMALIZED, FL = GL_FLOAT, UI = GL_UNSIGNED_INT, SI = GL_INT;
 
 // clang-format off
@@ -125,6 +128,7 @@ static const FormatInfo kFormats[] = {
 {GL_COMPRESSED_LUMINANCE_LATC1_EXT,              MTLPixelFormatBC4_RUnorm,  GL_LUMINANCE,       FmtKind::Unorm, Comp::Compressed, 1,  8, 4, 4, 0, 0, 1, SWZ(Red, Red, Red, One),   {0,1,2,3}, 0,0,0,0,0,0, UN},
 {GL_COMPRESSED_SIGNED_LUMINANCE_LATC1_EXT,       MTLPixelFormatBC4_RSnorm,  GL_LUMINANCE,       FmtKind::Snorm, Comp::Compressed, 1,  8, 4, 4, 0, 0, 1, SWZ(Red, Red, Red, One),   {0,1,2,3}, 0,0,0,0,0,0, SN},
 {GL_COMPRESSED_LUMINANCE_ALPHA_LATC2_EXT,        MTLPixelFormatBC5_RGUnorm, GL_LUMINANCE_ALPHA, FmtKind::Unorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, SWZ(Red, Red, Red, Green), {0,1,2,3}, 0,0,0,0,0,0, UN},
+{GL_COMPRESSED_LUMINANCE_ALPHA_3DC_ATI,          MTLPixelFormatBC5_RGUnorm, GL_LUMINANCE_ALPHA, FmtKind::Unorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, SWZ(Red, Red, Red, Green), {0,1,2,3}, 0,0,0,0,0,0, UN},
 {GL_COMPRESSED_SIGNED_LUMINANCE_ALPHA_LATC2_EXT, MTLPixelFormatBC5_RGSnorm, GL_LUMINANCE_ALPHA, FmtKind::Snorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, SWZ(Red, Red, Red, Green), {0,1,2,3}, 0,0,0,0,0,0, SN},
 {GL_COMPRESSED_RGBA_BPTC_UNORM,         MTLPixelFormatBC7_RGBAUnorm,    GL_RGBA, FmtKind::Unorm, Comp::Compressed, 4, 16, 4, 4, 0, 0, 1, IDENT,{0,1,2,3}, 0,0,0,0,0,0, UN},
 {GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM,   MTLPixelFormatBC7_RGBAUnorm_sRGB,GL_RGBA,FmtKind::Unorm, Comp::Compressed, 4, 16, 4, 4, 1, 0, 1, IDENT,{0,1,2,3}, 0,0,0,0,0,0, UN},
