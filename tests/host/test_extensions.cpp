@@ -651,3 +651,32 @@ TEST(nv_fence) {
     del(1, &f);
     CHECK_GL();
 }
+
+// GL_NV_occlusion_query
+TEST(nv_occlusion_query) {
+    CHECK(hasExtension("GL_NV_occlusion_query"));
+    auto gen = (void (*)(GLsizei, GLuint*))eglGetProcAddress("glGenOcclusionQueriesNV");
+    auto begin = (void (*)(GLuint))eglGetProcAddress("glBeginOcclusionQueryNV");
+    auto end = (void (*)())eglGetProcAddress("glEndOcclusionQueryNV");
+    auto get = (void (*)(GLuint, GLenum, GLuint*))eglGetProcAddress("glGetOcclusionQueryuivNV");
+    const char* vs = "#version 450 core\nin vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0, 1); }";
+    const char* fs = "#version 450 core\nout vec4 c;\nvoid main() { c = vec4(1); }";
+    GLuint prog = compileProgram(vs, fs);
+    glUseProgram(prog);
+    GLuint q = 0;
+    gen(1, &q);
+    begin(q);
+    GLint cur = 0;
+    glGetIntegerv(0x8865 /* GL_CURRENT_OCCLUSION_QUERY_ID_NV */, &cur);
+    CHECK_EQ(cur, (GLint)q);
+    drawQuad(prog);  // the whole 64x64 surface
+    end();
+    GLuint count = 0, avail = 0;
+    get(q, 0x8866 /* GL_PIXEL_COUNT_NV */, &count);
+    get(q, 0x8867 /* GL_PIXEL_COUNT_AVAILABLE_NV */, &avail);
+    CHECK_EQ(count, 64u * 64u);
+    CHECK_EQ(avail, 1u);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    CHECK_GL();
+}

@@ -571,3 +571,25 @@ API void APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei count, GLsizei*
     values[0] = v;
     if (length) *length = 1;
 }
+
+// --- GL_NV_occlusion_query: SAMPLES_PASSED queries under NVIDIA's names ---
+API void APIENTRY glGenOcclusionQueriesNV(GLsizei n, GLuint* ids) { glGenQueries(n, ids); }
+API void APIENTRY glDeleteOcclusionQueriesNV(GLsizei n, const GLuint* ids) { glDeleteQueries(n, ids); }
+API GLboolean APIENTRY glIsOcclusionQueryNV(GLuint id) { return glIsQuery(id); }
+API void APIENTRY glBeginOcclusionQueryNV(GLuint id) { glBeginQuery(GL_SAMPLES_PASSED, id); }
+API void APIENTRY glEndOcclusionQueryNV(void) { glEndQuery(GL_SAMPLES_PASSED); }
+
+API void APIENTRY glGetOcclusionQueryuivNV(GLuint id, GLenum pname, GLuint* params) {
+    MGL_CTX();
+    switch (pname) {
+    case GL_PIXEL_COUNT_NV: return glGetQueryObjectuiv(id, GL_QUERY_RESULT, params);
+    case GL_PIXEL_COUNT_AVAILABLE_NV: return glGetQueryObjectuiv(id, GL_QUERY_RESULT_AVAILABLE, params);
+    default: ctx->setError(GL_INVALID_ENUM);
+    }
+}
+
+API void APIENTRY glGetOcclusionQueryivNV(GLuint id, GLenum pname, GLint* params) {
+    GLuint v = 0;
+    glGetOcclusionQueryuivNV(id, pname, &v);
+    *params = (GLint)std::min<GLuint>(v, INT32_MAX);
+}
