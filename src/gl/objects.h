@@ -181,6 +181,10 @@ public:
     int storageLevels = 0, storageW = 0, storageH = 0, storageD = 0, storageLayers = 0;
     bool storageDirty = true;  // level specs changed -> (re)allocate and migrate
     bool needsShaderWrite = false;  // bound as an image -> storage needs ShaderWrite usage
+    // Data was uploaded or copied in, which GL keeps bit-exact: storage of the formats lossless compression
+    // alters (losslessCompressionSafe) opts out of it from then on (requireBitExact). Render targets never
+    // uploaded to keep it (SuperTuxKart's R11F_G11F_B10F light buffers).
+    bool bitExact = false;
     bool needsFormatView = false;   // reinterpreted by a texture view
     uint64_t lastUse = 0;
     uint64_t lastGpuWrite = 0;

@@ -205,7 +205,7 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
         }
     }
     td.usage = usage;
-    if (!losslessCompressionSafe(fmt->mtl)) td.allowGPUOptimizedContents = NO;
+    if (!losslessCompressionSafe(fmt->mtl) && t->bitExact) td.allowGPUOptimizedContents = NO;
     id<MTLTexture> nt = [ctx->dev->mtl newTextureWithDescriptor:td];
     if (nt && g_statsEnabled) statAddCaller("newTexture KB", __builtin_return_address(0), nt.allocatedSize >> 10);
     if (!nt) {
@@ -640,9 +640,33 @@ const void* resolveUnpackSource(Context* ctx, const void* pixels, size_t needed,
     return pixels;
 }
 
+void requireBitExact(Context* ctx, Texture* t) {
+    Texture* root = t->viewParent ? t->viewParent.get() : t;
+    if (root->bitExact) return;
+    root->bitExact = true;
+    id<MTLTexture> old = root->mtl;
+    if (!old || losslessCompressionSafe(old.pixelFormat) || !old.allowGPUOptimizedContents || root->sparse ||
+        root->target == GL_TEXTURE_BUFFER)
+        return;
+    // Reallocate without compression, copying the contents (as for added usages, api_texture.mm).
+    const FormatInfo* oldFmt = root->storageFmt;
+    root->mtl = nil;
+    root->storageFmt = nullptr;
+    root->storageDirty = true;
+    if (ensureTextureStorage(ctx, root) && oldFmt == root->storageFmt) {
+        ctx->endEncoder();
+        id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+        [e copyFromTexture:old toTexture:root->mtl];
+        [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    }
+    ctx->dev->releaseAfter(old, ctx->serial());
+    if (t != root) ensureTextureStorage(ctx, t);  // the view follows the new storage
+}
+
 // Copies a converted image (already in storage layout in `up`) into the texture.
 static void copyStagingToTexture(Context* ctx, Texture* t, const UploadAlloc& up, size_t rowBytes, size_t imageBytes, int level,
                                  int slice, int x, int y, int z, int w, int h, int d, MTLBlitOption opt = MTLBlitOptionNone) {
+    requireBitExact(ctx, t);
     id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
     bool is3D = t->mtl.textureType == MTLTextureType3D;
     if (is3D) {

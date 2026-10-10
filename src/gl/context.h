@@ -413,6 +413,9 @@ void setCurrentContext(Context* c);
 
 // Texture storage management (texture.mm)
 bool ensureTextureStorage(Context* ctx, Texture* t);
+// Before data is uploaded or copied into t: storage that lossless compression would alter goes uncompressed
+// (Texture::bitExact).
+void requireBitExact(Context* ctx, Texture* t);
 id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarget, bool stencilSampling, bool* complete);
 id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger);
 id<MTLTexture> attachmentTexture(Context* ctx, const Attachment& a, const FormatInfo** fmt, int* w, int* h);

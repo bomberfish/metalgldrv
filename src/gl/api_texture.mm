@@ -1811,6 +1811,7 @@ API void APIENTRY glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint src
 
     if (s.tex && !ensureTextureStorage(ctx, s.tex)) return;
     if (dr.tex && !ensureTextureStorage(ctx, dr.tex)) return;
+    if (dr.tex) requireBitExact(ctx, dr.tex);
     id<MTLTexture> src = s.tex ? s.tex->mtl : s.rb->mtl;
     id<MTLTexture> dst = dr.tex ? dr.tex->mtl : dr.rb->mtl;
     if (!src || !dst) return;
