@@ -121,6 +121,11 @@ static const FormatInfo kFormats[] = {
 {GL_COMPRESSED_SIGNED_RED_RGTC1,        MTLPixelFormatBC4_RSnorm,       GL_RED,  FmtKind::Snorm, Comp::Compressed, 1,  8, 4, 4, 0, 0, 1, R001, {0,1,2,3}, 0,0,0,0,0,0, SN},
 {GL_COMPRESSED_RG_RGTC2,                MTLPixelFormatBC5_RGUnorm,      GL_RG,   FmtKind::Unorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, RG01, {0,1,2,3}, 0,0,0,0,0,0, UN},
 {GL_COMPRESSED_SIGNED_RG_RGTC2,         MTLPixelFormatBC5_RGSnorm,      GL_RG,   FmtKind::Snorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, RG01, {0,1,2,3}, 0,0,0,0,0,0, SN},
+// EXT_texture_compression_latc: RGTC blocks read as luminance (and alpha)
+{GL_COMPRESSED_LUMINANCE_LATC1_EXT,              MTLPixelFormatBC4_RUnorm,  GL_LUMINANCE,       FmtKind::Unorm, Comp::Compressed, 1,  8, 4, 4, 0, 0, 1, SWZ(Red, Red, Red, One),   {0,1,2,3}, 0,0,0,0,0,0, UN},
+{GL_COMPRESSED_SIGNED_LUMINANCE_LATC1_EXT,       MTLPixelFormatBC4_RSnorm,  GL_LUMINANCE,       FmtKind::Snorm, Comp::Compressed, 1,  8, 4, 4, 0, 0, 1, SWZ(Red, Red, Red, One),   {0,1,2,3}, 0,0,0,0,0,0, SN},
+{GL_COMPRESSED_LUMINANCE_ALPHA_LATC2_EXT,        MTLPixelFormatBC5_RGUnorm, GL_LUMINANCE_ALPHA, FmtKind::Unorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, SWZ(Red, Red, Red, Green), {0,1,2,3}, 0,0,0,0,0,0, UN},
+{GL_COMPRESSED_SIGNED_LUMINANCE_ALPHA_LATC2_EXT, MTLPixelFormatBC5_RGSnorm, GL_LUMINANCE_ALPHA, FmtKind::Snorm, Comp::Compressed, 2, 16, 4, 4, 0, 0, 1, SWZ(Red, Red, Red, Green), {0,1,2,3}, 0,0,0,0,0,0, SN},
 {GL_COMPRESSED_RGBA_BPTC_UNORM,         MTLPixelFormatBC7_RGBAUnorm,    GL_RGBA, FmtKind::Unorm, Comp::Compressed, 4, 16, 4, 4, 0, 0, 1, IDENT,{0,1,2,3}, 0,0,0,0,0,0, UN},
 {GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM,   MTLPixelFormatBC7_RGBAUnorm_sRGB,GL_RGBA,FmtKind::Unorm, Comp::Compressed, 4, 16, 4, 4, 1, 0, 1, IDENT,{0,1,2,3}, 0,0,0,0,0,0, UN},
 {GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT,   MTLPixelFormatBC6H_RGBFloat,    GL_RGB,  FmtKind::Float, Comp::Compressed, 3, 16, 4, 4, 0, 0, 1, RGB1, {0,1,2,3}, 0,0,0,0,0,0, FL},
