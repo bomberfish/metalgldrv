@@ -499,20 +499,34 @@ uint64_t Device::zeroBufferAddress() {
 id<MTLLibrary> Device::compileLibrary(const std::string& source, std::string* errorOut, bool fastMath) {
     @autoreleasepool {  // the source string, options and errors autorelease
         MTL4LibraryDescriptor* ld = [MTL4LibraryDescriptor new];
-        ld.source = @(source.c_str());
+        // GLSL lets compilers fuse a * b + c into fma() outside `precise` expressions (which turn it off for
+        // their function, msl.cpp): allow it across statements too (relaxed math already does; this is for
+        // strict's safe math). Super strict keeps Metal's default.
+        bool fuse = caps.strictLevel < 2;
+        if (const char* o = getenv("METALGLDRV_MSL_OPTS"); o && strstr(o, "nofuse")) fuse = false;
+        ld.source = fuse ? @(("#pragma METAL fp contract(fast)\n" + source).c_str()) : @(source.c_str());
         MTLCompileOptions* co = [MTLCompileOptions new];
         co.languageVersion = MTLLanguageVersion4_0;
+        // GLSL lets compilers reassociate and contract floating-point math except in `precise` expressions,
+        // so by default shaders get relaxed math (which keeps NaN and infinity semantics: isnan / isinf still
+        // work); it's worth ~10% in shader-heavy games (SuperTuxKart's deferred lighting). The strict
+        // profiles and shaders with `precise` keep safe math.
         // TURBOHAX / SPEEDDEMON: fast math everywhere (reassociation, no NaN / infinity guarantees).
-        co.mathMode = fastMath || caps.turbo() ? MTLMathModeFast : MTLMathModeSafe;
+        bool precise = source.find("#pragma METAL fp contract(off)") != std::string::npos;
+        co.mathMode = fastMath || caps.turbo()               ? MTLMathModeFast
+                      : caps.strictLevel >= 1 || precise ? MTLMathModeSafe
+                                                             : MTLMathModeRelaxed;
         // Safe arithmetic (no reassociation, IEEE NaN/Inf) but the fast sin/cos/exp/log/pow...: GLSL bounds
         // them loosely (sin/cos: 2^-11 absolute), and the precise versions cost several times as much in
         // shaders that use many (DOOM (2016)'s depth of field: 64 sin/cos per pixel). The strict profiles
         // keep the precise ones; METALGLDRV_MSL_OPTS=precisefn too.
         co.mathFloatingPointFunctions = caps.strictLevel >= 1 ? MTLMathFloatingPointFunctionsPrecise : MTLMathFloatingPointFunctionsFast;
         co.preserveInvariance = YES;
-        // Debugging aid, read per compile: METALGLDRV_MSL_OPTS containing "noinv" and/or "size".
+        // Debugging aid, read per compile: METALGLDRV_MSL_OPTS containing "noinv", "safemath", "nofuse", "size",
+        // "precisefn".
         if (const char* o = getenv("METALGLDRV_MSL_OPTS")) {
             if (strstr(o, "noinv")) co.preserveInvariance = NO;
+            if (strstr(o, "safemath")) co.mathMode = MTLMathModeSafe;
             if (strstr(o, "size")) co.optimizationLevel = MTLLibraryOptimizationLevelSize;
             if (strstr(o, "precisefn")) co.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
         }

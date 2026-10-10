@@ -98,9 +98,9 @@ The default mode is conformant. Other profiles trade in either direction:
 
 | Setting | Profile | Effect |
 |---|---|---|
-| `METALGLDRV_STRICT=2` | super strict | Strict, plus the most expensive emulations (e.g. post-depth coverage). |
-| `METALGLDRV_STRICT=1` | strict | Accuracy features that conformance doesn't need but that cost performance: bounds-checked texel fetches everywhere, precise math functions, the full tessellation emulation, and more. |
-| (unset) | default | Conformant, fast paths that give identical results. |
+| `METALGLDRV_STRICT=2` | super strict | Strict, plus the most expensive emulations (e.g. post-depth coverage), and no fused multiply-add across statements. |
+| `METALGLDRV_STRICT=1` | strict | Accuracy features that conformance doesn't need but that cost performance: bounds-checked texel fetches everywhere, precise math functions, IEEE-safe shader arithmetic (no reassociation), the full tessellation emulation, and more. |
+| (unset) | default | Conformant, fast paths that give identical results. Shader math may be reassociated and fused as GLSL allows (NaN and infinity still behave). |
 | `METALGLDRV_TURBOHAX=1` | turbo | Not conformant: fast math (no NaN/infinity guarantees), anisotropy capped at 4x. |
 | `METALGLDRV_SPEEDDEMON=1` | speed demon | Turbo, plus: query results never wait for the GPU, `glFinish` doesn't wait, no robust-access bounds checks, anisotropy capped at 2x. |
 
