@@ -857,3 +857,20 @@ TEST(ext_framebuffer_multisample_blit_scaled) {
     glDeleteRenderbuffers(1, &rb);
     CHECK_GL();
 }
+
+// GL_EXT_debug_label
+TEST(ext_debug_label) {
+    CHECK(hasExtension("GL_EXT_debug_label"));
+    auto label = (void (*)(GLenum, GLuint, GLsizei, const char*))eglGetProcAddress("glLabelObjectEXT");
+    auto get = (void (*)(GLenum, GLuint, GLsizei, GLsizei*, char*))eglGetProcAddress("glGetObjectLabelEXT");
+    GLuint b;
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_ARRAY_BUFFER, b);
+    label(0x9151 /* GL_BUFFER_OBJECT_EXT */, b, 0, "vertices");
+    char out[32] = {};
+    GLsizei n = 0;
+    get(0x9151, b, sizeof out, &n, out);
+    CHECK(!strcmp(out, "vertices") && n == 8);
+    glDeleteBuffers(1, &b);
+    CHECK_GL();
+}

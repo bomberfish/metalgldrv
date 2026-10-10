@@ -455,3 +455,29 @@ API void APIENTRY glFramebufferTextureFaceARB(GLenum target, GLenum attachment, 
 // EXT_texture_integer: the clear color of integer color buffers (cleared like glClearColor's values)
 API void APIENTRY glClearColorIiEXT(GLint r, GLint g, GLint b, GLint a) { glClearColor((float)r, (float)g, (float)b, (float)a); }
 API void APIENTRY glClearColorIuiEXT(GLuint r, GLuint g, GLuint b, GLuint a) { glClearColor((float)r, (float)g, (float)b, (float)a); }
+
+// --- GL_EXT_debug_label: KHR_debug object labels under the EXT object types ---
+static GLenum khrIdentifier(GLenum type) {
+    switch (type) {
+    case GL_BUFFER_OBJECT_EXT: return GL_BUFFER;
+    case GL_SHADER_OBJECT_EXT: return GL_SHADER;
+    case GL_PROGRAM_OBJECT_EXT: return GL_PROGRAM;
+    case GL_VERTEX_ARRAY_OBJECT_EXT: return GL_VERTEX_ARRAY;
+    case GL_QUERY_OBJECT_EXT: return GL_QUERY;
+    case GL_PROGRAM_PIPELINE_OBJECT_EXT: return GL_PROGRAM_PIPELINE;
+    case GL_TEXTURE: case GL_FRAMEBUFFER: case GL_RENDERBUFFER: case GL_SAMPLER: case GL_TRANSFORM_FEEDBACK: return type;
+    default: return 0;
+    }
+}
+API void APIENTRY glLabelObjectEXT(GLenum type, GLuint object, GLsizei length, const GLchar* label) {
+    MGL_CTX();
+    GLenum id = khrIdentifier(type);
+    if (!id) return ctx->setError(GL_INVALID_ENUM);
+    glObjectLabel(id, object, length == 0 ? -1 : length, label);  // EXT: a length of 0 means null-terminated
+}
+API void APIENTRY glGetObjectLabelEXT(GLenum type, GLuint object, GLsizei bufSize, GLsizei* length, GLchar* label) {
+    MGL_CTX();
+    GLenum id = khrIdentifier(type);
+    if (!id) return ctx->setError(GL_INVALID_ENUM);
+    glGetObjectLabel(id, object, bufSize, length, label);
+}
