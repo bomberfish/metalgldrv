@@ -368,3 +368,27 @@ TEST(apple_flush_buffer_range) {
     glDeleteBuffers(1, &b);
     CHECK_GL();
 }
+
+// GL_APPLE_packed_pixels (the GL 1.2 packed pixel types): BGRA UNSIGNED_INT_8_8_8_8_REV in, 5_6_5 and 8_8_8_8 out.
+TEST(apple_packed_pixels) {
+    CHECK(hasExtension("GL_APPLE_packed_pixels"));
+    GLuint tex, fbo;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    uint32_t px = 0x80FF0000;  // ARGB in a uint: alpha 0x80, red 0xFF
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, &px);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    uint16_t rgb565 = 0;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, 1, 1, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, &rgb565);
+    CHECK_EQ(rgb565, 0xF800);
+    uint32_t rgba = 0;
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, &rgba);
+    CHECK_EQ(rgba, 0xFF000080u);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
