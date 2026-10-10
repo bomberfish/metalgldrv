@@ -240,7 +240,7 @@ inline uint3 mgl_upk_uint3(uint4 u) { return u.xyz; }
 inline uint4 mgl_upk_uint4(uint4 u) { return u; }
 inline ulong mgl_upk_ulong(uint4 u) { return as_type<ulong>(u.xy); }
 
-//@chunk mgl_tess mgl_tess_setup mgl_tess_unit mgl_tess_unit_size
+//@chunk mgl_tess mgl_tess_setup mgl_tess_unit mgl_tess_unit_size mgl_tess_unit_vertex mgl_tess_unit_prim
 // GL tessellation primitive generator (GL 4.6 section 11.2.2). The work for one
 // patch is split into "units" (one ring-side strip, the center, or one isoline),
 // each small enough for one mesh threadgroup (<= 130 vertices, <= 128 primitives).
@@ -561,4 +561,92 @@ inline uint2 mgl_tess_unit_size(thread const mgl_tess& T, uint unit) {
     if (T.domain == 0u) return uint2(3u, 1u);
     uint du = T.ni[0] - 2u * T.rings, dv = T.ni[1] - 2u * T.rings;
     return uint2((du + 1u) * (dv + 1u), 2u * du * dv);
+}
+
+// One element at a time, for threads that generate a unit in parallel: vertex k and primitive m of `unit`
+// exactly as mgl_tess_unit produces them (bit-identical coordinates, same primitives in the same order).
+// mgl_tess_unit_vertex also returns the value mgl_tess_unit stores in tp[k]; mgl_tess_unit_prim reads the
+// unit's vertices (co) and those values (tp) and returns its unit-local indices (ipp of them used).
+inline float3 mgl_tess_unit_vertex(thread const mgl_tess& T, uint unit, uint k, thread float& tparam) {
+    tparam = 0.0f;
+    if (T.domain == 2u) return float3(mgl_tess_pos(T.xo[1], T.no[1], k), float(unit) / T.xo[0], 0.0f);
+    if (T.special == 1u) return k == 0u ? float3(0, 0, 1) : k == 1u ? float3(1, 0, 0) : float3(0, 1, 0);
+    if (T.special == 2u) return k == 0u ? float3(0, 0, 0) : k == 1u ? float3(1, 0, 0) : k == 2u ? float3(1, 1, 0) : float3(0, 1, 0);
+    uint sides = T.domain == 0u ? 3u : 4u;
+    float tt;
+    if (T.points != 0u) {
+        uint u = unit;
+        for (uint r = 0; r < T.rings; r++) {
+            bool full;
+            if (T.domain == 0u) full = T.ni[0] >= 2u * r + 1u;
+            else full = T.ni[0] >= 2u * r + 1u && T.ni[1] >= 2u * r + 1u && 2u * r < min(T.ni[0], T.ni[1]);
+            uint cnt = full ? sides : 1u;
+            if (u < cnt) {
+                if (full) return mgl_tess_rowpt(T, r, u, k, tt);
+                if (T.domain == 0u) return float3(1.0f / 3.0f);
+                return mgl_tess_rowpt(T, r, T.ni[0] == 2u * r ? 2u : 1u, k, tt);
+            }
+            u -= cnt;
+        }
+        return float3(1.0f / 3.0f);
+    }
+    if (unit < sides * T.rings) {
+        uint r = unit / sides, s = unit % sides, a = mgl_tess_rowsegs(T, r, s);
+        if (k <= a) {
+            float3 c = mgl_tess_rowpt(T, r, s, k, tt);
+            tparam = tt;
+            return c;
+        }
+        uint b = mgl_tess_rowsegs(T, r + 1u, s);
+        float3 c = mgl_tess_rowpt(T, r + 1u, s, k - a - 1u, tt);
+        tparam = b ? tt : 0.5f;
+        return c;
+    }
+    uint R = T.rings;
+    if (T.domain == 0u) return mgl_tess_rowpt(T, R, k, 0u, tt);
+    uint nu = T.ni[0], nv2 = T.ni[1], du = nu - 2u * R;
+    uint iu = k % (du + 1u), jv = k / (du + 1u);
+    return float3(mgl_tess_pos(T.xi[0], nu, R + iu), mgl_tess_pos(T.xi[1], nv2, R + jv), 0.0f);
+}
+
+inline uint3 mgl_tess_wind(thread const mgl_tess& T, threadgroup const float3* co, uint a, uint b, uint c) {
+    float2 pa = co[a].xy, pb = co[b].xy, pc = co[c].xy;
+    float area = (pb.x - pa.x) * (pc.y - pa.y) - (pc.x - pa.x) * (pb.y - pa.y);
+    if ((T.ccw != 0u && area < 0.0f) || (T.ccw == 0u && area > 0.0f)) return uint3(a, c, b);
+    return uint3(a, b, c);
+}
+
+inline uint3 mgl_tess_unit_prim(thread const mgl_tess& T, uint unit, uint m, threadgroup const float3* co, threadgroup const float* tp) {
+    if (T.domain == 2u) return T.points != 0u ? uint3(m) : uint3(m, m + 1u, 0u);
+    if (T.points != 0u) return uint3(m);
+    if (T.special == 1u) return mgl_tess_wind(T, co, 0u, 1u, 2u);
+    if (T.special == 2u) return m == 0u ? mgl_tess_wind(T, co, 0u, 1u, 2u) : mgl_tess_wind(T, co, 0u, 2u, 3u);
+    uint sides = T.domain == 0u ? 3u : 4u;
+    if (unit < sides * T.rings) {
+        // mgl_tess_unit merges the outer row P (keys tp[1..a]) and the inner row Q (keys tp[q0+1..q0+b]),
+        // taking P on ties: a stable merge. Before step m it has taken i points of P, i = the number of P
+        // keys whose merged position (k - 1 + Q keys below it) is < m.
+        uint r = unit / sides, s = unit % sides;
+        uint a = mgl_tess_rowsegs(T, r, s), b = mgl_tess_rowsegs(T, r + 1u, s), q0 = a + 1u;
+        uint lo = 0u, hi = min(m, a);  // largest i in [0, hi] with position(i) < m (position(0) = -1)
+        while (lo < hi) {
+            uint k = (lo + hi + 1u) / 2u;
+            float x = tp[k];
+            uint qlo = 0u, qhi = b;  // Q keys < x
+            while (qlo < qhi) {
+                uint q = (qlo + qhi + 1u) / 2u;
+                if (tp[q0 + q] < x) qlo = q;
+                else qhi = q - 1u;
+            }
+            if (k - 1u + qlo < m) lo = k;
+            else hi = k - 1u;
+        }
+        uint i = lo, j = m - i;
+        bool advP = i == a ? false : j == b ? true : tp[i + 1u] <= tp[q0 + j + 1u];
+        return advP ? mgl_tess_wind(T, co, i, i + 1u, q0 + j) : mgl_tess_wind(T, co, i, q0 + j + 1u, q0 + j);
+    }
+    if (T.domain == 0u) return mgl_tess_wind(T, co, 0u, 1u, 2u);
+    uint du = T.ni[0] - 2u * T.rings, cell = m / 2u, iu = cell % du, jv = cell / du;
+    uint p00 = jv * (du + 1u) + iu, p10 = p00 + 1u, p01 = p00 + du + 1u, p11 = p01 + 1u;
+    return (m & 1u) == 0u ? mgl_tess_wind(T, co, p00, p10, p11) : mgl_tess_wind(T, co, p00, p11, p01);
 }

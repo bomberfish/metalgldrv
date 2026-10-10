@@ -4768,6 +4768,7 @@ void Emitter::emitTessEvalMesh(std::string& o) {
     if (esi.hasShared) e += "    threadgroup tes::MGLShared mgl_sh;\n    threadgroup tes::MGLShared* S = &mgl_sh;\n";
     e += "    threadgroup float3 mgl_co[" + std::to_string(MAXV) + "];\n    threadgroup float mgl_tp[" + std::to_string(MAXV) + "];\n";
     e += "    threadgroup ushort mgl_idx[" + std::to_string(MAXP * 3) + "];\n    threadgroup uint mgl_cnt[2];\n" + perVertexDecl;
+    e += "    threadgroup ushort mgl_uv[" + std::to_string(kTessMaxUnits + 1) + "], mgl_up[" + std::to_string(kTessMaxUnits + 1) + "];\n";
     if (ts_.inObject) {
         e += "    object_data const float* lv = (object_data const float*)(pl.rec + " + std::to_string(ts_.cpsMax) + "u * " + ns + ");\n";
         e += indentBy(tesLoadControlPoints("object_data const uint4* r = pl.rec + j * " + ns + ";\n", "pl.cps", NT), 4);
@@ -4777,14 +4778,25 @@ void Emitter::emitTessEvalMesh(std::string& o) {
         e += indentBy(tesLoadControlPoints(tesDeviceRecord("pl.gp", "pl.cps"), "pl.cps", NT), 4);
         e += "    if (mgl_tid == 0u) {\n" + indentBy(tesLoadPatch(), 8);
     }
+    // The group's units are generated in parallel: thread 0 lays out where each unit's vertices and
+    // primitives go, then every thread computes vertices, then primitives (mgl_tess_unit_vertex / _prim,
+    // identical to mgl_tess_unit's serial output).
     std::string sipp = std::to_string(ipp) + "u";
-    e += "        mgl_tess T = pl.T;\n        uint nv = 0u, np = 0u;\n";
-    e += "        for (uint u = pl.gstart[mgl_tg.x]; u < uint(pl.gstart[mgl_tg.x + 1u]); u++) {\n";
-    e += "            uint unv, unp;\n            mgl_tess_unit(T, u, mgl_co + nv, mgl_tp + nv, mgl_idx + np * " + sipp + ", unv, unp);\n";
-    e += "            for (uint k = np * " + sipp + "; k < (np + unp) * " + sipp + "; k++) mgl_idx[k] += ushort(nv);\n";
-    e += "            nv += unv;\n            np += unp;\n        }\n";
-    e += "        mgl_cnt[0] = nv;\n        mgl_cnt[1] = np;\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
-    e += "    uint nv = mgl_cnt[0], np = mgl_cnt[1];\n";
+    e += "        uint u0 = pl.gstart[mgl_tg.x], nu = uint(pl.gstart[mgl_tg.x + 1u]) - u0;\n";
+    e += "        mgl_tess T0 = pl.T;\n        mgl_uv[0] = 0;\n        mgl_up[0] = 0;\n";
+    e += "        for (uint i = 0; i < nu; i++) {\n            uint2 sz = mgl_tess_unit_size(T0, u0 + i);\n";
+    e += "            mgl_uv[i + 1u] = ushort(mgl_uv[i] + sz.x);\n            mgl_up[i + 1u] = ushort(mgl_up[i] + sz.y);\n        }\n";
+    e += "        mgl_cnt[0] = nu;\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    mgl_tess T = pl.T;\n    uint u0 = pl.gstart[mgl_tg.x], nu = mgl_cnt[0], nv = mgl_uv[nu], np = mgl_up[nu];\n";
+    e += "    for (uint k = mgl_tid; k < nv; k += " + std::to_string(NT) + "u) {\n";
+    e += "        uint i = 0u;\n        while (uint(mgl_uv[i + 1u]) <= k) i++;\n";
+    e += "        float t;\n        mgl_co[k] = mgl_tess_unit_vertex(T, u0 + i, k - mgl_uv[i], t);\n        mgl_tp[k] = t;\n    }\n";
+    e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+    e += "    for (uint m = mgl_tid; m < np; m += " + std::to_string(NT) + "u) {\n";
+    e += "        uint i = 0u;\n        while (uint(mgl_up[i + 1u]) <= m) i++;\n";
+    e += "        uint3 t = mgl_tess_unit_prim(T, u0 + i, m - mgl_up[i], mgl_co + mgl_uv[i], mgl_tp + mgl_uv[i]);\n";
+    e += "        for (uint c = 0; c < " + sipp + "; c++) mgl_idx[m * " + sipp + " + c] = ushort(t[c] + mgl_uv[i]);\n    }\n";
+    e += "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
     if (!ro.spill.empty()) e += "    threadgroup uint mgl_svs[" + std::to_string(MAXV) + "];\n";
     e += "    for (uint k = mgl_tid; k < nv; k += " + std::to_string(NT) + "u) {\n";
     e += indentBy(tesRun("mgl_co[k]", "pl.patch", "pl.cps"), 8);

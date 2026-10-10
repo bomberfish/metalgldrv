@@ -319,17 +319,32 @@ struct TessCase {
 static const char* kTessKernel = R"(
 struct mgl_TCase { uint domain, spacing, points, ccw; float outer[4]; float inner[2]; float pad[2]; };
 kernel void tesscheck(device const mgl_TCase* cases [[buffer(0)]], device float* out [[buffer(1)]], device uint* counts [[buffer(2)]],
-                      uint c [[threadgroup_position_in_grid]]) {
+                      device uint* mismatches [[buffer(3)]], uint c [[threadgroup_position_in_grid]]) {
     threadgroup float3 co[130];
     threadgroup float tp[130];
     threadgroup ushort idx[400];
     mgl_TCase k = cases[c];
     mgl_tess T = mgl_tess_setup(k.domain, k.spacing, k.points, k.ccw, float4(k.outer[0], k.outer[1], k.outer[2], k.outer[3]), float2(k.inner[0], k.inner[1]));
     uint ipp = k.points != 0u ? 1u : k.domain == 2u ? 2u : 3u;
-    uint base = c * 262144u, n = 0u;
+    uint base = c * 262144u, n = 0u, bad = 0u;
+    uint sides = k.domain == 0u ? 3u : 4u;
     for (uint u = 0; u < T.units; u++) {
         uint nv, np;
         mgl_tess_unit(T, u, co, tp, idx, nv, np);
+        // the per-element functions must reproduce it exactly
+        uint2 sz = mgl_tess_unit_size(T, u);
+        if (sz.x != nv || sz.y != np) bad++;
+        bool strip = k.domain != 2u && T.special == 0u && k.points == 0u && u < sides * T.rings;
+        for (uint i = 0; i < nv; i++) {
+            float t;
+            float3 v = mgl_tess_unit_vertex(T, u, i, t);
+            if (any(as_type<uint3>(v) != as_type<uint3>(co[i])) || (strip && as_type<uint>(t) != as_type<uint>(tp[i]))) bad++;
+        }
+        for (uint p = 0; p < np; p++) {
+            uint3 t = mgl_tess_unit_prim(T, u, p, co, tp);
+            for (uint i = 0; i < ipp; i++)
+                if (t[i] != uint(idx[p * ipp + i])) bad++;
+        }
         for (uint p = 0; p < np; p++)
             for (uint i = 0; i < ipp; i++) {
                 float3 v = co[idx[p * ipp + i]];
@@ -338,6 +353,7 @@ kernel void tesscheck(device const mgl_TCase* cases [[buffer(0)]], device float*
             }
     }
     counts[c] = n;
+    mismatches[c] = bad;
 }
 )";
 
@@ -360,8 +376,18 @@ int runTessCheck(bool verbose) {
     cases.push_back({0, 0, 0, 0, {3, 3, 3, 3}, {3, 3}});             // cw
     for (uint32_t d = 0; d < 2; d++)
         for (float a : {1.0f, 2.0f, 3.0f, 6.0f}) cases.push_back({d, 0, 1, 1, {a, a, a, a}, {a, a}});  // point mode
+    // different level on every edge (uneven strips), every spacing and winding
+    uint32_t rng = 7;
+    auto rlevel = [&]() {
+        rng = rng * 1664525u + 1013904223u;
+        return 1.0f + (float)(rng >> 8) / (float)(1u << 24) * ((rng & 3u) == 0u ? 40.0f : 9.0f);
+    };
+    for (int i = 0; i < 400; i++) {
+        uint32_t d = (uint32_t)i % 2u, sp = (uint32_t)(i / 2) % 3u, pts = i % 23 == 0 ? 1u : 0u;
+        cases.push_back({d, sp, pts, (uint32_t)(i / 6) % 2u, {rlevel(), rlevel(), rlevel(), rlevel()}, {rlevel(), rlevel()}});
+    }
     std::string body = kTessKernel;
-    std::string src = buildMSLPrelude(body + "\n// mgl_tess_setup mgl_tess_unit\n") + body;
+    std::string src = buildMSLPrelude(body + "\n// mgl_tess_setup mgl_tess_unit mgl_tess_unit_size mgl_tess_unit_vertex mgl_tess_unit_prim\n") + body;
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         NSError* err = nil;
@@ -381,6 +407,7 @@ int runTessCheck(bool verbose) {
         id<MTLBuffer> cb0 = [dev newBufferWithBytes:gc.data() length:gc.size() * sizeof(GPUCase) options:MTLResourceStorageModeShared];
         id<MTLBuffer> outB = [dev newBufferWithLength:cases.size() * 262144 * 4 options:MTLResourceStorageModeShared];
         id<MTLBuffer> cnt = [dev newBufferWithLength:cases.size() * 4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> mis = [dev newBufferWithLength:cases.size() * 4 options:MTLResourceStorageModeShared];
         id<MTLCommandQueue> q = [dev newCommandQueue];
         id<MTLCommandBuffer> cmd = [q commandBuffer];
         id<MTLComputeCommandEncoder> ce = [cmd computeCommandEncoder];
@@ -388,6 +415,7 @@ int runTessCheck(bool verbose) {
         [ce setBuffer:cb0 offset:0 atIndex:0];
         [ce setBuffer:outB offset:0 atIndex:1];
         [ce setBuffer:cnt offset:0 atIndex:2];
+        [ce setBuffer:mis offset:0 atIndex:3];
         [ce dispatchThreadgroups:MTLSizeMake(cases.size(), 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         [ce endEncoding];
         [cmd commit];
@@ -402,6 +430,10 @@ int runTessCheck(bool verbose) {
             std::string label = std::string(c.domain == 0 ? "tri" : c.domain == 1 ? "quad" : "iso") + " sp" + std::to_string(c.spacing) +
                                 (c.points ? " points" : "") + " outer=" + std::to_string(c.outer[0]) + "," + std::to_string(c.outer[1]) +
                                 " inner=" + std::to_string(c.inner[0]);
+            if (uint32_t m = ((const uint32_t*)mis.contents)[ci]) {
+                printf("FAIL %s: per-element generation differs in %u values\n", label.c_str(), m);
+                failures++;
+            }
             bool culled = !(c.outer[0] > 0) || !(c.outer[1] > 0);
             if (culled) {
                 if (n != 0) { printf("FAIL %s: culled patch produced %u vertices\n", label.c_str(), n); failures++; }
@@ -430,6 +462,9 @@ int runTessCheck(bool verbose) {
                 double a2 = (double)(bx - ax) * (cy - ay) - (double)(cx - ax) * (by - ay);
                 if ((c.ccw && a2 < -1e-12) || (!c.ccw && a2 > 1e-12)) badWinding++;
                 area += std::fabs(a2) / 2;
+                // zero-area triangles add no surface: fractional_odd treats an inner level of 1 as 1 + epsilon,
+                // whose inner ring lies on the outer edges (see mgl_tess_setup)
+                if (a2 == 0) continue;
                 std::tuple<float, float> P[3] = {{ax, ay}, {bx, by}, {cx, cy}};
                 for (int k = 0; k < 3; k++) {
                     auto p0 = P[k], p1 = P[(k + 1) % 3];
