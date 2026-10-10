@@ -7,11 +7,12 @@
 // factor, the TES (Heaven's) displaces along the normal by a height texture fetched with textureLod,
 // which makes it non-affine in gl_TessCoord. The fragment shader writes two G-buffer targets.
 //
-//   displacebench [--frames N] [--warmup N] [--grid N] [--draws N] [--weight W] [--notess] [--size WxH]
+//   displacebench [--frames N] [--warmup N] [--grid N] [--draws N] [--weight W] [--notess] [--size WxH] [--checksum] [--dump FILE]
 //
 // --grid N: N x N quads (2 N^2 triangles = patches); --weight W: per-vertex weights in [W/2, W], so
 // edge levels up to 2W (1 gives about one triangle per patch); --notess: the same geometry with VS + FS.
-// Reports GPU time (GL_TIME_ELAPSED around the frame) and wall time (issue + glFinish) per frame.
+// Reports GPU time (GL_TIME_ELAPSED around the frame) and wall time (issue + glFinish) per frame; --checksum also
+// prints a hash of the last frame's first colour target (equal images, equal hashes); --dump writes it as a PPM.
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl3.h>
 #include <algorithm>
@@ -215,7 +216,8 @@ void viewProjection(float* m, float aspect, const float eye[3], const float at[3
 int main(int argc, char** argv) {
     int frames = 60, warmup = 10, grid = 400, draws = 300, width = 1920, height = 1080;
     float weight = 4.0f;
-    bool notess = false;
+    bool notess = false, checksum = false;
+    std::string dump;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -231,6 +233,8 @@ int main(int argc, char** argv) {
         else if (a == "--draws") draws = atoi(next());
         else if (a == "--weight") weight = (float)atof(next());
         else if (a == "--notess") notess = true;
+        else if (a == "--checksum") checksum = true;
+        else if (a == "--dump") dump = next();
         else if (a == "--size") {
             if (sscanf(next(), "%dx%d", &width, &height) != 2) return 2;
         } else {
@@ -380,6 +384,20 @@ int main(int argc, char** argv) {
     printf("  gpu  ms/frame: median %8.3f  mean %8.3f  min %8.3f\n", g.median, g.mean, g.min);
     printf("  wall ms/frame: median %8.3f  mean %8.3f  min %8.3f\n", w.median, w.mean, w.min);
     printf("  probe pixel: %u %u %u %u\n", px[0], px[1], px[2], px[3]);
+    if (checksum || !dump.empty()) {
+        std::vector<uint8_t> img((size_t)width * height * 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, img.data());
+        uint64_t h = 1469598103934665603ull;
+        for (uint8_t b : img) h = (h ^ b) * 1099511628211ull;
+        if (checksum) printf("  checksum: %016llx\n", (unsigned long long)h);
+        if (FILE* f = dump.empty() ? nullptr : fopen(dump.c_str(), "wb")) {
+            fprintf(f, "P6\n%d %d\n255\n", width, height);
+            for (int y = height - 1; y >= 0; y--)
+                for (int x = 0; x < width; x++) fwrite(&img[((size_t)y * width + x) * 4], 1, 3, f);
+            fclose(f);
+        }
+    }
     CGLSetCurrentContext(nullptr);
     CGLDestroyContext(cgl);
     return 0;

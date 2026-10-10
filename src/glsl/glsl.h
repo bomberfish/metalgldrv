@@ -314,6 +314,9 @@ struct Reflection {
     // for the levels the domain uses (empty when the CPU can't compute them; without a TCS the levels are
     // GL_PATCH_DEFAULT_OUTER/INNER_LEVEL).
     bool tessFusable = false, tesAffine = false;
+    // The VS and TCS have no memory writes or subgroup operations, so the emulation may run several patches in one
+    // object threadgroup (EntryPoint::patchesPerObjectGroup).
+    bool tessBatchable = false;
     std::vector<TessLevelOp> tessLevels[6];
     // mesh shaders (EXT_mesh_shader)
     int taskLocalSize[3] = {1, 1, 1}, meshLocalSize[3] = {1, 1, 1};
@@ -441,6 +444,7 @@ struct EntryPoint {
     uint32_t maxMeshVertices = 0, maxMeshPrimitives = 0;
     uint32_t spillRecordBytes = 0;  // Mesh: bytes per primitive of spilled varyings (0 = none)
     uint32_t scratchWordsPerItem = 0;  // mgl_gs_copy: size of each item's MGLDrawInfo::gsRecord area
+    uint32_t patchesPerObjectGroup = 1;  // mgl_tes_obj: patches per object threadgroup (grid x = patches / this, rounded up)
 };
 
 struct MSLOutput {

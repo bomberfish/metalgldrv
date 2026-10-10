@@ -2650,10 +2650,11 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     std::function<id<MTL4RenderCommandEncoder>()> restart;
     auto drawMesh = [&](id<MTL4RenderCommandEncoder> enc, const glsl::MGLDrawInfo* info, bool splittable) {
         MTLSize tg = MTLSizeMake(1, 1, 1);
-        uint32_t n, y, z, chunk = kMeshGridChunk;
+        uint32_t n, y, z, chunk = kMeshGridChunk, per = 1;  // per: patches per object threadgroup (grid column)
         if (os) {
             tg = MTLSizeMake(os->threadsPerThreadgroup[0], os->threadsPerThreadgroup[1], os->threadsPerThreadgroup[2]);
-            n = s.prims, y = (uint32_t)d.instances, z = 1;
+            per = std::max<uint32_t>(1, os->patchesPerObjectGroup);
+            n = (s.prims + per - 1) / per, y = (uint32_t)d.instances, z = 1;
             size_t perColumn = (size_t)std::max<uint32_t>(1, os->payloadBytes) * y;  // y object threadgroups per grid column
             chunk = (uint32_t)std::clamp<size_t>(kMeshGridPayloadBytes / perColumn, 1, kMeshGridChunk);
         } else {
@@ -2662,7 +2663,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
             y = hasTess ? 1 : (uint32_t)d.instances;
         }
         // items per grid column of this grid (the TES records of tessellation + GS: one GS input primitive each)
-        double perColumn = hasTess && !os ? (double)z * std::max(1.0, refl.gsMaxVertices / 3.0) : itemsPerColumn;
+        double perColumn = hasTess && !os ? (double)z * std::max(1.0, refl.gsMaxVertices / 3.0) : itemsPerColumn * per;
         if (perColumn > 0) chunk = (uint32_t)std::clamp(meshWorkBudgetItems(ctx) / perColumn, 1.0, (double)chunk);
         for (uint32_t base = 0; base < n; base += chunk) {
             uint32_t count = std::min(chunk, n - base);
@@ -2675,7 +2676,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
             if (base) {
                 UploadAlloc c = ctx->upload(sizeof(glsl::MGLDrawInfo), 16);
                 memcpy(c.cpu, info, sizeof(glsl::MGLDrawInfo));
-                ((glsl::MGLDrawInfo*)c.cpu)->gridBase = base;
+                ((glsl::MGLDrawInfo*)c.cpu)->gridBase = base * per;
                 [table setAddress:c.gpu atIndex:glsl::kBufStageIO];
             }
             [enc drawMeshThreadgroups:MTLSizeMake(count, y, z) threadsPerObjectThreadgroup:tg threadsPerMeshThreadgroup:meshTG];

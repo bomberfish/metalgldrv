@@ -134,6 +134,12 @@ tessellator (equal / fractional_even / fractional_odd spacing, triangles / quads
   and the counted paths (geometry shader after tessellation, transform feedback,
   primitive queries), run it as the `mgl_tcs` compute kernel instead, which ends
   the render pass. `METALGLDRV_TESS_PASS1=compute` forces the kernel.
+* **Pieces and batches**: with a TCS in the object stage, units are cut into pieces of <= 32 primitives and
+  packed into small mesh threadgroups (34 vertices), up to 3 patches share an object threadgroup when the VS / TCS
+  have no side effects, and domain points / primitives are generated in parallel. `build/tests/displacebench`
+  (Heaven's displacement TCS / TES; `displacebench-apple` runs it on Apple's OpenGL) measures it. Primitive order
+  across mesh threadgroups isn't guaranteed: depth ties and blending within one tessellated draw may resolve
+  differently from GL's order.
 * **Multi-draws** (`glMultiDraw*`, also with `METALGLDRV_IMPLICIT_PATCHES`) run
   all their sub-draws in one emulation pass: a sub-draw table
   (`MGLDrawInfo::subDraws`) gives each patch its gl_DrawID, gl_BaseVertex and

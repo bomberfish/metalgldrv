@@ -323,6 +323,8 @@ kernel void tesscheck(device const mgl_TCase* cases [[buffer(0)]], device float*
     threadgroup float3 co[130];
     threadgroup float tp[130];
     threadgroup ushort idx[400];
+    threadgroup float3 pco[MGL_TESS_PIECE + 2u];
+    threadgroup float ptp[MGL_TESS_PIECE + 2u];
     mgl_TCase k = cases[c];
     mgl_tess T = mgl_tess_setup(k.domain, k.spacing, k.points, k.ccw, float4(k.outer[0], k.outer[1], k.outer[2], k.outer[3]), float2(k.inner[0], k.inner[1]));
     uint ipp = k.points != 0u ? 1u : k.domain == 2u ? 2u : 3u;
@@ -345,6 +347,24 @@ kernel void tesscheck(device const mgl_TCase* cases [[buffer(0)]], device float*
             for (uint i = 0; i < ipp; i++)
                 if (t[i] != uint(idx[p * ipp + i])) bad++;
         }
+        // its pieces: the same primitives (as coordinates) in the same order
+        uint pieces = mgl_tess_unit_pieces(T, u), up = 0u;
+        for (uint pc = 0; pc < pieces; pc++) {
+            uint4 pb = mgl_tess_piece_bounds(T, u, pc);
+            uint2 psz = mgl_tess_piece_size(T, u, pc);
+            if (psz.x > MGL_TESS_PIECE + 2u || psz.y > MGL_TESS_PIECE) { bad++; continue; }
+            for (uint i = 0; i < psz.x; i++) {
+                float t;
+                pco[i] = mgl_tess_piece_vertex(T, u, pb, i, t);
+                ptp[i] = t;
+            }
+            for (uint p = 0; p < psz.y; p++, up++) {
+                uint3 t = mgl_tess_piece_prim(T, u, pb, p, pco, ptp);
+                for (uint i = 0; i < ipp; i++)
+                    if (up >= np || t[i] >= psz.x || any(as_type<uint3>(pco[t[i]]) != as_type<uint3>(co[idx[up * ipp + i]]))) bad++;
+            }
+        }
+        if (up != np) bad++;
         for (uint p = 0; p < np; p++)
             for (uint i = 0; i < ipp; i++) {
                 float3 v = co[idx[p * ipp + i]];
@@ -387,7 +407,7 @@ int runTessCheck(bool verbose) {
         cases.push_back({d, sp, pts, (uint32_t)(i / 6) % 2u, {rlevel(), rlevel(), rlevel(), rlevel()}, {rlevel(), rlevel()}});
     }
     std::string body = kTessKernel;
-    std::string src = buildMSLPrelude(body + "\n// mgl_tess_setup mgl_tess_unit mgl_tess_unit_size mgl_tess_unit_vertex mgl_tess_unit_prim\n") + body;
+    std::string src = buildMSLPrelude(body + "\n// mgl_tess_setup mgl_tess_unit mgl_tess_unit_size mgl_tess_unit_vertex mgl_tess_unit_prim mgl_tess_unit_pieces mgl_tess_piece_bounds mgl_tess_piece_size mgl_tess_piece_vertex mgl_tess_piece_prim\n") + body;
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         NSError* err = nil;

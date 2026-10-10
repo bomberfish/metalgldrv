@@ -2116,23 +2116,17 @@ void Linker::tessFusedAnalysis() {
     auto has = [&](Stage s) { return (m & (1u << (int)s)) != 0; };
     if (!has(Stage::TessEval)) return;
     tessLevelAnalysis();
-    if (!has(Stage::Vertex) || has(Stage::Geometry)) return;
-    bool tri = r.tesPrimitiveMode == gl::TRIANGLES;
-    if ((!tri && r.tesPrimitiveMode != gl::QUADS) || r.tesPointMode) return;
-    if (r.writesLayer || r.writesViewportIndex) return;
-    if (const StageCode& tc = prog_->stages[(int)Stage::TessControl]; tc.main && (tc.outLayout.vertices < 1 || tc.outLayout.vertices > 4)) return;
-    // The fused vertex function runs the vertex shader once per patch vertex for every output vertex
-    // and the TCS invocations one after another (no barrier()): memory writes would happen several
-    // times and subgroup operations would see other invocations. Reading buffers and images is fine.
     auto bufferRoot = [](const Expr* e) {
         while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
         return e->kind == EK::Var && e->var->q.storage == Storage::Buffer;
     };
-    for (Stage st : {Stage::Vertex, Stage::TessControl, Stage::TessEval}) {
+    // Whether stage st runs correctly with its invocations in other arrangements: no memory writes (they could happen
+    // more than once) and no subgroup operations; with `barriers`, no TCS barrier() either (invocations in sequence).
+    auto fusableStage = [&](Stage st, bool barriers) {
         const StageCode& sc = prog_->stages[(int)st];
-        if (!sc.main) continue;
+        if (!sc.main) return true;
         for (const std::string& n : sc.usedNames)
-            if (n.compare(0, 11, "gl_Subgroup") == 0 || n.compare(0, 11, "gl_SubGroup") == 0) return;
+            if (n.compare(0, 11, "gl_Subgroup") == 0 || n.compare(0, 11, "gl_SubGroup") == 0) return false;
         bool bad = false;
         Walker w;
         w.onExpr = [&](const Expr* e) {
@@ -2154,14 +2148,27 @@ void Linker::tessFusedAnalysis() {
             if ((n.compare(0, 6, "atomic") == 0 && n != "atomicCounter") || n.compare(0, 10, "imageStore") == 0 ||
                 n.compare(0, 11, "imageAtomic") == 0)
                 bad = true;
-            if ((n == "barrier" && st == Stage::TessControl) || n.compare(0, 8, "subgroup") == 0 || n.compare(0, 6, "ballot") == 0 ||
+            if ((n == "barrier" && st == Stage::TessControl && barriers) || n.compare(0, 8, "subgroup") == 0 || n.compare(0, 6, "ballot") == 0 ||
                 n.compare(0, 14, "readInvocation") == 0 || n.compare(0, 19, "readFirstInvocation") == 0 ||
                 n.compare(0, 13, "anyInvocation") == 0 || n.compare(0, 14, "allInvocations") == 0)
                 bad = true;
         };
         for (auto* f : sc.reachable) w.stmt(f->body);
-        if (bad) return;
-    }
+        return !bad;
+    };
+    // Several patches per object threadgroup (tessellation emulation): VS and TCS run once per control point, but threads
+    // past the draw's last patch repeat its work without storing it.
+    r.tessBatchable = fusableStage(Stage::Vertex, false) && fusableStage(Stage::TessControl, false);
+    if (!has(Stage::Vertex) || has(Stage::Geometry)) return;
+    bool tri = r.tesPrimitiveMode == gl::TRIANGLES;
+    if ((!tri && r.tesPrimitiveMode != gl::QUADS) || r.tesPointMode) return;
+    if (r.writesLayer || r.writesViewportIndex) return;
+    if (const StageCode& tc = prog_->stages[(int)Stage::TessControl]; tc.main && (tc.outLayout.vertices < 1 || tc.outLayout.vertices > 4)) return;
+    // The fused vertex function runs the vertex shader once per patch vertex for every output vertex
+    // and the TCS invocations one after another (no barrier()): memory writes would happen several
+    // times and subgroup operations would see other invocations. Reading buffers and images is fine.
+    for (Stage st : {Stage::Vertex, Stage::TessControl, Stage::TessEval})
+        if (!fusableStage(st, true)) return;
     // Fragment shader: gl_PrimitiveID would count the rasterized triangles (not the patches) and the
     // inputs must fit a classic vertex function (124 scalars).
     if (const StageCode& fs = prog_->stages[(int)Stage::Fragment]; fs.main) {
