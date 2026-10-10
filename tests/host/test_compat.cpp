@@ -485,3 +485,68 @@ TEST(compat_apple_vertex_program_evaluators) {
     glDeleteShader(f);
     CHECK_GL();
 }
+
+// GL_ARB_shader_objects / GL_ARB_vertex_shader: the handle-based API compiles, links and draws.
+TEST(compat_arb_shader_objects) {
+    typedef void* H;  // GLhandleARB on Apple platforms
+    auto createShader = (H(*)(GLenum))eglGetProcAddress("glCreateShaderObjectARB");
+    auto shaderSource = (void (*)(H, GLsizei, const char**, const GLint*))eglGetProcAddress("glShaderSourceARB");
+    auto compile = (void (*)(H))eglGetProcAddress("glCompileShaderARB");
+    auto createProgram = (H(*)())eglGetProcAddress("glCreateProgramObjectARB");
+    auto attach = (void (*)(H, H))eglGetProcAddress("glAttachObjectARB");
+    auto link = (void (*)(H))eglGetProcAddress("glLinkProgramARB");
+    auto use = (void (*)(H))eglGetProcAddress("glUseProgramObjectARB");
+    auto getParam = (void (*)(H, GLenum, GLint*))eglGetProcAddress("glGetObjectParameterivARB");
+    auto getLog = (void (*)(H, GLsizei, GLsizei*, char*))eglGetProcAddress("glGetInfoLogARB");
+    auto getHandle = (H(*)(GLenum))eglGetProcAddress("glGetHandleARB");
+    auto uniformLoc = (GLint(*)(H, const char*))eglGetProcAddress("glGetUniformLocationARB");
+    auto bindAttrib = (void (*)(H, GLuint, const char*))eglGetProcAddress("glBindAttribLocationARB");
+    auto getAttached = (void (*)(H, GLsizei, GLsizei*, H*))eglGetProcAddress("glGetAttachedObjectsARB");
+    auto delObj = (void (*)(H))eglGetProcAddress("glDeleteObjectARB");
+    const char* vs = "attribute vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0.0, 1.0); }";
+    const char* fs = "uniform vec4 color;\nvoid main() { gl_FragColor = color; }";
+    H v = createShader(GL_VERTEX_SHADER), f = createShader(GL_FRAGMENT_SHADER);
+    shaderSource(v, 1, &vs, nullptr);
+    shaderSource(f, 1, &fs, nullptr);
+    compile(v);
+    compile(f);
+    GLint st = 0;
+    getParam(f, 0x8B81 /* GL_OBJECT_COMPILE_STATUS_ARB */, &st);
+    CHECK_EQ(st, 1);
+    getParam(f, 0x8B4E /* GL_OBJECT_TYPE_ARB */, &st);
+    CHECK_EQ(st, 0x8B48 /* GL_SHADER_OBJECT_ARB */);
+    getParam(f, 0x8B4F /* GL_OBJECT_SUBTYPE_ARB */, &st);
+    CHECK_EQ(st, GL_FRAGMENT_SHADER);
+    H p = createProgram();
+    attach(p, v);
+    attach(p, f);
+    bindAttrib(p, 0, "pos");
+    link(p);
+    getParam(p, 0x8B82 /* GL_OBJECT_LINK_STATUS_ARB */, &st);
+    CHECK_EQ(st, 1);
+    if (!st) {
+        char log[512] = {};
+        getLog(p, sizeof log, nullptr, log);
+        fprintf(stderr, "  link log: %s\n", log);
+    }
+    H objs[4] = {};
+    GLsizei n = 0;
+    getAttached(p, 4, &n, objs);
+    CHECK_EQ(n, 2);
+    use(p);
+    CHECK(getHandle(0x8B40 /* GL_PROGRAM_OBJECT_ARB */) == p);
+    glUniform4f(uniformLoc(p, "color"), 0, 0, 1, 1);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    float quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray(0);
+    CHECK_PIXEL(32, 32, 0, 0, 255, 255);
+    use(nullptr);
+    delObj(p);
+    delObj(v);
+    delObj(f);
+    CHECK_GL();
+}
