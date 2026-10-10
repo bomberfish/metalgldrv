@@ -295,3 +295,43 @@ TEST(compat_apple_specular_vector) {
     CHECK(abs(phong[0] - 180) <= 3);  // 0.707
     CHECK_GL();
 }
+
+// GL_APPLE_vertex_array_range: the range is recorded; arrays edited in it draw with the new data after a flush.
+TEST(compat_apple_vertex_array_range) {
+    auto range = (void (*)(GLsizei, void*))eglGetProcAddress("glVertexArrayRangeAPPLE");
+    auto flush = (void (*)(GLsizei, void*))eglGetProcAddress("glFlushVertexArrayRangeAPPLE");
+    auto param = (void (*)(GLenum, GLint))eglGetProcAddress("glVertexArrayParameteriAPPLE");
+    const GLenum VAR = 0x851D, VAR_LENGTH = 0x851E, STORAGE_HINT = 0x851F, VAR_POINTER = 0x8521, STORAGE_CACHED = 0x85BE;
+    static float pos[8] = {-1, -1, 0, -1, -1, 0, 0, 0};  // bottom-left quadrant
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    range(sizeof pos, pos);
+    param(STORAGE_HINT, STORAGE_CACHED);
+    glEnableClientState(VAR);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, pos);
+    glColor3f(1, 1, 0);
+    glDrawArrays(GL_QUADS, 0, 4);
+    for (int i = 0; i < 8; i++) pos[i] += 1;  // move to the top-right quadrant
+    flush(sizeof pos, pos);
+    glColor3f(0, 1, 1);
+    glDrawArrays(GL_QUADS, 0, 4);
+    CHECK_PIXEL(16, 16, 255, 255, 0, 255);
+    CHECK_PIXEL(48, 48, 0, 255, 255, 255);
+    GLint v = 0;
+    glGetIntegerv(VAR_LENGTH, &v);
+    CHECK_EQ(v, (GLint)sizeof pos);
+    glGetIntegerv(STORAGE_HINT, &v);
+    CHECK_EQ(v, (GLint)STORAGE_CACHED);
+    void* p = nullptr;
+    glGetPointerv(VAR_POINTER, &p);
+    CHECK(p == pos);
+    CHECK(glIsEnabled(VAR));
+    glDisableClientState(VAR);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    CHECK_GL();
+}

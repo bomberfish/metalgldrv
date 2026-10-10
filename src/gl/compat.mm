@@ -181,6 +181,12 @@ struct mgl::CompatState {
 
     ClientArray arrays[CA_COUNT];
     GLuint clientActiveTexture = 0;
+    // GL_APPLE_vertex_array_range: client arrays are read at draw time (always current), so the range, its
+    // storage hint and flushes are only recorded
+    bool varEnabled = false;
+    GLsizei varLength = 0;
+    const void* varPointer = nullptr;
+    GLenum varStorageHint = GL_STORAGE_SHARED_APPLE;
     // GL_APPLE_element_array
     bool elementArrayEnabled = false;
     GLenum elementArrayType = GL_UNSIGNED_INT;
@@ -326,6 +332,7 @@ bool mglCompatIsEnabled(Context* ctx, GLenum cap, bool* out) {
     case GL_FOG_COORD_ARRAY: *out = cs->arrays[CA_FOG].enabled; return true;
     case GL_TEXTURE_COORD_ARRAY: *out = cs->arrays[CA_TEX0 + std::min<int>(cs->clientActiveTexture, 7)].enabled; return true;
     case GL_ELEMENT_ARRAY_APPLE: *out = cs->elementArrayEnabled; return true;
+    case GL_VERTEX_ARRAY_RANGE_APPLE: *out = cs->varEnabled; return true;
     case GL_VERTEX_POINT_SIZE_APPLE: *out = cs->vertexPointSize; return true;
     case GL_POINT_SIZE_ARRAY_APPLE: *out = cs->arrays[CA_POINTSIZE].enabled; return true;
     case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
@@ -380,6 +387,8 @@ bool mglCompatGet(Context* ctx, GLenum pname, double* out, int* n, bool* isFloat
     case GL_CURRENT_FOG_COORD: return one(cs->current[CA_FOG][0], true);
     case GL_SHADE_MODEL: return one(cs->shadeModel, false);
     case GL_ELEMENT_ARRAY_TYPE_APPLE: return one(cs->elementArrayType, false);
+    case GL_VERTEX_ARRAY_RANGE_LENGTH_APPLE: return one(cs->varLength, false);
+    case GL_VERTEX_ARRAY_STORAGE_HINT_APPLE: return one(cs->varStorageHint, false);
     case GL_CURRENT_POINT_SIZE_APPLE: return one(cs->current[CA_POINTSIZE][0], true);
     case GL_POINT_SIZE_ARRAY_TYPE_APPLE: return one(cs->arrays[CA_POINTSIZE].type, false);
     case GL_POINT_SIZE_ARRAY_STRIDE_APPLE: return one(cs->arrays[CA_POINTSIZE].stride, false);
@@ -1082,6 +1091,10 @@ API void APIENTRY glEnableClientState(GLenum cap) {
         compat(ctx)->elementArrayEnabled = true;
         return;
     }
+    if (cap == GL_VERTEX_ARRAY_RANGE_APPLE) {
+        compat(ctx)->varEnabled = true;
+        return;
+    }
     int a = arrayForCap(ctx, cap);
     if (a == -1) return ctx->setError(GL_INVALID_ENUM);
     if (a >= 0) compat(ctx)->arrays[a].enabled = true;
@@ -1091,6 +1104,10 @@ API void APIENTRY glDisableClientState(GLenum cap) {
     MGL_CTX();
     if (cap == GL_ELEMENT_ARRAY_APPLE) {
         compat(ctx)->elementArrayEnabled = false;
+        return;
+    }
+    if (cap == GL_VERTEX_ARRAY_RANGE_APPLE) {
+        compat(ctx)->varEnabled = false;
         return;
     }
     int a = arrayForCap(ctx, cap);
@@ -2011,6 +2028,7 @@ bool mglCompatGetPointer(Context* ctx, GLenum pname, void** out) {
     case GL_FOG_COORD_ARRAY_POINTER: *out = (void*)cs->arrays[CA_FOG].pointer; return true;
     case GL_TEXTURE_COORD_ARRAY_POINTER: *out = (void*)cs->arrays[CA_TEX0 + std::min<int>(cs->clientActiveTexture, 7)].pointer; return true;
     case GL_ELEMENT_ARRAY_POINTER_APPLE: *out = (void*)cs->elementArrayPointer; return true;
+    case GL_VERTEX_ARRAY_RANGE_POINTER_APPLE: *out = (void*)cs->varPointer; return true;
     case GL_POINT_SIZE_ARRAY_POINTER_APPLE: *out = (void*)cs->arrays[CA_POINTSIZE].pointer; return true;
     default: return false;
     }
@@ -2059,4 +2077,29 @@ API void APIENTRY glMultiDrawRangeElementArrayAPPLE(GLenum mode, GLuint start, G
     MGL_CTX();
     if (primcount < 0) return ctx->setError(GL_INVALID_VALUE);
     for (GLsizei i = 0; i < primcount; i++) glDrawRangeElementArrayAPPLE(mode, start, end, first[i], count[i]);
+}
+
+// ---------------------------------------------------------------------------
+// GL_APPLE_vertex_array_range
+// ---------------------------------------------------------------------------
+API void APIENTRY glVertexArrayRangeAPPLE(GLsizei length, void* pointer) {
+    MGL_CTX();
+    if (length < 0) return ctx->setError(GL_INVALID_VALUE);
+    CompatState* cs = compat(ctx);
+    cs->varLength = length;
+    cs->varPointer = pointer;
+}
+
+API void APIENTRY glFlushVertexArrayRangeAPPLE(GLsizei length, void* pointer) {
+    MGL_CTX();
+    if (length < 0) return ctx->setError(GL_INVALID_VALUE);
+    (void)pointer;  // draws read client arrays as they are; nothing is cached to update
+}
+
+API void APIENTRY glVertexArrayParameteriAPPLE(GLenum pname, GLint param) {
+    MGL_CTX();
+    if (pname != GL_VERTEX_ARRAY_STORAGE_HINT_APPLE) return ctx->setError(GL_INVALID_ENUM);
+    if (param != GL_STORAGE_CLIENT_APPLE && param != GL_STORAGE_CACHED_APPLE && param != GL_STORAGE_SHARED_APPLE)
+        return ctx->setError(GL_INVALID_ENUM);
+    compat(ctx)->varStorageHint = (GLenum)param;
 }
