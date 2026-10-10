@@ -209,6 +209,8 @@ public:
 
     // per-context namespaces
     NameSpace<VertexArray> vaos;
+    // GL_APPLE_fence names: the serial SetFenceAPPLE recorded, 0 while generated but not set.
+    std::unordered_map<GLuint, uint64_t> appleFences;
     // Framebuffer names: this context's own, or the share group's when the app profile shares them
     // (AppProfile::shareFramebuffers).
     NameSpace<Framebuffer> ownFramebuffers;

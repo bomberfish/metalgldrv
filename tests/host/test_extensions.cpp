@@ -292,3 +292,41 @@ TEST(apple_vertex_array_object) {
     CHECK(!isVao(4242));
     CHECK_GL();
 }
+
+// GL_APPLE_fence: fences and object tests complete once the GPU has run the commands before them.
+TEST(apple_fence) {
+    CHECK(hasExtension("GL_APPLE_fence"));
+    auto gen = (void (*)(GLsizei, GLuint*))eglGetProcAddress("glGenFencesAPPLE");
+    auto del = (void (*)(GLsizei, const GLuint*))eglGetProcAddress("glDeleteFencesAPPLE");
+    auto set = (void (*)(GLuint))eglGetProcAddress("glSetFenceAPPLE");
+    auto isFence = (GLboolean(*)(GLuint))eglGetProcAddress("glIsFenceAPPLE");
+    auto test = (GLboolean(*)(GLuint))eglGetProcAddress("glTestFenceAPPLE");
+    auto finish = (void (*)(GLuint))eglGetProcAddress("glFinishFenceAPPLE");
+    auto testObject = (GLboolean(*)(GLenum, GLuint))eglGetProcAddress("glTestObjectAPPLE");
+    auto finishObject = (void (*)(GLenum, GLint))eglGetProcAddress("glFinishObjectAPPLE");
+    GLuint f = 0;
+    gen(1, &f);
+    CHECK(f != 0);
+    CHECK(!isFence(f));  // not set yet
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    set(f);
+    CHECK(isFence(f));
+    finish(f);
+    CHECK(test(f));
+    CHECK(testObject(0x8A0B /* GL_FENCE_APPLE */, f));
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    uint32_t px[16] = {};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    finishObject(GL_TEXTURE, (GLint)tex);
+    CHECK(testObject(GL_TEXTURE, tex));
+    CHECK_GL();
+    testObject(GL_TEXTURE, 999999);
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);
+    del(1, &f);
+    CHECK(!isFence(f));
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
