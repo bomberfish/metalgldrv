@@ -84,6 +84,7 @@ public:
     // for the GPU (serializedModify) / only ranges flushed with glFlushMappedBufferRangeAPPLE are written
     // (flushingUnmap).
     bool appleSerializedModify = true, appleFlushingUnmap = true;
+    GLenum applePurgeable = 0;  // GL_APPLE_object_purgeable: VOLATILE_APPLE / RELEASED_APPLE while purgeable
     uint64_t lastUse = 0;         // serial of last command buffer referencing mtl
     uint64_t lastGpuWrite = 0;    // serial of last GPU write (SSBO/xfb/copy) for read-back sync
     // mapping
@@ -185,6 +186,7 @@ public:
     int storageLevels = 0, storageW = 0, storageH = 0, storageD = 0, storageLayers = 0;
     bool storageDirty = true;  // level specs changed -> (re)allocate and migrate
     bool needsShaderWrite = false;  // bound as an image -> storage needs ShaderWrite usage
+    GLenum applePurgeable = 0;      // GL_APPLE_object_purgeable: VOLATILE_APPLE / RELEASED_APPLE while purgeable
     // Data was uploaded or copied in, which GL keeps bit-exact: storage of the formats lossless compression
     // alters (losslessCompressionSafe) opts out of it from then on (requireBitExact). Render targets never
     // uploaded to keep it (SuperTuxKart's R11F_G11F_B10F light buffers).

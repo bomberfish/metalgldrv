@@ -151,3 +151,72 @@ API void APIENTRY glSwapAPPLE(void) {
     if (s && s->layer) presentWindowSurface(ctx, s);
     else ctx->flush();
 }
+
+// --- GL_APPLE_object_purgeable --------------------------------------------------------------------------
+// Metal's purgeable states: VOLATILE_APPLE lets the system reclaim the memory under pressure, RELEASED_APPLE
+// discards it now; making the object unpurgeable again reports whether the contents survived.
+static bool purgeableTarget(Context* ctx, GLenum objectType, GLuint name, id<MTLResource>* res, GLenum** flag) {
+    std::lock_guard<std::recursive_mutex> g(ctx->share->mutex);
+    if (objectType == GL_BUFFER_OBJECT_APPLE) {
+        Buffer* b = ctx->share->buffers.get(name);
+        if (!b) return false;
+        *res = b->mtl;
+        *flag = &b->applePurgeable;
+        return true;
+    }
+    if (objectType == GL_TEXTURE) {
+        Texture* t = ctx->share->textures.get(name);
+        if (!t) return false;
+        Texture* root = t->viewParent ? t->viewParent.get() : t;
+        *res = root->mtl;
+        *flag = &root->applePurgeable;
+        return true;
+    }
+    return false;
+}
+
+API GLenum APIENTRY glObjectPurgeableAPPLE(GLenum objectType, GLuint name, GLenum option) {
+    MGL_CTX_RET(0);
+    if (objectType != GL_BUFFER_OBJECT_APPLE && objectType != GL_TEXTURE) return ctx->setError(GL_INVALID_ENUM), 0;
+    if (option != GL_VOLATILE_APPLE && option != GL_RELEASED_APPLE) return ctx->setError(GL_INVALID_ENUM), 0;
+    id<MTLResource> res = nil;
+    GLenum* flag = nullptr;
+    if (!name || !purgeableTarget(ctx, objectType, name, &res, &flag)) return ctx->setError(GL_INVALID_VALUE), 0;
+    if (*flag) return ctx->setError(GL_INVALID_OPERATION), 0;  // already purgeable
+    *flag = option;
+    if (!res) return GL_RELEASED_APPLE;  // no storage: nothing to keep
+    if (option == GL_RELEASED_APPLE) {
+        // Commands still using the memory must finish before it goes.
+        ctx->finish();
+        [res setPurgeableState:MTLPurgeableStateEmpty];
+        return GL_RELEASED_APPLE;
+    }
+    [res setPurgeableState:MTLPurgeableStateVolatile];
+    return GL_VOLATILE_APPLE;
+}
+
+API GLenum APIENTRY glObjectUnpurgeableAPPLE(GLenum objectType, GLuint name, GLenum option) {
+    MGL_CTX_RET(0);
+    if (objectType != GL_BUFFER_OBJECT_APPLE && objectType != GL_TEXTURE) return ctx->setError(GL_INVALID_ENUM), 0;
+    if (option != GL_RETAINED_APPLE && option != GL_UNDEFINED_APPLE) return ctx->setError(GL_INVALID_ENUM), 0;
+    id<MTLResource> res = nil;
+    GLenum* flag = nullptr;
+    if (!name || !purgeableTarget(ctx, objectType, name, &res, &flag)) return ctx->setError(GL_INVALID_VALUE), 0;
+    if (!*flag) return ctx->setError(GL_INVALID_OPERATION), 0;  // not purgeable
+    GLenum was = *flag;
+    *flag = 0;
+    if (!res) return GL_UNDEFINED_APPLE;
+    MTLPurgeableState prev = [res setPurgeableState:MTLPurgeableStateNonVolatile];
+    // Released contents count as gone even when Metal kept the pages.
+    return was == GL_RELEASED_APPLE || prev == MTLPurgeableStateEmpty ? GL_UNDEFINED_APPLE : GL_RETAINED_APPLE;
+}
+
+API void APIENTRY glGetObjectParameterivAPPLE(GLenum objectType, GLuint name, GLenum pname, GLint* params) {
+    MGL_CTX();
+    if (objectType != GL_BUFFER_OBJECT_APPLE && objectType != GL_TEXTURE) return ctx->setError(GL_INVALID_ENUM);
+    if (pname != GL_PURGEABLE_APPLE) return ctx->setError(GL_INVALID_ENUM);
+    id<MTLResource> res = nil;
+    GLenum* flag = nullptr;
+    if (!name || !purgeableTarget(ctx, objectType, name, &res, &flag)) return ctx->setError(GL_INVALID_VALUE);
+    *params = *flag ? GL_TRUE : GL_FALSE;
+}

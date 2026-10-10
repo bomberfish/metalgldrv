@@ -445,3 +445,44 @@ TEST(apple_flush_render) {
     CHECK_PIXEL(4, 4, 0, 255, 0, 255);
     CHECK_GL();
 }
+
+// GL_APPLE_object_purgeable: volatile objects keep their contents unless the system reclaims them; released
+// ones come back undefined.
+TEST(apple_object_purgeable) {
+    CHECK(hasExtension("GL_APPLE_object_purgeable"));
+    auto purgeable = (GLenum(*)(GLenum, GLuint, GLenum))eglGetProcAddress("glObjectPurgeableAPPLE");
+    auto unpurgeable = (GLenum(*)(GLenum, GLuint, GLenum))eglGetProcAddress("glObjectUnpurgeableAPPLE");
+    auto getParam = (void (*)(GLenum, GLuint, GLenum, GLint*))eglGetProcAddress("glGetObjectParameterivAPPLE");
+    const GLenum BUFFER_OBJECT = 0x85B3, VOLATILE = 0x8A1A, RELEASED = 0x8A19, RETAINED = 0x8A1B, UNDEFINED = 0x8A1C,
+                 PURGEABLE = 0x8A1D;
+    GLuint b;
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_ARRAY_BUFFER, b);
+    uint32_t data[256];
+    for (int i = 0; i < 256; i++) data[i] = i;
+    glBufferData(GL_ARRAY_BUFFER, sizeof data, data, GL_STATIC_DRAW);
+    CHECK_EQ(purgeable(BUFFER_OBJECT, b, VOLATILE), VOLATILE);
+    GLint p = 0;
+    getParam(BUFFER_OBJECT, b, PURGEABLE, &p);
+    CHECK_EQ(p, GL_TRUE);
+    purgeable(BUFFER_OBJECT, b, VOLATILE);
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);  // already purgeable
+    GLenum r = unpurgeable(BUFFER_OBJECT, b, RETAINED);
+    CHECK(r == RETAINED || r == UNDEFINED);
+    if (r == RETAINED) {
+        uint32_t out[4];
+        glGetBufferSubData(GL_ARRAY_BUFFER, 4 * 100, sizeof out, out);
+        CHECK_EQ(out[0], 100u);
+    }
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    CHECK_EQ(purgeable(GL_TEXTURE, tex, RELEASED), RELEASED);
+    CHECK_EQ(unpurgeable(GL_TEXTURE, tex, UNDEFINED), UNDEFINED);
+    getParam(GL_TEXTURE, tex, PURGEABLE, &p);
+    CHECK_EQ(p, GL_FALSE);
+    glDeleteTextures(1, &tex);
+    glDeleteBuffers(1, &b);
+    CHECK_GL();
+}
