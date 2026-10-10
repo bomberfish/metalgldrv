@@ -65,7 +65,7 @@ const char* kExtensions[] = {
     "GL_KHR_debug", "GL_KHR_no_error", "GL_KHR_parallel_shader_compile", "GL_KHR_robust_buffer_access_behavior",
     "GL_KHR_robustness", "GL_KHR_shader_subgroup", "GL_KHR_texture_compression_astc_ldr", "GL_NV_blend_square", "GL_NV_conditional_render",
     "GL_NV_depth_clamp", "GL_NV_fence", "GL_NV_occlusion_query", "GL_NV_primitive_restart", "GL_NV_shader_subgroup_partitioned", "GL_NV_texture_barrier",
-    "GL_ATI_draw_buffers", "GL_ATI_meminfo", "GL_ATI_separate_stencil", "GL_NVX_gpu_memory_info",
+    "GL_ATI_draw_buffers", "GL_ATI_meminfo", "GL_ATI_separate_stencil", "GL_ATI_texture_float", "GL_NVX_gpu_memory_info",
 };
 struct DeviceExtension {
     const char* name;

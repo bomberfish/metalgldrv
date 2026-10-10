@@ -661,3 +661,17 @@ TEST(compat_nv_primitive_restart) {
     glDisable(0x8558);
     CHECK_GL();
 }
+
+// GL_ATI_texture_float: ATI's names for the ARB_texture_float formats.
+TEST(compat_ati_texture_float) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    float a = 3.0f;
+    glTexImage2D(GL_TEXTURE_2D, 0, 0x8816 /* GL_ALPHA_FLOAT32_ATI */, 1, 1, 0, GL_ALPHA, GL_FLOAT, &a);
+    float out[4] = {};
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, out);
+    CHECK(out[0] == 0 && out[3] == 3.0f);
+    glDeleteTextures(1, &tex);
+    CHECK_GL();
+}
