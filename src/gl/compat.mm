@@ -3226,6 +3226,9 @@ API GLboolean APIENTRY glIsTextureEXT(GLuint texture) { return glIsTexture(textu
 API GLboolean APIENTRY glAreTexturesResidentEXT(GLsizei n, const GLuint* textures, GLboolean* residences) {
     return glAreTexturesResident(n, textures, residences);
 }
+API void APIENTRY glPrioritizeTexturesEXT(GLsizei n, const GLuint* textures, const GLclampf* priorities) {
+    glPrioritizeTextures(n, textures, priorities);
+}
 
 // ---------------------------------------------------------------------------
 // GL_NV_half_float: half-precision immediate-mode values (generated from gl.xml; the vertex weight one
