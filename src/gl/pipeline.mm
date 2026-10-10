@@ -42,6 +42,7 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
         h = hashBytes(&key.msArray4, sizeof key.msArray4, h);
     }
     h = hashBytes(&key.advancedBlend, 1, h);
+    if (key.source1FromLocation1) h = hashBytes("s1", 2, h);
     if (key.fsr) h = hashBytes(&key.fsr, 1, h);
     if (key.pdc) h = hashBytes(&key.pdc, 1, h);
     if (key.tessComputePass) h = hashBytes("tcp", 3, h);
@@ -132,6 +133,7 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
             if (key.sampleShading) why += " sampleShading";
             if (key.sampleMask) why += " sampleMask";
             if (key.advancedBlend) why += " advancedBlend";
+            if (key.source1FromLocation1) why += " source1FromLocation1";
             if (key.patchVertices) why += " patchVertices";
             MGL_INFO("draw-time variant: program %u (%s) %.1f ms:%s", prog->name, t_apiName, total, why.empty() ? " (link-time key)" : why.c_str());
         }

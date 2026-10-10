@@ -405,6 +405,10 @@ struct VariantKey {
     // (0 = none), plus kAdvancedBlendNoDstAlpha / kAdvancedBlendClamp. The shader reads the destination
     // with framebuffer fetch and blends; fixed-function blending is off for that attachment.
     uint8_t advancedBlend = 0;
+    // Fragment: blending reads SRC1 factors but the shader has no index-1 output: the output at location 1
+    // becomes the second source ([[color(0), index(1)]]), as Direct3D's dual-source blending and other GL
+    // drivers do (Unigine binds its second output to location 1).
+    bool source1FromLocation1 = false;
     // EXT_fragment_shading_rate (METALGLDRV_STRICT): coarse shading. The fragment shader computes the
     // effective rate from MGLFsr (bound at kBufFsr) and runs one invocation per coarse fragment (see
     // emitFS); the last pre-rasterization stage passes gl_PrimitiveShadingRateEXT (0 if it doesn't write

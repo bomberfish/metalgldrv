@@ -3687,16 +3687,23 @@ inline uint mgl_pdc_mask(constant MGLPdc& P, float4 fc, uint layer) {
     std::vector<std::string> colorFields;  // Out members taken from the lane that shaded the coarse fragment
     for (auto* v : sc_->globals) {
         if (v->q.storage != Storage::Out || v->builtin != BuiltinVar::None) continue;
+        // Outputs the shader never touches are inactive and leave their attachments alone: Unigine's
+        // lighting passes declare the G-buffer outputs too but write only s_frag_color.
         auto it = P->fragOutputs.find(v->name);
         if (it == P->fragOutputs.end()) continue;
+        bool source1 = K.source1FromLocation1 && it->second.second == 0 && it->second.first <= 1 &&
+                       it->second.first + (v->type.isArray() ? v->type.dims[0] : 1) > 1;
+        if (!sc_->used.count(v) && !source1) continue;  // the blend still needs its second source
         auto [loc, idx] = it->second;
         int n = v->type.isArray() ? v->type.dims[0] : 1;
         Type et = v->type.stripArrays();
         for (int i = 0; i < n; i++) {
             std::string a = "g." + varName(v) + (v->type.isArray() ? "[" + std::to_string(i) + "]" : "");
-            std::string fn = "mgl_c" + std::to_string(loc + i) + (idx ? "_1" : "");
+            int l = loc + i, x = idx;
+            if (K.source1FromLocation1 && l == 1 && x == 0) l = 0, x = 1;  // the second blend source
+            std::string fn = "mgl_c" + std::to_string(l) + (x ? "_1" : "");
             std::string vt = vecName(et.base == BT::Double ? BT::Float : et.base, 4);
-            outS += "    " + vt + " " + fn + " [[color(" + std::to_string(loc + i) + ")" + (idx ? ", index(1)" : "") + "]];\n";
+            outS += "    " + vt + " " + fn + " [[color(" + std::to_string(l) + ")" + (x ? ", index(1)" : "") + "]];\n";
             std::string val = a;
             if (et.vec == 1) val = vt + "(" + a + ", 0, 0, 1)";
             else if (et.vec == 2) val = vt + "(" + a + ", 0, 1)";

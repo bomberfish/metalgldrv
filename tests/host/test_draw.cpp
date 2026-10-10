@@ -649,3 +649,103 @@ out vec4 o; void main() { o = vec4(0, 1, 0, 1); })");
     glDeleteVertexArrays(1, &vao);
     CHECK_GL();
 }
+
+// A declared output the shader never writes is inactive: its attachment keeps its contents
+// (Unigine's lighting passes declare the G-buffer outputs but write only color 0).
+TEST(unwritten_output_keeps_attachment) {
+    GLuint tex[2], fbo, vao;
+    glGenTextures(2, tex);
+    for (GLuint t : tex) {
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    }
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, tex[1], 0);
+    GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, bufs);
+    const GLfloat blue[4] = {0, 0, 1, 1};
+    glClearBufferfv(GL_COLOR, 0, blue);
+    glClearBufferfv(GL_COLOR, 1, blue);
+    GLuint p = compileProgram(R"(#version 330 core
+void main() { gl_Position = vec4(vec2(gl_VertexID & 1, gl_VertexID >> 1) * 2.0 - 1.0, 0, 1); })",
+                              R"(#version 330 core
+layout(location = 0) out vec4 color; layout(location = 1) out vec4 gbuffer;
+void main() { color = vec4(0, 1, 0, 1); })");
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glViewport(0, 0, 16, 16);
+    glUseProgram(p);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    uint8_t px[4] = {};
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_EQ(px[1], 255);
+    glReadBuffer(GL_COLOR_ATTACHMENT1);
+    glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_EQ(px[1], 0);
+    CHECK_EQ(px[2], 255);
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 64, 64);
+    glDeleteProgram(p);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(2, tex);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}
+// SRC1 blend factors with outputs bound to locations 0 and 1 and no index-1 output: location 1 is the second
+// source, as in Direct3D (Unigine Heaven's scattering pass: ONE, SRC1_COLOR with the transmittance in output 1).
+TEST(blend_src1_from_location1) {
+    GLuint tex[2], fb, vao;
+    glGenTextures(2, tex);
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 16, 16, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
+    glBindTexture(GL_TEXTURE_2D, tex[1]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, tex[1], 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glViewport(0, 0, 16, 16);
+    glClearColor(1, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    GLuint p = glCreateProgram();
+    const char* srcs[2] = {R"(#version 150
+void main() { gl_Position = vec4(vec2(gl_VertexID & 1, gl_VertexID >> 1) * 2.0 - 1.0, 0, 1); })",
+                           R"(#version 150
+out vec4 s_frag_data_0; out vec4 s_frag_data_1;
+void main() { s_frag_data_0 = vec4(0, 0.5, 0, 1); s_frag_data_1 = vec4(0.25, 0.25, 0.25, 1); })"};
+    GLenum types[2] = {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER};
+    for (int i = 0; i < 2; i++) {
+        GLuint s = glCreateShader(types[i]);
+        glShaderSource(s, 1, &srcs[i], nullptr);
+        glCompileShader(s);
+        glAttachShader(p, s);
+        glDeleteShader(s);
+    }
+    glBindFragDataLocation(p, 0, "s_frag_data_0");
+    glBindFragDataLocation(p, 1, "s_frag_data_1");
+    glLinkProgram(p);
+    glUseProgram(p);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_SRC1_COLOR);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_BLEND);
+    float px[4] = {};
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(8, 8, 1, 1, GL_RGBA, GL_FLOAT, px);
+    CHECK(fabsf(px[0] - 0.25f) < 0.01f && fabsf(px[1] - 0.5f) < 0.01f && fabsf(px[2] - 0.25f) < 0.01f);
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 64, 64);
+    glDeleteProgram(p);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(2, tex);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}

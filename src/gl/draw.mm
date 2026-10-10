@@ -1123,8 +1123,26 @@ static const char* advancedBlendError(Context* ctx, ProgramObj* prog) {
     return nullptr;
 }
 
-// Dual-source factors with no index-1 output: undefined in GL, a pipeline error in Metal. Blend as if
-// the second source were zero (Unigine Heaven leaves SRC1 factors set for shaders without one).
+static bool usesSource1(GLenum f) {
+    return f == GL_SRC1_COLOR || f == GL_ONE_MINUS_SRC1_COLOR || f == GL_SRC1_ALPHA || f == GL_ONE_MINUS_SRC1_ALPHA;
+}
+
+// SRC1 blend factors on draw buffer 0 with a fragment shader that has no index-1 output but one at location 1:
+// that output is the second source (VariantKey::source1FromLocation1). GL leaves this undefined; Direct3D's
+// dual-source blending reads output 1, other GL drivers do the same, and Unigine relies on it.
+static bool source1FromLocation1(Context* ctx, const glsl::Reflection& refl) {
+    const BlendState& b = ctx->blend[0];
+    if (!b.enabled || !(usesSource1(b.srcRGB) || usesSource1(b.dstRGB) || usesSource1(b.srcA) || usesSource1(b.dstA))) return false;
+    bool loc1 = false;
+    for (auto& o : refl.fragOutputs) {
+        if (o.index == 1) return false;
+        loc1 |= o.location <= 1 && o.location + o.arraySize > 1;
+    }
+    return loc1;
+}
+
+// Dual-source factors with no second source at all: undefined in GL, a pipeline error in Metal. Blend as
+// if the second source were zero.
 static MTLBlendFactor withoutSource1(MTLBlendFactor f) {
     switch (f) {
     case MTLBlendFactorSource1Color: case MTLBlendFactorSource1Alpha: return MTLBlendFactorZero;
@@ -1135,7 +1153,7 @@ static MTLBlendFactor withoutSource1(MTLBlendFactor f) {
 
 static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Reflection& refl) {
     const PassDesc& p = ctx->curPass;
-    bool source1 = false;
+    bool source1 = source1FromLocation1(ctx, refl);
     for (auto& o : refl.fragOutputs) source1 |= o.index == 1;
     for (int i = 0; i < kMaxDrawBuffers; i++) {
         if (!p.color[i].tex) continue;
@@ -3341,6 +3359,10 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
     vk.sparseImageSlots = sparseImageSlots(ctx, prog);
     msArraySlots(ctx, prog, vk);
     vk.advancedBlend = advancedBlendKey(ctx);
+    {
+        ProgramObj* f = ctx->pipeline && !ctx->program ? ctx->pipeline->stages[(int)glsl::Stage::Fragment].get() : prog;
+        vk.source1FromLocation1 = f && source1FromLocation1(ctx, f->refl);
+    }
     if (ctx->strict()) {
         ProgramObj* f = ctx->pipeline && !ctx->program ? ctx->pipeline->stages[(int)glsl::Stage::Fragment].get() : prog;
         vk.fsr = fsrWanted(ctx, refl.writesPrimitiveShadingRate, f ? &f->refl : nullptr);
@@ -3446,6 +3468,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
                 fk.primitive = vk.primitive;
                 fk.flatshadeLastVertex = vk.flatshadeLastVertex;
                 fk.advancedBlend = vk.advancedBlend;
+                fk.source1FromLocation1 = vk.source1FromLocation1;
                 fk.fsr = vk.fsr;
                 fk.pdc = vk.pdc;
                 fsVar = ctx->pipelines_->variant(f, fk);
