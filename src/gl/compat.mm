@@ -2718,3 +2718,20 @@ MTPACKED_IMPL(1)
 MTPACKED_IMPL(2)
 MTPACKED_IMPL(3)
 MTPACKED_IMPL(4)
+
+// GL_ARB_robustness / GL 4.5: glGetMap with the size of the output buffer (bytes).
+template <typename T>
+static void getnMap(GLenum target, GLenum query, GLsizei bufSize, T* v) {
+    MGL_CTX();
+    double out[kMaxEvalOrder * kMaxEvalOrder * 4];
+    int n;
+    getMap(ctx, target, query, out, &n);
+    if ((size_t)n * sizeof(T) > (size_t)std::max(bufSize, 0)) return ctx->setError(GL_INVALID_OPERATION);
+    for (int k = 0; k < n; k++) v[k] = std::is_integral_v<T> ? (T)lround(out[k]) : (T)out[k];
+}
+API void APIENTRY glGetnMapdv(GLenum target, GLenum query, GLsizei bufSize, GLdouble* v) { getnMap(target, query, bufSize, v); }
+API void APIENTRY glGetnMapfv(GLenum target, GLenum query, GLsizei bufSize, GLfloat* v) { getnMap(target, query, bufSize, v); }
+API void APIENTRY glGetnMapiv(GLenum target, GLenum query, GLsizei bufSize, GLint* v) { getnMap(target, query, bufSize, v); }
+API void APIENTRY glGetnMapdvARB(GLenum target, GLenum query, GLsizei bufSize, GLdouble* v) { getnMap(target, query, bufSize, v); }
+API void APIENTRY glGetnMapfvARB(GLenum target, GLenum query, GLsizei bufSize, GLfloat* v) { getnMap(target, query, bufSize, v); }
+API void APIENTRY glGetnMapivARB(GLenum target, GLenum query, GLsizei bufSize, GLint* v) { getnMap(target, query, bufSize, v); }

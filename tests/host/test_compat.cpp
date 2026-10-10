@@ -618,3 +618,16 @@ TEST(compat_packed_immediate) {
     CHECK_PIXEL(32, 32, 0, 255, 0, 255);
     CHECK_GL();
 }
+
+// glGetnMap (ARB_robustness): checked against the buffer size.
+TEST(compat_getn_map) {
+    auto getnMapfv = (void (*)(GLenum, GLenum, GLsizei, GLfloat*))eglGetProcAddress("glGetnMapfvARB");
+    float line[2][3] = {{0, 0, 0}, {1, 1, 0}};
+    glMap1f(GL_MAP1_VERTEX_3, 0, 1, 3, 2, &line[0][0]);
+    float coeff[6] = {};
+    getnMapfv(GL_MAP1_VERTEX_3, GL_COEFF, sizeof coeff, coeff);
+    CHECK(coeff[3] == 1 && coeff[4] == 1);
+    CHECK_GL();
+    getnMapfv(GL_MAP1_VERTEX_3, GL_COEFF, 4 * sizeof(float), coeff);
+    CHECK_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);
+}
