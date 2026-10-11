@@ -390,7 +390,18 @@ public:
         uint64_t mtl = 0, prepDone = 0, mainDone = 0;  // event values (above)
         bool prepWaitsMain = false;
         uint64_t count = 0;  // segments opened by this context
+        // what the pass was resolved from (tessSegmentPassCurrent)
+        Framebuffer* fb = nullptr;
+        uint64_t fbVersion = 0;
+        bool fbSRGB = false;
+        int surfaceW = 0, surfaceH = 0;
+        id<MTLTexture> storage[kNumAttachments] = {};
+        uint32_t depthFormat = 0, stencilFormat = 0;  // MTLPixelFormat of the pass's depth / stencil attachments
     } tessSeg;
+    // The draw framebuffer is still the open segment's pass (what resolvePass would give, without resolving it):
+    // the same framebuffer, unchanged, its attachments on the same storage.
+    bool tessSegmentPassCurrent() const;
+    void tessSegmentSnapshot();  // records the draw framebuffer's state for tessSegmentPassCurrent
     id<MTLEvent> tessEvent = nil;
     uint64_t tessEventValue = 0;
     uint64_t tessLastMain = 0;    // event value of the last segment's render command buffer

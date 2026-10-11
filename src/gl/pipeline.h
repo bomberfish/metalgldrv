@@ -36,6 +36,9 @@ struct ProgramVariant {
     // Render pipelines built from this variant (PipelineCache::renderPipeline), keyed by the
     // RenderPipelineKey bytes. They live and die with the variant.
     mutable std::unordered_map<std::string, id<MTLRenderPipelineState>> renderPipelines;
+    // VariantKey::tessMetal: the mgl_tcs kernel for classic encoders (executeTessMetal)
+    id<MTLComputePipelineState> classicTcs = nil;
+    bool classicTcsTried = false;
     ~ProgramVariant();
 };
 
@@ -95,6 +98,12 @@ public:
 private:
     Context* ctx_;
     std::unordered_map<std::string, id<MTLDepthStencilState>> ds_;
+    // The last renderPipeline lookup (consecutive draws mostly repeat it; hashing the key's bytes as a string
+    // costs more than comparing them)
+    RenderPipelineKey lastKey_;
+    id<MTLRenderPipelineState> lastPipeline_ = nil;
+    DepthStencilKey lastDsKey_;
+    id<MTLDepthStencilState> lastDepthStencil_ = nil;
 };
 
 uint64_t hashBytes(const void* data, size_t n, uint64_t seed = 1469598103934665603ull);

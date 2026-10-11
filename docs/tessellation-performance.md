@@ -58,15 +58,26 @@ Heaven (1920x1080 High, Normal tessellation), interleaved runs on the quiet mach
 | metalgldrv 847e3e2 (morning) | 86.9 |
 | with the changes above | 93.2, 93.4 |
 | + cached Objective-C properties | 94.9, 94.6 |
+| + per-draw CPU work below | 97.9, 97.9 (Apple GL 111.3, 113.3 interleaved) |
 
 (The morning's interleaved runs on a busy machine gave Apple GL 67.0 / 73.9 and metalgldrv 68.9 / 68.8: the
 machine's other work hid a 23% gap.)
 
 Heaven is CPU-bound on our driver: the main thread hardly waits, and the driver takes about half of it. The game
-is x86_64, so the driver's own code runs translated by Rosetta, where every Objective-C property read
-(`gpuAddress`, `gpuResourceID`, texture properties) is a translated `objc_msgSend`; those are now cached on the
-GL objects. Argument buffers are still built per draw (`buildArguments`: texture views, completeness, samplers),
-the largest remaining cost.
+is x86_64, so the driver's own code runs translated by Rosetta. An x86_64 build of displacebench with many small
+draws (`build-x86`, run under Rosetta like Heaven; `--grid 40 --draws 3000 --weight 2 --pipelined`, ms per frame)
+measures the per-draw CPU cost against Apple's x86_64 GL:
+
+| ms / frame, x86_64 under Rosetta | 3000 tessellated draws | + 3000 plain draws interleaved |
+|---|---|---|
+| metalgldrv 15b4dcc | 4.39 | 8.48 |
+| + pipeline / depth-stencil / sampler memos (last key compared, not hashed as a string) | 3.81 | 8.06 |
+| + variant hash over enabled attributes only, word-wise | 3.08 | 7.34 |
+| + no resolvePass per draw in an open segment (`tessSegmentPassCurrent`) | 2.64 | 6.31 |
+| Apple GL | 2.61 | 7.39 |
+
+Also cached: Objective-C property reads on hot paths (`gpuAddress`, `gpuResourceID`, texture properties, upload
+chunk addresses: each a translated `objc_msgSend` under Rosetta) and per-draw `getenv`s.
 
 ### 2026-10-10 (first version)
 

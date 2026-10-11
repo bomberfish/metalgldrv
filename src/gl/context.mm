@@ -593,10 +593,51 @@ bool Context::openTessSegment(const PassDesc& p, bool prevWrites) {
     // the attachments are in use until the segment completes
     PassDesc tagged;
     resolvePass(tagged);
+    tessSegmentSnapshot();
     // the segment's pass is the current one for the draw state (applyDynamicState, fillColorKey)
     curPass = p;
     enc.reset();
     return tessSeg.open;
+}
+
+void Context::tessSegmentSnapshot() {
+    tessSeg.fb = drawFb.get();
+    tessSeg.fbVersion = tessSeg.fb ? tessSeg.fb->version : 0;
+    tessSeg.fbSRGB = framebufferSRGB;
+    tessSeg.depthFormat = tessSeg.pass.depth.tex ? (uint32_t)tessSeg.pass.depth.tex.pixelFormat : 0;
+    tessSeg.stencilFormat = tessSeg.pass.stencil.tex ? (uint32_t)tessSeg.pass.stencil.tex.pixelFormat : 0;
+    for (int i = 0; i < kNumAttachments; i++) tessSeg.storage[i] = nil;
+    if (Framebuffer* fb = tessSeg.fb) {
+        if (fb->isDefault && fb->surface) {
+            tessSeg.storage[0] = fb->surface->color;
+            tessSeg.storage[1] = fb->surface->msColor;
+            tessSeg.storage[2] = fb->surface->depthStencil;
+            tessSeg.surfaceW = fb->surface->width;
+            tessSeg.surfaceH = fb->surface->height;
+        } else {
+            for (int i = 0; i < kNumAttachments; i++) {
+                const Attachment& a = fb->att[i];
+                tessSeg.storage[i] = a.type == GL_TEXTURE && a.tex ? a.tex->mtl : a.type == GL_RENDERBUFFER && a.rb ? a.rb->mtl : nil;
+            }
+        }
+    }
+}
+
+bool Context::tessSegmentPassCurrent() const {
+    const TessSegment& s = tessSeg;
+    Framebuffer* fb = drawFb.get();
+    if (!s.open || !fb || fb != s.fb || fb->version != s.fbVersion || framebufferSRGB != s.fbSRGB || pendingClear.any()) return false;
+    if (fb->isDefault) {
+        Surface* sf = fb->surface;
+        return sf && sf->color == s.storage[0] && sf->msColor == s.storage[1] && sf->depthStencil == s.storage[2] && sf->width == s.surfaceW &&
+               sf->height == s.surfaceH;
+    }
+    for (int i = 0; i < kNumAttachments; i++) {
+        const Attachment& a = fb->att[i];
+        if (a.type == GL_TEXTURE && a.tex && (a.tex->mtl != s.storage[i] || a.tex->storageDirty)) return false;
+        if (a.type == GL_RENDERBUFFER && a.rb && a.rb->mtl != s.storage[i]) return false;
+    }
+    return true;
 }
 
 void Context::tessPrepWaitForPrevious() {
@@ -632,6 +673,7 @@ void Context::endTessSegment() {
     tessSeg.prep = tessSeg.main = nil;
     tessSeg.compute = nil;
     tessSeg.render = nil;
+    for (int i = 0; i < kNumAttachments; i++) tessSeg.storage[i] = nil;
     enc.reset();
     passDirty = true;
 }

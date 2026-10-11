@@ -51,13 +51,15 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     if (key.tessMetal) h = hashBytes("mt", 2, h ^ 0x3b);
     if (key.patchVertices) h = hashBytes(&key.patchVertices, 1, h ^ 0x5d);
     if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch || key.xfbInVertex) {
-        // Field by field: VertexFetch has padding bytes with indeterminate contents.
-        for (const glsl::VertexFetch& f : key.attribs) {
-            uint64_t packed[2] = {(uint64_t)f.enabled | (uint64_t)f.normalized << 1 | (uint64_t)f.integer << 2 | (uint64_t)f.isDouble << 3 |
-                                      (uint64_t)f.size << 8 | (uint64_t)f.binding << 16 | (uint64_t)f.glType << 32,
-                                  f.relativeOffset};
-            if (!f.enabled) packed[0] = packed[1] = 0;
-            h = hashBytes(packed, sizeof packed, h);
+        // Field by field (VertexFetch has padding bytes with indeterminate contents), enabled attributes only, a word
+        // at a time: every tessellated draw looks its variant up.
+        for (size_t i = 0; i < std::size(key.attribs); i++) {
+            const glsl::VertexFetch& f = key.attribs[i];
+            if (!f.enabled) continue;
+            uint64_t w[3] = {i, (uint64_t)f.normalized << 1 | (uint64_t)f.integer << 2 | (uint64_t)f.isDouble << 3 | (uint64_t)f.size << 8 |
+                                    (uint64_t)f.binding << 16 | (uint64_t)f.glType << 32,
+                             f.relativeOffset};
+            for (uint64_t x : w) h = (h ^ x) * 0x100000001b3ull ^ (h >> 29);
         }
     }
     auto it = prog->variants.find(h);
@@ -313,25 +315,30 @@ static void setColorAttachment(MTLRenderPipelineColorAttachmentDescriptor* c, MT
 }
 
 id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey& keyIn) {
-    RenderPipelineKey key = keyIn;
-    key.variantUid = key.variant->uid;
-    const ProgramVariant* vptr = key.variant;
-    const ProgramVariant* fptr = key.fsVariant;
-    key.variant = nullptr;
-    key.fsVariant = nullptr;
-    std::string k((const char*)&key, sizeof key);
-    key.variant = vptr;
-    key.fsVariant = fptr;
-    auto& cache = vptr->renderPipelines;
-    auto it = cache.find(k);
-    if (it != cache.end()) return it->second;
+    // identity: the key's bytes with the variants' uids instead of their (reusable) addresses
+    RenderPipelineKey norm = keyIn;
+    norm.variantUid = keyIn.variant->uid;
+    norm.variant = nullptr;
+    norm.fsVariant = nullptr;
+    if (lastPipeline_ && !memcmp(&norm, &lastKey_, sizeof norm)) return lastPipeline_;
+    std::string k((const char*)&norm, sizeof norm);
+    auto& cache = keyIn.variant->renderPipelines;
     id<MTLRenderPipelineState> pso;
-    auto t0 = std::chrono::steady_clock::now();
-    @autoreleasepool {  // descriptor setup and pipeline compiles autorelease
-        pso = newRenderPipeline(ctx_->dev, key);
+    if (auto it = cache.find(k); it != cache.end()) {
+        pso = it->second;
+    } else {
+        RenderPipelineKey key = norm;
+        key.variant = keyIn.variant;
+        key.fsVariant = keyIn.fsVariant;
+        auto t0 = std::chrono::steady_clock::now();
+        @autoreleasepool {  // descriptor setup and pipeline compiles autorelease
+            pso = newRenderPipeline(ctx_->dev, key);
+        }
+        if (g_hitchMs > 0) hitchCompile("render pipeline creation", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        cache[k] = pso;
     }
-    if (g_hitchMs > 0) hitchCompile("render pipeline creation", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
-    cache[k] = pso;
+    lastKey_ = norm;
+    lastPipeline_ = pso;
     return pso;
 }
 
@@ -400,9 +407,14 @@ id<MTLComputePipelineState> PipelineCache::computePipeline(ProgramVariant* v) {
 }
 
 id<MTLDepthStencilState> PipelineCache::depthStencil(const DepthStencilKey& key) {
+    if (lastDepthStencil_ && !memcmp(&key, &lastDsKey_, sizeof key)) return lastDepthStencil_;
     std::string k((const char*)&key, sizeof key);
     auto it = ds_.find(k);
-    if (it != ds_.end()) return it->second;
+    if (it != ds_.end()) {
+        lastDsKey_ = key;
+        lastDepthStencil_ = it->second;
+        return it->second;
+    }
     MTLDepthStencilDescriptor* d = [MTLDepthStencilDescriptor new];
     d.depthCompareFunction = (MTLCompareFunction)key.depthFunc;
     d.depthWriteEnabled = key.depthWrite;

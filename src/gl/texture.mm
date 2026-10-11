@@ -530,10 +530,22 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
                    s.compareMode == GL_COMPARE_REF_TO_TEXTURE ? (int32_t)s.compareFunc : 0,
                    (int32_t)std::clamp(lroundf(s.maxAnisotropy), 1L, (long)maxAnisotropyCap()), border, isInteger ? 1 : 0, (int32_t)s.reductionMode,
                    !s.seamless && spi::cubeSeamsSupported()};
+    // every draw asks for each of its samplers: the last few answers per thread, before the shared cache
+    struct Recent {
+        int32_t k[sizeof k / sizeof k[0]];
+        id<MTLSamplerState> sampler;
+    };
+    thread_local Recent recent[8];
+    uint32_t slot = (uint32_t)hashBytes(k, sizeof k) % 8;
+    if (recent[slot].sampler && !memcmp(recent[slot].k, k, sizeof k)) return recent[slot].sampler;
     std::string key((const char*)k, sizeof k);
     std::lock_guard<std::mutex> g(m);
     auto it = cache.find(key);
-    if (it != cache.end()) return it->second;
+    if (it != cache.end()) {
+        memcpy(recent[slot].k, k, sizeof k);
+        recent[slot].sampler = it->second;
+        return it->second;
+    }
     MTLSamplerDescriptor* d = [MTLSamplerDescriptor new];
     bool linearMin = s.minFilter == GL_LINEAR || s.minFilter == GL_LINEAR_MIPMAP_NEAREST || s.minFilter == GL_LINEAR_MIPMAP_LINEAR;
     d.minFilter = linearMin && !isInteger ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
@@ -573,6 +585,8 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     d.normalizedCoordinates = YES;
     id<MTLSamplerState> st = [Device::get()->mtl newSamplerStateWithDescriptor:d];
     cache[key] = st;
+    memcpy(recent[slot].k, k, sizeof k);
+    recent[slot].sampler = st;
     return st;
 }
 

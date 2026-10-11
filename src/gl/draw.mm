@@ -2830,9 +2830,13 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
     vk.primitive = GL_PATCHES;
     ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
     if (!var || !var->ok) return false;
-    const glsl::EntryPoint* k = var->entry("mgl_tcs");
-    id<MTLComputePipelineState> tcs = k ? ctx->pipelines_->classicComputePipeline(var, "mgl_tcs") : nil;
+    if (!var->classicTcsTried) {
+        var->classicTcs = var->entry("mgl_tcs") ? ctx->pipelines_->classicComputePipeline(var, "mgl_tcs") : nil;
+        var->classicTcsTried = true;
+    }
+    id<MTLComputePipelineState> tcs = var->classicTcs;
     if (!tcs) return false;
+    const glsl::EntryPoint* k = var->entry("mgl_tcs");
     bool quads = refl.tesPrimitiveMode == GL_QUADS;
     const glsl::MultiPassInfo& mp = refl.multipass;
     int cps = mp.tcsOutputVertices ? (int)mp.tcsOutputVertices : ctx->patchVertices;
@@ -2849,11 +2853,16 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
     // Setting up the draw can record Metal 4 work (texture storage, feedback-loop copies), which ends the segment:
     // then once more in a new one.
     for (int attempt = 0; attempt < 2; attempt++) {
-        PassDesc p;
-        if (!ctx->resolvePass(p)) return true;
         Context::TessSegment& seg = ctx->tessSeg;
-        if (!seg.open || !(seg.pass == p) || ctx->pendingClear.any())
-            if (!ctx->openTessSegment(p, prevWrites)) return false;
+        if (!ctx->tessSegmentPassCurrent()) {
+            PassDesc p;
+            if (!ctx->resolvePass(p)) return true;
+            if (!seg.open || !(seg.pass == p) || ctx->pendingClear.any()) {
+                if (!ctx->openTessSegment(p, prevWrites)) return false;
+            } else {
+                ctx->tessSegmentSnapshot();
+            }
+        }
         uint64_t segCount = seg.count;
         MPState s;
         s.ctx = ctx;
@@ -2873,8 +2882,8 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
         id<MTLBuffer> infoBuf = ctx->uploadBuffer(s.infoAddr, &infoOff), tfBuf = ctx->uploadBuffer(s.tessFactors, &tfOff);
         if (!argBuf || !sysBuf || !infoBuf || !tfBuf) return false;
         fillColorKey(ctx, key, refl);
-        key.depthFormat = p.depth.tex ? (uint32_t)p.depth.tex.pixelFormat : 0;
-        key.stencilFormat = p.stencil.tex ? (uint32_t)p.stencil.tex.pixelFormat : 0;
+        key.depthFormat = seg.depthFormat;
+        key.stencilFormat = seg.stencilFormat;
         id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
         if (!pso) return false;
         MGL_STAT("draw:tess-metal");
@@ -2927,8 +2936,11 @@ static bool segmentDraw(Context* ctx, ProgramObj* prog, ProgramVariant* var, Pro
                         uint64_t argAddr, uint64_t fsArgAddr) {
     Context::TessSegment& seg = ctx->tessSeg;
     if (!seg.open || !envFlagCached("METALGLDRV_TESS_SEGMENT_DRAWS", true) || mglQueryVisibilityActive(ctx)) return false;
-    PassDesc p;
-    if (!ctx->resolvePass(p) || !(p == seg.pass) || ctx->pendingClear.any()) return false;
+    if (!ctx->tessSegmentPassCurrent()) {
+        PassDesc p;
+        if (!ctx->resolvePass(p) || !(p == seg.pass) || ctx->pendingClear.any()) return false;
+        ctx->tessSegmentSnapshot();
+    }
     const glsl::Reflection& refl = prog->refl;
     uint64_t segCount = seg.count;
     RenderPipelineKey key;
@@ -2941,8 +2953,8 @@ static bool segmentDraw(Context* ctx, ProgramObj* prog, ProgramVariant* var, Pro
     key.rasterEnabled = !ctx->rasterizerDiscard;
     key.topologyClass = (uint8_t)(refl.writesLayer ? topologyClass(d.mode) : MTLPrimitiveTopologyClassUnspecified);
     key.classic = 1;
-    key.depthFormat = p.depth.tex ? (uint32_t)p.depth.tex.pixelFormat : 0;
-    key.stencilFormat = p.stencil.tex ? (uint32_t)p.stencil.tex.pixelFormat : 0;
+    key.depthFormat = seg.depthFormat;
+    key.stencilFormat = seg.stencilFormat;
     VertexInput vin;
     if (!setupVertexInput(ctx, prog, key, vin, d, minIdx, maxIdx)) return true;
     if (!seg.open || seg.count != segCount || !vin.classicOk) return false;  // a CPU read synchronized (flush)
@@ -3644,8 +3656,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
     }
     vk.pdc = pdc.tests;
     if (hasTess) {  // METALGLDRV_TESS_PASS1=compute: VS + TCS in a compute pass even when the object stage could run them
-        const char* p1 = getenv("METALGLDRV_TESS_PASS1");
-        vk.tessComputePass = p1 && !strcmp(p1, "compute");
+        vk.tessComputePass = envFlagCached("METALGLDRV_TESS_PASS1", false);
         vk.patchVertices = (uint8_t)std::clamp(ctx->patchVertices, 0, 32);
     }
     bool xfbActive = ctx->xfb && ctx->xfb->active && !ctx->xfb->paused;
@@ -3702,7 +3713,8 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
     // With rasterization discarded the draw only matters for vertex-stage side effects
     // (storage buffer / image / atomic counter writes); run it without a fragment stage then.
     if (ctx->rasterizerDiscard && !programHasSideEffects(refl)) return;
-    if (envFlag("METALGLDRV_DUMP_LAYOUT")) {
+    static const bool dumpLayout = envFlag("METALGLDRV_DUMP_LAYOUT");
+    if (dumpLayout) {
         // One line per (program, layout) for diagnosing vertex input issues in the field.
         static std::set<std::string> seen;
         std::string desc;
