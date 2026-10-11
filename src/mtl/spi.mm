@@ -54,6 +54,26 @@ void setLineWidth(id encoder, float width) {
 
 float maxLineWidth() { return lineWidthSupported() ? 16.0f : 1.0f; }
 
+bool cubeSeamsSupported() {
+#if METALGLDRV_PRIVATE_API
+    static const bool ok = [] {
+        if (!enabled() || ![MTLSamplerDescriptor instancesRespondToSelector:sel_registerName("setForceSeamsOnCubemapFiltering:")]) return false;
+        id<MTLDevice> d = MTLCreateSystemDefaultDevice();
+        SEL cap = sel_registerName("supportsForceSeamsOnCubemaps");
+        return [d respondsToSelector:cap] && ((BOOL (*)(id, SEL))objc_msgSend)(d, cap);
+    }();
+    return ok;
+#else
+    return false;
+#endif
+}
+
+void forceCubeSeams(MTLSamplerDescriptor* d) {
+#if METALGLDRV_PRIVATE_API
+    if (cubeSeamsSupported()) send<BOOL>(d, "setForceSeamsOnCubemapFiltering:", YES);
+#endif
+}
+
 void markOpenGLQueue(MTLCommandQueueDescriptor* d) {
 #if METALGLDRV_PRIVATE_API
     if (enabled()) send<BOOL>(d, "setIsOpenGLQueue:", YES);

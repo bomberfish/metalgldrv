@@ -327,6 +327,19 @@ tessellation segment: ~43 us per segment on an M4 Pro):
 | `supportsDepthBoundsTesting` | n/a | NO on M4 Pro (the depth bounds selectors exist on classic encoders only anyway) |
 | classic encoder alpha test, depth bounds, point size, threadgroup distribution, `setParallelExecution:` | classic only | not usable from the Metal 4 path |
 
+A full survey of the Metal runtime (an untracked dump in `~/metalgldrv-deps/private-metal-api/`) audited against
+the objects metalgldrv records with:
+
+| Selector | On Metal 4 objects | Result |
+|---|---|---|
+| `-[MTLSamplerDescriptor setForceSeamsOnCubemapFiltering:]` (`supportsForceSeamsOnCubemaps`) | yes, and it works for argument-buffer samplers | **used**: cube maps without `GL_TEXTURE_CUBE_MAP_SEAMLESS` (GL's default) filter inside the face in the sampler instead of the shader clamping coordinates. Bit-identical to the shader path over 12288 samples at face edges and corners (`mgltest cube_nonseamless_sweep`), 1-3% faster in a cube-heavy fragment benchmark |
+| compute encoder `fillTexture:level:slice:region:color:`, `fillBuffer:range:pattern4:` | yes | not needed: `glClearTexImage` is rarely hot; `glClearBufferData` would gain more from clearing on the GPU at all, which public `fillBuffer:range:value:` or a kernel can do |
+| compute encoder `encodeStartIf:` / `encodeStartWhile:` ... | yes (compute only) | GPU-side predication of compute work; conditional rendering needs it on render encoders, which don't have it |
+| compute encoder `setThreadgroupDistributionMode:` | yes | no known GL use |
+| texture descriptor `compressionMode`, `lossyCompressionMode` | yes | lossless compression only alters RGB9E5 / RG11B10 (`losslessCompressionSafe`), already handled |
+| texture descriptor `sparseSurfaceDefaultValue`, `swizzleKey`, `writeAccessPattern` | yes | no GL feature needs them |
+| render encoder `setVertexAmplificationMode:value:`, render pass `useExplicitRenderTargetDimensions`, pipeline `colorSampleCount` | yes | no GL feature needs them (mixed-sample / multiview extensions aren't exposed) |
+
 ### Queue and command buffer
 
 | Selector | Target | Arguments | What it does |
@@ -444,43 +457,50 @@ tessellation segment: ~43 us per segment on an M4 Pro):
 ## General private Metal APIs (not GL-specific)
 
 Beyond the OpenGL-emulation SPIs above, the Metal runtime exposes private APIs on its descriptor, encoder,
-command buffer, and command queue classes that could improve metalgldrv performance. Discovered by dumping
-ObjC methods from the loaded Metal runtime classes (`MTL*Internal`, `AGXG16XFamily*`, `MTL3On4*`,
-`MTL4*Descriptor`) after forcing the GPU plugin to load. All verified present on the M4 Pro (AGXG16S).
+command buffer, and command queue classes. Discovered by dumping ObjC methods from the loaded Metal runtime
+classes (`MTL*Internal`, `AGXG16XFamily*`, `MTL3On4*`, `MTL4*Descriptor`) after forcing the GPU plugin to
+load via `MTLCreateSystemDefaultDevice()`. All selectors verified present on the M4 Pro (AGXG16S).
+
+**Tested in 02a9a5b (displacebench with `--interleave`): none of these improved performance.** The only
+private API adopted by metalgldrv from this entire investigation is `setLineWidth:` on the Metal 4 render
+encoder (gated by `MGL_PRIVATE_API` / `METALGLDRV_MORALLY_WRONG`). The rest are documented for reference.
 
 ### Device feature queries (SPI)
 
 `MTLDevice` (via `_MTLDevice` and `AGXG16XFamilyDevice`) exposes ~250 `supports*` selectors. Most correspond
-to public `MTLGPUFamily` feature sets, but many are private. All return YES on M4 Pro.
+to public `MTLGPUFamily` feature sets, but many are private. Must check with `respondsToSelector:` AND
+verify the return value — calling `objc_msgSend` on an unrecognized selector returns garbage.
 
-Key private capabilities verified on M4 Pro:
-- `supportsCustomBorderColor` — custom sampler border colors (see GL SPI section above)
-- `supportsPrimitiveRestartOverride` — hardware primitive restart with arbitrary index
-- `supportsDepthBoundsTesting` — depth bounds test (`GL_EXT_depth_bounds_test`)
-- `supportsDepthClipModeClampExtended` — extended depth clamp behavior
-- `supportsTessellation` — classic Metal tessellation (drawPatches)
-- `supportsFP32TessFactors` — FP32 tessellation factors (vs the default FP16)
-- `supportsIndirectTessellation` — indirect drawPatches
-- `supportsConcurrentComputeDispatch` — concurrent compute execution
-- `supportsDeadlineProfile` — deadline-based GPU scheduling
-- `supportsCommandBufferJump` — command buffer jumping (conditional execution?)
-- `supportsForkJoin` — fork/join in command buffers
-- `supportsCommandQueueBarriers` — cross-queue barriers
-- `supportsLateEvalEvent` — late-evaluated events
-- `supportsOpenCLTextureWriteSwizzles` — texture write swizzles
-- `supportsPartialRenderMemoryBarrier` — partial (non-full) render memory barriers
-- `supportsStencilFeedback` — read stencil buffer in fragment shader
-- `supportsSIMDGroupParallelForwardProgress` — forward progress for SIMD groups
+Selected private capabilities on M4 Pro (verified with `respondsToSelector:` + value check):
+- `supportsCustomBorderColor` YES — custom sampler border colors (only with directly bound samplers, not argument buffers)
+- `supportsPrimitiveRestartOverride` YES — hardware primitive restart (classic Metal encoder only)
+- `supportsDepthBoundsTesting` **NO** — device responds to the selector but returns 0; not supported on M4
+- `supportsDepthClipModeClampExtended` YES
+- `supportsTessellation` YES — classic Metal tessellation (drawPatches)
+- `supportsFP32TessFactors` YES — `tessellationFactorFormat = 1` gives float32 factors, but unnecessary: metalgldrv rounds levels up to the next representable half, keeping segment counts exact; float32 only refines fractional segment lengths by <0.05%
+- `supportsIndirectTessellation` YES — indirect drawPatches
+- `supportsConcurrentComputeDispatch` YES
+- `supportsDeadlineProfile` YES — deadline-based GPU scheduling
+- `supportsCommandBufferJump` YES
+- `supportsForkJoin` YES
+- `supportsCommandQueueBarriers` YES
+- `supportsLateEvalEvent` YES
+- `supportsOpenCLTextureWriteSwizzles` YES
+- `supportsPartialRenderMemoryBarrier` YES
+- `supportsStencilFeedback` YES
+- `supportsSIMDGroupParallelForwardProgress` YES
 
 ### Compute pipeline descriptor (MTL4ComputePipelineDescriptor)
 
-These are directly applicable to metalgldrv since it uses Metal 4 compute pipelines.
+On Metal 4 compute pipeline descriptors (not render). **Tested: no measurable effect** on the VS+TCS kernel
+in displacebench — within run-to-run noise. These appear to be cross-process scheduling hints that a single
+application cannot benefit from.
 
 | Selector | Arguments | What it does |
 |---|---|---|
-| `setContentionRelief:` | `uint64_t` | Reduces GPU contention when multiple compute pipelines compete for resources. Likely a hint to the scheduler about how aggressively to timeslice. Applicable to metalgldrv's TCS and prefix-sum compute dispatches that run alongside rendering. |
-| `setOptimizeForPersistentKernel:` | `BOOL` | Tells Metal that this kernel will be dispatched many times and should be kept resident in the GPU's instruction cache. Applicable to metalgldrv's TCS compute, which dispatches per tessellated draw. |
-| `setForwardProgressUsage:` | `uint64_t` | Controls forward progress guarantees for the compute pipeline. A lower setting may allow more aggressive GPU scheduling at the cost of starvation risk. |
+| `setContentionRelief:` | `uint64_t` | Hint to the scheduler about timeslicing between competing compute pipelines. |
+| `setOptimizeForPersistentKernel:` | `BOOL` | Requests the kernel be kept resident in the GPU instruction cache. |
+| `setForwardProgressUsage:` | `uint64_t` | Controls forward progress guarantees for the pipeline. |
 
 ### Compute command encoder
 
@@ -496,12 +516,17 @@ These are directly applicable to metalgldrv since it uses Metal 4 compute pipeli
 
 | Selector | Metal ver. | Arguments | What it does |
 |---|---|---|---|
-| `setQosLevel:` | Both | `uint64_t` | Quality-of-service level for the command queue. Higher QoS gets priority GPU scheduling. Could prioritize the render queue over background compute. |
-| `setDisableCrossQueueHazardTracking:` | Classic | `BOOL` | Disables Metal's automatic hazard tracking between queues. When metalgldrv manages queue synchronization manually (via events/fences), disabling the driver's tracking eliminates overhead. |
-| `setDisableIOFencing:` | Classic | `BOOL` | Disables IO fencing on the queue. May reduce overhead when IO ordering isn't needed. |
-| `setEnableLowLatencySignalSharedEvent:` | Classic | `BOOL` | Enables low-latency signaling of shared events from this queue. Reduces the latency when one queue signals another via `MTLSharedEvent`, relevant for the two-queue tessellation architecture. |
-| `setEnableLowLatencyWaitSharedEvent:` | Classic | `BOOL` | Enables low-latency waiting on shared events. The wait-side counterpart of the above. |
-| `setDevicePartition:` | Classic | `uint64_t` | Partitions GPU resources for this queue. Could isolate compute from render on multi-cluster GPUs. |
+| `setQosLevel:` | Both | `uint64_t` (default 2) | **Tested: no effect.** Values 0, 3, 4 all within noise. |
+| `setDisableCrossQueueHazardTracking:` | Classic | `BOOL` | **Tested: no effect** on queue switch cost. |
+| `setDisableIOFencing:` | Classic | `BOOL` | **Tested: no effect** on queue switch cost. |
+| `setEnableLowLatencySignalSharedEvent:` | Classic | `BOOL` | See low-latency events note below. |
+| `setEnableLowLatencyWaitSharedEvent:` | Classic | `BOOL` | See low-latency events note below. |
+| `setDevicePartition:` | Classic | `uint64_t` | Partitions GPU resources for this queue. Not tested. |
+
+**Low-latency shared events:** MTLSharedEvent between the Metal 4 and classic queues is 4-5x slower than
+the plain MTLEvent metalgldrv uses (82-97 ms vs 18 ms per frame in the 300-switch displacebench test). The
+low-latency flags reduce it to ~62 ms — still far worse than MTLEvent. MTLSharedEvent appears designed for
+cross-process or cross-device sync and carries unavoidable overhead within a single process.
 
 ### Command queue (runtime)
 
@@ -538,37 +563,20 @@ These are directly applicable to metalgldrv since it uses Metal 4 compute pipeli
 
 | Selector | Metal ver. | Arguments | What it does |
 |---|---|---|---|
-| `setLineWidth:` | **Both** | `float` | Wide lines. Confirmed present on both `AGXG16XFamilyRenderContext` (classic) and `AGXG16XFamilyRenderContext_mtlnext` (Metal 4). metalgldrv can call this directly on its Metal 4 render encoder. |
+| `setLineWidth:` | **Both** | `float` | Wide lines. **In use** (gated by `MGL_PRIVATE_API`). The only private API from this investigation adopted by metalgldrv. |
 | `setDepthTestMinBound:maxBound:` | Classic | `float, float` | Depth bounds test — fragments outside [min, max] are discarded before the fragment shader. Useful for `GL_EXT_depth_bounds_test` and as a general early-Z optimization. Only on classic Metal encoder. |
 | `setPointSize:` | Classic | `float` | Set point size from the CPU side (vs outputting `[[point_size]]` from the vertex shader). Classic Metal only. |
 | `setAlphaTestReferenceValue:` | Classic | `float` | Alpha test reference value, companion to `setAlphaTestEnabled:` on the pipeline. |
-| `barrierAfterQueueStages:beforeStages:options:` | **Metal 4** | `uint64_t, uint64_t, uint64_t` | Cross-queue barrier on the Metal 4 encoder. Could synchronize a classic Metal tessellation queue with the Metal 4 render queue without MTLSharedEvent overhead. |
+| `barrierAfterQueueStages:beforeStages:options:` | **Metal 4** | `uint64_t, uint64_t, uint64_t` | **Tested: this is the public `...visibilityOptions:` barrier under another name.** Orders work within one queue; cannot replace the MTLEvent between the Metal 4 and classic queues. |
 
-### Potential performance wins for metalgldrv
+### Summary
 
-**Scheduling (frame pacing):**
-- `commitWithDeadline:` with the next VSync time gives the GPU scheduler a clear priority signal.
-  Combined with `setQosLevel:` on the command queue, this could reduce frame jitter and ensure
-  render work preempts background compute (shader compilation, etc.).
+Of all the general private Metal APIs investigated, only `setLineWidth:` proved usable on Metal 4 encoders
+and is now in use. The scheduling and queue hints (QoS, contention relief, persistent kernel, hazard tracking
+disable) had no measurable effect in displacebench. The cross-queue barrier turned out to be the existing
+public barrier under another name. Low-latency shared events were still 3x slower than plain MTLEvent.
+Most interesting per-draw APIs (depth bounds, alpha test, point size, parallel execution, threadgroup
+distribution) exist only on classic Metal encoders, not Metal 4.
 
-**Tessellation (two-queue architecture):**
-- `setEnableLowLatencySignalSharedEvent:` / `setEnableLowLatencyWaitSharedEvent:` on the classic
-  Metal queue reduces the sync latency between the TCS compute queue and the Metal 4 render queue.
-- `setDisableCrossQueueHazardTracking:` eliminates Metal's per-resource tracking overhead when
-  metalgldrv already handles synchronization via MTLSharedEvent.
-- `barrierAfterQueueStages:beforeStages:options:` on the Metal 4 render encoder might replace
-  MTLSharedEvent entirely for within-frame sync.
-- `encodeCacheHintTag:` / `encodeCacheHintFinalize:` could keep tessellation output buffers hot
-  in L2 between the compute and render passes.
-
-**Compute (TCS / prefix sum):**
-- `setOptimizeForPersistentKernel: YES` on the TCS compute pipeline, which dispatches hundreds
-  of times per frame across tessellated draws.
-- `setContentionRelief:` to reduce contention between TCS compute and concurrent render work.
-- `setThreadgroupDistributionMode:` could improve occupancy for the mesh shader's small
-  threadgroups (32 threads) by controlling how they spread across GPU clusters.
-
-**Rendering features:**
-- `setLineWidth:` on Metal 4 is the immediate win — enables `glLineWidth` with no fallback needed.
-- `setAlphaTestEnabled:` (classic Metal only) avoids shader-based `discard` for alpha-tested
-  geometry, which is a significant optimization since `discard` disables early-Z on Apple GPUs.
+The remaining classic-Metal-only APIs (alpha test, clip distances, depth bounds, point smooth) are documented
+for reference if metalgldrv ever adds a classic Metal render path alongside Metal 4.

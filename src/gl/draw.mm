@@ -637,8 +637,9 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute, 
             memcpy(&bits, &bias, 4);
             v = bits;
             // .y: 1 when a cube map is filtered without TEXTURE_CUBE_MAP_SEAMLESS. Metal always
-            // filters across cube faces; the shader keeps such lookups inside the selected face.
-            if (s.textureTarget == GL_TEXTURE_CUBE_MAP || s.textureTarget == GL_TEXTURE_CUBE_MAP_ARRAY) {
+            // filters across cube faces; the shader keeps such lookups inside the selected face, unless the
+            // sampler does (spi::forceCubeSeams, samplerStateFor).
+            if ((s.textureTarget == GL_TEXTURE_CUBE_MAP || s.textureTarget == GL_TEXTURE_CUBE_MAP_ARRAY) && !spi::cubeSeamsSupported()) {
                 SamplerState st = t ? t->sampler : SamplerState();
                 if (Sampler* so = ctx->samplers[unit].get()) st = so->state;
                 bool seamless = ctx->textureCubeSeamless && st.seamless;

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <mutex>
 #include "mtl/compress.h"
+#include "mtl/spi.h"
 #include "util/log.h"
 #include "util/stats.h"
 
@@ -526,7 +527,8 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     int32_t k[] = {(int32_t)s.minFilter, (int32_t)s.magFilter, (int32_t)s.wrapS, (int32_t)s.wrapT, (int32_t)s.wrapR,
                    q(s.minLod, 0.0f, 1000.0f), q(s.maxLod, 0.0f, 1000.0f), 0,
                    s.compareMode == GL_COMPARE_REF_TO_TEXTURE ? (int32_t)s.compareFunc : 0,
-                   (int32_t)std::clamp(lroundf(s.maxAnisotropy), 1L, (long)maxAnisotropyCap()), border, isInteger ? 1 : 0, (int32_t)s.reductionMode};
+                   (int32_t)std::clamp(lroundf(s.maxAnisotropy), 1L, (long)maxAnisotropyCap()), border, isInteger ? 1 : 0, (int32_t)s.reductionMode,
+                   !s.seamless && spi::cubeSeamsSupported()};
     std::string key((const char*)k, sizeof k);
     std::lock_guard<std::mutex> g(m);
     auto it = cache.find(key);
@@ -564,6 +566,8 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
             d.lodMinClamp = d.lodMaxClamp = 0;
         }
     }
+    // cube maps without TEXTURE_CUBE_MAP_SEAMLESS filter within the face (otherwise the shader does it; draw.mm LodBias)
+    if (!s.seamless) spi::forceCubeSeams(d);
     d.supportArgumentBuffers = YES;
     d.normalizedCoordinates = YES;
     id<MTLSamplerState> st = [Device::get()->mtl newSamplerStateWithDescriptor:d];

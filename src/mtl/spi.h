@@ -22,5 +22,11 @@ void setLineWidth(id encoder, float width);
 // Widest line GL advertises with setLineWidth: (GL_ALIASED_LINE_WIDTH_RANGE), 1 without it.
 float maxLineWidth();
 
+// Cube maps without GL_TEXTURE_CUBE_MAP_SEAMLESS (GL's default): -[MTLSamplerDescriptor
+// setForceSeamsOnCubemapFiltering:YES] keeps linear filtering inside the selected face, also for argument-buffer
+// samplers. Without it the shader clamps such lookups itself (SlotKind::LodBias .y).
+bool cubeSeamsSupported();
+void forceCubeSeams(MTLSamplerDescriptor* d);
+
 
 }  // namespace mgl::spi

@@ -265,7 +265,8 @@ emulation on the integer ALUs. Planned: move heavy ops into an
 src/mtl/spi.h wraps the few private Metal selectors that help GL and work on the objects metalgldrv records with
 (Apple's GL driver uses them; docs/tessellation-performance.md lists what was tried): `setLineWidth:` on render
 encoders for `glLineWidth` (1..16, as Apple's GL; otherwise lines are 1 pixel and the range is 1..1) and
-`setIsOpenGLQueue:` on the tessellation queue. Built in with the CMake option `MGL_PRIVATE_API` (default ON; App
+`setIsOpenGLQueue:` on the tessellation queue, and `setForceSeamsOnCubemapFiltering:` on samplers of cube maps
+without `GL_TEXTURE_CUBE_MAP_SEAMLESS` (otherwise the shader keeps those lookups inside the face). Built in with the CMake option `MGL_PRIVATE_API` (default ON; App
 Store review rejects private API, so apps shipped there turn it off), used unless `METALGLDRV_MORALLY_WRONG=0`, and
 each call checks that the object implements the selector.
 
