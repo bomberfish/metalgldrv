@@ -281,7 +281,7 @@ inline void mgl_tess_level(float x, uint spacing, thread float& xe, thread uint&
 
 // Position of point i (0..n) on an edge subdivided for level x into n segments:
 // n-2 segments of length 1/x and two shorter equal segments placed symmetrically around the center.
-inline float mgl_tess_pos(float x, uint n, uint i) {
+inline float mgl_tess_pos_raw(float x, uint n, uint i) {
     if (n == 0u) return 0.0f;
     if (float(n) == x || n < 2u) return float(i) / float(n);
     float L = 1.0f / x, s = (1.0f - float(n - 2u) * L) * 0.5f;
@@ -290,6 +290,16 @@ inline float mgl_tess_pos(float x, uint n, uint i) {
     if (i >= n) return 1.0f;
     uint shorts = (i > a ? 1u : 0u) + (i > b ? 1u : 0u);
     return float(i - shorts) * L + float(shorts) * s;
+}
+// Bit-exact symmetric (GL invariance rule 3: an edge's points mirror onto each other exactly): points in the first
+// half are 1 - their mirror in the second half, a subtraction that is exact (Sterbenz) for values in [0.5, 1], so
+// 1 - p of a second-half point p reproduces its mirror exactly.
+inline float mgl_tess_pos(float x, uint n, uint i) {
+    return 2u * i < n ? 1.0f - mgl_tess_pos_raw(x, n, n - i) : mgl_tess_pos_raw(x, n, i);
+}
+// v of isoline `line` of n (lines at 0, 1/n, .., (n-1)/n), symmetric like mgl_tess_pos
+inline float mgl_tess_isoline_v(uint line, float n) {
+    return 2.0f * float(line) < n ? 1.0f - (n - float(line)) / n : float(line) / n;
 }
 
 inline mgl_tess mgl_tess_setup(uint domain, uint spacing, uint points, uint ccw, float4 outer, float2 inner) {
@@ -434,7 +444,7 @@ inline void mgl_tess_unit(thread const mgl_tess& T, uint unit, threadgroup float
     np = 0u;
     if (T.domain == 2u) {  // isolines: one line per unit
         uint n = T.no[1];
-        float v = float(unit) / T.xo[0];
+        float v = mgl_tess_isoline_v(unit, T.xo[0]);
         for (uint i = 0; i <= n; i++) co[nv++] = float3(mgl_tess_pos(T.xo[1], n, i), v, 0.0f);
         if (T.points != 0u) {
             for (uint i = 0; i < nv; i++) idx[np++] = ushort(i);
@@ -503,7 +513,7 @@ inline void mgl_tess_unit(thread const mgl_tess& T, uint unit, threadgroup float
             bool advP;
             if (i == a) advP = false;
             else if (j == b) advP = true;
-            else advP = tp[i + 1u] <= tp[q0 + j + 1u];
+            else advP = tp[i + 1u] < tp[q0 + j + 1u];
             if (advP) { mgl_tess_tri(T, co, idx, np, i, i + 1u, q0 + j); i++; }
             else { mgl_tess_tri(T, co, idx, np, i, q0 + j + 1u, q0 + j); j++; }
         }
@@ -575,7 +585,7 @@ inline uint2 mgl_tess_unit_size(thread const mgl_tess& T, uint unit) {
 // unit's vertices (co) and those values (tp) and returns its unit-local indices (ipp of them used).
 inline float3 mgl_tess_unit_vertex(thread const mgl_tess& T, uint unit, uint k, thread float& tparam) {
     tparam = 0.0f;
-    if (T.domain == 2u) return float3(mgl_tess_pos(T.xo[1], T.no[1], k), float(unit) / T.xo[0], 0.0f);
+    if (T.domain == 2u) return float3(mgl_tess_pos(T.xo[1], T.no[1], k), mgl_tess_isoline_v(unit, T.xo[0]), 0.0f);
     if (T.special == 1u) return k == 0u ? float3(0, 0, 1) : k == 1u ? float3(1, 0, 0) : float3(0, 1, 0);
     if (T.special == 2u) return k == 0u ? float3(0, 0, 0) : k == 1u ? float3(1, 0, 0) : k == 2u ? float3(1, 1, 0) : float3(0, 1, 0);
     uint sides = T.domain == 0u ? 3u : 4u;
@@ -630,8 +640,9 @@ inline uint3 mgl_tess_unit_prim(thread const mgl_tess& T, uint unit, uint m, thr
     uint sides = T.domain == 0u ? 3u : 4u;
     if (unit < sides * T.rings) {
         // mgl_tess_unit merges the outer row P (keys tp[1..a]) and the inner row Q (keys tp[q0+1..q0+b]),
-        // taking P on ties: a stable merge. Before step m it has taken i points of P, i = the number of P
-        // keys whose merged position (k - 1 + Q keys below it) is < m.
+        // taking Q on ties (with equal spacing, every triangle then lies in one cell of the grid, also at the
+        // rings' corners, which dEQP's tessellation + geometry grid tests rely on). Before step m it has taken i
+        // points of P, i = the number of P keys whose merged position (k - 1 + Q keys up to it) is < m.
         uint r = unit / sides, s = unit % sides;
         uint a = mgl_tess_rowsegs(T, r, s), b = mgl_tess_rowsegs(T, r + 1u, s), q0 = a + 1u;
         uint lo = 0u, hi = min(m, a);  // largest i in [0, hi] with position(i) < m (position(0) = -1)
@@ -641,14 +652,14 @@ inline uint3 mgl_tess_unit_prim(thread const mgl_tess& T, uint unit, uint m, thr
             uint qlo = 0u, qhi = b;  // Q keys < x
             while (qlo < qhi) {
                 uint q = (qlo + qhi + 1u) / 2u;
-                if (tp[q0 + q] < x) qlo = q;
+                if (tp[q0 + q] <= x) qlo = q;
                 else qhi = q - 1u;
             }
             if (k - 1u + qlo < m) lo = k;
             else hi = k - 1u;
         }
         uint i = lo, j = m - i;
-        bool advP = i == a ? false : j == b ? true : tp[i + 1u] <= tp[q0 + j + 1u];
+        bool advP = i == a ? false : j == b ? true : tp[i + 1u] < tp[q0 + j + 1u];
         return advP ? mgl_tess_wind(T, co, i, i + 1u, q0 + j) : mgl_tess_wind(T, co, i, q0 + j + 1u, q0 + j);
     }
     if (T.domain == 0u) return mgl_tess_wind(T, co, 0u, 1u, 2u);
@@ -688,7 +699,7 @@ inline uint mgl_tess_merge_pos(thread const mgl_tess& T, uint r, uint s, uint a,
         while (qlo < qhi) {
             uint q = (qlo + qhi + 1u) / 2u;
             mgl_tess_rowpt(T, r + 1u, s, q, tt);
-            if (tt < x) qlo = q;
+            if (tt <= x) qlo = q;
             else qhi = q - 1u;
         }
         if (k - 1u + qlo < m) lo = k;
@@ -758,14 +769,14 @@ inline uint3 mgl_tess_piece_prim(thread const mgl_tess& T, uint unit, uint4 pb, 
             uint qlo = 0u, qhi = b;
             while (qlo < qhi) {
                 uint q = (qlo + qhi + 1u) / 2u;
-                if (tp[q0 + q] < x) qlo = q;
+                if (tp[q0 + q] <= x) qlo = q;
                 else qhi = q - 1u;
             }
             if (k - 1u + qlo < m) lo = k;
             else hi = k - 1u;
         }
         uint i = lo, j = m - i;
-        bool advP = i == a ? false : j == b ? true : tp[i + 1u] <= tp[q0 + j + 1u];
+        bool advP = i == a ? false : j == b ? true : tp[i + 1u] < tp[q0 + j + 1u];
         return advP ? mgl_tess_wind(T, co, i, i + 1u, q0 + j) : mgl_tess_wind(T, co, i, q0 + j + 1u, q0 + j);
     }
     if (mgl_tess_is_qcentre(T, unit)) {

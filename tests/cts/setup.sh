@@ -71,8 +71,12 @@ if [[ -f "$REPO/CMakeLists.txt" && ! -f "$DRIVER_BUILD/libmetalgldrv.dylib" ]]; 
     ninja -C "$DRIVER_BUILD" metalgldrv
 fi
 
-# 5. Configure + build glcts
+# 5. Configure + build glcts. libpng's headers must match the library it links (Homebrew's): CMake can find an
+# older png.h first (Mono.framework ships 1.4), and then every test that loads a reference image fails
+# ("Runtime check failed: 'png_ptr'").
+PNG_INC=$(brew --prefix libpng 2>/dev/null)/include
 cmake -G Ninja -S "$CTS_DIR" -B "$CTS_BUILD" \
+    ${PNG_INC:+-DPNG_PNG_INCLUDE_DIR="$PNG_INC"} \
     -DDEQP_TARGET=metalgl \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_OSX_ARCHITECTURES=arm64 \
