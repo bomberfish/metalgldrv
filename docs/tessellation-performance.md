@@ -59,6 +59,7 @@ Heaven (1920x1080 High, Normal tessellation), interleaved runs on the quiet mach
 | with the changes above | 93.2, 93.4 |
 | + cached Objective-C properties | 94.9, 94.6 |
 | + per-draw CPU work below | 97.9, 97.9 (Apple GL 111.3, 113.3 interleaved) |
+| + feedback-loop check without Objective-C calls for unattached textures | 100.2, 100.5 (Apple GL 110.4, 112.2) |
 
 (The morning's interleaved runs on a busy machine gave Apple GL 67.0 / 73.9 and metalgldrv 68.9 / 68.8: the
 machine's other work hid a 23% gap.)

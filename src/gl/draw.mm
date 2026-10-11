@@ -315,6 +315,16 @@ static void flushImageWritebacks(Context* ctx) {
 static id<MTLTexture> feedbackSnapshot(Context* ctx, Texture* t, id<MTLTexture> view) {
     Framebuffer* fb = ctx->drawFb.get();
     if (!fb || fb->isDefault || !t->mtl || t->target == GL_TEXTURE_BUFFER) return view;
+    // Storage is only shared through texture views (ARB_texture_view): a texture that is neither attached itself nor
+    // related to an attachment by a view isn't (and the checks below are Objective-C calls, slow under Rosetta)
+    bool related = false;
+    for (int j = 0; j < kMaxDrawBuffers && !related; j++) {
+        GLenum db = fb->drawBuffers[j];
+        if (db < GL_COLOR_ATTACHMENT0 || db >= GL_COLOR_ATTACHMENT0 + kMaxDrawBuffers) continue;
+        const Attachment& at = fb->att[db - GL_COLOR_ATTACHMENT0];
+        related = at.type == GL_TEXTURE && at.tex && (at.tex.get() == t || at.tex->viewParent || t->viewParent);
+    }
+    if (!related) return view;
     id<MTLTexture> base = t->mtl.parentTexture ? t->mtl.parentTexture : t->mtl;
     // only attachments the pass writes (enabled draw buffers) at a level the sampler can read
     NSUInteger lo = view.parentTexture ? view.parentRelativeLevel : 0, n = view.mipmapLevelCount;
