@@ -315,12 +315,23 @@ static void setColorAttachment(MTLRenderPipelineColorAttachmentDescriptor* c, MT
 }
 
 id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey& keyIn) {
+    // the last lookup again (most draws): the same bytes and the same variants (uids: addresses get reused)
+    if (lastPipeline_ && !memcmp(&keyIn, &lastKeyIn_, sizeof keyIn) && keyIn.variant->uid == lastKey_.variantUid &&
+        (!keyIn.fsVariant || keyIn.fsVariant->uid == lastFsUid_))
+        return lastPipeline_;
     // identity: the key's bytes with the variants' uids instead of their (reusable) addresses
     RenderPipelineKey norm = keyIn;
     norm.variantUid = keyIn.variant->uid;
     norm.variant = nullptr;
     norm.fsVariant = nullptr;
-    if (lastPipeline_ && !memcmp(&norm, &lastKey_, sizeof norm)) return lastPipeline_;
+    const ProgramVariant* v = keyIn.variant;
+    if (v->lastPipeline && !memcmp(&norm, v->lastKey.get(), sizeof norm)) {
+        lastKey_ = norm;
+        lastKeyIn_ = keyIn;
+        lastFsUid_ = keyIn.fsVariant ? keyIn.fsVariant->uid : 0;
+        lastPipeline_ = v->lastPipeline;
+        return lastPipeline_;
+    }
     std::string k((const char*)&norm, sizeof norm);
     auto& cache = keyIn.variant->renderPipelines;
     id<MTLRenderPipelineState> pso;
@@ -338,7 +349,12 @@ id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey
         cache[k] = pso;
     }
     lastKey_ = norm;
+    lastKeyIn_ = keyIn;
+    lastFsUid_ = keyIn.fsVariant ? keyIn.fsVariant->uid : 0;
     lastPipeline_ = pso;
+    if (!v->lastKey) v->lastKey = std::make_unique<RenderPipelineKey>();
+    *v->lastKey = norm;
+    v->lastPipeline = pso;
     return pso;
 }
 

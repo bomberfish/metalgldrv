@@ -355,7 +355,22 @@ static MTLTextureSwizzle glSwizzleToMTL(GLenum s, MTLTextureSwizzleChannels base
 
 static bool isMipmapFilter(GLenum f) { return f != GL_NEAREST && f != GL_LINEAR; }
 
+static bool mipmapCompleteWalk(const Texture* t, int base, int maxLevel, int* lastLevel);
+
+// Draws ask for every bound texture: the last answer is kept until a level's specification changes.
 static bool mipmapComplete(const Texture* t, int base, int maxLevel, int* lastLevel) {
+    Texture::MipCompleteMemo& m = const_cast<Texture*>(t)->mipMemo;
+    if (m.version != t->specVersion || m.base != base || m.maxLevel != maxLevel) {
+        m.complete = mipmapCompleteWalk(t, base, maxLevel, &m.last);
+        m.version = t->specVersion;
+        m.base = base;
+        m.maxLevel = maxLevel;
+    }
+    *lastLevel = m.last;
+    return m.complete;
+}
+
+static bool mipmapCompleteWalk(const Texture* t, int base, int maxLevel, int* lastLevel) {
     const TexImageLevel& b = t->levels[0][base];
     int w = b.width, h = b.height, d = b.depth;
     int l = base;
@@ -435,19 +450,24 @@ static MTLTextureType viewTypeFor(GLenum samplerTarget, MTLTextureType storage) 
     }
 }
 
-id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarget, bool stencilSampling, bool* complete) {
+// The view lives as long as the texture's storage (t->mtl, t->views): returned unretained, which saves the retain /
+// autorelease of returning an object (every draw asks for every texture it samples).
+void textureSamplingViewInto(Context* ctx, Texture* t, GLenum samplerTarget, bool stencilSampling, bool* complete,
+                             __unsafe_unretained id<MTLTexture>* out) {
     *complete = false;
+    *out = nil;
     const SamplerState& ss = t->sampler;
     int first, last;
-    if (!textureComplete(t, ss, &first, &last)) return nil;
-    if (!ensureTextureStorage(ctx, t)) return nil;
+    if (!textureComplete(t, ss, &first, &last)) return;
+    if (!ensureTextureStorage(ctx, t)) return;
     if (t->target == GL_TEXTURE_BUFFER) {
-        if (!ensureBufferTexture(ctx, t)) return nil;  // follows buffer reallocation / RGB32 refresh
+        if (!ensureBufferTexture(ctx, t)) return;  // follows buffer reallocation / RGB32 refresh
         *complete = true;
-        return t->mtl;
+        *out = t->mtl;
+        return;
     }
     const FormatInfo* f = t->storageFmt ? t->storageFmt : formatInfo(GL_RGBA8);
-    id<MTLTexture> mt = t->sparseRead ? t->sparseRead : t->mtl;
+    __unsafe_unretained id<MTLTexture> mt = t->sparseRead ? t->sparseRead : t->mtl;  // owned by t
     const Texture::MtlProps& mp = t->propsOf(mt);
     MTLTextureSwizzleChannels base = f->swizzle;
     MTLPixelFormat pf = mp.pixelFormat;
@@ -486,19 +506,31 @@ id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarge
                     levelCount == (int)mp.levels && sw.red == MTLTextureSwizzleRed &&
                     sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
     *complete = true;
-    if (identity) return mt;
+    if (identity) {
+        *out = mt;
+        return;
+    }
     Texture::ViewKey key{(uint64_t)pf | (uint64_t)vt << 16 | (uint64_t)levelStart << 24 | (uint64_t)levelCount << 32,
                          (uint64_t)sw.red | (uint64_t)sw.green << 8 | (uint64_t)sw.blue << 16 | (uint64_t)sw.alpha << 24};
     auto it = t->views.find(key);
-    if (it != t->views.end()) return it->second;
+    if (it != t->views.end()) {
+        *out = it->second;
+        return;
+    }
     id<MTLTexture> v = [mt newTextureViewWithPixelFormat:pf textureType:vt levels:NSMakeRange(levelStart, levelCount)
                                                      slices:NSMakeRange(0, slices) swizzle:sw];
     if (!v) {
         MGL_ERR("texture view creation failed");
         *complete = false;
-        return nil;
+        return;
     }
     t->views[key] = v;
+    *out = v;
+}
+
+id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarget, bool stencilSampling, bool* complete) {
+    __unsafe_unretained id<MTLTexture> v = nil;
+    textureSamplingViewInto(ctx, t, samplerTarget, stencilSampling, complete, &v);
     return v;
 }
 
@@ -517,7 +549,8 @@ static MTLSamplerAddressMode addressMode(GLenum wrap) {
     }
 }
 
-id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
+// The sampler state for `s` (cached for the process) and its gpuResourceID, unretained: draws ask for every sampler.
+void samplerStateInto(const SamplerState& s, bool isInteger, __unsafe_unretained id<MTLSamplerState>* sampler, MTLResourceID* rid) {
     static std::mutex m;
     static std::unordered_map<std::string, id<MTLSamplerState>> cache;
     // The key holds only what reaches the Metal descriptor, with LOD clamps quantized to 1/256
@@ -534,17 +567,27 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     struct Recent {
         int32_t k[sizeof k / sizeof k[0]];
         id<MTLSamplerState> sampler;
+        MTLResourceID rid;
     };
     thread_local Recent recent[8];
-    uint32_t slot = (uint32_t)hashBytes(k, sizeof k) % 8;
-    if (recent[slot].sampler && !memcmp(recent[slot].k, k, sizeof k)) return recent[slot].sampler;
+    uint32_t h = 0;
+    for (int32_t x : k) h = (h ^ (uint32_t)x) * 0x9e3779b1u;
+    uint32_t slot = h >> 29;
+    if (recent[slot].sampler && !memcmp(recent[slot].k, k, sizeof k)) {
+        *sampler = recent[slot].sampler;
+        *rid = recent[slot].rid;
+        return;
+    }
     std::string key((const char*)k, sizeof k);
     std::lock_guard<std::mutex> g(m);
     auto it = cache.find(key);
     if (it != cache.end()) {
         memcpy(recent[slot].k, k, sizeof k);
         recent[slot].sampler = it->second;
-        return it->second;
+        recent[slot].rid = it->second.gpuResourceID;
+        *sampler = recent[slot].sampler;
+        *rid = recent[slot].rid;
+        return;
     }
     MTLSamplerDescriptor* d = [MTLSamplerDescriptor new];
     bool linearMin = s.minFilter == GL_LINEAR || s.minFilter == GL_LINEAR_MIPMAP_NEAREST || s.minFilter == GL_LINEAR_MIPMAP_LINEAR;
@@ -587,6 +630,15 @@ id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
     cache[key] = st;
     memcpy(recent[slot].k, k, sizeof k);
     recent[slot].sampler = st;
+    recent[slot].rid = st.gpuResourceID;
+    *sampler = recent[slot].sampler;
+    *rid = recent[slot].rid;
+}
+
+id<MTLSamplerState> samplerStateFor(const SamplerState& s, bool isInteger) {
+    __unsafe_unretained id<MTLSamplerState> st = nil;
+    MTLResourceID rid;
+    samplerStateInto(s, isInteger, &st, &rid);
     return st;
 }
 

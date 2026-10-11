@@ -12,6 +12,7 @@
 #include "glapi.h"
 #include "glsl/glsl.h"
 #include "gl/arb_program.h"
+#include "gl/gltypes.h"
 #include "mtl/device.h"
 #include "mtl/formats.h"
 
@@ -166,6 +167,14 @@ public:
     int samples = 0;
     bool fixedSampleLocations = true;
 
+    // Bumped whenever a level's specification (levels[][]) changes: mipmapComplete remembers its last answer
+    uint32_t specVersion = 1;
+    struct MipCompleteMemo {
+        uint32_t version = 0;
+        int base = -1, maxLevel = -1, last = 0;
+        bool complete = false;
+    } mipMemo;
+
     // Texture parameters
     SamplerState sampler;
     int baseLevel = 0, maxLevel = 1000;
@@ -233,14 +242,14 @@ public:
         NSUInteger levels = 0, arrayLength = 0;
     };
     MtlProps mtlProps;
-    const MtlProps& propsOf(id<MTLTexture> t) {
+    const MtlProps& propsOf(__unsafe_unretained id<MTLTexture> t) {
         if (mtlProps.of != t) mtlProps = {t, t.pixelFormat, t.textureType, t.mipmapLevelCount, t.arrayLength};
         return mtlProps;
     }
     // gpuResourceID of the view sampled last
     id<MTLTexture> resourceIDOf = nil;
     MTLResourceID resourceID = {};
-    MTLResourceID resourceIDFor(id<MTLTexture> v) {
+    MTLResourceID resourceIDFor(__unsafe_unretained id<MTLTexture> v) {
         if (resourceIDOf != v) {
             resourceIDOf = v;
             resourceID = v.gpuResourceID;
@@ -319,6 +328,19 @@ public:
     bool defaultFixedSampleLocations = false;
     uint32_t version = 1;  // bumped on any attachment change
     bool isDefault = false;
+    // framebufferStatus's last answer and what it depended on (every draw asks)
+    struct StatusMemo {
+        struct Att {
+            const void* obj = nullptr;
+            const void* fmt = nullptr;
+            int x = 0, y = 0, z = 0;
+            bool operator==(const Att& o) const { return obj == o.obj && fmt == o.fmt && x == o.x && y == o.y && z == o.z; }
+        };
+        bool valid = false;
+        uint32_t version = 0;
+        Att att[kNumAttachments];
+        GLenum status = 0;
+    } statusMemo;
     // EXT_fragment_shading_rate_attachment (METALGLDRV_STRICT): an R8UI texture, layer 0 of it (the
     // layer limit is 1), each texel covering 2^shadingRateTexelLog2 pixels.
     Ref<Texture> shadingRateTex;
@@ -401,6 +423,13 @@ public:
     std::string infoLog;
     std::shared_ptr<const glsl::LinkedProgram> program;
     glsl::Reflection refl;
+    // refl.attributes' shapes and the locations holding a dvec3 / dvec4, for `program` (setupVertexInput, every draw)
+    struct AttribShapes {
+        std::shared_ptr<const glsl::LinkedProgram> of;
+        std::vector<TypeShape> shapes;
+        uint32_t wideMask = 0;
+        bool wideAt15 = false;  // one reaches location 15 (wantManualFetch)
+    } attribShapes;
 
     // default uniform block storage (MSL layout as reported by reflection)
     std::vector<uint8_t> uniformData;

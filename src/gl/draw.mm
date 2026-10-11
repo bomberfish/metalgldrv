@@ -312,9 +312,11 @@ static void flushImageWritebacks(Context* ctx) {
 // pass's tile loads/stores (texels near tile edges read stale or partial data), so sampling uses a
 // copy taken before the render pass. GL only defines reads of texels not written since the last
 // glTextureBarrier, which ends the pass; every pass gets a fresh copy.
-static id<MTLTexture> feedbackSnapshot(Context* ctx, Texture* t, id<MTLTexture> view) {
+// *view, or what to sample instead (owned by t): unretained, called for every texture a draw samples.
+static void feedbackSnapshot(Context* ctx, Texture* t, __unsafe_unretained id<MTLTexture>* io) {
+    __unsafe_unretained id<MTLTexture> view = *io;
     Framebuffer* fb = ctx->drawFb.get();
-    if (!fb || fb->isDefault || !t->mtl || t->target == GL_TEXTURE_BUFFER) return view;
+    if (!fb || fb->isDefault || !t->mtl || t->target == GL_TEXTURE_BUFFER) return;
     // Storage is only shared through texture views (ARB_texture_view): a texture that is neither attached itself nor
     // related to an attachment by a view isn't (and the checks below are Objective-C calls, slow under Rosetta)
     bool related = false;
@@ -324,7 +326,7 @@ static id<MTLTexture> feedbackSnapshot(Context* ctx, Texture* t, id<MTLTexture> 
         const Attachment& at = fb->att[db - GL_COLOR_ATTACHMENT0];
         related = at.type == GL_TEXTURE && at.tex && (at.tex.get() == t || at.tex->viewParent || t->viewParent);
     }
-    if (!related) return view;
+    if (!related) return;
     id<MTLTexture> base = t->mtl.parentTexture ? t->mtl.parentTexture : t->mtl;
     // only attachments the pass writes (enabled draw buffers) at a level the sampler can read
     NSUInteger lo = view.parentTexture ? view.parentRelativeLevel : 0, n = view.mipmapLevelCount;
@@ -339,7 +341,7 @@ static id<MTLTexture> feedbackSnapshot(Context* ctx, Texture* t, id<MTLTexture> 
         NSUInteger lvl = (NSUInteger)at.level + (a->mtl.parentTexture ? a->mtl.parentRelativeLevel : 0);
         attached = ab == base && lvl >= lo && lvl < lo + n;
     }
-    if (!attached || t->mtl.parentTexture) return view;
+    if (!attached || t->mtl.parentTexture) return;
     uint64_t pass = ctx->passOpen ? ctx->passCounter : ctx->passCounter + 1;
     if (!t->fbSnapshot || t->fbSnapshotSrc != t->mtl || t->fbSnapshotPass != pass) {
         if (!t->fbSnapshot || t->fbSnapshotSrc != t->mtl) {
@@ -360,7 +362,7 @@ static id<MTLTexture> feedbackSnapshot(Context* ctx, Texture* t, id<MTLTexture> 
             t->fbSnapshotSrc = t->mtl;
             for (auto& [k, v] : t->fbSnapshotViews) ctx->dev->retainUntil(v, ctx->serial());
             t->fbSnapshotViews.clear();
-            if (!t->fbSnapshot) return view;
+            if (!t->fbSnapshot) return;
             ctx->dev->makeResident(t->fbSnapshot);
         }
         MGL_STAT("feedback-snapshot");
@@ -369,20 +371,26 @@ static id<MTLTexture> feedbackSnapshot(Context* ctx, Texture* t, id<MTLTexture> 
         ctx->endEncoder();
         t->fbSnapshotPass = ctx->passCounter + 1;  // the pass this draw will open
     }
-    if (view == t->mtl) return t->fbSnapshot;
+    if (view == t->mtl) {
+        *io = t->fbSnapshot;
+        return;
+    }
     NSUInteger slices = view.arrayLength * (view.textureType == MTLTextureTypeCube || view.textureType == MTLTextureTypeCubeArray ? 6 : 1);
     Texture::ViewKey key{(uint64_t)view.pixelFormat | (uint64_t)view.textureType << 16 | (uint64_t)view.parentRelativeLevel << 24 |
                              (uint64_t)view.mipmapLevelCount << 32,
                          (uint64_t)view.swizzle.red | (uint64_t)view.swizzle.green << 8 | (uint64_t)view.swizzle.blue << 16 |
                              (uint64_t)view.swizzle.alpha << 24 | (uint64_t)view.parentRelativeSlice << 32};
     auto it = t->fbSnapshotViews.find(key);
-    if (it != t->fbSnapshotViews.end()) return it->second;
+    if (it != t->fbSnapshotViews.end()) {
+        *io = it->second;
+        return;
+    }
     id<MTLTexture> v = [t->fbSnapshot newTextureViewWithPixelFormat:view.pixelFormat textureType:view.textureType
                                                               levels:NSMakeRange(view.parentRelativeLevel, view.mipmapLevelCount)
                                                               slices:NSMakeRange(view.parentRelativeSlice, slices) swizzle:view.swizzle];
-    if (!v) return view;
+    if (!v) return;
     t->fbSnapshotViews[key] = v;
-    return v;
+    *io = v;
 }
 
 // VariantKey::msArraySlots / msArray4: multisample sampler slots bound to emulated (2D array)
@@ -565,16 +573,17 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute, 
                             ut == GL_SAMPLER_2D_ARRAY_SHADOW || ut == GL_SAMPLER_CUBE_SHADOW || ut == GL_SAMPLER_2D_RECT_SHADOW ||
                             ut == GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW;
             (void)bt;
-            id<MTLTexture> view = nil;
+            // owned by the texture (its storage and views, its feedback snapshot) or the context (dummies)
+            __unsafe_unretained id<MTLTexture> view = nil;
             Texture* t = (unit >= 0 && unit < kMaxTextureUnits && ti >= 0) ? ctx->textures[unit][ti].get() : nullptr;
             if (t) {
                 bool complete = false;
                 Sampler* so = ctx->samplers[std::clamp(unit, 0, kMaxTextureUnits - 1)].get();
                 SamplerState saved = t->sampler;
                 if (so) t->sampler = so->state;  // completeness uses the effective sampler
-                view = textureSamplingView(ctx, t, s.textureTarget, false, &complete);
+                textureSamplingViewInto(ctx, t, s.textureTarget, false, &complete, &view);
                 if (so) t->sampler = saved;
-                if (view && !forCompute) view = feedbackSnapshot(ctx, t, view);
+                if (view && !forCompute) feedbackSnapshot(ctx, t, &view);
                 if (view) {
                     t->lastUse = serial;
                     // Kind mismatch (e.g. float sampler on int texture) is undefined; keep the view.
@@ -630,8 +639,9 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute, 
             bool isInt = t && t->storageFmt && (t->storageFmt->kind == FmtKind::UInt || t->storageFmt->kind == FmtKind::SInt);
             if (t && t->storageFmt && t->storageFmt->kind == FmtKind::Stencil) isInt = true;
             if (!ctx->textureCubeSeamless) st.seamless = false;
-            id<MTLSamplerState> ss = samplerStateFor(st, isInt);
-            MTLResourceID rid = ss.gpuResourceID;
+            __unsafe_unretained id<MTLSamplerState> ss = nil;  // cached for the process
+            MTLResourceID rid;
+            samplerStateInto(st, isInt, &ss, &rid);
             memcpy(&v, &rid, 8);
             break;
         }
@@ -805,18 +815,32 @@ static bool wantManualFetch(Context* ctx) {
     return unaligned;
 }
 
+// refl.attributes' shapes and the locations holding a dvec3 / dvec4 (computed once per linked program)
+static const ProgramObj::AttribShapes& attribShapes(ProgramObj* prog) {
+    ProgramObj::AttribShapes& as = prog->attribShapes;
+    if (as.of != prog->program || as.shapes.size() != prog->refl.attributes.size()) {
+        as.of = prog->program;
+        as.shapes.clear();
+        as.wideMask = 0;
+        as.wideAt15 = false;
+        for (const auto& a : prog->refl.attributes) {
+            TypeShape ts = typeShape(a.type);
+            as.shapes.push_back(ts);
+            if (a.location < 0 || ts.base != BaseType::Double || ts.rows <= 2) continue;
+            for (int k = 0; k < std::max(1, a.locationsUsed) && a.location + k < kMaxVertexAttribs; k++) as.wideMask |= 1u << (a.location + k);
+            if (a.location + std::max(1, a.locationsUsed) > 15) as.wideAt15 = true;
+        }
+    }
+    return as;
+}
+
 // stage_in carries the upper half of a dvec3/dvec4 in Metal attribute 16 + L, which
 // doesn't exist for L = 15 (Metal has 31 attributes): such programs fetch in the shader.
 static bool wantManualFetch(Context* ctx, ProgramObj* prog) {
     if (wantManualFetch(ctx)) return true;
     VertexArray* vao = ctx->vao.get();
     if (!vao) return false;
-    bool wideAt15 = false;
-    for (const auto& a : prog->refl.attributes) {
-        TypeShape ts = typeShape(a.type);
-        if (ts.base == BaseType::Double && ts.rows > 2 && a.location >= 0 && a.location + std::max(1, a.locationsUsed) > 15) wideAt15 = true;
-    }
-    if (!wideAt15) return false;
+    if (!attribShapes(prog).wideAt15) return false;
     for (int l = 0; l < kMaxVertexAttribs; l++)
         if (vao->attribs[l].enabled && vao->attribs[l].clientPointer) return false;
     return true;
@@ -854,7 +878,8 @@ static void failSafeDrawInfo(Context* ctx, glsl::MGLDrawInfo* info) {
 struct VertexInput {
     struct Binding {
         uint64_t addr;
-        id<MTLBuffer> buffer;  // the buffer holding addr, or nil for upload memory
+        // the buffer holding addr, or nil for upload memory (kept alive by its GL buffer object for the draw)
+        __unsafe_unretained id<MTLBuffer> buffer;
         uint32_t stride;
         uint8_t index;
         bool strided;  // bound with an attribute stride (MTLBufferLayoutStrideDynamic)
@@ -888,15 +913,13 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
     }
     bool needCurrent = false;
     uint32_t bindingUsed = 0;
-    uint32_t wideMask = 0;  // locations holding a dvec3/dvec4
-    for (const auto& a : prog->refl.attributes) {
-        TypeShape ts = typeShape(a.type);
-        if (a.location < 0 || ts.base != BaseType::Double || ts.rows <= 2) continue;
-        for (int k = 0; k < std::max(1, a.locationsUsed) && a.location + k < kMaxVertexAttribs; k++) wideMask |= 1u << (a.location + k);
-    }
-    for (const auto& a : prog->refl.attributes) {
+    uint32_t clientBindings = 0, unalignedBindings = 0;  // bindings with a client-side array / an attribute offset not 4-aligned
+    const ProgramObj::AttribShapes& as = attribShapes(prog);
+    const uint32_t wideMask = as.wideMask;
+    for (size_t ai = 0; ai < prog->refl.attributes.size(); ai++) {
+        const auto& a = prog->refl.attributes[ai];
         if (a.location < 0) continue;
-        TypeShape ts = typeShape(a.type);
+        TypeShape ts = as.shapes[ai];
         int nloc = std::max(1, a.locationsUsed) ;
         for (int k = 0; k < nloc; k++) {
             int loc = a.location + k;
@@ -943,6 +966,8 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                     ak.bufferIndex = glsl::kBufVertex0 + va->binding;
                     ak.offset = va->relativeOffset;
                     bindingUsed |= 1u << va->binding;
+                    if (va->clientPointer) clientBindings |= 1u << va->binding;
+                    if (ak.offset & 3) unalignedBindings |= 1u << va->binding;
                 }
             }
             if (!enabled) {
@@ -976,8 +1001,9 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         id<MTLBuffer> buffer = nil;
         // client-side arrays (compatibility profile)
         const VertexAttrib* clientAttr = nullptr;
-        for (int l = 0; l < kMaxVertexAttribs; l++)
-            if (vao->attribs[l].enabled && vao->attribs[l].binding == (GLuint)b && vao->attribs[l].clientPointer) clientAttr = &vao->attribs[l];
+        if (clientBindings & (1u << b))
+            for (int l = 0; l < kMaxVertexAttribs; l++)
+                if (vao->attribs[l].enabled && vao->attribs[l].binding == (GLuint)b && vao->attribs[l].clientPointer) clientAttr = &vao->attribs[l];
         if (clientAttr && !(vb.buffer && vb.buffer->mtl)) {
             uint32_t lo = vb.divisor ? 0 : minIndex;
             uint32_t hi = vb.divisor ? (uint32_t)((d.instances + vb.divisor - 1) / vb.divisor + d.baseInstance) : maxIndex + 1;
@@ -992,9 +1018,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
             buffer = vb.buffer->mtl;
             vb.buffer->lastUse = serial;
         }
-        bool unaligned = (stride & 3) || (addr & 3);
-        for (int l = 0; l < kMaxVertexAttribs; l++)
-            if (key.attribs[l].format && key.attribs[l].bufferIndex == glsl::kBufVertex0 + b && (key.attribs[l].offset & 3)) unaligned = true;
+        bool unaligned = (stride & 3) || (addr & 3) || (unalignedBindings & (1u << b));
         if (unaligned) {
             // Metal needs 4-byte aligned strides/offsets: repack the used vertex range into
             // an aligned interleaved layout (each attribute at a 4-byte aligned offset).
@@ -1244,7 +1268,8 @@ static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Refle
 // ---------------------------------------------------------------------------
 struct IndexInfo {
     uint64_t addr = 0;
-    id<MTLBuffer> buffer = nil;  // the buffer holding addr, or nil for upload memory
+    // the buffer holding addr, or nil for upload memory (kept alive by its GL buffer object or the rotation cache)
+    __unsafe_unretained id<MTLBuffer> buffer = nil;
     size_t length = 0;
     MTLIndexType type = MTLIndexTypeUInt32;
     uint32_t count = 0;
@@ -1738,7 +1763,7 @@ static void executePdc(Context* ctx, ProgramObj* prog, ProgramVariant* var, Prog
     VertexInput vin;
     if (!setupVertexInput(ctx, prog, key, vin, d, minIdx, maxIdx)) return;
     vin.apply(table);
-    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    __unsafe_unretained id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);  // owned by the variant
     id<MTLRenderPipelineState> prePso = ctx->pipelines_->renderPipeline(pdcPrepassKey(key));
     if (!pso || !prePso) return;
     uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first, d.indexed);
@@ -2514,7 +2539,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         key.variant = var;
         fillColorKey(ctx, key, refl);
         key.rasterEnabled = true;
-        id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+        __unsafe_unretained id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);  // owned by the variant
         if (!pso) return true;
         if (ctx->enc.pipeline != pso) {
             [e setRenderPipelineState:pso];
@@ -2614,7 +2639,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
         key.variant = var;
         fillColorKey(ctx, key, refl);
         key.rasterEnabled = true;
-        id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+        __unsafe_unretained id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);  // owned by the variant
         if (!pso) return true;
         if (ctx->enc.pipeline != pso) {
             [e setRenderPipelineState:pso];
@@ -2688,7 +2713,7 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     key.variant = var;
     fillColorKey(ctx, key, refl);
     key.rasterEnabled = !ctx->rasterizerDiscard;
-    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    __unsafe_unretained id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);  // owned by the variant
     if (!pso) { retire(); return true; }
     GLenum rasterMode = hasGS ? refl.gsOutputPrimitive : hasTess ? GL_TRIANGLES : s.listMode;
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
@@ -2894,7 +2919,7 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
         fillColorKey(ctx, key, refl);
         key.depthFormat = seg.depthFormat;
         key.stencilFormat = seg.stencilFormat;
-        id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+        __unsafe_unretained id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);  // owned by the variant
         if (!pso) return false;
         MGL_STAT("draw:tess-metal");
         g_tessMetalDraws++;
@@ -2993,7 +3018,7 @@ static bool segmentDraw(Context* ctx, ProgramObj* prog, ProgramVariant* var, Pro
     } else if (d.indexed || ii.generated) {
         if (!(idxBuf = classicBuffer(ctx, ii.addr, ii.buffer, &idxOff))) return false;
     }
-    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    __unsafe_unretained id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);  // owned by the variant
     if (!pso) return true;
     MGL_STAT("draw:tess-segment");
     g_segmentDraws++;
@@ -3840,9 +3865,10 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
         return;
     }
     if (!fsrAddr && segmentDraw(ctx, prog, var, fsProg, fsVar, mixedFs, frefl, d, ii, minIdx, maxIdx, argAddr, fsArgAddr)) return;
-    id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
+    // owned by the context for the draw
+    __unsafe_unretained id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
     if (!e) return;
-    id<MTL4ArgumentTable> table = ctx->renderArgTable;
+    __unsafe_unretained id<MTL4ArgumentTable> table = ctx->renderArgTable;
     RenderPipelineKey key;
     key.variant = var;
     if (mixedFs) {
@@ -3885,7 +3911,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
         st += b;
         if (seen.insert(st).second) MGL_INFO("draw state prog %u mode %x count %d: %s", prog->name, d.mode, d.count, st.c_str());
     }
-    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    __unsafe_unretained id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);  // owned by the variant
     if (!pso) return;
     if (ctx->enc.pipeline != pso) {
         [e setRenderPipelineState:pso];
@@ -4310,7 +4336,7 @@ static void executeMeshDraw(Context* ctx, ProgramObj* prog, ProgramObj* fsProg, 
     }
     fillColorKey(ctx, key, frefl);
     key.rasterEnabled = !ctx->rasterizerDiscard;
-    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    __unsafe_unretained id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);  // owned by the variant
     if (!pso) return;
     if (ctx->enc.pipeline != pso) {
         [e setRenderPipelineState:pso];

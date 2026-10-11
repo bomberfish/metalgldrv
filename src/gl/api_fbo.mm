@@ -54,8 +54,30 @@ static GLenum attachmentStatus(Context* ctx, const Attachment& a, bool isColor, 
     return GL_FRAMEBUFFER_COMPLETE;
 }
 
+static GLenum framebufferStatusUncached(Context* ctx, Framebuffer* fb);
+
+// The status depends on the attachments (version) and their images: the textures' level specifications and base /
+// max levels, the renderbuffers' formats, sizes and sample counts.
 GLenum framebufferStatus(Context* ctx, Framebuffer* fb) {
     if (fb->isDefault) return fb->surface ? GL_FRAMEBUFFER_COMPLETE : GL_FRAMEBUFFER_UNDEFINED;
+    Framebuffer::StatusMemo::Att now[kNumAttachments];
+    for (int i = 0; i < kNumAttachments; i++) {
+        const Attachment& a = fb->att[i];
+        if (a.type == GL_TEXTURE && a.tex) now[i] = {a.tex.get(), nullptr, (int)a.tex->specVersion, a.tex->baseLevel, a.tex->maxLevel};
+        else if (a.type == GL_RENDERBUFFER && a.rb) now[i] = {a.rb.get(), a.rb->fmt, a.rb->width, a.rb->height, a.rb->samples};
+    }
+    Framebuffer::StatusMemo& m = fb->statusMemo;
+    bool same = m.valid && m.version == fb->version;
+    for (int i = 0; i < kNumAttachments && same; i++) same = m.att[i] == now[i];
+    if (same) return m.status;
+    m.status = framebufferStatusUncached(ctx, fb);
+    m.version = fb->version;
+    for (int i = 0; i < kNumAttachments; i++) m.att[i] = now[i];
+    m.valid = true;
+    return m.status;
+}
+
+static GLenum framebufferStatusUncached(Context* ctx, Framebuffer* fb) {
     bool any = false;
     int samples = -1;
     int layeredState = -1;

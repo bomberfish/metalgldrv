@@ -170,6 +170,7 @@ static bool validTexTarget(GLenum target, int dims) {
 
 static void defineLevel(Texture* t, int face, int level, int w, int h, int d, GLenum internalFormat, const FormatInfo* f) {
     TexImageLevel& L = t->levels[face][level];
+    t->specVersion++;
     bool changed = L.fmt != f || L.width != w || L.height != h || L.depth != d;
     L.width = w;
     L.height = h;
@@ -240,6 +241,7 @@ static void texImage(Context* ctx, GLenum target, GLint level, GLint internalfor
         int face = 0;
         if (fits) {
             pt->levels[face][level] = TexImageLevel{w, dims >= 2 ? h : 1, dims >= 3 ? d : 1, (GLenum)internalformat, f};
+            pt->specVersion++;
         } else {
             for (int l = 0; l < Texture::kMaxLevels; l++) pt->levels[face][l] = TexImageLevel();
         }
@@ -529,6 +531,7 @@ static void texStorage(Context* ctx, Texture* t, GLsizei levels, GLenum internal
     if (t->target == GL_TEXTURE_3D && !compressedSupports3D(f))
         return ctx->setError(GL_INVALID_OPERATION, "compressed format 0x%x can't be used for 3D textures", internalformat);
     if (t->sparse && !sparseStorageCheck(ctx, t, f, w, h, d)) return;
+    t->specVersion++;
     for (int face = 0; face < 6; face++)
         for (int l = 0; l < Texture::kMaxLevels; l++) t->levels[face][l] = TexImageLevel();
     int faces = t->target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
@@ -611,6 +614,7 @@ static void texStorageMS(Context* ctx, Texture* t, GLsizei samples, GLenum inter
     t->samples = s;
     t->fixedSampleLocations = fixed;
     TexImageLevel& L = t->levels[0][0];
+    t->specVersion++;
     L.width = w;
     L.height = h;
     L.depth = d;
@@ -1169,6 +1173,7 @@ static void texBuffer(Context* ctx, Texture* t, GLenum internalformat, GLuint bu
     t->mtl = nil;
     t->levels[0][0].fmt = f;
     t->levels[0][0].internalFormat = internalformat;
+    t->specVersion++;
 }
 
 API void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
@@ -1982,6 +1987,7 @@ API void APIENTRY glTextureView(GLuint texture, GLenum target, GLuint origtextur
     t->immutableLevels = nLevels;
     t->viewImmutableLevels = orig->viewParent ? orig->viewImmutableLevels : orig->immutableLevels;
     int faces = target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
+    t->specVersion++;
     for (int l = 0; l < Texture::kMaxLevels; l++)
         for (int face = 0; face < 6; face++) t->levels[face][l] = TexImageLevel();
     for (int l = 0; l < nLevels && l < Texture::kMaxLevels; l++) {
