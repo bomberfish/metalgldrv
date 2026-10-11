@@ -118,7 +118,10 @@ void releaseSparseTiles(Texture* t, uint64_t serial) {
 static void syncForMappingUpdate(Context* ctx, bool commit, double lastUnmap) {
     if (!commit) return ctx->finish();
     double wait = lastUnmap + Device::kSparseSettleTime - CFAbsoluteTimeGetCurrent();
-    if (wait <= 0) return ctx->flush();
+    if (wait <= 0) {
+        ctx->flush();
+        return ctx->queueAfterTessSegments();
+    }
     ctx->finish();
     usleep((useconds_t)(wait * 1e6));
 }

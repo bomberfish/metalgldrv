@@ -358,7 +358,7 @@ public:
     void finish();
     // Submits the open command buffer if it is the one recorded under `serial`.
     void flushIfPending(uint64_t serial) {
-        if (cb_ && serial_ == serial) flush();
+        if ((cb_ && serial_ == serial) || (tessSeg.open && tessSeg.serial == serial)) flush();
     }
     UploadAlloc upload(size_t size, size_t align = 256);
     // The buffer and offset of upload memory at GPU address `gpu` used by the open command buffer (nil if none):
@@ -366,26 +366,45 @@ public:
     id<MTLBuffer> uploadBuffer(uint64_t gpu, NSUInteger* offset);
 
     // ---- Metal's tessellator (draw.mm executeTessMetal) ----
-    // Metal 4 has no tessellation. Tessellated draws run on the device's classic queue in a segment between two
-    // Metal 4 command buffers: openTessSegment commits the Metal 4 work so far (S), a pre-pass command buffer runs
-    // the VS + TCS kernels and a render pass over the same attachments draws the patches (drawPatches); the next
-    // Metal 4 command buffer (S', the one open during the segment, whose serial everything the segment uses gets)
-    // waits for it. One event orders them: S signals v, the pre-pass waits for v and signals v + 1, the render
-    // command buffer waits for v + 1 and signals v + 2, which S' waits for. Consecutive tessellated draws into
-    // the same pass share a segment; anything recorded for Metal 4 (Context::commandBuffer) ends it.
+    // Metal 4 has no tessellation. Tessellated draws, and the draws after them into the same pass, run on the
+    // device's classic queue in a segment: a pre-pass command buffer runs the VS + TCS kernels, and a render pass
+    // over the same attachments draws (drawPatches). The segment has a serial of its own (Context::serial() while it
+    // is open), complete when its render command buffer is. Anything recorded for Metal 4 (Context::commandBuffer)
+    // ends it. Ordering, with one event:
+    //  - openTessSegment submits the Metal 4 work so far and signals `mtl` after it; the pre-pass waits for it (or,
+    //    without Metal 4 work since the last segment, for that one's pre-pass).
+    //  - The render command buffer waits for the pre-pass (`prep`) and the previous segment's render command buffer
+    //    (`main` of that one): same queue, but untracked resources.
+    //  - The pre-pass waits for the previous segment only when it may read what that one wrote (prepWaitsMain:
+    //    textures, images or storage in the VS / TCS, or a memory barrier since). Otherwise it runs while the
+    //    previous segment draws, as compute next to the render pass.
+    //  - The Metal 4 queue waits for the last segment before it runs the next Metal 4 command buffer (flush).
+    // Completions therefore stay in submission order (serials, upload memory: Context::lastWorkSerial_).
     struct TessSegment {
         bool open = false;
         PassDesc pass;
         id<MTLCommandBuffer> prep = nil, main = nil;
         id<MTLComputeCommandEncoder> compute = nil;
         id<MTLRenderCommandEncoder> render = nil;
-        uint64_t value = 0;  // v (above)
+        uint64_t serial = 0;
+        uint64_t mtl = 0, prepDone = 0, mainDone = 0;  // event values (above)
+        bool prepWaitsMain = false;
         uint64_t count = 0;  // segments opened by this context
     } tessSeg;
     id<MTLEvent> tessEvent = nil;
     uint64_t tessEventValue = 0;
-    bool openTessSegment(const PassDesc& p);  // false if there is no classic queue
+    uint64_t tessLastMain = 0;    // event value of the last segment's render command buffer
+    uint64_t tessLastPrep = 0;    // and of its (last) pre-pass
+    bool tessMtlWork = false;     // Metal 4 work submitted since the last segment opened
+    uint64_t tessQueueWaited = 0;  // the last such value the Metal 4 queue waits for
+    bool tessBarrier = false;      // glMemoryBarrier / glTextureBarrier since the last segment
+    // prevWrites: the first draw's VS / TCS read what the previous segment may have written (prepWaitsMain)
+    bool openTessSegment(const PassDesc& p, bool prevWrites);  // false if there is no classic queue
     void endTessSegment();
+    // The pre-pass of the open segment waits for the previous segment (a new pre-pass command buffer if it doesn't).
+    void tessPrepWaitForPrevious();
+    // Work submitted to the Metal 4 queue from now on (sparse mapping updates) waits for the segments so far.
+    void queueAfterTessSegments();
     id<MTL4ArgumentTable> renderArgTable, computeArgTable;
     id<MTL4ArgumentTable> renderArgTableFS;  // fragment stage of a program pipeline whose FS comes from another program
 
@@ -458,13 +477,24 @@ public:
 
 private:
     std::vector<std::pair<uint64_t, id<MTLBuffer>>> uploadRetired_;  // (serial, chunk)
-    id<MTLBuffer> uploadChunk_ = nil;
+    // An upload buffer with its addresses (Objective-C calls per upload are slow under Rosetta)
+    struct UploadBuf {
+        id<MTLBuffer> buffer = nil;
+        uint8_t* cpu = nullptr;
+        uint64_t gpu = 0, length = 0;
+    };
+    UploadBuf uploadChunk_;
     id<MTLBuffer> takeRetiredUpload(size_t want);
+    id<MTLBuffer> newUpload(size_t want);
+    void retireUploads();
+    size_t uploadPoolBytes() const;
     size_t uploadOffset_ = 0;
-    std::vector<id<MTLBuffer>> uploadUsed_;  // chunks used by the open command buffer
+    std::vector<UploadBuf> uploadUsed_;  // chunks used by the open command buffer
     id<MTL4CommandBuffer> cb_ = nil;
     id<MTL4CommandAllocator> alloc_ = nil;
     uint64_t serial_ = 0;
+    uint64_t lastWorkSerial_ = 0;
+    bool cbUsed_ = false;  // something was recorded in cb_ (commandBuffer()), not just its serial taken  // the Metal 4 command buffer or segment submitted last (completes after the others)
 };
 
 // Thread-current context.

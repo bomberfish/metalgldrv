@@ -14,10 +14,66 @@ fixed-function hardware (Apple GPUs have no hardware tessellator); it is still f
 emulation, which stays for what it can't do (isolines, point_mode, geometry shaders, transform feedback, queries,
 ...). `METALGLDRV_TESS_METAL=0` turns it off.
 
+### 2026-10-11: closing the gap
+
+Measured on a quiet machine (no other apps drawing; WindowServer alone moves single runs by ±20% otherwise).
+displacebench `--pipelined` (frames back to back with `glFlush`, wall ms per frame; the per-frame timer query and
+`glFinish` let the GPU idle and clock down between frames, which hid most of the difference):
+
+| wall ms / frame | weight 0.5 | 2 | 8 |
+|---|---|---|---|
+| metalgldrv 847e3e2 (morning) | 7.0 | 8.3 | 14.5 |
+| + upload pool waits instead of allocating | 5.1 | 6.4 | 12.2 |
+| + overlap (below) and the smaller changes | 1.06 | 1.35 | 3.36 |
+| Apple GL | 1.25 | 1.17 | 2.90 |
+
+What changed, by effect:
+
+1. **Upload churn.** With frames in flight, `upload()` found no completed retired chunk and created a new 4 MB
+   buffer, making it resident and freeing old ones (kernel calls, ~1 s of system time per 2 s). It now waits for
+   the oldest retired chunk while more than 3/4 of the pool is in flight, and the pool holds 1/16 of the working
+   set (128-768 MB, was 256 MB / 64 buffers): Heaven uploads ~100 MB of TCS records per frame.
+2. **Overlap.** The segment's VS + TCS pre-pass waited for the Metal 4 queue, which waited for the previous
+   segment: every frame ran TCS, then drawing, strictly in turn (0.85 + 1.2 ms at weight 2), while Apple's driver
+   runs the next TCS beside the current render pass (its times match max(TCS, draw), not their sum). Segments now
+   have serials of their own, the Metal 4 queue waits for them only before Metal 4 work, and a pre-pass waits for
+   the previous segment only when its VS / TCS read textures, images or storage (docs/ARCHITECTURE.md). One
+   detail mattered: `glClear` resolving the framebuffer took a serial, which opened an empty Metal 4 command
+   buffer every frame, and committing it serialized everything again; an empty one now stays open.
+3. **Draws without tessellation join the open segment** (classic pipelines for them): Heaven went from ~15 to 3
+   segment switches per frame.
+4. Small: TCS kernels as concurrent dispatches; unused `gl_PerVertex` members (8 clip + 8 cull distances, point
+   size) no longer take threadgroup memory (888 -> 408 bytes per patch in displacebench); culled patches write no
+   control-point records, levels reach memory only when the TES reads them.
+
+Tried without effect: a fence so the next render pass's vertex stage overlaps the previous fragment stage
+(instead of an event on the whole command buffer), fewer control-point loads in the TES (-4%), no texture fetch in
+the TES (0%).
+
+Heaven (1920x1080 High, Normal tessellation), interleaved runs on the quiet machine:
+
+| fps | runs |
+|---|---|
+| Apple GL | 111.1, 113.0, 112.9, 113.1 |
+| metalgldrv 847e3e2 (morning) | 86.9 |
+| with the changes above | 93.2, 93.4 |
+| + cached Objective-C properties | 94.9, 94.6 |
+
+(The morning's interleaved runs on a busy machine gave Apple GL 67.0 / 73.9 and metalgldrv 68.9 / 68.8: the
+machine's other work hid a 23% gap.)
+
+Heaven is CPU-bound on our driver: the main thread hardly waits, and the driver takes about half of it. The game
+is x86_64, so the driver's own code runs translated by Rosetta, where every Objective-C property read
+(`gpuAddress`, `gpuResourceID`, texture properties) is a translated `objc_msgSend`; those are now cached on the
+GL objects. Argument buffers are still built per draw (`buildArguments`: texture views, completeness, samplers),
+the largest remaining cost.
+
+### 2026-10-10 (first version)
+
 Heaven, back to back on the same (busy) machine: Apple GL 78.4 fps, metalgldrv 73.9 fps (was 35 fps with the
 emulation; Apple GL measured 103 fps on a quieter machine earlier).
 
-displacebench, GPU ms per frame, back to back:
+displacebench, GPU ms per frame (timer query), back to back:
 
 | | weight 0.5 | 2 | 4 | 8 |
 |---|---|---|---|---|
@@ -25,11 +81,12 @@ displacebench, GPU ms per frame, back to back:
 | emulation (`METALGLDRV_TESS_METAL=0`) | 8.5 | 23.0 | 23.3 | 48.8 |
 | Apple GL | 1.7 | 2.5 | 2.9 | 6.2 |
 
-The remaining gap is a fixed cost per patch (the VS + TCS kernel, the TES reading its control points from device
-memory instead of stage-in). Differences from the emulation: Metal places domain points in fixed point (~1e-4 off
+Differences from the emulation: Metal places domain points in fixed point (~1e-4 off
 for equal spacing), chooses its own lengths for the short segments of fractional spacing (GL leaves them to the
 implementation) and its own triangulation, so images differ in a few percent of pixels by small amounts;
-`glslrun --tesscheck` and `mgltest tessellation_metal_tessellator` check the differences stay within that.
+`glslrun --tesscheck` and `mgltest tessellation_metal_tessellator` check the differences stay within that. Like
+Apple's GL, Metal's tessellator doesn't draw the patches of one draw in a fixed order: depth ties between patches
+resolve differently from run to run (a few hundred pixels of displacebench).
 
 What it took besides the shaders:
 

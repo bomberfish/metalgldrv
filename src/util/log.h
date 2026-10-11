@@ -12,6 +12,9 @@ void logf(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)))
 // Environment helpers (MGL_* variables)
 bool envFlag(const char* name, bool def = false);
 int envInt(const char* name, int def);
+// envFlag for switches read on every draw: cached per thread until envChanged() (getenv scans the environment)
+bool envFlagCached(const char* name, bool def);
+void envChanged();
 }  // namespace mgl
 
 #define MGL_ERR(...) ::mgl::logf(::mgl::LOG_ERROR, __VA_ARGS__)

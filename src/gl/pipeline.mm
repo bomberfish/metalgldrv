@@ -158,27 +158,60 @@ static MTL4LibraryFunctionDescriptor* fn(id<MTLLibrary> lib, const std::string& 
 static void setColorAttachment(MTLRenderPipelineColorAttachmentDescriptor* c, MTLPixelFormat pf, const BlendKey& b);
 static void setColorAttachment(MTL4RenderPipelineColorAttachmentDescriptor* c, MTLPixelFormat pf, const BlendKey& b);
 
-// VariantKey::tessMetal: TES (mgl_tes_vs) + fragment function behind Metal's tessellator, for classic render encoders.
-static id<MTLRenderPipelineState> newTessMetalPipeline(Device* dev, const RenderPipelineKey& key) {
+// Vertex descriptor of a pipeline key (nil without attributes); strides are set per draw.
+static MTLVertexDescriptor* vertexDescriptor(const RenderPipelineKey& key) {
+    MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
+    bool anyAttr = false;
+    for (int i = 0; i < 32; i++) {
+        const VertexAttribKey& a = key.attribs[i];
+        if (!a.format) continue;
+        vd.attributes[i].format = (MTLVertexFormat)a.format;
+        vd.attributes[i].bufferIndex = a.bufferIndex;
+        vd.attributes[i].offset = a.offset;
+        anyAttr = true;
+    }
+    for (int b = 0; b < 32; b++) {
+        const VertexBufferKey& vb = key.buffers[b];
+        if (!vb.used) continue;
+        vd.layouts[b].stride = MTLBufferLayoutStrideDynamic;
+        vd.layouts[b].stepFunction = (MTLVertexStepFunction)vb.stepFunction;
+        vd.layouts[b].stepRate = vb.stepFunction == MTLVertexStepFunctionConstant ? 0 : std::max(1u, vb.stepRate);
+    }
+    return anyAttr ? vd : nil;
+}
+
+// RenderPipelineKey::classic: for classic render encoders (a tessellation segment). With tessMetal the vertex
+// function is the TES (mgl_tes_vs) behind Metal's tessellator.
+static id<MTLRenderPipelineState> newClassicPipeline(Device* dev, const RenderPipelineKey& key) {
     const ProgramVariant* v = key.variant;
     const glsl::EntryPoint* vs = v->entry(glsl::EntryPoint::Vertex);
     const glsl::EntryPoint* fs = v->entry(glsl::EntryPoint::Fragment);
+    id<MTLLibrary> fsLib = v->lib;
+    if (key.fsVariantUid) {  // program pipeline: fragment stage from another program (or none)
+        fs = key.fsVariant ? key.fsVariant->entry(glsl::EntryPoint::Fragment) : nullptr;
+        fsLib = key.fsVariant ? key.fsVariant->lib : nil;
+    }
     if (!vs) return nil;
     MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = [v->lib newFunctionWithName:@(vs->name.c_str())];
-    if (fs && key.rasterEnabled) d.fragmentFunction = [v->lib newFunctionWithName:@(fs->name.c_str())];
+    if (fs && key.rasterEnabled) d.fragmentFunction = [fsLib newFunctionWithName:@(fs->name.c_str())];
     d.rasterSampleCount = key.sampleCount;
     d.alphaToCoverageEnabled = key.alphaToCoverage;
     d.alphaToOneEnabled = key.alphaToOne;
     d.rasterizationEnabled = key.rasterEnabled;
-    d.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
-    d.tessellationPartitionMode = (MTLTessellationPartitionMode)key.tessPartition;
-    d.maxTessellationFactor = 64;
-    d.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
-    d.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
-    d.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
-    d.tessellationOutputWindingOrder = (MTLWinding)key.tessWinding;
-    d.tessellationFactorScaleEnabled = NO;
+    if (key.tessMetal) {
+        d.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        d.tessellationPartitionMode = (MTLTessellationPartitionMode)key.tessPartition;
+        d.maxTessellationFactor = 64;
+        d.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        d.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+        d.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
+        d.tessellationOutputWindingOrder = (MTLWinding)key.tessWinding;
+        d.tessellationFactorScaleEnabled = NO;
+    } else {
+        d.vertexDescriptor = vertexDescriptor(key);
+        d.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)key.topologyClass;
+    }
     for (int i = 0; i < 8; i++)
         if (key.colorFormats[i]) setColorAttachment(d.colorAttachments[i], (MTLPixelFormat)key.colorFormats[i], key.blend[i]);
     d.depthAttachmentPixelFormat = (MTLPixelFormat)key.depthFormat;
@@ -186,12 +219,12 @@ static id<MTLRenderPipelineState> newTessMetalPipeline(Device* dev, const Render
     NSError* err = nil;
     MGL_STAT("render-pipeline-create");
     id<MTLRenderPipelineState> pso = [dev->mtl newRenderPipelineStateWithDescriptor:d error:&err];
-    if (!pso) MGL_ERR("tessellation pipeline creation failed: %s", err.localizedDescription.UTF8String);
+    if (!pso) MGL_ERR("classic render pipeline creation failed: %s", err.localizedDescription.UTF8String);
     return pso;
 }
 
 static id<MTLRenderPipelineState> newRenderPipeline(Device* dev, const RenderPipelineKey& key) {
-    if (key.tessMetal) return newTessMetalPipeline(dev, key);
+    if (key.classic) return newClassicPipeline(dev, key);
     const ProgramVariant* v = key.variant;
     MTL4PipelineDescriptor* desc = nil;
     const glsl::EntryPoint* vs = v->entry(glsl::EntryPoint::Vertex);
@@ -230,24 +263,7 @@ static id<MTLRenderPipelineState> newRenderPipeline(Device* dev, const RenderPip
         if (!vs) return nil;
         d.vertexFunctionDescriptor = fn(v->lib, vs->name);
         if (fs && key.rasterEnabled) d.fragmentFunctionDescriptor = fn(fsLib, fs->name);
-        MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
-        bool anyAttr = false;
-        for (int i = 0; i < 32; i++) {
-            const VertexAttribKey& a = key.attribs[i];
-            if (!a.format) continue;
-            vd.attributes[i].format = (MTLVertexFormat)a.format;
-            vd.attributes[i].bufferIndex = a.bufferIndex;
-            vd.attributes[i].offset = a.offset;
-            anyAttr = true;
-        }
-        for (int b = 0; b < 32; b++) {
-            const VertexBufferKey& vb = key.buffers[b];
-            if (!vb.used) continue;
-            vd.layouts[b].stride = MTLBufferLayoutStrideDynamic;
-            vd.layouts[b].stepFunction = (MTLVertexStepFunction)vb.stepFunction;
-            vd.layouts[b].stepRate = vb.stepFunction == MTLVertexStepFunctionConstant ? 0 : std::max(1u, vb.stepRate);
-        }
-        if (anyAttr) d.vertexDescriptor = vd;
+        d.vertexDescriptor = vertexDescriptor(key);
         d.rasterSampleCount = key.sampleCount;
         d.alphaToCoverageState = key.alphaToCoverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
         d.alphaToOneState = key.alphaToOne ? MTL4AlphaToOneStateEnabled : MTL4AlphaToOneStateDisabled;

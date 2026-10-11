@@ -109,6 +109,8 @@ public:
     double takeMaxGpuSeconds();
     // Seconds the GPU was busy with this device's command buffers since the last call (overlaps counted once).
     double takeGpuBusySeconds();
+    // GPU time of classic (tessellation) command buffers: [0] VS + TCS kernels, [1] render passes
+    void takeTessGpuSeconds(double out[2]);
     // A reserved serial whose command buffer was never submitted.
     void abandonSerial(uint64_t serial) { markComplete(serial, nil); }
 
@@ -124,8 +126,9 @@ public:
     // Metal 4 has no tessellation; tessellated draws run on this classic queue between Metal 4 command buffers
     // (Context::openTessSegment). nil if it can't be created.
     id<MTLCommandQueue> classicQueue();
-    // Commits a classic command buffer (after the residency set's pending changes).
-    void commitClassic(id<MTLCommandBuffer> cb);
+    // Commits a classic command buffer (after the residency set's pending changes); `serial` (0: none) completes
+    // with it.
+    void commitClassic(id<MTLCommandBuffer> cb, bool render, uint64_t serial);
     // On the Metal 4 queue: signal `e` with `value` once the work committed so far is done / make the work
     // committed from now on wait until `e` reaches `value`.
     void queueSignal(id<MTLEvent> e, uint64_t value);
@@ -197,7 +200,7 @@ private:
     bool classicQueueTried_ = false;
     std::map<uint64_t, std::pair<double, double>> gpuTimes_;
     double maxGpuSeconds_ = 0, lastLongWarning_ = 0;
-    double gpuBusySeconds_ = 0, gpuBusyUntil_ = 0;
+    double gpuBusySeconds_ = 0, gpuBusyUntil_ = 0, tessGpuSeconds_[2] = {};
 
     std::mutex mutex_;
     std::condition_variable cv_;

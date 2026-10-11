@@ -152,6 +152,14 @@ double Device::takeGpuBusySeconds() {
     return b;
 }
 
+void Device::takeTessGpuSeconds(double out[2]) {
+    std::lock_guard<std::mutex> g(mutex_);
+    for (int i = 0; i < 2; i++) {
+        out[i] = tessGpuSeconds_[i];
+        tessGpuSeconds_[i] = 0;
+    }
+}
+
 bool Device::gpuTimes(uint64_t serial, double* start, double* end) {
     std::lock_guard<std::mutex> g(mutex_);
     auto it = gpuTimes_.find(serial);
@@ -312,13 +320,23 @@ id<MTLCommandQueue> Device::classicQueue() {
     return classicQueue_;
 }
 
-void Device::commitClassic(id<MTLCommandBuffer> cb) {
+void Device::commitClassic(id<MTLCommandBuffer> cb, bool render, uint64_t serial) {
     waitForeground();
+    if (!cb) {
+        if (serial) markComplete(serial, nil, 0, 0);
+        return;
+    }
     [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
-        if (c.error) MGL_ERR("GPU command buffer (tessellation) failed: %s", c.error.description.UTF8String);
+        if (c.GPUEndTime > 0) {
+            std::lock_guard<std::mutex> g(mutex_);
+            tessGpuSeconds_[render] += c.GPUEndTime - c.GPUStartTime;
+        }
+        if (serial) this->markComplete(serial, c.error, 0, 0);
+        else if (c.error) MGL_ERR("GPU command buffer (tessellation) failed: %s", c.error.description.UTF8String);
     }];
     std::lock_guard<std::mutex> g(mutex_);
     commitResidencyLocked();
+    if (serial) submitted_.insert(serial);
     [cb commit];
 }
 

@@ -69,9 +69,10 @@ struct RenderPipelineKey {
     uint8_t sampleCount = 1, alphaToCoverage = 0, alphaToOne = 0, rasterEnabled = 1;
     uint8_t topologyClass = 0, logicOp = 0;
     uint8_t pdcPrepass = 0;  // ARB_post_depth_coverage pre-pass: fragment function mgl_fs_pdc of a VariantKey::pdc variant
-    // VariantKey::tessMetal: a classic pipeline (MTLRenderPipelineDescriptor) with Metal's tessellator: partition mode
-    // (MTLTessellationPartitionMode), output winding (MTLWinding) and the pass's depth / stencil formats
-    uint8_t tessMetal = 0, tessPartition = 0, tessWinding = 0, pad = 0;
+    // classic: a classic pipeline (MTLRenderPipelineDescriptor), for draws in a tessellation segment
+    // (Context::TessSegment); it needs the pass's depth / stencil formats. tessMetal (VariantKey::tessMetal): with
+    // Metal's tessellator, partition mode (MTLTessellationPartitionMode) and output winding (MTLWinding).
+    uint8_t tessMetal = 0, tessPartition = 0, tessWinding = 0, classic = 0;
     uint32_t depthFormat = 0, stencilFormat = 0;
 };
 struct DepthStencilKey {

@@ -136,13 +136,21 @@ tessellator (equal / fractional_even / fractional_odd spacing, triangles / quads
   fixed-function hardware, and it is 4-5x faster than the emulation (docs/tessellation-performance.md). Metal 4
   command buffers can't encode it, so tessellated draws run in *segments* on the device's classic
   `MTLCommandQueue` (`Context::openTessSegment`): the Metal 4 work so far is committed, a pre-pass command buffer
-  takes the draws' VS + TCS kernels and a classic render pass over the same attachments takes their
-  `drawPatches`; one `MTLEvent` per context orders Metal 4 work, pre-pass, render pass and the next Metal 4
-  command buffer, whose serial covers everything the segment used. Consecutive tessellated draws into the same
-  pass share a segment; any Metal 4 recording (`Context::commandBuffer`), a flush, `glMemoryBarrier` or
-  `glTextureBarrier` ends it. Classic encoders bind `MTLBuffer`s, so the draw's argument / system / draw-info
-  uploads are found by address (`Context::uploadBuffer`); resources stay resident through the device's residency
-  set, which the classic queue shares. Domain points match the emulation's for equal spacing up to Metal's fixed
+  takes the draws' VS + TCS kernels (concurrent dispatches) and a classic render pass over the same attachments
+  takes their `drawPatches`. Draws without tessellation into the same pass join the open segment
+  (draw.mm `segmentDraw`, classic pipelines: `RenderPipelineKey::classic`), so a pass with tessellation switches
+  queues once, not once per run of tessellated draws (each switch ends both passes and costs tens of
+  microseconds; `METALGLDRV_TESS_SEGMENT_DRAWS=0` turns this off). Any Metal 4 recording
+  (`Context::commandBuffer`), a flush, `glMemoryBarrier` or `glTextureBarrier` ends a segment. A segment has a
+  serial of its own (`Context::serial()` while it is open), complete with its render command buffer; one
+  `MTLEvent` per context orders the work (`Context::TessSegment`): the pre-pass after earlier Metal 4 work, the
+  render pass after the pre-pass and the previous segment's render pass, Metal 4 work after the segments before
+  it (waited for lazily, when a Metal 4 command buffer is submitted). The pre-pass only waits for the previous
+  segment when the VS / TCS read textures, images or storage (or after a barrier), so the next frame's VS + TCS
+  kernels run beside the current render pass as Apple's driver does it; completions stay in submission order,
+  which upload memory relies on. Classic encoders bind `MTLBuffer`s, so uploads are found by address
+  (`Context::uploadBuffer`); resources stay resident through the device's residency set, which the classic queue
+  shares. Domain points match the emulation's for equal spacing up to Metal's fixed
   point (~1e-4); for fractional spacing Metal (Direct3D's rules) picks other lengths for the two short segments,
   which GL leaves to the implementation; triangulation and the provoking vertex of generated triangles differ too
   (`glslrun --tesscheck` compares the points of 783 level sets, `mgltest tessellation_metal_tessellator` the
@@ -340,7 +348,8 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   `METALGLDRV_RENDERER`, `METALGLDRV_VERSION_STRING`, `METALGLDRV_GLSL_VERSION_STRING`,
   `METALGLDRV_HIDE_EXTENSIONS`, `METALGLDRV_EXTRA_EXTENSIONS`, `METALGLDRV_EXTENSION_YEAR`, `METALGLDRV_VRAM_MB`,
   `METALGLDRV_GLSL_QUIRKS`, `METALGLDRV_SHARE_FRAMEBUFFERS`.
-* `METALGLDRV_STATS=1` – per-function event counters and the GPU's busy time, logged every 5 s.
+* `METALGLDRV_STATS=1` – per-function event counters and the GPU's busy time (tessellation command buffers
+  separately, their VS + TCS pre-passes too), logged every 5 s.
   `METALGLDRV_PROFILE_PASSES=1` adds GPU time per render pass / compute dispatch (each is committed
   in its own command buffer, so it changes performance; labels name the framebuffer, the entry
   point that opened the pass, its draw count and first program).
@@ -351,6 +360,7 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   compatibility contexts from sharing (patched in memory by default; see docs/doom2016.md).
 * `METALGLDRV_IMPLICIT_PATCHES=1` – draws whose primitives have GL_PATCH_VERTICES vertices run as
   patches while tessellation is active (Iris + Sodium; set by the Fabric mod).
+* `METALGLDRV_TESS_SEGMENT_DRAWS=0` – draws without tessellation end a tessellation segment instead of joining it.
 * `METALGLDRV_TESS_METAL=0`, `METALGLDRV_TESS_FAST=0`, `METALGLDRV_TESS_BATCH=0`, `METALGLDRV_TESS_PASS1=compute` –
   turn off Metal's tessellator, the tessellation fast path or multi-draw batching, or run the emulation's pass 1 as a
   compute kernel (see Tessellation; for comparisons and debugging).
@@ -371,6 +381,10 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
 * `METALGLDRV_RENDER_SCALE=<0.25..1>` – macOS replacement mode (Minecraft): views carrying our
   surfaces report and render at that fraction of their backing scale (`ourBackingScale` in nsgl.mm),
   so GLFW / SDL size the framebuffer smaller; ignored under Wine, which sizes windows itself.
+* `METALGLDRV_SWAP_INTERVAL=<n>` – overrides the app's swap interval (0: no display sync, which can tear when the
+  window is scanned out directly; Apple's GL composites windows and doesn't).
+* `METALGLDRV_CAPTURE_SEQ=<file>` – appends every presented frame, downscaled to 480x270 RGB, to the file (read
+  back asynchronously; for finding out-of-order or glitched frames in a sequence).
 * `METALGLDRV_MAX_FPS`, `METALGLDRV_CAPTURE*` (frame and
   per-program texture captures, written to `METALGLDRV_DUMP_DIR` when set),
   `METALGLDRV_MSL_OPTS`, `METALGLDRV_MSL_OVERRIDE`, `METALGLDRV_GLSL_PATCH`,

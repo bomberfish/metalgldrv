@@ -109,7 +109,17 @@ public:
     std::vector<SparseTiles> sparsePages;
     double sparseUnmapTime = 0;  // CFAbsoluteTime of the last decommit
 
-    uint64_t gpuAddress() const { return mtl ? mtl.gpuAddress : 0; }
+    // mtl.gpuAddress, cached: draws read it for every bound buffer, and an Objective-C call per read is slow under
+    // Rosetta. The cache holds the buffer it belongs to, so a replaced `mtl` can't be mistaken for it.
+    uint64_t gpuAddress() const {
+        if (mtl != gpuAddressOf_) {
+            gpuAddressOf_ = mtl;
+            gpuAddress_ = mtl ? mtl.gpuAddress : 0;
+        }
+        return gpuAddress_;
+    }
+    mutable id<MTLBuffer> gpuAddressOf_ = nil;
+    mutable uint64_t gpuAddress_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -214,6 +224,29 @@ public:
     // shaders can't write multisample textures); they can't be framebuffer attachments.
     bool msArray = false;
     double sparseUnmapTime = 0;  // CFAbsoluteTime of the last decommit
+
+    // Properties of the Metal texture sampled last (textureSamplingView), cached like Buffer::gpuAddress().
+    struct MtlProps {
+        id<MTLTexture> of = nil;
+        MTLPixelFormat pixelFormat = MTLPixelFormatInvalid;
+        MTLTextureType type = MTLTextureType2D;
+        NSUInteger levels = 0, arrayLength = 0;
+    };
+    MtlProps mtlProps;
+    const MtlProps& propsOf(id<MTLTexture> t) {
+        if (mtlProps.of != t) mtlProps = {t, t.pixelFormat, t.textureType, t.mipmapLevelCount, t.arrayLength};
+        return mtlProps;
+    }
+    // gpuResourceID of the view sampled last
+    id<MTLTexture> resourceIDOf = nil;
+    MTLResourceID resourceID = {};
+    MTLResourceID resourceIDFor(id<MTLTexture> v) {
+        if (resourceIDOf != v) {
+            resourceIDOf = v;
+            resourceID = v.gpuResourceID;
+        }
+        return resourceID;
+    }
 
     // Cached sampling views keyed by (base,max level, swizzle, format, ds mode)
     struct ViewKey {

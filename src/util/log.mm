@@ -1,3 +1,5 @@
+#include <atomic>
+#include <vector>
 #include "util/log.h"
 #include <cstdio>
 #include <cstdlib>
@@ -64,6 +66,30 @@ bool envFlag(const char* name, bool def) {
     if (!v || !*v) return def;
     return !(strcmp(v, "0") == 0 || strcasecmp(v, "false") == 0 || strcasecmp(v, "no") == 0);
 }
+
+static std::atomic<uint32_t> g_envEpoch{1};
+
+bool envFlagCached(const char* name, bool def) {
+    struct Entry {
+        const char* name;
+        bool def, value;
+        uint32_t epoch;
+    };
+    thread_local std::vector<Entry> cache;
+    uint32_t epoch = g_envEpoch.load(std::memory_order_relaxed);
+    for (Entry& e : cache)
+        if (e.name == name && e.def == def) {
+            if (e.epoch != epoch) {
+                e.value = envFlag(name, def);
+                e.epoch = epoch;
+            }
+            return e.value;
+        }
+    cache.push_back({name, def, envFlag(name, def), epoch});
+    return cache.back().value;
+}
+
+void envChanged() { g_envEpoch.fetch_add(1, std::memory_order_relaxed); }
 
 int envInt(const char* name, int def) {
     const char* v = getenv(name);

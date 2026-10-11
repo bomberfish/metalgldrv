@@ -786,7 +786,7 @@ inline half mgl_tess_metal_level(float x) {
     half h = half(x);
     return float(h) < x ? as_type<half>(ushort(as_type<ushort>(h) + 1u)) : h;
 }
-inline void mgl_tess_metal_factors(device half* f, uint gp, device const float* lv, bool quads) {
+template <typename P> inline void mgl_tess_metal_factors(device half* f, uint gp, P lv, bool quads) {
     uint n = quads ? 4u : 3u;
     bool cull = false;
     for (uint i = 0; i < n; i++) cull = cull || !(lv[i] > 0.0f);

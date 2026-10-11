@@ -2757,12 +2757,24 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     std::string structs, members, funcs, init, zero;
     std::vector<const StructDef*> order;
     collectStructs(order);
+    // gl_in / gl_out (arrayed gl_PerVertex) keep only the members the stage references: the entry points copy only
+    // those (fieldsOfVar), and unused gl_ClipDistance / gl_CullDistance arrays would take threadgroup memory
+    std::map<const StructDef*, std::set<int>> keep;
+    for (auto& [b, v] : si.bi)
+        if ((b == BuiltinVar::In || b == BuiltinVar::Out) && v->block && v->type.isArray()) {
+            auto& k = keep[v->block];
+            k.insert(si.usedMembers[v].begin(), si.usedMembers[v].end());
+        }
+    auto memberDeclared = [&](const StructDef* sd, size_t mi) {
+        const Member& m = sd->members[mi];
+        if (m.type.isArray() && m.type.dims[0] == 0) return false;
+        auto kept = keep.find(sd);
+        return kept == keep.end() || kept->second.empty() || kept->second.count((int)mi);
+    };
     for (auto* sd : order) {
         structs += "struct " + structName(sd) + " {\n";
-        for (auto& m : sd->members) {
-            if (m.type.isArray() && m.type.dims[0] == 0) continue;
-            structs += "    " + mt(m.type) + " m_" + m.name + ";\n";
-        }
+        for (size_t mi = 0; mi < sd->members.size(); mi++)
+            if (memberDeclared(sd, mi)) structs += "    " + mt(sd->members[mi].type) + " m_" + sd->members[mi].name + ";\n";
         structs += "};\n";
     }
 
@@ -2877,8 +2889,8 @@ void Emitter::emitBody(Stage s, std::string& o, const std::string& preG, const s
     for (auto* sd : needEq_ ? order : std::vector<const StructDef*>{}) {
         std::string n = structName(sd);
         o += "inline bool mgl_eq(" + n + " a, " + n + " b) { return true";
-        for (auto& m : sd->members)
-            if (!(m.type.isArray() && m.type.dims[0] == 0)) o += " && mgl_eq(a.m_" + m.name + ", b.m_" + m.name + ")";
+        for (size_t mi = 0; mi < sd->members.size(); mi++)
+            if (memberDeclared(sd, mi)) o += " && mgl_eq(a.m_" + sd->members[mi].name + ", b.m_" + sd->members[mi].name + ")";
         o += "; }\n";
     }
     if (hasShared_) o += "struct MGLShared {\n" + sharedDecl + "};\n";
@@ -4601,16 +4613,41 @@ std::string Emitter::tessControlBody(const std::vector<Field>& vf, const std::ve
     e += "    g.mgl_init();\n    g." + tsi.mainName + "();\n";
     e += "    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);\n";
     useStage(Stage::TessControl);
+    const Variable* lo = tsi.bi.count(BuiltinVar::TessLevelOuter) ? tsi.bi[BuiltinVar::TessLevelOuter] : nullptr;
+    const Variable* li = tsi.bi.count(BuiltinVar::TessLevelInner) ? tsi.bi[BuiltinVar::TessLevelInner] : nullptr;
+    auto level = [&](int i) {
+        return i < 4 ? (lo ? varName(lo) + "[" + std::to_string(i) + "]" : std::string("1.0f")) : (li ? varName(li) + "[" + std::to_string(i - 4) + "]" : std::string("1.0f"));
+    };
+    if (K.tessMetal) {
+        // Metal's tessellator drops patches with an outer factor of 0 without running the TES: their records aren't
+        // written, and the levels only reach memory when the TES reads them
+        const StageCode& es = SC(Stage::TessEval);
+        bool tesLevels = es.usedNames.count("gl_TessLevelOuter") || es.usedNames.count("gl_TessLevelInner");
+        bool quads = RF(Stage::TessEval).tesPrimitiveMode == gl::QUADS;
+        e += "    float mgl_lv[6] = {";
+        for (int i = 0; i < 6; i++) e += (i ? ", " : "") + level(i);
+        e += "};\n    bool mgl_culled = !(mgl_lv[0] > 0.0f && mgl_lv[1] > 0.0f && mgl_lv[2] > 0.0f" + std::string(quads ? " && mgl_lv[3] > 0.0f" : "") + ");\n";
+        e += "    if (!mgl_culled) {\n        " + cpRec("mgl_tid");
+        for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "", "mgl_tid")) + ";\n";
+        e += "    }\n    if (mgl_tid == 0u) {\n";
+        if (tesLevels || !recP.empty()) {
+            e += "        if (!mgl_culled) {\n            " + lvDecl;
+            if (tesLevels)
+                for (int i = 0; i < 6; i++) e += "            lv[" + std::to_string(i) + "] = mgl_lv[" + std::to_string(i) + "];\n";
+            e += "            " + prDecl;
+            for (size_t i = 0; i < recP.size(); i++) e += "            pr[" + std::to_string(i) + "] = " + pk(recP[i], acc(recP[i], "")) + ";\n";
+            e += "        }\n";
+        }
+        e += std::string("        mgl_tess_metal_factors(D.tessFactors, mgl_gp, mgl_lv, ") + (quads ? "true" : "false") + ");\n    }\n";
+        return e;
+    }
     e += "    {\n        " + cpRec("mgl_tid");
     for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "", "mgl_tid")) + ";\n";
     e += "    }\n    if (mgl_tid == 0u) {\n        " + lvDecl;
-    const Variable* lo = tsi.bi.count(BuiltinVar::TessLevelOuter) ? tsi.bi[BuiltinVar::TessLevelOuter] : nullptr;
-    const Variable* li = tsi.bi.count(BuiltinVar::TessLevelInner) ? tsi.bi[BuiltinVar::TessLevelInner] : nullptr;
-    for (int i = 0; i < 4; i++) e += "        lv[" + std::to_string(i) + "] = " + (lo ? varName(lo) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
-    for (int i = 0; i < 2; i++) e += "        lv[" + std::to_string(4 + i) + "] = " + (li ? varName(li) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
+    for (int i = 0; i < 6; i++) e += "        lv[" + std::to_string(i) + "] = " + level(i) + ";\n";
     e += "        " + prDecl;
     for (size_t i = 0; i < recP.size(); i++) e += "        pr[" + std::to_string(i) + "] = " + pk(recP[i], acc(recP[i], "")) + ";\n";
-    e += tessMetalFactors() + "    }\n";
+    e += "    }\n";
     return e;
 }
 

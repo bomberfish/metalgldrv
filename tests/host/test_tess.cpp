@@ -8,6 +8,7 @@
 #include <cstring>
 #include <vector>
 
+extern "C" void mglTestEnvChanged(void);
 extern "C" void mglTestTessCounters(uint64_t* passes, uint64_t* fused);
 
 namespace {
@@ -73,6 +74,7 @@ std::vector<float> render(Target& t, bool fast, bool batch, bool kernel, const s
     setenv("METALGLDRV_TESS_METAL", mt ? "1" : "0", 1);
     setenv("METALGLDRV_TESS_FAST", fast ? "1" : "0", 1);
     setenv("METALGLDRV_TESS_BATCH", batch ? "1" : "0", 1);
+    mglTestEnvChanged();
     if (kernel) setenv("METALGLDRV_TESS_PASS1", "compute", 1);
     else unsetenv("METALGLDRV_TESS_PASS1");
     glClearColor(-1, -1, -1, -1);
@@ -83,6 +85,7 @@ std::vector<float> render(Target& t, bool fast, bool batch, bool kernel, const s
     unsetenv("METALGLDRV_TESS_BATCH");
     unsetenv("METALGLDRV_TESS_PASS1");
     unsetenv("METALGLDRV_TESS_METAL");
+    mglTestEnvChanged();
     return px;
 }
 
@@ -199,6 +202,7 @@ TEST(tessellation_fast_path) {
     GLint lvl = glGetUniformLocation(p, "lvl");
     glPatchParameteri(GL_PATCH_VERTICES, 3);
     setenv("METALGLDRV_IMPLICIT_PATCHES", "1", 1);
+    mglTestEnvChanged();
     // sub-draws: quad A (draw 0), an empty one (draw 1), quad B's second triangle (draw 2: indices 2 3 0
     // + 4), quad B's first triangle (draw 3: indices 0 1 2 + 4)
     const GLsizei counts[4] = {6, 0, 3, 3};
@@ -285,6 +289,7 @@ TEST(tessellation_fast_path) {
     CHECK_EQ(fusedDraws() - f0, 3u);
     CHECK_EQ(differing(sref, render(t, false, true, true, singles)), 0);
     unsetenv("METALGLDRV_IMPLICIT_PATCHES");
+    mglTestEnvChanged();
 
     glDeleteBuffers(2, bufs);
     glDeleteVertexArrays(1, &vao);
@@ -513,6 +518,7 @@ void main() {
     glUniform1f(glGetUniformLocation(p, "lvl"), 1.0f);
     glPatchParameteri(GL_PATCH_VERTICES, 3);
     setenv("METALGLDRV_IMPLICIT_PATCHES", "1", 1);
+    mglTestEnvChanged();
     GLuint indirect, ib8;
     const uint32_t cmds[10] = {3, 1, 0, 0, 0, 3, 1, 3, 4, 0};  // count, instances, first index, base vertex, base instance
     glGenBuffers(1, &indirect);
@@ -550,6 +556,7 @@ void main() {
     auto depthPass = [&](bool fast) {
         setenv("METALGLDRV_TESS_METAL", "0", 1);
         setenv("METALGLDRV_TESS_FAST", fast ? "1" : "0", 1);
+        mglTestEnvChanged();
         glClearDepth(1.0);
         glClear(GL_DEPTH_BUFFER_BIT);
         draws();
@@ -557,6 +564,7 @@ void main() {
         glReadPixels(0, 0, 64, 64, GL_DEPTH_COMPONENT, GL_FLOAT, d.data());
         unsetenv("METALGLDRV_TESS_FAST");
         unsetenv("METALGLDRV_TESS_METAL");
+        mglTestEnvChanged();
         return d;
     };
     std::vector<float> dref = depthPass(false), dfast = depthPass(true);
@@ -567,6 +575,7 @@ void main() {
     glDeleteFramebuffers(1, &fbo);
     glDeleteTextures(1, &depth);
     unsetenv("METALGLDRV_IMPLICIT_PATCHES");
+    mglTestEnvChanged();
     glDeleteBuffers(1, &indirect);
     glDeleteBuffers(1, &ib8);
     glDeleteBuffers(2, bufs);
@@ -921,6 +930,109 @@ void main() {
             compare("quads as lines", ref, mt, 0.35, 1.0f);
             glDeleteProgram(p);
         }
+    glDeleteBuffers(2, bufs);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}
+
+extern "C" uint64_t mglTestTessSegmentDraws(void);
+
+// Draws without tessellation between tessellated ones go into the open segment's classic render pass: the same
+// image as with every one of them ending the segment (indexed, generated indices, instanced, blending, depth,
+// a second program, uniforms changing between draws).
+TEST(tessellation_segment_draws) {
+    Target t;
+    GLuint depth;
+    glGenRenderbuffers(1, &depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, 64, 64);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+    GLuint bufs[2];
+    GLuint vao = quadsVao(bufs);
+    // without displacement: the patches' triangles don't overlap (depth ties would resolve in Metal's order)
+    const char* tes = R"(#version 460 core
+layout(triangles, equal_spacing, ccw) in;
+in V { vec4 color; flat int id; } vi[];
+out vec4 color;
+void main() {
+    vec3 t = gl_TessCoord;
+    gl_Position = t.x * gl_in[0].gl_Position + t.y * gl_in[1].gl_Position + t.z * gl_in[2].gl_Position;
+    color = t.x * vi[0].color + t.y * vi[1].color + t.z * vi[2].color + vec4(0.0, 0.0, 4.0 * t.x * t.y, 0.0);  // not affine
+})";
+    GLuint tess = program(kVS, kTCS, tes, "#version 460 core\nin vec4 color;\nout vec4 o;\nvoid main() { o = color; }\n");
+    const char* vs = R"(#version 460 core
+layout(location = 0) in vec2 p;
+layout(location = 1) in vec4 c;
+uniform vec3 off;
+out vec4 color;
+void main() {
+    color = c + vec4(0.0, 0.0, float(gl_InstanceID) * 0.5, 0.0);
+    gl_Position = vec4(p + off.xy + vec2(float(gl_InstanceID) * 0.3, 0.0), off.z, 1.0);
+})";
+    GLuint plain = glCreateProgram(), plain2 = glCreateProgram();
+    for (GLuint pr : {plain, plain2}) {
+        GLuint a = shader(GL_VERTEX_SHADER, vs);
+        GLuint b = shader(GL_FRAGMENT_SHADER, pr == plain ? "#version 460 core\nin vec4 color;\nout vec4 o;\nvoid main() { o = color; }\n"
+                                                           : "#version 460 core\nin vec4 color;\nuniform vec4 tint;\nout vec4 o;\nvoid main() { o = color * tint; }\n");
+        glAttachShader(pr, a);
+        glAttachShader(pr, b);
+        glLinkProgram(pr);
+        glDeleteShader(a);
+        glDeleteShader(b);
+    }
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    auto frame = [&](bool segmentDraws) {
+        setenv("METALGLDRV_TESS_METAL", "1", 1);
+        setenv("METALGLDRV_TESS_SEGMENT_DRAWS", segmentDraws ? "1" : "0", 1);
+        mglTestEnvChanged();
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glClearColor(-1, -1, -1, -1);
+        glClearDepth(1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        auto plainDraw = [&](GLuint pr, float x, float y, float z, const std::function<void()>& draw) {
+            glUseProgram(pr);
+            glUniform3f(glGetUniformLocation(pr, "off"), x, y, z);
+            draw();
+        };
+        auto indexed = [] { glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr); };
+        plainDraw(plain, 0.0f, 0.95f, 0.5f, indexed);  // before the segment
+        glUseProgram(tess);
+        glUniform1f(glGetUniformLocation(tess, "lvl"), 3.0f);
+        glDrawElementsBaseVertex(GL_PATCHES, 6, GL_UNSIGNED_SHORT, nullptr, 4);
+        plainDraw(plain, 0.3f, 0.0f, -0.5f, indexed);  // in front of nothing
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+        plainDraw(plain, 0.6f, 0.3f, 0.2f, [] { glDrawArrays(GL_TRIANGLE_FAN, 0, 4); });  // generated indices, blended
+        glDisable(GL_BLEND);
+        plainDraw(plain, 0.0f, 0.4f, -0.2f, [] { glDrawElementsInstanced(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, nullptr, 2); });
+        glUseProgram(plain2);
+        glUniform4f(glGetUniformLocation(plain2, "tint"), 0.5f, 2.0f, 1.0f, 1.0f);
+        plainDraw(plain2, 0.9f, 0.9f, 0.9f, indexed);  // behind the tessellated quad
+        glUseProgram(tess);
+        glDrawElementsBaseVertex(GL_PATCHES, 6, GL_UNSIGNED_SHORT, nullptr, 0);
+        plainDraw(plain2, -0.2f, -0.2f, 0.7f, indexed);  // behind where it overlaps
+        std::vector<float> px = t.read();
+        unsetenv("METALGLDRV_TESS_METAL");
+        unsetenv("METALGLDRV_TESS_SEGMENT_DRAWS");
+        mglTestEnvChanged();
+        glDisable(GL_DEPTH_TEST);
+        return px;
+    };
+    std::vector<float> ref = frame(false);
+    uint64_t n0 = mglTestTessSegmentDraws();
+    std::vector<float> seg = frame(true);
+    CHECK(mglTestTessSegmentDraws() - n0 >= 4);
+    int covered = 0;
+    for (size_t i = 0; i < ref.size(); i += 4) covered += ref[i + 3] != -1.0f;
+    CHECK(covered > 1000);
+    int diff = differing(ref, seg);
+    if (diff) fprintf(stderr, "  %d pixels differ\n", diff);
+    CHECK(diff == 0);
+    glDeleteProgram(tess);
+    glDeleteProgram(plain);
+    glDeleteProgram(plain2);
+    glDeleteRenderbuffers(1, &depth);
     glDeleteBuffers(2, bufs);
     glDeleteVertexArrays(1, &vao);
     CHECK_GL();

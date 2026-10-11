@@ -94,12 +94,12 @@ Context::Context(Ref<ShareGroup> sh, int major, int minor, bool core, bool debug
 }
 
 Context::~Context() {
-    if (cb_) flush();
+    if (cb_ || tessSeg.open) flush();
     releaseDrawCaches(this);
     mglCompatDestroy(this);
     delete pipelines_;
     for (auto& [s, b] : uploadRetired_) dev->releaseAfter(b, s);
-    if (uploadChunk_) dev->releaseAfter(uploadChunk_, serial_);
+    if (uploadChunk_.buffer) dev->releaseAfter(uploadChunk_.buffer, lastWorkSerial_);
 }
 
 thread_local const char* t_apiName = "";
@@ -311,6 +311,7 @@ void Context::bindSurfaces(Surface* draw, Surface* read) {
 // command recording
 // ---------------------------------------------------------------------------
 uint64_t Context::serial() {
+    if (tessSeg.open) return tessSeg.serial;
     if (!cb_) {
         serial_ = dev->reserveSerial();
         alloc_ = dev->acquireAllocator();
@@ -323,6 +324,7 @@ uint64_t Context::serial() {
 id<MTL4CommandBuffer> Context::commandBuffer() {
     if (tessSeg.open) endTessSegment();  // Metal 4 work after the segment's
     serial();
+    cbUsed_ = true;
     return cb_;
 }
 
@@ -376,6 +378,35 @@ id<MTLBuffer> Context::takeRetiredUpload(size_t want) {
     return b;
 }
 
+// Bytes the retired upload pool keeps: 1/16 of the GPU's working set, 128 MB to 768 MB.
+size_t Context::uploadPoolBytes() const {
+    static const size_t bytes = std::clamp<size_t>((size_t)dev->mtl.recommendedMaxWorkingSetSize / 16, 128u << 20, 768u << 20);
+    return bytes;
+}
+
+// An upload buffer of at least `want` bytes: a retired one the GPU is done with, else a new one. While more than
+// 3/4 of the pool is retired but still in use by the GPU, waits for the oldest that fits instead: the CPU stays at
+// most that far ahead, and buffers aren't created (and made resident) and freed again every frame.
+id<MTLBuffer> Context::newUpload(size_t want) {
+    const size_t kUploadInFlight = uploadPoolBytes() * 3 / 4;
+    if (id<MTLBuffer> b = takeRetiredUpload(want)) return b;
+    size_t pending = 0;
+    auto oldest = uploadRetired_.end();
+    for (auto it = uploadRetired_.begin(); it != uploadRetired_.end(); ++it) {
+        pending += it->second.length;
+        if (it->second.length >= want && (oldest == uploadRetired_.end() || it->first < oldest->first)) oldest = it;
+    }
+    if (pending > kUploadInFlight && oldest != uploadRetired_.end()) {
+        MGL_STAT("upload-wait");
+        dev->waitFor(oldest->first);
+        id<MTLBuffer> b = oldest->second;
+        uploadRetired_.erase(oldest);
+        return b;
+    }
+    MGL_STAT("upload-new");
+    return dev->newBuffer(want);
+}
+
 UploadAlloc Context::upload(size_t size, size_t align) {
     const size_t kChunk = 4 << 20;
     serial();
@@ -385,22 +416,37 @@ UploadAlloc Context::upload(size_t size, size_t align) {
         // finds it again; the current chunk stays.
         size_t want = kChunk;
         while (want < size) want *= 2;
-        id<MTLBuffer> b = takeRetiredUpload(want);
-        if (!b) b = dev->newBuffer(want);
-        uploadUsed_.push_back(b);
-        return UploadAlloc{b, (uint8_t*)bufferContents(b), b.gpuAddress, 0};
+        id<MTLBuffer> b = newUpload(want);
+        uploadUsed_.push_back({b, (uint8_t*)bufferContents(b), b.gpuAddress, b.length});
+        return UploadAlloc{b, uploadUsed_.back().cpu, uploadUsed_.back().gpu, 0};
     }
     uploadOffset_ = (uploadOffset_ + align - 1) & ~(align - 1);
-    if (!uploadChunk_ || uploadOffset_ + size > uploadChunk_.length) {
-        if (uploadChunk_) uploadUsed_.push_back(uploadChunk_);
-        uploadChunk_ = takeRetiredUpload(kChunk);
-        if (!uploadChunk_) uploadChunk_ = dev->newBuffer(kChunk);
+    if (!uploadChunk_.buffer || uploadOffset_ + size > uploadChunk_.length) {
+        if (uploadChunk_.buffer) uploadUsed_.push_back(uploadChunk_);
+        id<MTLBuffer> b = newUpload(kChunk);
+        uploadChunk_ = {b, (uint8_t*)bufferContents(b), b.gpuAddress, b.length};
         uploadOffset_ = 0;
     }
-    UploadAlloc a{uploadChunk_, (uint8_t*)bufferContents(uploadChunk_) + uploadOffset_, uploadChunk_.gpuAddress + uploadOffset_,
-                  uploadOffset_};
+    UploadAlloc a{uploadChunk_.buffer, uploadChunk_.cpu + uploadOffset_, uploadChunk_.gpu + uploadOffset_, uploadOffset_};
     uploadOffset_ += size;
     return a;
+}
+
+// Filled upload chunks retire with the work submitted last, which completes after the others (Context::TessSegment).
+// The current chunk continues: it retires with the last work that used it. Retiring it at every flush would need a
+// new chunk per command buffer.
+void Context::retireUploads() {
+    for (auto& b : uploadUsed_) uploadRetired_.push_back({lastWorkSerial_, b.buffer});
+    uploadUsed_.clear();
+    // Trim the retired pool to uploadPoolBytes() and 256 buffers: a frame of a tessellation-heavy game uploads ~100 MB
+    // (Unigine Heaven), and with 3 frames in flight a smaller pool frees buffers the next frame allocates again.
+    size_t retiredBytes = 0;
+    for (auto& r : uploadRetired_) retiredBytes += r.second.length;
+    while (uploadRetired_.size() > 256 || (retiredBytes > uploadPoolBytes() && uploadRetired_.size() > 1)) {
+        retiredBytes -= uploadRetired_.front().second.length;
+        dev->releaseAfter(uploadRetired_.front().second, uploadRetired_.front().first);
+        uploadRetired_.erase(uploadRetired_.begin());
+    }
 }
 
 void Context::flush(id<CAMetalDrawable> present, bool keepUploads) {
@@ -418,27 +464,19 @@ void Context::flush(id<CAMetalDrawable> present, bool keepUploads) {
             // Nothing recorded but a present was requested: record an empty buffer.
             serial();
         } else {
+            // only segments ran since the last flush
+            if (!keepUploads) retireUploads();
             return;
         }
     }
     endEncoder();
     [cb_ endCommandBuffer];
+    queueAfterTessSegments();
     dev->submit(cb_, alloc_, serial_, present);
-    // Filled upload chunks retire with this command buffer. The current one continues in the next: it retires with
-    // the last command buffer that used it, which completes after the others (every encoder starts with a barrier
-    // after all earlier work on the queue). Retiring it at every flush would need a new chunk per command buffer.
-    if (!keepUploads) {
-        for (auto& b : uploadUsed_) uploadRetired_.push_back({serial_, b});
-        uploadUsed_.clear();
-    }
-    // Trim the retired pool: at most 64 buffers and 256 MB (a frame of a tessellation-heavy game uploads ~100 MB).
-    size_t retiredBytes = 0;
-    for (auto& r : uploadRetired_) retiredBytes += r.second.length;
-    while (uploadRetired_.size() > 64 || (retiredBytes > (256u << 20) && uploadRetired_.size() > 1)) {
-        retiredBytes -= uploadRetired_.front().second.length;
-        dev->releaseAfter(uploadRetired_.front().second, uploadRetired_.front().first);
-        uploadRetired_.erase(uploadRetired_.begin());
-    }
+    lastWorkSerial_ = serial_;
+    if (cbUsed_) tessMtlWork = true;
+    cbUsed_ = false;
+    if (!keepUploads) retireUploads();
     cb_ = nil;
     alloc_ = nil;
     passOpen = false;
@@ -447,12 +485,13 @@ void Context::flush(id<CAMetalDrawable> present, bool keepUploads) {
 }
 
 id<MTLBuffer> Context::uploadBuffer(uint64_t gpu, NSUInteger* offset) {
-    auto in = [&](id<MTLBuffer> b) { return b && gpu >= b.gpuAddress && gpu < b.gpuAddress + b.length; };
-    id<MTLBuffer> found = in(uploadChunk_) ? uploadChunk_ : nil;
+    auto in = [&](const UploadBuf& b) { return b.buffer && gpu >= b.gpu && gpu < b.gpu + b.length; };
+    const UploadBuf* found = in(uploadChunk_) ? &uploadChunk_ : nullptr;
     for (size_t i = uploadUsed_.size(); !found && i-- > 0;)
-        if (in(uploadUsed_[i])) found = uploadUsed_[i];
-    if (found) *offset = (NSUInteger)(gpu - found.gpuAddress);
-    return found;
+        if (in(uploadUsed_[i])) found = &uploadUsed_[i];
+    if (!found) return nil;
+    *offset = (NSUInteger)(gpu - found->gpu);
+    return found->buffer;
 }
 
 // Fills a render pass descriptor (Metal 4 or classic) for pass `p`, with the pending clears as load actions.
@@ -505,60 +544,91 @@ static void fillPassDescriptor(RP* rp, const PassDesc& p, const PendingClear& cl
     rp.defaultRasterSampleCount = p.samples;
 }
 
-bool Context::openTessSegment(const PassDesc& p) {
+bool Context::openTessSegment(const PassDesc& p, bool prevWrites) {
     id<MTLCommandQueue> q = dev->classicQueue();
     if (!q) return false;
     if (tessSeg.open) endTessSegment();
     MGL_STAT("tess-segment");
-    // Pending clears become the segment pass's load actions. Everything recorded so far runs first, and its
-    // upload memory stays live until S' (the segment may read it).
+    // Pending clears become the segment pass's load actions. The upload memory used so far may be read by the
+    // segment: it retires with later work.
+    // A Metal 4 command buffer with nothing recorded (opened for a serial: resources tagged as used by what comes
+    // next) stays open: it runs after the segment.
     PendingClear clear = pendingClear;
     pendingClear.reset();
-    flush(nil, true);
+    if (cb_ && cbUsed_) flush(nil, true);
     if (!tessEvent) tessEvent = [dev->mtl newEvent];
-    uint64_t v = ++tessEventValue;
-    tessEventValue += 2;
-    dev->queueSignal(tessEvent, v);
-    serial();  // S'
+    tessSeg.mtl = 0;
+    if (tessMtlWork) {  // the Metal 4 work so far; else the previous pre-pass (which waited for it), in queue order
+        tessSeg.mtl = ++tessEventValue;
+        dev->queueSignal(tessEvent, tessSeg.mtl);
+        tessMtlWork = false;
+    }
+    tessSeg.prepDone = ++tessEventValue;
+    tessSeg.mainDone = ++tessEventValue;
+    bool waitMain = (prevWrites || tessBarrier) && tessLastMain;
+    tessBarrier = false;
     @autoreleasepool {
         tessSeg.prep = [q commandBuffer];
         tessSeg.main = [q commandBuffer];
-        [tessSeg.prep encodeWaitForEvent:tessEvent value:v];
-        [tessSeg.main encodeWaitForEvent:tessEvent value:v + 1];
+        if (tessSeg.mtl) [tessSeg.prep encodeWaitForEvent:tessEvent value:tessSeg.mtl];
+        else if (tessLastPrep) [tessSeg.prep encodeWaitForEvent:tessEvent value:tessLastPrep];
+        if (waitMain) [tessSeg.prep encodeWaitForEvent:tessEvent value:tessLastMain];
+        [tessSeg.main encodeWaitForEvent:tessEvent value:tessSeg.prepDone];
+        if (tessLastMain) [tessSeg.main encodeWaitForEvent:tessEvent value:tessLastMain];
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor new];
         fillPassDescriptor(rp, p, clear);
-        tessSeg.compute = [tessSeg.prep computeCommandEncoder];
+        tessSeg.compute = [tessSeg.prep computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];  // TCS dispatches are independent
         tessSeg.render = [tessSeg.main renderCommandEncoderWithDescriptor:rp];
     }
-    if (!tessSeg.render || !tessSeg.compute) {
-        MGL_ERR("failed to begin a tessellation pass (%dx%d)", p.width, p.height);
-        tessSeg.open = true;
-        endTessSegment();
-        return false;
-    }
-    tessSeg.value = v;
+    tessSeg.serial = dev->reserveSerial();
+    tessSeg.prepWaitsMain = waitMain || !tessLastMain;
     tessSeg.pass = p;
     tessSeg.open = true;
     tessSeg.count++;
+    if (!tessSeg.render || !tessSeg.compute) {
+        MGL_ERR("failed to begin a tessellation pass (%dx%d)", p.width, p.height);
+        endTessSegment();
+        return false;
+    }
+    // the attachments are in use until the segment completes
+    PassDesc tagged;
+    resolvePass(tagged);
     // the segment's pass is the current one for the draw state (applyDynamicState, fillColorKey)
     curPass = p;
     enc.reset();
-    return true;
+    return tessSeg.open;
+}
+
+void Context::tessPrepWaitForPrevious() {
+    if (!tessSeg.open || tessSeg.prepWaitsMain) return;
+    // the pre-pass so far goes first; the next one waits for it and for the previous segment
+    uint64_t chain = ++tessEventValue;
+    @autoreleasepool {
+        [tessSeg.compute endEncoding];
+        [tessSeg.prep encodeSignalEvent:tessEvent value:chain];
+        dev->commitClassic(tessSeg.prep, false, 0);
+        tessSeg.prep = [dev->classicQueue() commandBuffer];
+        [tessSeg.prep encodeWaitForEvent:tessEvent value:chain];
+        [tessSeg.prep encodeWaitForEvent:tessEvent value:tessLastMain];
+        tessSeg.compute = [tessSeg.prep computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+    }
+    tessSeg.prepWaitsMain = true;
 }
 
 void Context::endTessSegment() {
     if (!tessSeg.open) return;
     tessSeg.open = false;
-    uint64_t v = tessSeg.value;
     @autoreleasepool {
         [tessSeg.compute endEncoding];
-        [tessSeg.prep encodeSignalEvent:tessEvent value:v + 1];
-        dev->commitClassic(tessSeg.prep);
+        [tessSeg.prep encodeSignalEvent:tessEvent value:tessSeg.prepDone];
+        dev->commitClassic(tessSeg.prep, false, 0);
         [tessSeg.render endEncoding];
-        [tessSeg.main encodeSignalEvent:tessEvent value:v + 2];
-        dev->commitClassic(tessSeg.main);
+        [tessSeg.main encodeSignalEvent:tessEvent value:tessSeg.mainDone];
+        dev->commitClassic(tessSeg.main, true, tessSeg.serial);
     }
-    dev->queueWait(tessEvent, v + 2);
+    tessLastMain = tessSeg.mainDone;
+    tessLastPrep = tessSeg.prepDone;
+    lastWorkSerial_ = tessSeg.serial;
     tessSeg.prep = tessSeg.main = nil;
     tessSeg.compute = nil;
     tessSeg.render = nil;
@@ -566,9 +636,15 @@ void Context::endTessSegment() {
     passDirty = true;
 }
 
+void Context::queueAfterTessSegments() {
+    if (tessLastMain <= tessQueueWaited) return;
+    dev->queueWait(tessEvent, tessLastMain);
+    tessQueueWaited = tessLastMain;
+}
+
 void Context::finish() {
     MGL_STAT_CALLER("finish");
-    uint64_t s = cb_ ? serial_ : 0;
+    uint64_t s = tessSeg.open ? tessSeg.serial : cb_ ? serial_ : 0;
     flush();
     if (s) dev->waitFor(s);
     else dev->waitIdle();
@@ -577,7 +653,7 @@ void Context::finish() {
 void Context::waitForResource(uint64_t lastUse) {
     if (lastUse == 0) return;
     MGL_STAT_CALLER("gpu-wait");
-    if (cb_ && lastUse == serial_) flush();
+    if ((cb_ && lastUse == serial_) || (tessSeg.open && lastUse == tessSeg.serial)) flush();
     dev->waitFor(lastUse);
 }
 

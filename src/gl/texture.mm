@@ -448,8 +448,9 @@ id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarge
     }
     const FormatInfo* f = t->storageFmt ? t->storageFmt : formatInfo(GL_RGBA8);
     id<MTLTexture> mt = t->sparseRead ? t->sparseRead : t->mtl;
+    const Texture::MtlProps& mp = t->propsOf(mt);
     MTLTextureSwizzleChannels base = f->swizzle;
-    MTLPixelFormat pf = mt.pixelFormat;
+    MTLPixelFormat pf = mp.pixelFormat;
     bool depthStencilFmt = f->kind == FmtKind::DepthStencil;
     bool sampleStencil = stencilSampling || (depthStencilFmt && t->depthStencilMode == GL_STENCIL_INDEX) || f->kind == FmtKind::Stencil;
     if (sampleStencil) {
@@ -474,15 +475,15 @@ id<MTLTexture> textureSamplingView(Context* ctx, Texture* t, GLenum samplerTarge
     sw.green = glSwizzleToMTL(t->swizzle[1], base);
     sw.blue = glSwizzleToMTL(t->swizzle[2], base);
     sw.alpha = glSwizzleToMTL(t->swizzle[3], base);
-    MTLTextureType vt = t->msArray ? MTLTextureType2DArray : viewTypeFor(samplerTarget, mt.textureType);
+    MTLTextureType vt = t->msArray ? MTLTextureType2DArray : viewTypeFor(samplerTarget, mp.type);
     int levelStart = first, levelCount = last - first + 1;
-    levelStart = std::min(levelStart, (int)mt.mipmapLevelCount - 1);
-    levelCount = std::max(1, std::min(levelCount, (int)mt.mipmapLevelCount - levelStart));
-    NSUInteger slices = mt.arrayLength;
-    if (mt.textureType == MTLTextureTypeCube) slices = 6;
-    if (mt.textureType == MTLTextureTypeCubeArray) slices = mt.arrayLength * 6;
-    bool identity = pf == mt.pixelFormat && vt == mt.textureType && levelStart == 0 &&
-                    levelCount == (int)mt.mipmapLevelCount && sw.red == MTLTextureSwizzleRed &&
+    levelStart = std::min(levelStart, (int)mp.levels - 1);
+    levelCount = std::max(1, std::min(levelCount, (int)mp.levels - levelStart));
+    NSUInteger slices = mp.arrayLength;
+    if (mp.type == MTLTextureTypeCube) slices = 6;
+    if (mp.type == MTLTextureTypeCubeArray) slices = mp.arrayLength * 6;
+    bool identity = pf == mp.pixelFormat && vt == mp.type && levelStart == 0 &&
+                    levelCount == (int)mp.levels && sw.red == MTLTextureSwizzleRed &&
                     sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
     *complete = true;
     if (identity) return mt;

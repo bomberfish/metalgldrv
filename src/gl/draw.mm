@@ -583,7 +583,7 @@ static uint64_t buildArguments(Context* ctx, ProgramObj* prog, bool forCompute, 
                 FmtKind k = isUint ? FmtKind::UInt : isInt ? FmtKind::SInt : isShadow ? FmtKind::Depth : FmtKind::Unorm;
                 view = dummyTexture(ctx, tt, k);
             }
-            MTLResourceID rid = view.gpuResourceID;
+            MTLResourceID rid = t ? t->resourceIDFor(view) : view.gpuResourceID;
             memcpy(&v, &rid, 8);
             break;
         }
@@ -840,7 +840,28 @@ static void failSafeDrawInfo(Context* ctx, glsl::MGLDrawInfo* info) {
     if (!info->subDrawCount) info->subDrawCount = 1;  // the zero buffer: one sub-draw from patch 0, list from indexBuffer
 }
 
-static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& key, id<MTL4ArgumentTable> table, const DrawParams& d,
+// Vertex buffer bindings of a draw (setupVertexInput), for a Metal 4 argument table or a classic encoder.
+struct VertexInput {
+    struct Binding {
+        uint64_t addr;
+        id<MTLBuffer> buffer;  // the buffer holding addr, or nil for upload memory
+        uint32_t stride;
+        uint8_t index;
+        bool strided;  // bound with an attribute stride (MTLBufferLayoutStrideDynamic)
+    };
+    Binding b[kMaxVertexBindings + 2];
+    int n = 0;
+    bool classicOk = true;  // no address outside its buffer (vertex index lo of client arrays maps to the upload's start)
+    void add(uint64_t addr, id<MTLBuffer> buffer, uint32_t stride, uint32_t index, bool strided) { b[n++] = {addr, buffer, stride, (uint8_t)index, strided}; }
+    void apply(id<MTL4ArgumentTable> t) const {
+        for (int i = 0; i < n; i++) {
+            if (b[i].strided) [t setAddress:b[i].addr attributeStride:b[i].stride atIndex:b[i].index];
+            else [t setAddress:b[i].addr atIndex:b[i].index];
+        }
+    }
+};
+
+static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& key, VertexInput& vin, const DrawParams& d,
                              uint32_t minIndex, uint32_t maxIndex) {
     VertexArray* vao = ctx->vao.get();
     uint64_t serial = ctx->serial();
@@ -852,7 +873,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         fillVertexBindings(ctx, info);
         info->baseInstance = d.baseInstance;
         failSafeDrawInfo(ctx, info);
-        [table setAddress:di.gpu atIndex:glsl::kBufStageIO];
+        vin.add(di.gpu, nil, 0, glsl::kBufStageIO, false);
         return true;
     }
     bool needCurrent = false;
@@ -942,6 +963,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         bk.stepRate = vb.divisor ? vb.divisor : 1;
         GLsizei stride = vb.stride;
         uint64_t addr = 0;
+        id<MTLBuffer> buffer = nil;
         // client-side arrays (compatibility profile)
         const VertexAttrib* clientAttr = nullptr;
         for (int l = 0; l < kMaxVertexAttribs; l++)
@@ -953,9 +975,11 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
             UploadAlloc u = ctx->upload(bytes, 16);
             memcpy(u.cpu, (const uint8_t*)clientAttr->clientPointer + (size_t)lo * stride, (size_t)(hi - lo) * stride);
             addr = u.gpu - (uint64_t)lo * stride;  // vertex index lo maps to the start of the upload
+            if (lo) vin.classicOk = false;
             // relative offsets were computed against pointer==binding offset, which is 0 for client arrays
         } else if (vb.buffer && vb.buffer->mtl) {
             addr = vb.buffer->gpuAddress() + vb.offset;
+            buffer = vb.buffer->mtl;
             vb.buffer->lastUse = serial;
         }
         bool unaligned = (stride & 3) || (addr & 3);
@@ -995,10 +1019,12 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                     for (auto& r : reps) memcpy(dv + r.dstOff, sv + r.srcOff, r.size);
                 }
                 addr = u.gpu - (uint64_t)lo * newStride;
+                buffer = nil;
+                if (lo) vin.classicOk = false;
                 stride = (GLsizei)newStride;
             }
         }
-        [table setAddress:addr attributeStride:stride atIndex:glsl::kBufVertex0 + b];
+        vin.add(addr, buffer, (uint32_t)stride, glsl::kBufVertex0 + b, true);
     }
     if (needCurrent) {
         // floats (16 bytes per location) followed by doubles (32 bytes per location)
@@ -1009,7 +1035,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         bk.used = 1;
         bk.stepFunction = MTLVertexStepFunctionConstant;
         bk.stepRate = 0;
-        [table setAddress:ca.gpu attributeStride:0 atIndex:kBufCurrentAttribs];
+        vin.add(ca.gpu, nil, 0, kBufCurrentAttribs, true);
     }
     return true;
 }
@@ -1208,6 +1234,7 @@ static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Refle
 // ---------------------------------------------------------------------------
 struct IndexInfo {
     uint64_t addr = 0;
+    id<MTLBuffer> buffer = nil;  // the buffer holding addr, or nil for upload memory
     size_t length = 0;
     MTLIndexType type = MTLIndexTypeUInt32;
     uint32_t count = 0;
@@ -1335,6 +1362,7 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
         if (d.indexed) {
             if (ib) {
                 out.addr = ib->gpuAddress() + (size_t)d.indices;
+                out.buffer = ib->mtl;
                 out.length = (size_t)d.count * isz;
                 ib->lastUse = ctx->serial();
             } else {
@@ -1697,7 +1725,9 @@ static void executePdc(Context* ctx, ProgramObj* prog, ProgramVariant* var, Prog
     fillColorKey(ctx, key, frefl);
     key.rasterEnabled = true;
     key.topologyClass = (uint8_t)(refl.writesLayer ? topologyClass(d.mode) : MTLPrimitiveTopologyClassUnspecified);
-    if (!setupVertexInput(ctx, prog, key, table, d, minIdx, maxIdx)) return;
+    VertexInput vin;
+    if (!setupVertexInput(ctx, prog, key, vin, d, minIdx, maxIdx)) return;
+    vin.apply(table);
     id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
     id<MTLRenderPipelineState> prePso = ctx->pipelines_->renderPipeline(pdcPrepassKey(key));
     if (!pso || !prePso) return;
@@ -2771,11 +2801,27 @@ static bool tessMetalWanted(Context* ctx, ProgramObj* prog, const glsl::VariantK
     if (vk.pdc || vk.fsr || ctx->rasterizerDiscard || ctx->statsQueriesActive || mglQueryVisibilityActive(ctx)) return false;
     if (ctx->polygonMode == GL_POINT) return false;
     // METALGLDRV_TESS_METAL=0: always the emulation (read per draw: tests switch it)
-    return envFlag("METALGLDRV_TESS_METAL", true) && ctx->dev->classicQueue();
+    return envFlagCached("METALGLDRV_TESS_METAL", true) && ctx->dev->classicQueue();
 }
 
 static uint64_t g_tessMetalDraws = 0;
 extern "C" __attribute__((visibility("default"))) uint64_t mglTestTessMetalDraws(void) { return g_tessMetalDraws; }
+// Tests that switch METALGLDRV_* variables between draws call this (envFlagCached).
+extern "C" __attribute__((visibility("default"))) void mglTestEnvChanged(void) { mgl::envChanged(); }
+
+// The VS / TCS of `prog` read what draws may write (textures, images, storage buffers, atomic counters): their
+// pre-pass waits for the previous tessellation segment (Context::TessSegment).
+static bool tessPrepReadsWrites(ProgramObj* prog) {
+    const uint32_t stages = 1u << (int)glsl::Stage::Vertex | 1u << (int)glsl::Stage::TessControl;
+    const glsl::Reflection& r = prog->refl;
+    for (const auto& u : r.uniforms)
+        if (u.slot >= 0 && (u.stageMask & stages)) return true;
+    for (const auto& b : r.storageBlocks)
+        if (b.stageMask & stages) return true;
+    for (const auto& a : r.atomicCounterBuffers)
+        if (a.stageMask & stages) return true;
+    return false;
+}
 
 // False: nothing was encoded and the emulation draws it.
 static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d, glsl::VariantKey vk, const DrawParams* batch, int batchCount) {
@@ -2794,10 +2840,12 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
     key.variant = var;
     key.rasterEnabled = 1;
     key.tessMetal = 1;
+    key.classic = 1;
     key.tessPartition = (uint8_t)(refl.tesSpacing == GL_FRACTIONAL_EVEN ? MTLTessellationPartitionModeFractionalEven
                                   : refl.tesSpacing == GL_FRACTIONAL_ODD ? MTLTessellationPartitionModeFractionalOdd
                                                                          : MTLTessellationPartitionModeInteger);
     key.tessWinding = (uint8_t)(refl.tesOrder == GL_CW ? MTLWindingClockwise : MTLWindingCounterClockwise);
+    bool prevWrites = tessPrepReadsWrites(prog);
     // Setting up the draw can record Metal 4 work (texture storage, feedback-loop copies), which ends the segment:
     // then once more in a new one.
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -2805,7 +2853,7 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
         if (!ctx->resolvePass(p)) return true;
         Context::TessSegment& seg = ctx->tessSeg;
         if (!seg.open || !(seg.pass == p) || ctx->pendingClear.any())
-            if (!ctx->openTessSegment(p)) return false;
+            if (!ctx->openTessSegment(p, prevWrites)) return false;
         uint64_t segCount = seg.count;
         MPState s;
         s.ctx = ctx;
@@ -2831,6 +2879,7 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
         if (!pso) return false;
         MGL_STAT("draw:tess-metal");
         g_tessMetalDraws++;
+        if (prevWrites) ctx->tessPrepWaitForPrevious();
         id<MTLComputeCommandEncoder> ce = seg.compute;
         [ce setComputePipelineState:tcs];
         [ce setBuffer:argBuf offset:argOff atIndex:glsl::kBufArgs];
@@ -2857,6 +2906,106 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
         return true;
     }
     return false;
+}
+
+static uint64_t g_segmentDraws = 0;
+extern "C" __attribute__((visibility("default"))) uint64_t mglTestTessSegmentDraws(void) { return g_segmentDraws; }
+
+// The buffer holding `addr` and its offset there, for classic encoders: `buffer` when known, upload memory otherwise.
+static id<MTLBuffer> classicBuffer(Context* ctx, uint64_t addr, id<MTLBuffer> buffer, NSUInteger* offset) {
+    if (!buffer) return ctx->uploadBuffer(addr, offset);
+    if (addr < buffer.gpuAddress || addr > buffer.gpuAddress + buffer.length) return nil;
+    *offset = (NSUInteger)(addr - buffer.gpuAddress);
+    return buffer;
+}
+
+// A draw without tessellation while a tessellation segment is open on its pass: into the segment's classic render
+// encoder, which keeps the pass in the segment (each switch between the queues ends both passes and costs tens of
+// microseconds of GPU time). False: nothing was encoded, and the Metal 4 path draws it (ending the segment).
+static bool segmentDraw(Context* ctx, ProgramObj* prog, ProgramVariant* var, ProgramObj* fsProg, ProgramVariant* fsVar, bool mixedFs,
+                        const glsl::Reflection& frefl, const DrawParams& d, const IndexInfo& ii, uint32_t minIdx, uint32_t maxIdx,
+                        uint64_t argAddr, uint64_t fsArgAddr) {
+    Context::TessSegment& seg = ctx->tessSeg;
+    if (!seg.open || !envFlagCached("METALGLDRV_TESS_SEGMENT_DRAWS", true) || mglQueryVisibilityActive(ctx)) return false;
+    PassDesc p;
+    if (!ctx->resolvePass(p) || !(p == seg.pass) || ctx->pendingClear.any()) return false;
+    const glsl::Reflection& refl = prog->refl;
+    uint64_t segCount = seg.count;
+    RenderPipelineKey key;
+    key.variant = var;
+    if (mixedFs) {
+        key.fsVariant = fsVar;
+        key.fsVariantUid = fsVar ? fsVar->uid : ~0ull;
+    }
+    fillColorKey(ctx, key, frefl);
+    key.rasterEnabled = !ctx->rasterizerDiscard;
+    key.topologyClass = (uint8_t)(refl.writesLayer ? topologyClass(d.mode) : MTLPrimitiveTopologyClassUnspecified);
+    key.classic = 1;
+    key.depthFormat = p.depth.tex ? (uint32_t)p.depth.tex.pixelFormat : 0;
+    key.stencilFormat = p.stencil.tex ? (uint32_t)p.stencil.tex.pixelFormat : 0;
+    VertexInput vin;
+    if (!setupVertexInput(ctx, prog, key, vin, d, minIdx, maxIdx)) return true;
+    if (!seg.open || seg.count != segCount || !vin.classicOk) return false;  // a CPU read synchronized (flush)
+    uint64_t sysAddr = buildSys(ctx, prog, d.drawID, d.baseVertex, d.baseInstance, d.first, d.indexed);
+    uint64_t fsSysAddr = mixedFs && fsProg ? buildSys(ctx, fsProg, d.drawID, d.baseVertex, d.baseInstance, d.first, d.indexed) : sysAddr;
+    if (!argAddr) argAddr = ctx->upload(16).gpu;
+    if (mixedFs && !fsArgAddr) fsArgAddr = ctx->upload(16).gpu;
+    if (!mixedFs) fsArgAddr = argAddr;
+    NSUInteger argOff = 0, sysOff = 0, fsArgOff = 0, fsSysOff = 0, idxOff = 0, indOff = 0;
+    id<MTLBuffer> argBuf = classicBuffer(ctx, argAddr, nil, &argOff), sysBuf = classicBuffer(ctx, sysAddr, nil, &sysOff);
+    id<MTLBuffer> fsArgBuf = classicBuffer(ctx, fsArgAddr, nil, &fsArgOff), fsSysBuf = classicBuffer(ctx, fsSysAddr, nil, &fsSysOff);
+    if (!argBuf || !sysBuf || !fsArgBuf || !fsSysBuf) return false;
+    id<MTLBuffer> vbuf[kMaxVertexBindings + 2];
+    NSUInteger voff[kMaxVertexBindings + 2];
+    for (int i = 0; i < vin.n; i++)
+        if (!(vbuf[i] = classicBuffer(ctx, vin.b[i].addr, vin.b[i].buffer, &voff[i]))) return false;
+    id<MTLBuffer> idxBuf = nil, indBuf = nil;
+    Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
+    if (d.indirect) {
+        if (!(indBuf = d.indirect->mtl)) return false;
+        indOff = (NSUInteger)d.indirectOffset;
+        if (d.indexed) {
+            if (!ib || !ib->mtl || d.indexType == GL_UNSIGNED_BYTE) return false;
+            idxBuf = ib->mtl;
+        }
+    } else if (d.indexed || ii.generated) {
+        if (!(idxBuf = classicBuffer(ctx, ii.addr, ii.buffer, &idxOff))) return false;
+    }
+    id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+    if (!pso) return true;
+    MGL_STAT("draw:tess-segment");
+    g_segmentDraws++;
+    id<MTLRenderCommandEncoder> e = seg.render;
+    if (ctx->enc.pipeline != pso) {
+        [e setRenderPipelineState:pso];
+        ctx->enc.pipeline = pso;
+    }
+    applyDynamicState(ctx, e, d.mode, refl.writesViewportIndex);
+    [e setVertexBuffer:argBuf offset:argOff atIndex:glsl::kBufArgs];
+    [e setVertexBuffer:sysBuf offset:sysOff atIndex:glsl::kBufSys];
+    [e setFragmentBuffer:fsArgBuf offset:fsArgOff atIndex:glsl::kBufArgs];
+    [e setFragmentBuffer:fsSysBuf offset:fsSysOff atIndex:glsl::kBufSys];
+    for (int i = 0; i < vin.n; i++) {
+        if (vin.b[i].strided) [e setVertexBuffer:vbuf[i] offset:voff[i] attributeStride:vin.b[i].stride atIndex:vin.b[i].index];
+        else [e setVertexBuffer:vbuf[i] offset:voff[i] atIndex:vin.b[i].index];
+    }
+    mglQueryNotifyDraw(ctx, d.mode, d.indirect ? 0 : d.count, d.instances);
+    if (d.indirect) {
+        d.indirect->lastUse = ctx->serial();
+        if (d.indexed) {
+            ib->lastUse = ctx->serial();
+            [e drawIndexedPrimitives:ii.prim indexType:d.indexType == GL_UNSIGNED_SHORT ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
+                         indexBuffer:idxBuf indexBufferOffset:0 indirectBuffer:indBuf indirectBufferOffset:indOff];
+        } else {
+            [e drawPrimitives:ii.prim indirectBuffer:indBuf indirectBufferOffset:indOff];
+        }
+    } else if (d.indexed || ii.generated) {
+        [e drawIndexedPrimitives:ii.prim indexCount:ii.count indexType:ii.type indexBuffer:idxBuf indexBufferOffset:idxOff
+                   instanceCount:d.instances baseVertex:d.indexed ? d.baseVertex : 0 baseInstance:d.baseInstance];
+    } else {
+        [e drawPrimitives:ii.prim vertexStart:d.first vertexCount:d.count instanceCount:d.instances baseInstance:d.baseInstance];
+    }
+    return true;
 }
 
 // Fast path for indexed triangle/line lists from a buffer: rotate the whole index buffer
@@ -2910,6 +3059,7 @@ static bool rotatedWholeBuffer(Context* ctx, const DrawParams& d, IndexInfo& out
     out.count = (uint32_t)(d.count / vpp * vpp);
     out.generated = true;
     out.addr = ib->rotated.gpuAddress + off;
+    out.buffer = ib->rotated;
     out.length = out.count * isz;
     return true;
 }
@@ -3005,6 +3155,7 @@ static bool prepareRotatedIndices(Context* ctx, const DrawParams& d, IndexInfo& 
         id<MTLBuffer> buf = ctx->dev->newBuffer(ids.size() * 4);
         memcpy(bufferContents(buf), ids.data(), ids.size() * 4);
         out.addr = buf.gpuAddress;
+        out.buffer = buf;
         if (cache.size() > 512 || rc.bytes > (32u << 20)) {
             for (auto& [k, e] : cache) ctx->dev->releaseAfter(e.buffer, ctx->serial());
             cache.clear();
@@ -3403,7 +3554,7 @@ static bool tessFusedWanted(Context* ctx, ProgramObj* prog, const glsl::VariantK
     const glsl::Reflection& r = prog->refl;
     if (!r.tessFusable || prog->composite || ctx->patchVertices < 1 || ctx->patchVertices > 4) return false;
     if (vk.pdc || vk.fsr || ctx->rasterizerDiscard || ctx->statsQueriesActive) return false;
-    if (!envFlag("METALGLDRV_TESS_FAST", true)) return false;
+    if (!envFlagCached("METALGLDRV_TESS_FAST", true)) return false;
     if (tessLevelsTrivial(ctx, prog)) return true;
     // affine: the same filled triangles at any levels (polygon modes would draw the sub-triangles' edges or
     // vertices); the fused vertex function culls patches by their outer levels itself
@@ -3426,7 +3577,7 @@ static bool tessBatchable(Context* ctx) {
         ProgramObj* f = ctx->pipeline && !ctx->program ? ctx->pipeline->stages[(int)glsl::Stage::Fragment].get() : prog;
         if (f && f->refl.postDepthCoverage) return false;
     }
-    return envFlag("METALGLDRV_TESS_BATCH", true);
+    return envFlagCached("METALGLDRV_TESS_BATCH", true);
 }
 
 static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams* batch, int batchCount) {
@@ -3666,6 +3817,7 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
         executePdc(ctx, prog, var, fsProg, fsVar, mixedFs, frefl, d, ii, minIdx, maxIdx, argAddr, fsArgAddr, pdc.writes ? &pdcSplit : nullptr);
         return;
     }
+    if (!fsrAddr && segmentDraw(ctx, prog, var, fsProg, fsVar, mixedFs, frefl, d, ii, minIdx, maxIdx, argAddr, fsArgAddr)) return;
     id<MTL4RenderCommandEncoder> e = ctx->renderEncoder();
     if (!e) return;
     id<MTL4ArgumentTable> table = ctx->renderArgTable;
@@ -3679,7 +3831,9 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
     key.rasterEnabled = !ctx->rasterizerDiscard;
     // Point size is always written; only layered rendering (gl_Layer from the vertex shader) needs a class.
     key.topologyClass = (uint8_t)(refl.writesLayer ? topologyClass(d.mode) : MTLPrimitiveTopologyClassUnspecified);
-    if (!setupVertexInput(ctx, prog, key, table, d, minIdx, maxIdx)) return;
+    VertexInput vin;
+    if (!setupVertexInput(ctx, prog, key, vin, d, minIdx, maxIdx)) return;
+    vin.apply(table);
     if (ctx->renderEnc != e) {
         // Should not happen (see above); never encode into an ended encoder.
         MGL_ERR("render encoder changed during draw setup; dropping draw");
@@ -4298,8 +4452,9 @@ API void APIENTRY glDispatchComputeGroupSizeARB(GLuint x, GLuint y, GLuint z, GL
 // ---------------------------------------------------------------------------
 API void APIENTRY glMemoryBarrier(GLbitfield barriers) {
     MGL_CTX();
-    // A tessellation segment runs all its VS + TCS kernels before its draws
+    // A tessellation segment runs all its VS + TCS kernels before its draws; the next one's wait for this one's
     ctx->endTessSegment();
+    ctx->tessBarrier = true;
     const GLbitfield shaderWrites = GL_SHADER_STORAGE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
                                     GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_ELEMENT_ARRAY_BARRIER_BIT | GL_UNIFORM_BARRIER_BIT |
                                     GL_COMMAND_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT;
@@ -4321,6 +4476,7 @@ API void APIENTRY glTextureBarrier(void) {
     MGL_CTX();
     // Feedback loops: finish the pass so later draws see earlier writes.
     ctx->endTessSegment();
+    ctx->tessBarrier = true;
     ctx->endEncoder();
 }
 API void APIENTRY glTextureBarrierNV(void) { glTextureBarrier(); }

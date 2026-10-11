@@ -204,11 +204,64 @@ static void maybeCaptureFrame(Surface* surf) {
     CGColorSpaceRelease(cs);
 }
 
+// METALGLDRV_CAPTURE_SEQ=<file>: appends every presented frame, box-filtered to 480x270 RGB (top row first), to the
+// file (finding frames that are out of order or broken in a sequence). Frames are read back through a ring of pixel
+// pack buffers and written 4 frames later, so the GPU keeps several frames in flight as without the capture.
+static void maybeCaptureSequence(Surface* surf) {
+    static FILE* f = [] {
+        const char* p = getenv("METALGLDRV_CAPTURE_SEQ");
+        return p && *p ? fopen(p, "wb") : nullptr;
+    }();
+    if (!f) return;
+    int w = surf->width, h = surf->height;
+    const int ow = 480, oh = 270, kRing = 4;
+    if (w < ow || h < oh) return;
+    static GLuint pbo[kRing] = {};
+    static int pw[kRing] = {}, ph[kRing] = {};
+    static uint64_t frame = 0;
+    GLint readFb = 0, packBuf = 0, align = 4;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFb);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuf);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &align);
+    if (!pbo[0]) glGenBuffers(kRing, pbo);
+    int slot = (int)(frame % kRing);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[slot]);
+    if (frame >= kRing) {  // the frame read into this slot kRing frames ago
+        int sw = pw[slot], sh = ph[slot];
+        if (const uint8_t* px = (const uint8_t*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)sw * sh * 4, GL_MAP_READ_BIT)) {
+            std::vector<uint8_t> out((size_t)ow * oh * 3);
+            for (int y = 0; y < oh; y++)
+                for (int x = 0; x < ow; x++) {
+                    int x0 = x * sw / ow, x1 = (x + 1) * sw / ow, y0 = y * sh / oh, y1 = (y + 1) * sh / oh;
+                    uint32_t sum[3] = {}, n = 0;
+                    for (int yy = y0; yy < y1; yy++)
+                        for (int xx = x0; xx < x1; xx++, n++)
+                            for (int c = 0; c < 3; c++) sum[c] += px[((size_t)yy * sw + xx) * 4 + c];
+                    for (int c = 0; c < 3; c++) out[((size_t)(oh - 1 - y) * ow + x) * 3 + c] = (uint8_t)(sum[c] / std::max(1u, n));
+                }
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            fwrite(out.data(), 1, out.size(), f);
+            fflush(f);
+        }
+    }
+    glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)w * h * 4, nullptr, GL_STREAM_READ);
+    pw[slot] = w;
+    ph[slot] = h;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFb);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuf);
+    glPixelStorei(GL_PACK_ALIGNMENT, align);
+    frame++;
+}
+
 void presentWindowSurface(Context* ctx, Surface* surf) {
     // Don't touch the drawable / GPU while backgrounded.
     Device::get()->waitForeground();
     @autoreleasepool {
         if (currentContext() == ctx) maybeCaptureFrame(surf);
+        if (currentContext() == ctx) maybeCaptureSequence(surf);
         hitchFrameEnd();
         ctx->applyClearNow();
         id<CAMetalDrawable> drawable = [surf->layer nextDrawable];
@@ -238,6 +291,8 @@ void presentWindowSurface(Context* ctx, Surface* surf) {
 }
 
 void setSurfaceSwapInterval(Surface* s, int interval) {
+    // METALGLDRV_SWAP_INTERVAL=<n>: overrides the app's swap interval
+    if (const char* e = getenv("METALGLDRV_SWAP_INTERVAL"); e && *e) interval = atoi(e);
     s->swapInterval = interval;
 #if !TARGET_OS_IPHONE
     if (s->layer) {

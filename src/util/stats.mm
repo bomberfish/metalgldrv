@@ -29,20 +29,25 @@ void statCount(const char* event) {
     g_counts[event]++;
 }
 
-void statCaller(const char* event, void* ra) {
+// Symbol name of a return address (dladdr is slow: cached per address).
+static const std::string& callerName(void* ra) {
+    static std::unordered_map<void*, std::string> names;
+    auto it = names.find(ra);
+    if (it != names.end()) return it->second;
     Dl_info info{};
-    std::string who = "?";
-    if (dladdr(ra, &info) && info.dli_sname) who = info.dli_sname;
+    return names[ra] = dladdr(ra, &info) && info.dli_sname ? info.dli_sname : "?";
+}
+
+void statCaller(const char* event, void* ra) {
     std::lock_guard<std::mutex> g(g_m);
+    const std::string& who = callerName(ra);
     g_counts[std::string(event) + " <- " + who]++;
     g_counts[event]++;
 }
 
 void statAddCaller(const char* event, void* ra, uint64_t amount) {
-    Dl_info info{};
-    std::string who = "?";
-    if (dladdr(ra, &info) && info.dli_sname) who = info.dli_sname;
     std::lock_guard<std::mutex> g(g_m);
+    const std::string& who = callerName(ra);
     g_counts[std::string(event) + " <- " + who] += amount;
     g_counts[event] += amount;
 }
@@ -117,7 +122,10 @@ void statMaybeReport() {
     if (d) {
         double busy = d->takeGpuBusySeconds();
         char gpu[96];
-        snprintf(gpu, sizeof gpu, ", GPU busy %.0f ms (%.0f%%)", busy * 1000, busy / 5 * 100);
+        double tess[2];
+        d->takeTessGpuSeconds(tess);
+        snprintf(gpu, sizeof gpu, ", GPU busy %.0f ms (%.0f%%) + tessellation %.0f ms (TCS %.0f)", busy * 1000, busy / 5 * 100,
+                 (tess[0] + tess[1]) * 1000, tess[0] * 1000);
         out += gpu;
         // command buffers: everything up to the watermark is complete (and its resources reusable)
         uint64_t c[4];
@@ -234,6 +242,7 @@ void hitchFrameEnd() {
 }
 
 void statsRefreshFromEnv() {
+    envChanged();
     g_statsEnabled = envFlag("METALGLDRV_STATS", false);
     g_traceCalls = envFlag("METALGLDRV_TRACE_CALLS", false);
     g_countCalls = g_traceCalls;
