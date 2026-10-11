@@ -7,10 +7,11 @@
 // factor, the TES (Heaven's) displaces along the normal by a height texture fetched with textureLod,
 // which makes it non-affine in gl_TessCoord. The fragment shader writes two G-buffer targets.
 //
-//   displacebench [--frames N] [--warmup N] [--grid N] [--draws N] [--weight W] [--notess] [--size WxH] [--checksum] [--dump FILE]
+//   displacebench [--frames N] [--warmup N] [--grid N] [--draws N] [--weight W] [--notess] [--interleave] [--size WxH] [--checksum] [--dump FILE]
 //
 // --grid N: N x N quads (2 N^2 triangles = patches); --weight W: per-vertex weights in [W/2, W], so
-// edge levels up to 2W (1 gives about one triangle per patch); --notess: the same geometry with VS + FS.
+// edge levels up to 2W (1 gives about one triangle per patch); --notess: the same geometry with VS + FS;
+// --interleave: one triangle without tessellation after every tessellated draw (as games mix them).
 // Reports GPU time (GL_TIME_ELAPSED around the frame) and wall time (issue + glFinish) per frame; --checksum also
 // prints a hash of the last frame's first colour target (equal images, equal hashes); --dump writes it as a PPM.
 #include <OpenGL/OpenGL.h>
@@ -216,7 +217,7 @@ void viewProjection(float* m, float aspect, const float eye[3], const float at[3
 int main(int argc, char** argv) {
     int frames = 60, warmup = 10, grid = 400, draws = 300, width = 1920, height = 1080;
     float weight = 4.0f;
-    bool notess = false, checksum = false;
+    bool notess = false, checksum = false, interleave = false;
     std::string dump;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -233,6 +234,7 @@ int main(int argc, char** argv) {
         else if (a == "--draws") draws = atoi(next());
         else if (a == "--weight") weight = (float)atof(next());
         else if (a == "--notess") notess = true;
+        else if (a == "--interleave") interleave = true;
         else if (a == "--checksum") checksum = true;
         else if (a == "--dump") dump = next();
         else if (a == "--size") {
@@ -259,10 +261,15 @@ int main(int argc, char** argv) {
     GLuint prog = notess ? link({compile(GL_VERTEX_SHADER, kVSNoTess), compile(GL_FRAGMENT_SHADER, kFS)})
                          : link({compile(GL_VERTEX_SHADER, kVS), compile(GL_TESS_CONTROL_SHADER, kTCS),
                                  compile(GL_TESS_EVALUATION_SHADER, kTES), compile(GL_FRAGMENT_SHADER, kFS)});
-    glUseProgram(prog);
+    GLuint plain = interleave ? link({compile(GL_VERTEX_SHADER, kVSNoTess), compile(GL_FRAGMENT_SHADER, kFS)}) : 0;
     float vp[16];
     const float eye[3] = {-20.0f, -20.0f, 25.0f}, at[3] = {60.0f, 60.0f, 0.0f};
     viewProjection(vp, (float)width / height, eye, at);
+    if (plain) {
+        glUseProgram(plain);
+        glUniformMatrix4fv(glGetUniformLocation(plain, "s_projection"), 1, GL_FALSE, vp);
+    }
+    glUseProgram(prog);
     glUniformMatrix4fv(glGetUniformLocation(prog, "s_projection"), 1, GL_FALSE, vp);
     glUniform3f(glGetUniformLocation(prog, "s_camera_position"), eye[0], eye[1], eye[2]);
     // start fading at 10 units over 100; full edge factor at edges of 1 unit
@@ -361,6 +368,11 @@ int main(int argc, char** argv) {
         for (size_t first = 0; first < tris; first += perDraw) {
             size_t n = std::min(perDraw, tris - first);
             glDrawElements(notess ? GL_TRIANGLES : GL_PATCHES, (GLsizei)(n * 3), GL_UNSIGNED_INT, (void*)(first * 12));
+            if (plain) {
+                glUseProgram(plain);
+                glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_INT, (void*)(first * 12));
+                glUseProgram(prog);
+            }
         }
         glEndQuery(GL_TIME_ELAPSED);
         glFinish();
@@ -379,8 +391,8 @@ int main(int argc, char** argv) {
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(width / 2, height / 3, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
     Stats g = stats(gpuMs), w = stats(wallMs);
-    printf("displacebench (%s): %s, %zu patches in %d draws, weight %g, %dx%d, %d frames\n", (const char*)glGetString(GL_RENDERER),
-           notess ? "VS+FS" : "VS+TCS+TES+FS", tris, draws, weight, width, height, frames);
+    printf("displacebench (%s): %s, %zu patches in %d draws%s, weight %g, %dx%d, %d frames\n", (const char*)glGetString(GL_RENDERER),
+           notess ? "VS+FS" : "VS+TCS+TES+FS", tris, draws, plain ? " (interleaved)" : "", weight, width, height, frames);
     printf("  gpu  ms/frame: median %8.3f  mean %8.3f  min %8.3f\n", g.median, g.mean, g.min);
     printf("  wall ms/frame: median %8.3f  mean %8.3f  min %8.3f\n", w.median, w.mean, w.min);
     printf("  probe pixel: %u %u %u %u\n", px[0], px[1], px[2], px[3]);

@@ -312,6 +312,21 @@ descriptors metalgldrv records with:
 | `setPrimitiveRestartEnabled:index:`, `setProvokingVertexMode:`, `setViewportTransformEnabled:` | no | no |
 | pipeline / render pass `setOpenGLModeEnabled:`, `setLogicOperation*:`, `setPointCoordLowerLeft:`, `setSampleCoverage*:`, `setDitherEnabled:` | no (classic descriptors only) | no |
 
+A second round (found by listing the Metal runtime's methods, not in Apple's GL driver), measured with
+displacebench (`--interleave` puts a plain triangle after every tessellated draw, so each one is its own
+tessellation segment: ~43 us per segment on an M4 Pro):
+
+| Selector | On Metal 4 objects | Result |
+|---|---|---|
+| `tessellationFactorFormat` = 1 (`supportsFP32TessFactors`) | n/a (classic pipeline) | float32 factors (35.011 makes 36 segments, half makes 35). Not used: rounding levels up to a half already keeps every segment count; it would only refine fractional segment lengths by < 0.05% |
+| compute pipeline `setOptimizeForPersistentKernel:`, `setContentionRelief:`, `setForwardProgressUsage:` | yes (`MTL4ComputePipelineDescriptor`, also classic; not render pipelines) | no measurable change on the VS + TCS kernel (within run-to-run noise); likely scheduling hints against other processes |
+| command queue `setQosLevel:` (default 2) | yes (`MTL4CommandQueueDescriptor`, also classic) | 0, 3, 4: within noise |
+| classic queue `setDisableCrossQueueHazardTracking:`, `setDisableIOFencing:` | classic only | segment cost unchanged |
+| classic queue `setEnableLowLatencySignalSharedEvent:` / `...WaitSharedEvent:` | classic only | an `MTLSharedEvent` between the queues is 4-5x slower than the `MTLEvent` metalgldrv uses; the flags only win part of that back |
+| encoder `barrierAfterQueueStages:beforeStages:options:` (and variants) | yes | the public `...visibilityOptions:` barrier under another name: orders work within one queue, not across queues |
+| `supportsDepthBoundsTesting` | n/a | NO on M4 Pro (the depth bounds selectors exist on classic encoders only anyway) |
+| classic encoder alpha test, depth bounds, point size, threadgroup distribution, `setParallelExecution:` | classic only | not usable from the Metal 4 path |
+
 ### Queue and command buffer
 
 | Selector | Target | Arguments | What it does |
