@@ -181,6 +181,11 @@ public:
 
     // --- helpers ------------------------------------------------------------
     id<MTLBuffer> newBuffer(size_t size, MTLResourceOptions opts = MTLResourceStorageModeShared);
+    // GL buffer storage, reallocated often (glBufferData orphaning, renames of busy buffers): buffers of power-of-two
+    // sizes (256 B .. 4 MB) that return to a free list once the GPU is done with them (recycleBufferAfter), resident
+    // all along. At least `size` bytes; the contents are undefined.
+    id<MTLBuffer> newBufferRecycled(size_t size);
+    void recycleBufferAfter(id<MTLBuffer> b, uint64_t serial);
     // GPU address of a zeroed, always resident buffer of kZeroBufferBytes for pointers a shader may follow
     // but that a draw has nothing for (never 0). Shaders that write through such a pointer by mistake
     // only change this scratch memory.
@@ -203,6 +208,11 @@ private:
     double gpuBusySeconds_ = 0, gpuBusyUntil_ = 0, tessGpuSeconds_[2] = {};
 
     std::mutex mutex_;
+    static constexpr int kRecycleClasses = 15;           // 256 B << 0 .. 14
+    static constexpr size_t kRecycleMaxBytes = 64u << 20;  // free + pending
+    std::deque<std::pair<uint64_t, id<MTLBuffer>>> recyclePending_[kRecycleClasses];
+    std::vector<id<MTLBuffer>> recycleFree_[kRecycleClasses];
+    size_t recycleBytes_ = 0;
     std::condition_variable cv_;
     std::atomic<bool> background_{false};
     std::mutex bgMutex_;

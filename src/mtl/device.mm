@@ -569,6 +569,49 @@ id<MTLBuffer> Device::newBuffer(size_t size, MTLResourceOptions opts) {
     return b;
 }
 
+// Size class of newBufferRecycled: 256 B << c (c = 15: too large to recycle)
+static int recycleClass(size_t size) {
+    int c = 0;
+    while (c < 15 && (size_t)256 << c < size) c++;
+    return c;
+}
+
+id<MTLBuffer> Device::newBufferRecycled(size_t size) {
+    int c = recycleClass(size);
+    if (c >= kRecycleClasses) return newBuffer(size);
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        auto& pend = recyclePending_[c];
+        auto& free = recycleFree_[c];
+        while (!pend.empty() && isCompleteLocked(pend.front().first)) {
+            free.push_back(pend.front().second);
+            pend.pop_front();
+        }
+        if (!free.empty()) {
+            id<MTLBuffer> b = free.back();
+            free.pop_back();
+            recycleBytes_ -= b.length;
+            return b;
+        }
+    }
+    return newBuffer((size_t)256 << c);
+}
+
+void Device::recycleBufferAfter(id<MTLBuffer> b, uint64_t serial) {
+    if (!b) return;
+    NSUInteger len = b.length;
+    int c = recycleClass(len);
+    if (c < kRecycleClasses && len == (size_t)256 << c) {
+        std::lock_guard<std::mutex> g(mutex_);
+        if (recycleBytes_ + len <= kRecycleMaxBytes) {
+            recycleBytes_ += len;
+            recyclePending_[c].push_back({serial, b});
+            return;
+        }
+    }
+    releaseAfter(b, serial);
+}
+
 uint64_t Device::zeroBufferAddress() {
     static id<MTLBuffer> zero = [this] {
         id<MTLBuffer> b = newBuffer(kZeroBufferBytes);

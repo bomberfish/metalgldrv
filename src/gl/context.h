@@ -366,6 +366,7 @@ public:
     // The buffer and offset of upload memory at GPU address `gpu` used by the open command buffer (nil if none):
     // classic encoders bind buffers, not addresses.
     id<MTLBuffer> uploadBuffer(uint64_t gpu, NSUInteger* offset);
+    bool uploadBufferOf(uint64_t gpu, NSUInteger* offset, __unsafe_unretained id<MTLBuffer>* out);  // unretained
 
     // ---- Metal's tessellator (draw.mm executeTessMetal) ----
     // Metal 4 has no tessellation. Tessellated draws, and the draws after them into the same pass, run on the
@@ -550,7 +551,14 @@ const std::vector<std::string>& mglDeviceGlslExtensions(const DeviceCaps& caps);
 // The entry point's name is remembered for GL errors (log lines and KHR_debug messages): that of the outermost
 // MGL_CTX on the stack, so an entry point that calls others reports its own name (plain wrappers without
 // MGL_CTX, such as glDrawElements, report the entry point implementing them).
-extern thread_local const char* t_apiName;
+// The thread's current context and entry point name, in one thread-local (each thread-local access in a dylib is a
+// call): MGL_CTX reads it once.
+struct ThreadGL {
+    Context* current = nullptr;
+    const char* apiName = "";
+};
+extern thread_local ThreadGL t_gl;
+#define t_apiName (::mgl::t_gl.apiName)
 // METALGLDRV_TRACE_CALLS=1: per-entry-point call counts logged every 5 s from a background thread
 // (stats.mm), also when the app makes no frames. METALGLDRV_HITCH_MS: time spent in each call, reported for
 // slow frames (hitchFrameEnd). One branch per call when both are off.
@@ -558,22 +566,23 @@ extern bool g_traceCalls;
 uint64_t traceCall(const char* name);  // returns the start time when hitches are timed, else 0
 void traceCallEnd(const char* name, uint64_t start);
 struct ApiName {
+    ThreadGL& tg;
     const char* saved;
     uint64_t start = 0;
-    explicit ApiName(const char* name) : saved(t_apiName) {
+    explicit ApiName(const char* name) : tg(t_gl), saved(tg.apiName) {
         if (!*saved) {
-            t_apiName = name;
+            tg.apiName = name;
             if (g_traceCalls) start = traceCall(name);
         }
     }
     ~ApiName() {
-        if (start) traceCallEnd(t_apiName, start);
-        t_apiName = saved;
+        if (start) traceCallEnd(tg.apiName, start);
+        tg.apiName = saved;
     }
 };
 #define MGL_CTX_RET(r)                                                         \
     ::mgl::ApiName mgl_apiName_(__func__);                                 \
-    ::mgl::Context* ctx = ::mgl::currentContext();                         \
+    ::mgl::Context* ctx = mgl_apiName_.tg.current;                         \
     if (!ctx) return r
 #define MGL_CTX() MGL_CTX_RET()
 

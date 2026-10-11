@@ -878,8 +878,9 @@ static void failSafeDrawInfo(Context* ctx, glsl::MGLDrawInfo* info) {
 struct VertexInput {
     struct Binding {
         uint64_t addr;
-        // the buffer holding addr, or nil for upload memory (kept alive by its GL buffer object for the draw)
+        // the buffer holding addr (at `offset`), or nil for upload memory (kept alive by its GL buffer object for the draw)
         __unsafe_unretained id<MTLBuffer> buffer;
+        NSUInteger offset;
         uint32_t stride;
         uint8_t index;
         bool strided;  // bound with an attribute stride (MTLBufferLayoutStrideDynamic)
@@ -887,7 +888,9 @@ struct VertexInput {
     Binding b[kMaxVertexBindings + 2];
     int n = 0;
     bool classicOk = true;  // no address outside its buffer (vertex index lo of client arrays maps to the upload's start)
-    void add(uint64_t addr, id<MTLBuffer> buffer, uint32_t stride, uint32_t index, bool strided) { b[n++] = {addr, buffer, stride, (uint8_t)index, strided}; }
+    void add(uint64_t addr, __unsafe_unretained id<MTLBuffer> buffer, NSUInteger offset, uint32_t stride, uint32_t index, bool strided) {
+        b[n++] = {addr, buffer, offset, stride, (uint8_t)index, strided};
+    }
     void apply(id<MTL4ArgumentTable> t) const {
         for (int i = 0; i < n; i++) {
             if (b[i].strided) [t setAddress:b[i].addr attributeStride:b[i].stride atIndex:b[i].index];
@@ -908,7 +911,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         fillVertexBindings(ctx, info);
         info->baseInstance = d.baseInstance;
         failSafeDrawInfo(ctx, info);
-        vin.add(di.gpu, nil, 0, glsl::kBufStageIO, false);
+        vin.add(di.gpu, nil, 0, 0, glsl::kBufStageIO, false);
         return true;
     }
     bool needCurrent = false;
@@ -998,7 +1001,8 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         bk.stepRate = vb.divisor ? vb.divisor : 1;
         GLsizei stride = vb.stride;
         uint64_t addr = 0;
-        id<MTLBuffer> buffer = nil;
+        __unsafe_unretained id<MTLBuffer> buffer = nil;  // owned by the GL buffer
+        NSUInteger bufferOffset = 0;
         // client-side arrays (compatibility profile)
         const VertexAttrib* clientAttr = nullptr;
         if (clientBindings & (1u << b))
@@ -1016,6 +1020,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         } else if (vb.buffer && vb.buffer->mtl) {
             addr = vb.buffer->gpuAddress() + vb.offset;
             buffer = vb.buffer->mtl;
+            bufferOffset = (NSUInteger)vb.offset;
             vb.buffer->lastUse = serial;
         }
         bool unaligned = (stride & 3) || (addr & 3) || (unalignedBindings & (1u << b));
@@ -1058,7 +1063,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
                 stride = (GLsizei)newStride;
             }
         }
-        vin.add(addr, buffer, (uint32_t)stride, glsl::kBufVertex0 + b, true);
+        vin.add(addr, buffer, bufferOffset, (uint32_t)stride, glsl::kBufVertex0 + b, true);
     }
     if (needCurrent) {
         // floats (16 bytes per location) followed by doubles (32 bytes per location)
@@ -1069,7 +1074,7 @@ static bool setupVertexInput(Context* ctx, ProgramObj* prog, RenderPipelineKey& 
         bk.used = 1;
         bk.stepFunction = MTLVertexStepFunctionConstant;
         bk.stepRate = 0;
-        vin.add(ca.gpu, nil, 0, kBufCurrentAttribs, true);
+        vin.add(ca.gpu, nil, 0, 0, kBufCurrentAttribs, true);
     }
     return true;
 }
@@ -1268,8 +1273,10 @@ static void fillColorKey(Context* ctx, RenderPipelineKey& key, const glsl::Refle
 // ---------------------------------------------------------------------------
 struct IndexInfo {
     uint64_t addr = 0;
-    // the buffer holding addr, or nil for upload memory (kept alive by its GL buffer object or the rotation cache)
+    // the buffer holding addr (at bufferOffset), or nil for upload memory (kept alive by its GL buffer object or the
+    // rotation cache)
     __unsafe_unretained id<MTLBuffer> buffer = nil;
+    size_t bufferOffset = 0;
     size_t length = 0;
     MTLIndexType type = MTLIndexTypeUInt32;
     uint32_t count = 0;
@@ -1398,6 +1405,7 @@ static bool prepareIndices(Context* ctx, const DrawParams& d, IndexInfo& out, ui
             if (ib) {
                 out.addr = ib->gpuAddress() + (size_t)d.indices;
                 out.buffer = ib->mtl;
+                out.bufferOffset = (size_t)d.indices;
                 out.length = (size_t)d.count * isz;
                 ib->lastUse = ctx->serial();
             } else {
@@ -2913,9 +2921,10 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
         mpUpload(s);
         if (!seg.open || seg.count != segCount) continue;
         NSUInteger argOff = 0, sysOff = 0, infoOff = 0, tfOff = 0;
-        id<MTLBuffer> argBuf = ctx->uploadBuffer(s.argAddr, &argOff), sysBuf = ctx->uploadBuffer(s.sysAddr, &sysOff);
-        id<MTLBuffer> infoBuf = ctx->uploadBuffer(s.infoAddr, &infoOff), tfBuf = ctx->uploadBuffer(s.tessFactors, &tfOff);
-        if (!argBuf || !sysBuf || !infoBuf || !tfBuf) return false;
+        __unsafe_unretained id<MTLBuffer> argBuf = nil, sysBuf = nil, infoBuf = nil, tfBuf = nil;  // the upload lists own them
+        if (!ctx->uploadBufferOf(s.argAddr, &argOff, &argBuf) || !ctx->uploadBufferOf(s.sysAddr, &sysOff, &sysBuf) ||
+            !ctx->uploadBufferOf(s.infoAddr, &infoOff, &infoBuf) || !ctx->uploadBufferOf(s.tessFactors, &tfOff, &tfBuf))
+            return false;
         fillColorKey(ctx, key, refl);
         key.depthFormat = seg.depthFormat;
         key.stencilFormat = seg.stencilFormat;
@@ -2955,12 +2964,14 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
 static uint64_t g_segmentDraws = 0;
 extern "C" __attribute__((visibility("default"))) uint64_t mglTestTessSegmentDraws(void) { return g_segmentDraws; }
 
-// The buffer holding `addr` and its offset there, for classic encoders: `buffer` when known, upload memory otherwise.
-static id<MTLBuffer> classicBuffer(Context* ctx, uint64_t addr, id<MTLBuffer> buffer, NSUInteger* offset) {
-    if (!buffer) return ctx->uploadBuffer(addr, offset);
-    if (addr < buffer.gpuAddress || addr > buffer.gpuAddress + buffer.length) return nil;
-    *offset = (NSUInteger)(addr - buffer.gpuAddress);
-    return buffer;
+// The buffer holding `addr` and its offset there, for classic encoders: `buffer` (at `bufferOffset`) when known,
+// upload memory otherwise. Unretained (owned by GL objects or the upload lists): every draw in a segment binds several.
+static bool classicBuffer(Context* ctx, uint64_t addr, __unsafe_unretained id<MTLBuffer> buffer, NSUInteger bufferOffset, NSUInteger* offset,
+                          __unsafe_unretained id<MTLBuffer>* out) {
+    if (!buffer) return ctx->uploadBufferOf(addr, offset, out);
+    *offset = bufferOffset;
+    *out = buffer;
+    return true;
 }
 
 // A draw without tessellation while a tessellation segment is open on its pass: into the segment's classic render
@@ -2999,14 +3010,15 @@ static bool segmentDraw(Context* ctx, ProgramObj* prog, ProgramVariant* var, Pro
     if (mixedFs && !fsArgAddr) fsArgAddr = ctx->upload(16).gpu;
     if (!mixedFs) fsArgAddr = argAddr;
     NSUInteger argOff = 0, sysOff = 0, fsArgOff = 0, fsSysOff = 0, idxOff = 0, indOff = 0;
-    id<MTLBuffer> argBuf = classicBuffer(ctx, argAddr, nil, &argOff), sysBuf = classicBuffer(ctx, sysAddr, nil, &sysOff);
-    id<MTLBuffer> fsArgBuf = classicBuffer(ctx, fsArgAddr, nil, &fsArgOff), fsSysBuf = classicBuffer(ctx, fsSysAddr, nil, &fsSysOff);
-    if (!argBuf || !sysBuf || !fsArgBuf || !fsSysBuf) return false;
-    id<MTLBuffer> vbuf[kMaxVertexBindings + 2];
+    __unsafe_unretained id<MTLBuffer> argBuf = nil, sysBuf = nil, fsArgBuf = nil, fsSysBuf = nil;
+    if (!classicBuffer(ctx, argAddr, nil, 0, &argOff, &argBuf) || !classicBuffer(ctx, sysAddr, nil, 0, &sysOff, &sysBuf) ||
+        !classicBuffer(ctx, fsArgAddr, nil, 0, &fsArgOff, &fsArgBuf) || !classicBuffer(ctx, fsSysAddr, nil, 0, &fsSysOff, &fsSysBuf))
+        return false;
+    __unsafe_unretained id<MTLBuffer> vbuf[kMaxVertexBindings + 2];
     NSUInteger voff[kMaxVertexBindings + 2];
     for (int i = 0; i < vin.n; i++)
-        if (!(vbuf[i] = classicBuffer(ctx, vin.b[i].addr, vin.b[i].buffer, &voff[i]))) return false;
-    id<MTLBuffer> idxBuf = nil, indBuf = nil;
+        if (!classicBuffer(ctx, vin.b[i].addr, vin.b[i].buffer, vin.b[i].offset, &voff[i], &vbuf[i])) return false;
+    __unsafe_unretained id<MTLBuffer> idxBuf = nil, indBuf = nil;  // owned by the GL buffers
     Buffer* ib = d.indexed && ctx->vao ? ctx->vao->elementBuffer.get() : nullptr;
     if (d.indirect) {
         if (!(indBuf = d.indirect->mtl)) return false;
@@ -3016,13 +3028,13 @@ static bool segmentDraw(Context* ctx, ProgramObj* prog, ProgramVariant* var, Pro
             idxBuf = ib->mtl;
         }
     } else if (d.indexed || ii.generated) {
-        if (!(idxBuf = classicBuffer(ctx, ii.addr, ii.buffer, &idxOff))) return false;
+        if (!classicBuffer(ctx, ii.addr, ii.buffer, ii.bufferOffset, &idxOff, &idxBuf)) return false;
     }
     __unsafe_unretained id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);  // owned by the variant
     if (!pso) return true;
     MGL_STAT("draw:tess-segment");
     g_segmentDraws++;
-    id<MTLRenderCommandEncoder> e = seg.render;
+    __unsafe_unretained id<MTLRenderCommandEncoder> e = seg.render;  // owned by the segment
     if (ctx->enc.pipeline != pso) {
         [e setRenderPipelineState:pso];
         ctx->enc.pipeline = pso;
@@ -3107,6 +3119,7 @@ static bool rotatedWholeBuffer(Context* ctx, const DrawParams& d, IndexInfo& out
     out.generated = true;
     out.addr = ib->rotated.gpuAddress + off;
     out.buffer = ib->rotated;
+    out.bufferOffset = off;
     out.length = out.count * isz;
     return true;
 }

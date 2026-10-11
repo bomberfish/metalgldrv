@@ -27,13 +27,13 @@ int texTargetIndex(GLenum target) {
     return -1;
 }
 
-static thread_local Context* t_current = nullptr;
-Context* currentContext() { return t_current; }
+thread_local ThreadGL t_gl;
+Context* currentContext() { return t_gl.current; }
 
 NameSpace<Framebuffer>& framebufferNames(ShareGroup* share, NameSpace<Framebuffer>& own) {
     return share && (appProfile().shareFramebuffers || share->shareContainers) ? share->framebuffers : own;
 }
-void setCurrentContext(Context* c) { t_current = c; }
+void setCurrentContext(Context* c) { t_gl.current = c; }
 
 bool PassDesc::operator==(const PassDesc& o) const {
     for (int i = 0; i < kMaxDrawBuffers; i++)
@@ -102,7 +102,6 @@ Context::~Context() {
     if (uploadChunk_.buffer) dev->releaseAfter(uploadChunk_.buffer, lastWorkSerial_);
 }
 
-thread_local const char* t_apiName = "";
 
 static const char* errorName(GLenum e) {
     switch (e) {
@@ -484,14 +483,20 @@ void Context::flush(id<CAMetalDrawable> present, bool keepUploads) {
     dev->collect();
 }
 
-id<MTLBuffer> Context::uploadBuffer(uint64_t gpu, NSUInteger* offset) {
+bool Context::uploadBufferOf(uint64_t gpu, NSUInteger* offset, __unsafe_unretained id<MTLBuffer>* out) {
     auto in = [&](const UploadBuf& b) { return b.buffer && gpu >= b.gpu && gpu < b.gpu + b.length; };
     const UploadBuf* found = in(uploadChunk_) ? &uploadChunk_ : nullptr;
     for (size_t i = uploadUsed_.size(); !found && i-- > 0;)
         if (in(uploadUsed_[i])) found = &uploadUsed_[i];
-    if (!found) return nil;
+    if (!found) return false;
     *offset = (NSUInteger)(gpu - found->gpu);
-    return found->buffer;
+    *out = found->buffer;
+    return true;
+}
+
+id<MTLBuffer> Context::uploadBuffer(uint64_t gpu, NSUInteger* offset) {
+    __unsafe_unretained id<MTLBuffer> b = nil;
+    return uploadBufferOf(gpu, offset, &b) ? b : nil;
 }
 
 // Fills a render pass descriptor (Metal 4 or classic) for pass `p`, with the pending clears as load actions.

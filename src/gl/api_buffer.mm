@@ -9,7 +9,8 @@ using namespace mgl;
 namespace mgl {
 
 Buffer::~Buffer() {
-    if (mtl) Device::get()->releaseAfter(mtl, lastUse);
+    if (mtl && !sparse) Device::get()->recycleBufferAfter(mtl, std::max(lastUse, lastGpuWrite));
+    else if (mtl) Device::get()->releaseAfter(mtl, lastUse);
     if (rotated) Device::get()->releaseAfter(rotated, rotatedLastUse);
     if (sparse) {
         releaseSparsePages(this, std::max(lastUse, lastGpuWrite));
@@ -21,8 +22,8 @@ Buffer::~Buffer() {
 // Replace storage with a fresh allocation. Old storage stays alive until the GPU is done.
 static bool allocStorage(Buffer* b, GLsizeiptr size) {
     Device* d = Device::get();
-    if (b->mtl) d->releaseAfter(b->mtl, std::max(b->lastUse, b->lastGpuWrite));
-    b->mtl = d->newBuffer((size_t)std::max<GLsizeiptr>(size, 4));
+    if (b->mtl) d->recycleBufferAfter(b->mtl, std::max(b->lastUse, b->lastGpuWrite));
+    b->mtl = d->newBufferRecycled((size_t)std::max<GLsizeiptr>(size, 4));
     if (!b->mtl) {
         b->cpu = nullptr;
         b->size = 0;
@@ -60,11 +61,11 @@ void writeBuffer(Context* ctx, Buffer* b, GLintptr offset, GLsizeiptr size, cons
         uint8_t* oldCpu = b->cpu;
         uint64_t oldUse = b->lastUse;
         Device* d = ctx->dev;
-        b->mtl = d->newBuffer((size_t)std::max<GLsizeiptr>(b->size, 4));
+        b->mtl = d->newBufferRecycled((size_t)std::max<GLsizeiptr>(b->size, 4));
         b->cpu = (uint8_t*)bufferContents(b->mtl);
         memcpy(b->cpu, oldCpu, b->size);
         memcpy(b->cpu + offset, data, size);
-        d->releaseAfter(old, oldUse);
+        d->recycleBufferAfter(old, oldUse);
         b->lastUse = 0;
         b->generation++;
         return;
