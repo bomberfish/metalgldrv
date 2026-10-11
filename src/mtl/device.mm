@@ -8,6 +8,7 @@
 #import <UIKit/UIKit.h>
 #endif
 #import <QuartzCore/CAMetalLayer.h>
+#include "mtl/spi.h"
 #include "util/log.h"
 #include "util/stats.h"
 #include <chrono>
@@ -85,6 +86,22 @@ bool Device::init() {
         }
         caps.sparse = sparseTileBytes > 0;
         caps.strictLevel = parseAccuracyLevel();
+        if (spi::enabled()) {
+            // private API on Metal 4 encoders: ask a render encoder (recorded, never committed)
+            MTLTextureDescriptor* td = texture2DDescriptor(MTLPixelFormatR8Unorm, 1, 1);
+            td.usage = MTLTextureUsageRenderTarget;
+            td.storageMode = MTLStorageModePrivate;
+            id<MTLTexture> t = [mtl newTextureWithDescriptor:td];
+            id<MTL4CommandAllocator> a = [mtl newCommandAllocator];
+            id<MTL4CommandBuffer> cb = [mtl newCommandBuffer];
+            [cb beginCommandBufferWithAllocator:a];
+            MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
+            rp.colorAttachments[0].texture = t;
+            id<MTL4RenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            spi::probeLineWidth(e);
+            [e endEncoding];
+            [cb endCommandBuffer];
+        }
         MGL_INFO("Metal 4 device: %s (apple9=%d, bc=%d, sparse=%d%s)", mtl.name.UTF8String, caps.hasFamilyApple9, caps.bcCompression,
                  caps.sparse,
                  caps.superStrict() ? ", super strict" : caps.strict() ? ", strict" : caps.speedDemon() ? ", SPEEDDEMON" : caps.turbo() ? ", TURBOHAX" : "");
@@ -274,6 +291,45 @@ void Device::submit(id<MTL4CommandBuffer> cb, id<MTL4CommandAllocator> alloc, ui
             [drawable present];
     }
     if (alloc) inflightAllocators_.push_back({serial, alloc});
+}
+
+id<MTLCommandQueue> Device::classicQueue() {
+    std::lock_guard<std::mutex> g(mutex_);
+    if (classicQueueTried_) return classicQueue_;
+    classicQueueTried_ = true;
+    @autoreleasepool {
+        MTLCommandQueueDescriptor* qd = [MTLCommandQueueDescriptor new];
+        qd.maxCommandBufferCount = 64;
+        spi::markOpenGLQueue(qd);
+        classicQueue_ = [mtl newCommandQueueWithDescriptor:qd];
+        if (!classicQueue_) {
+            MGL_WARN("no classic Metal command queue: tessellation stays emulated");
+            return nil;
+        }
+        classicQueue_.label = @"metalgldrv tessellation";
+        [classicQueue_ addResidencySet:residency];
+    }
+    return classicQueue_;
+}
+
+void Device::commitClassic(id<MTLCommandBuffer> cb) {
+    waitForeground();
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+        if (c.error) MGL_ERR("GPU command buffer (tessellation) failed: %s", c.error.description.UTF8String);
+    }];
+    std::lock_guard<std::mutex> g(mutex_);
+    commitResidencyLocked();
+    [cb commit];
+}
+
+void Device::queueSignal(id<MTLEvent> e, uint64_t value) {
+    std::lock_guard<std::mutex> g(mutex_);
+    [queue signalEvent:e value:value];
+}
+
+void Device::queueWait(id<MTLEvent> e, uint64_t value) {
+    std::lock_guard<std::mutex> g(mutex_);
+    [queue waitForEvent:e value:value];
 }
 
 void Device::commitResidencyLocked() {

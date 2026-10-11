@@ -4,6 +4,10 @@ cmake_minimum_required(VERSION 3.24)
 # under Rosetta). Use a separate build dir (docs/crossover.md):
 #   cmake -G Ninja -B build-universal -DMGL_UNIVERSAL=ON && ninja -C build-universal metalgldrv
 option(MGL_UNIVERSAL "Build a universal (arm64 + x86_64) macOS library" OFF)
+# Private Metal API (src/mtl/spi.h): selectors Apple's own GL driver uses, for wide lines, exact border colors and
+# its GL-mode queue. On by default; turn it off for apps that go through App Store review. At run time
+# METALGLDRV_MORALLY_WRONG=0 disables them in a build that has them.
+option(MGL_PRIVATE_API "Use private Metal API where it helps GL (not App Store safe)" ON)
 if(MGL_UNIVERSAL AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "" FORCE)
 endif()
@@ -77,6 +81,7 @@ else()
   target_link_libraries(metalgldrv PRIVATE "-framework AppKit" "-framework CoreVideo")
 endif()
 target_compile_options(metalgldrv PRIVATE -fvisibility=hidden -fobjc-arc -Wall -Wno-unused-parameter -Wno-unused-function)
+target_compile_definitions(metalgldrv PRIVATE METALGLDRV_PRIVATE_API=$<BOOL:${MGL_PRIVATE_API}>)
 set_target_properties(metalgldrv PROPERTIES
   OUTPUT_NAME metalgldrv
   # >= the 1.0.0 that binaries linked against OpenGL.framework record (crossover-install.sh).

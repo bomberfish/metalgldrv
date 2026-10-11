@@ -2163,12 +2163,6 @@ void Linker::tessFusedAnalysis() {
     bool tri = r.tesPrimitiveMode == gl::TRIANGLES;
     if ((!tri && r.tesPrimitiveMode != gl::QUADS) || r.tesPointMode) return;
     if (r.writesLayer || r.writesViewportIndex) return;
-    if (const StageCode& tc = prog_->stages[(int)Stage::TessControl]; tc.main && (tc.outLayout.vertices < 1 || tc.outLayout.vertices > 4)) return;
-    // The fused vertex function runs the vertex shader once per patch vertex for every output vertex
-    // and the TCS invocations one after another (no barrier()): memory writes would happen several
-    // times and subgroup operations would see other invocations. Reading buffers and images is fine.
-    for (Stage st : {Stage::Vertex, Stage::TessControl, Stage::TessEval})
-        if (!fusableStage(st, true)) return;
     // Fragment shader: gl_PrimitiveID would count the rasterized triangles (not the patches) and the
     // inputs must fit a classic vertex function (124 scalars).
     if (const StageCode& fs = prog_->stages[(int)Stage::Fragment]; fs.main) {
@@ -2190,6 +2184,15 @@ void Linker::tessFusedAnalysis() {
                 scalars += count(v->type);
         if (scalars > 124) return;
     }
+    // Metal's tessellator runs the TES as a vertex function, possibly more than once per domain point: no memory
+    // writes or subgroup operations there (the VS and TCS run in the mgl_tcs kernel as in the emulation).
+    r.tessMetal = fusableStage(Stage::TessEval, false);
+    if (const StageCode& tc = prog_->stages[(int)Stage::TessControl]; tc.main && (tc.outLayout.vertices < 1 || tc.outLayout.vertices > 4)) return;
+    // The fused vertex function runs the vertex shader once per patch vertex for every output vertex
+    // and the TCS invocations one after another (no barrier()): memory writes would happen several
+    // times and subgroup operations would see other invocations. Reading buffers and images is fine.
+    for (Stage st : {Stage::Vertex, Stage::TessControl, Stage::TessEval})
+        if (!fusableStage(st, true)) return;
     r.tessFusable = true;
     r.tesAffine = tesAffineAnalysis();
 }

@@ -7,6 +7,7 @@
 #include "gl/gltypes.h"
 #include "gl/internal_shaders.h"
 #include "gl/pipeline.h"
+#include "mtl/spi.h"
 #include "util/log.h"
 #include "util/stats.h"
 
@@ -22,6 +23,7 @@ bool mglXfbPrepareDraw(Context* ctx, GLenum mode, uint64_t vertices);  // api_xf
 void mglQueryNotifyDraw(Context* ctx, GLenum mode, uint64_t vertices, uint64_t instances);  // api_query.mm
 void mglQueryAddPrimitives(Context* ctx, int stream, uint64_t generated, uint64_t written, bool xfbActive, bool overflow);  // api_query.mm
 bool mglQueryPrimitivesActive(Context* ctx);  // api_query.mm
+bool mglQueryVisibilityActive(Context* ctx);  // api_query.mm
 uint64_t mglPrimitivesFor(GLenum mode, uint64_t vertices);  // api_query.mm
 
 namespace {
@@ -82,8 +84,10 @@ inline uint32_t readIndex(const uint8_t* p, GLenum type, size_t i) {
 // ---------------------------------------------------------------------------
 // state application
 // ---------------------------------------------------------------------------
-// noWrites: depth and stencil writes off (ARB_post_depth_coverage pre-passes)
-static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLenum mode, bool viewportArray = false, bool noWrites = false) {
+// noWrites: depth and stencil writes off (ARB_post_depth_coverage pre-passes). E: a Metal 4 or (tessellation
+// segments) classic render encoder; the state setters have the same selectors.
+template <class E>
+static void applyDynamicState(Context* ctx, E e, GLenum mode, bool viewportArray = false, bool noWrites = false) {
     auto& es = ctx->enc;
     const PassDesc& p = ctx->curPass;
     // Viewport 0, or all of them when the last pre-rasterization stage writes gl_ViewportIndex
@@ -159,6 +163,14 @@ static void applyDynamicState(Context* ctx, id<MTL4RenderCommandEncoder> e, GLen
     if (memcmp(es.blendColor, ctx->blendColor, 16) != 0) {
         [e setBlendColorRed:ctx->blendColor[0] green:ctx->blendColor[1] blue:ctx->blendColor[2] alpha:ctx->blendColor[3]];
         memcpy(es.blendColor, ctx->blendColor, 16);
+    }
+    // glLineWidth: Metal rasterizes 1-pixel lines; the private setLineWidth: widens them (spi.h)
+    if (spi::lineWidthSupported()) {
+        float w = std::clamp(ctx->lineWidth, 1.0f, spi::maxLineWidth());
+        if (es.lineWidth != w) {
+            spi::setLineWidth(e, w);
+            es.lineWidth = w;
+        }
     }
     uint32_t refF = ctx->stencil[0].ref & 0xff, refB = ctx->stencil[1].ref & 0xff;
     if (es.stencilRef[0] != refF || es.stencilRef[1] != refB) {
@@ -2021,6 +2033,7 @@ struct MPState {
     // persistent scratch (survives the CPU waits between passes)
     id<MTLBuffer> tcsV = nil, tcsP = nil, counts = nil, tesV = nil, tesP = nil, gsRec = nil;
     uint64_t tcsVAddr = 0, tcsPAddr = 0;  // pass 1 records in upload memory (mpTessControl `transient`)
+    uint64_t tessFactors = 0;             // Metal's tessellation factors (VariantKey::tessMetal)
     uint32_t itemCount = 0, tesPrimCount = 0;
     std::vector<uint32_t> offsets;  // uint4 per item, uploaded with the draw info
     uint32_t xfbPrimLimit[4] = {0, 0, 0, 0};
@@ -2097,6 +2110,7 @@ void mpUpload(MPState& s) {
     info->spillBuffer = s.spillBuffer;
     info->spillCounter = s.spillCounter;
     info->spillCapacity = s.spillCapacity;
+    info->tessFactors = s.tessFactors;
     if (!s.offsets.empty()) {
         UploadAlloc off = ctx->upload(s.offsets.size() * 4, 16);
         memcpy(off.cpu, s.offsets.data(), s.offsets.size() * 4);
@@ -2740,6 +2754,108 @@ static bool executeMultiPass(Context* ctx, ProgramObj* prog, const DrawParams& d
     drawMesh(e, s.info, true);
     retire();
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Metal's tessellator (VariantKey::tessMetal). Metal 4 has no tessellation, but classic Metal's drawPatches does, and
+// Apple's GL driver uses it: VS + TCS run in the mgl_tcs kernel (records and Metal's factors in upload memory) on
+// the pre-pass command buffer of a tessellation segment (Context::openTessSegment), and the segment's render pass
+// draws the patches with the TES as the post-tessellation vertex function. Consecutive tessellated draws into
+// the same pass share a segment.
+// ---------------------------------------------------------------------------
+static bool tessMetalWanted(Context* ctx, ProgramObj* prog, const glsl::VariantKey& vk, const DrawParams& d) {
+    const glsl::Reflection& r = prog->refl;
+    if (!r.tessMetal || prog->composite || d.indirect || ctx->patchVertices < 1 || ctx->patchVertices > 32) return false;
+    // nothing that needs the emulation's per-primitive work or a Metal 4 render pass
+    if (vk.pdc || vk.fsr || ctx->rasterizerDiscard || ctx->statsQueriesActive || mglQueryVisibilityActive(ctx)) return false;
+    if (ctx->polygonMode == GL_POINT) return false;
+    // METALGLDRV_TESS_METAL=0: always the emulation (read per draw: tests switch it)
+    return envFlag("METALGLDRV_TESS_METAL", true) && ctx->dev->classicQueue();
+}
+
+static uint64_t g_tessMetalDraws = 0;
+extern "C" __attribute__((visibility("default"))) uint64_t mglTestTessMetalDraws(void) { return g_tessMetalDraws; }
+
+// False: nothing was encoded and the emulation draws it.
+static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d, glsl::VariantKey vk, const DrawParams* batch, int batchCount) {
+    const glsl::Reflection& refl = prog->refl;
+    fillVertexFetch(ctx, prog, vk);
+    vk.primitive = GL_PATCHES;
+    ProgramVariant* var = ctx->pipelines_->variant(prog, vk);
+    if (!var || !var->ok) return false;
+    const glsl::EntryPoint* k = var->entry("mgl_tcs");
+    id<MTLComputePipelineState> tcs = k ? ctx->pipelines_->classicComputePipeline(var, "mgl_tcs") : nil;
+    if (!tcs) return false;
+    bool quads = refl.tesPrimitiveMode == GL_QUADS;
+    const glsl::MultiPassInfo& mp = refl.multipass;
+    int cps = mp.tcsOutputVertices ? (int)mp.tcsOutputVertices : ctx->patchVertices;
+    RenderPipelineKey key;
+    key.variant = var;
+    key.rasterEnabled = 1;
+    key.tessMetal = 1;
+    key.tessPartition = (uint8_t)(refl.tesSpacing == GL_FRACTIONAL_EVEN ? MTLTessellationPartitionModeFractionalEven
+                                  : refl.tesSpacing == GL_FRACTIONAL_ODD ? MTLTessellationPartitionModeFractionalOdd
+                                                                         : MTLTessellationPartitionModeInteger);
+    key.tessWinding = (uint8_t)(refl.tesOrder == GL_CW ? MTLWindingClockwise : MTLWindingCounterClockwise);
+    // Setting up the draw can record Metal 4 work (texture storage, feedback-loop copies), which ends the segment:
+    // then once more in a new one.
+    for (int attempt = 0; attempt < 2; attempt++) {
+        PassDesc p;
+        if (!ctx->resolvePass(p)) return true;
+        Context::TessSegment& seg = ctx->tessSeg;
+        if (!seg.open || !(seg.pass == p) || ctx->pendingClear.any())
+            if (!ctx->openTessSegment(p)) return false;
+        uint64_t segCount = seg.count;
+        MPState s;
+        s.ctx = ctx;
+        s.prog = prog;
+        s.d = &d;
+        s.var = var;
+        tessSubDraws(s, batch ? batch : &d, batch ? batchCount : 1);
+        if (!s.prims) return true;
+        size_t patches = (size_t)s.prims * d.instances;
+        s.tcsVAddr = ctx->upload(patches * std::max(1, cps) * std::max<uint32_t>(16, mp.tcsVertexOutBytes) + 16, 16).gpu;
+        s.tcsPAddr = ctx->upload(patches * std::max<uint32_t>(32, mp.tcsPatchOutBytes) + 16, 16).gpu;
+        s.tessFactors = ctx->upload(patches * (quads ? 12 : 8), 16).gpu;
+        mpUpload(s);
+        if (!seg.open || seg.count != segCount) continue;
+        NSUInteger argOff = 0, sysOff = 0, infoOff = 0, tfOff = 0;
+        id<MTLBuffer> argBuf = ctx->uploadBuffer(s.argAddr, &argOff), sysBuf = ctx->uploadBuffer(s.sysAddr, &sysOff);
+        id<MTLBuffer> infoBuf = ctx->uploadBuffer(s.infoAddr, &infoOff), tfBuf = ctx->uploadBuffer(s.tessFactors, &tfOff);
+        if (!argBuf || !sysBuf || !infoBuf || !tfBuf) return false;
+        fillColorKey(ctx, key, refl);
+        key.depthFormat = p.depth.tex ? (uint32_t)p.depth.tex.pixelFormat : 0;
+        key.stencilFormat = p.stencil.tex ? (uint32_t)p.stencil.tex.pixelFormat : 0;
+        id<MTLRenderPipelineState> pso = ctx->pipelines_->renderPipeline(key);
+        if (!pso) return false;
+        MGL_STAT("draw:tess-metal");
+        g_tessMetalDraws++;
+        id<MTLComputeCommandEncoder> ce = seg.compute;
+        [ce setComputePipelineState:tcs];
+        [ce setBuffer:argBuf offset:argOff atIndex:glsl::kBufArgs];
+        [ce setBuffer:sysBuf offset:sysOff atIndex:glsl::kBufSys];
+        [ce setBuffer:infoBuf offset:infoOff atIndex:glsl::kBufStageIO];
+        uint32_t per = std::max<uint32_t>(1, k->patchesPerObjectGroup);
+        [ce dispatchThreadgroups:MTLSizeMake((s.prims + per - 1) / per, (NSUInteger)d.instances, 1)
+           threadsPerThreadgroup:MTLSizeMake((NSUInteger)k->threadsPerThreadgroup[0], 1, 1)];
+        id<MTLRenderCommandEncoder> re = seg.render;
+        if (ctx->enc.pipeline != pso) {
+            [re setRenderPipelineState:pso];
+            ctx->enc.pipeline = pso;
+        }
+        applyDynamicState(ctx, re, GL_TRIANGLES);
+        [re setVertexBuffer:argBuf offset:argOff atIndex:glsl::kBufArgs];
+        [re setVertexBuffer:sysBuf offset:sysOff atIndex:glsl::kBufSys];
+        [re setVertexBuffer:infoBuf offset:infoOff atIndex:glsl::kBufStageIO];
+        [re setFragmentBuffer:argBuf offset:argOff atIndex:glsl::kBufArgs];
+        [re setFragmentBuffer:sysBuf offset:sysOff atIndex:glsl::kBufSys];
+        [re setFragmentBuffer:infoBuf offset:infoOff atIndex:glsl::kBufStageIO];
+        [re setTessellationFactorBuffer:tfBuf offset:tfOff instanceStride:(NSUInteger)s.prims * (quads ? 12 : 8)];
+        [re drawPatches:(NSUInteger)cps patchStart:0 patchCount:s.prims patchIndexBuffer:nil patchIndexBufferOffset:0
+              instanceCount:(NSUInteger)d.instances baseInstance:0];
+        return true;
+    }
+    return false;
 }
 
 // Fast path for indexed triangle/line lists from a buffer: rotate the whole index buffer
@@ -3399,6 +3515,11 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
             glsl::VariantKey fk = vk;
             fk.tessFused = (uint8_t)ctx->patchVertices;
             if (executeMultiPass(ctx, prog, d, fk, false, false, batch, batchCount)) return;
+        }
+        if (vk.kind == glsl::PipelineKind::Tessellation && !xfbActive && !primQueries && tessMetalWanted(ctx, prog, vk, d)) {
+            glsl::VariantKey hk = vk;
+            hk.tessMetal = true;
+            if (executeTessMetal(ctx, prog, d, hk, batch, batchCount)) return;
         }
         // With rasterizer discard the mesh pass only matters for shader side effects, which the
         // capture pass already produced; otherwise it runs with rasterization disabled.
@@ -4176,6 +4297,8 @@ API void APIENTRY glDispatchComputeGroupSizeARB(GLuint x, GLuint y, GLuint z, GL
 // ---------------------------------------------------------------------------
 API void APIENTRY glMemoryBarrier(GLbitfield barriers) {
     MGL_CTX();
+    // A tessellation segment runs all its VS + TCS kernels before its draws
+    ctx->endTessSegment();
     const GLbitfield shaderWrites = GL_SHADER_STORAGE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
                                     GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_ELEMENT_ARRAY_BARRIER_BIT | GL_UNIFORM_BARRIER_BIT |
                                     GL_COMMAND_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT;
@@ -4196,6 +4319,7 @@ API void APIENTRY glMemoryBarrierByRegion(GLbitfield barriers) { glMemoryBarrier
 API void APIENTRY glTextureBarrier(void) {
     MGL_CTX();
     // Feedback loops: finish the pass so later draws see earlier writes.
+    ctx->endTessSegment();
     ctx->endEncoder();
 }
 API void APIENTRY glTextureBarrierNV(void) { glTextureBarrier(); }

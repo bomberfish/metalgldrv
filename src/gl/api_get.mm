@@ -4,6 +4,7 @@
 #include <cmath>
 #include "gl/app_profile.h"
 #include "gl/ext_years.h"
+#include "mtl/spi.h"
 #include "util/log.h"
 
 using namespace mgl;
@@ -449,8 +450,8 @@ static bool getState(Context* ctx, GLenum pname, int index, Value& v) {
     case GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT: v = I(64); return true;
     case GL_MIN_MAP_BUFFER_ALIGNMENT: v = I(64); return true;
     case GL_SUBPIXEL_BITS: v = I(8); return true;
-    case GL_ALIASED_LINE_WIDTH_RANGE: v = F2(1, 1); return true;
-    case GL_SMOOTH_LINE_WIDTH_RANGE: v = F2(1, 1); return true;
+    case GL_ALIASED_LINE_WIDTH_RANGE: v = F2(1, spi::maxLineWidth()); return true;
+    case GL_SMOOTH_LINE_WIDTH_RANGE: v = F2(1, spi::maxLineWidth()); return true;
     case GL_SMOOTH_LINE_WIDTH_GRANULARITY: v = F(0.0); return true;
     case GL_POINT_SIZE_RANGE: v = F2(1, 511); return true;
     case GL_ALIASED_POINT_SIZE_RANGE: v = F2(1, 511); return true;

@@ -512,6 +512,8 @@ private:
         // Units split into pieces of <= kTessPiece primitives (mgl_tess_piece_*), packed into mesh threadgroups of
         // kTessPiece + 2 vertices: with VS + TCS in the object stage (emitTessEvalMeshBatched).
         bool pieces = false;
+        // Several patches per threadgroup of VS + TCS (NB > 1 or pieces): threads take patch mgl_lp = mgl_tid0 / OUTV.
+        bool batched = false;
     } ts_;
     // mgl_TPayload: units per patch (mgl_tess_setup: at most 4 x 32 ring strips + the centre) and the bytes
     // before the control point records (gp..cps, mgl_tess, groups, gstart[], rounded up)
@@ -543,6 +545,7 @@ private:
     // tcsPatchOut) or "object_data" (the object stage's payload).
     std::string tessControlBody(const std::vector<Field>& vf, const std::vector<Field>& recV, const std::vector<Field>& recP,
                                 const std::string& recordsTo);
+    std::string tessMetalFactors();
     void emitTessFused(std::string& o);
     std::vector<Field> tesRec_;  // TES output record layout (tessellation feeding GS / xfb)
     int tesRB_ = 16, tesIpp_ = 3;
@@ -555,6 +558,7 @@ private:
     std::string tesLoadPatch(const std::string& space = "device");
     std::string tesRun(const std::string& coord, const std::string& patch, const std::string& cps);
     void emitTessEvalMesh(std::string& o);
+    void emitTessEvalMetal(std::string& o);
     void emitVertexMesh(std::string& o);
     void emitMesh(std::string& o);
     std::string workgroupBuiltins(Stage st, const int* localSize, std::string& params);
@@ -4564,12 +4568,12 @@ std::string Emitter::tessControlBody(const std::vector<Field>& vf, const std::ve
         for (size_t i = 0; i < recV.size(); i++) e += "        r[" + std::to_string(i) + "] = " + pk(recV[i], acc(recV[i], "vg.")) + ";\n";
         e += "    }\n    if (mgl_tid == 0u) {\n        " + lvDecl;
         e += "        for (int i = 0; i < 4; i++) lv[i] = sys.tessDefaultOuter[i];\n        lv[4] = sys.tessDefaultInner[0];\n"
-             "        lv[5] = sys.tessDefaultInner[1];\n    }\n";
+             "        lv[5] = sys.tessDefaultInner[1];\n" + tessMetalFactors() + "    }\n";
         return e;
     }
     int OUTV = ts_.OUTV;
     StageInfo& tsi = si_[(int)Stage::TessControl];
-    if (tsi.hasShared && ts_.pieces)
+    if (tsi.hasShared && ts_.batched)
         e += "    threadgroup tcs::MGLShared mgl_sh[" + std::to_string(ts_.NB) + "];\n    threadgroup tcs::MGLShared* S = &mgl_sh[mgl_lp];\n";
     else if (tsi.hasShared)
         e += "    threadgroup tcs::MGLShared mgl_sh;\n    threadgroup tcs::MGLShared* S = &mgl_sh;\n";
@@ -4606,8 +4610,15 @@ std::string Emitter::tessControlBody(const std::vector<Field>& vf, const std::ve
     for (int i = 0; i < 2; i++) e += "        lv[" + std::to_string(4 + i) + "] = " + (li ? varName(li) + "[" + std::to_string(i) + "]" : "1.0f") + ";\n";
     e += "        " + prDecl;
     for (size_t i = 0; i < recP.size(); i++) e += "        pr[" + std::to_string(i) + "] = " + pk(recP[i], acc(recP[i], "")) + ";\n";
-    e += "    }\n";
+    e += tessMetalFactors() + "    }\n";
     return e;
+}
+
+// VariantKey::tessMetal: thread 0 of the patch converts the levels `lv` it just stored to Metal's factors.
+std::string Emitter::tessMetalFactors() {
+    if (!K.tessMetal) return "";
+    bool quads = RF(Stage::TessEval).tesPrimitiveMode == gl::QUADS;
+    return std::string("        mgl_tess_metal_factors(D.tessFactors, mgl_gp, lv, ") + (quads ? "true" : "false") + ");\n";
 }
 
 void Emitter::emitTessControlPass(std::string& o) {
@@ -4644,7 +4655,7 @@ void Emitter::emitTessControlPass(std::string& o) {
     // geometry shaders / transform feedback) pass 1 is the mgl_tcs kernel.
     bool gs = stageMask_ & (1u << (int)Stage::Geometry);
     size_t payload = (ts_.hasTCS ? std::max(kTessPayloadHeader, tessBatchHeader(1)) : kTessPayloadHeader) + (size_t)ts_.cpsMax * ts_.VB + ts_.PB;
-    ts_.inObject = K.kind == PipelineKind::Tessellation && !gs && !K.tessComputePass && payload <= 16384;
+    ts_.inObject = K.kind == PipelineKind::Tessellation && !gs && !K.tessComputePass && !K.tessMetal && payload <= 16384;
     ts_.NREC = (size_t)ts_.cpsMax * (ts_.VB / 16) + ts_.PB / 16;
     ts_.NB = 1;
     ts_.pieces = ts_.inObject && ts_.hasTCS;
@@ -4654,11 +4665,18 @@ void Emitter::emitTessControlPass(std::string& o) {
         while (nb > 1 && (tessBatchHeader(nb) + nb * ts_.NREC * 16 > 16384 || nb * ts_.NREC * 16 > 12288)) nb--;
         ts_.NB = nb;
     }
-    if (ts_.pieces) ts_.threads = ts_.NB * OUTV;
+    if (K.tessMetal && ts_.hasTCS && R.tessBatchable) {
+        // the mgl_tcs kernel of Metal's tessellator: as many patches as fit 32 threads (Apple's GL driver does the same)
+        int nb = 32 / OUTV;
+        while (nb > 1 && nb * ts_.NREC * 16 > 16384) nb--;
+        ts_.NB = nb;
+    }
+    ts_.batched = ts_.pieces || ts_.NB > 1;
+    if (ts_.batched) ts_.threads = ts_.NB * OUTV;
     std::string prefix = "    uint mgl_gpatch = mgl_tg.x + D.gridBase, mgl_inst = mgl_tg.y, mgl_gp = mgl_inst * D.primitiveCount + mgl_gpatch, mgl_pv = D.patchVertices;\n"
                          "    device const MGLSubDraw& mgl_sd = D.subDraws[mgl_sd_find(D, mgl_gpatch)];\n"
                          "    uint mgl_patch = mgl_gpatch - mgl_sd.firstPatch;\n";
-    if (ts_.pieces) {
+    if (ts_.batched) {
         // threads past the draw's last patch repeat it (barrier() needs every thread) and their patch is dropped
         std::string sO = std::to_string(OUTV) + "u";
         prefix = "    uint mgl_lp = mgl_tid0 / " + sO + ", mgl_tid = mgl_tid0 % " + sO + ";\n"
@@ -4673,11 +4691,13 @@ void Emitter::emitTessControlPass(std::string& o) {
         ts_.objBody = prefix + tessControlBody(vf, recV, recP, "object_data");
     } else {
         std::string e = "kernel void mgl_tcs(constant MGLArgs& A [[buffer(0)]], constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], "
-                        "uint3 mgl_tg [[threadgroup_position_in_grid]], uint mgl_tid [[thread_index_in_threadgroup]]) {\n";
+                        "uint3 mgl_tg [[threadgroup_position_in_grid]], uint " + std::string(ts_.batched ? "mgl_tid0" : "mgl_tid") +
+                        " [[thread_index_in_threadgroup]]) {\n";
         e += prefix + tessControlBody(vf, recV, recP, "device") + "}\n\n";
         entries_ += e;
         EntryPoint k1{"mgl_tcs", Stage::TessControl, EntryPoint::Kernel};
         k1.threadsPerThreadgroup[0] = ts_.threads;
+        k1.patchesPerObjectGroup = (uint32_t)ts_.NB;
         out_.entryPoints.push_back(k1);
     }
     // tessellator configuration shared by the TES passes
@@ -5151,6 +5171,38 @@ void Emitter::emitTessFused(std::string& o) {
     out_.entryPoints.push_back({"mgl_vs", Stage::TessEval, EntryPoint::Vertex});
 }
 
+// VariantKey::tessMetal: the TES as the post-tessellation vertex function of Metal's tessellator. Patch mgl_gpatch of
+// instance mgl_inst reads the mgl_tcs kernel's records; Metal's position_in_patch is gl_TessCoord (the factors follow
+// GL's edge order, mgl_tess_metal_factors). Classic outputs: only the varyings the fragment shader reads.
+void Emitter::emitTessEvalMetal(std::string& o) {
+    const Reflection& R = RF(Stage::TessEval);
+    bool quads = R.tesPrimitiveMode == gl::QUADS;
+    prepareStage(Stage::TessEval);
+    sharedSpace_ = "thread";
+    filterOutputs_ = true;
+    RasterOut ro = rasterOutput(Stage::TessEval, "g.", false, false);
+    filterOutputs_ = false;
+    emitBody(Stage::TessEval, o);
+    o += "struct Out {\n" + ro.vertexStruct + "};\n}  // namespace tes\n\n";
+    StageInfo& esi = si_[(int)Stage::TessEval];
+    std::string e = std::string("[[patch(") + (quads ? "quad" : "triangle") + ")]] vertex tes::Out mgl_tes_vs(constant MGLArgs& A [[buffer(0)]], "
+                    "constant MGLSys& sys [[buffer(1)]], constant MGLDrawInfo& D [[buffer(22)]], uint mgl_gpatch [[patch_id]], "
+                    "uint mgl_inst [[instance_id]], " + (quads ? "float2" : "float3") + " mgl_pip [[position_in_patch]]) {\n";
+    e += "    uint mgl_gp = mgl_inst * D.primitiveCount + mgl_gpatch;\n";
+    e += "    uint mgl_patch = mgl_gpatch - D.subDraws[mgl_sd_find(D, mgl_gpatch)].firstPatch;\n";
+    if (esi.hasShared) e += "    tes::MGLShared mgl_sh;\n    thread tes::MGLShared* S = &mgl_sh;\n";
+    e += "    const uint mgl_tid = 0u;\n";
+    e += indentBy(tesLoadControlPoints(tesDeviceRecord("mgl_gp", ts_.cps), ts_.cps, 1), 4);
+    e += "    device const float* lv = (device const float*)(D.tcsPatchOut + mgl_gp * " + std::to_string(ts_.PB) + "u);\n";
+    e += indentBy(tesLoadPatch("device"), 4);
+    e += indentBy(tesRun(quads ? "float3(mgl_pip, 0.0f)" : "mgl_pip", "mgl_patch", ts_.cps), 4);
+    e += "    tes::Out v;\n" + indentBy(ro.vertexCopy, 4) + "    return v;\n}\n\n";
+    entries_ += e;
+    fragInputsAvailable_ = ro.names;
+    haveVsOutputs_ = true;
+    out_.entryPoints.push_back({"mgl_tes_vs", Stage::TessEval, EntryPoint::Vertex});
+}
+
 // TES output written to records (one per generated domain point of each unit) plus a primitive
 // list in GL order: mgl_tes_count sizes each patch (itemCounts = primitives, vertices, units),
 // the runtime computes prefix sums (itemOffsets = first primitive, first vertex) and the largest
@@ -5534,6 +5586,13 @@ MSLOutput Emitter::run() {
                 if (K.tessFused) {
                     if (gs) fail("the tessellation fast path has no geometry shader stage");
                     emitTessFused(o);
+                    if (SC(Stage::Fragment).main) emitFS(o, false);
+                    break;
+                }
+                if (K.tessMetal) {
+                    if (gs) fail("Metal's tessellator has no geometry shader stage");
+                    emitTessControlPass(o);
+                    emitTessEvalMetal(o);
                     if (SC(Stage::Fragment).main) emitFS(o, false);
                     break;
                 }

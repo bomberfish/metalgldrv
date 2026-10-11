@@ -68,8 +68,9 @@ struct Target {
     }
 };
 
-// Renders `draw` with the given switches: fast path, batching, pass 1 as a compute kernel.
-std::vector<float> render(Target& t, bool fast, bool batch, bool kernel, const std::function<void()>& draw) {
+// Renders `draw` with the given switches: fast path, batching, pass 1 as a compute kernel, Metal's tessellator.
+std::vector<float> render(Target& t, bool fast, bool batch, bool kernel, const std::function<void()>& draw, bool mt = false) {
+    setenv("METALGLDRV_TESS_METAL", mt ? "1" : "0", 1);
     setenv("METALGLDRV_TESS_FAST", fast ? "1" : "0", 1);
     setenv("METALGLDRV_TESS_BATCH", batch ? "1" : "0", 1);
     if (kernel) setenv("METALGLDRV_TESS_PASS1", "compute", 1);
@@ -81,6 +82,7 @@ std::vector<float> render(Target& t, bool fast, bool batch, bool kernel, const s
     unsetenv("METALGLDRV_TESS_FAST");
     unsetenv("METALGLDRV_TESS_BATCH");
     unsetenv("METALGLDRV_TESS_PASS1");
+    unsetenv("METALGLDRV_TESS_METAL");
     return px;
 }
 
@@ -546,6 +548,7 @@ void main() {
     CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
     glEnable(GL_DEPTH_TEST);
     auto depthPass = [&](bool fast) {
+        setenv("METALGLDRV_TESS_METAL", "0", 1);
         setenv("METALGLDRV_TESS_FAST", fast ? "1" : "0", 1);
         glClearDepth(1.0);
         glClear(GL_DEPTH_BUFFER_BIT);
@@ -553,6 +556,7 @@ void main() {
         std::vector<float> d(64 * 64);
         glReadPixels(0, 0, 64, 64, GL_DEPTH_COMPONENT, GL_FLOAT, d.data());
         unsetenv("METALGLDRV_TESS_FAST");
+        unsetenv("METALGLDRV_TESS_METAL");
         return d;
     };
     std::vector<float> dref = depthPass(false), dfast = depthPass(true);
@@ -777,6 +781,146 @@ void main() {
         }
         glDeleteProgram(p);
     }
+    glDeleteBuffers(2, bufs);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}
+
+// Metal's tessellator (VariantKey::tessMetal) against the emulation. Not bit for bit: Metal places domain points in
+// fixed point, picks its own lengths for the short segments of fractional spacing (GL leaves them to the
+// implementation) and its own triangulation. Coverage and colors must agree up to that, culling must see GL's
+// winding, and instancing, multi-draws (batched sub-draws), default levels, quads and polygon mode lines must work.
+extern "C" uint64_t mglTestTessMetalDraws(void);
+TEST(tessellation_metal_tessellator) {
+    auto compare = [&](const char* what, const std::vector<float>& ref, const std::vector<float>& mt, double maxCoverageDiff, float maxColorDiff) {
+        int covRef = 0, covMt = 0, covDiff = 0, colorBad = 0;
+        for (size_t i = 0; i < ref.size(); i += 4) {
+            bool a = ref[i + 3] != -1.0f, b = mt[i + 3] != -1.0f;
+            covRef += a;
+            covMt += b;
+            covDiff += a != b;
+            if (a && b)
+                for (int k = 0; k < 4; k++)
+                    if (std::fabs(ref[i + k] - mt[i + k]) > maxColorDiff) {
+                        colorBad++;
+                        break;
+                    }
+        }
+        bool ok = covRef > 0 && covDiff <= maxCoverageDiff * covRef + 2 && colorBad <= 0.02 * covRef + 2;
+        if (!ok) fprintf(stderr, "  %s: covered %d / %d, coverage differs at %d, colors at %d\n", what, covRef, covMt, covDiff, colorBad);
+        CHECK(ok);
+    };
+    Target t;
+    GLuint bufs[2];
+    GLuint vao = quadsVao(bufs);
+    // triangles, fractional_odd, displaced interior, patch outputs, gl_PrimitiveID in the TES
+    {
+        const char* tes = R"(#version 460 core
+layout(triangles, fractional_odd_spacing, ccw) in;
+in V { vec4 color; flat int id; } vi[];
+patch in vec4 pd;
+out vec4 color;
+void main() {
+    vec3 t = gl_TessCoord;
+    gl_Position = t.x * gl_in[0].gl_Position + t.y * gl_in[1].gl_Position + t.z * gl_in[2].gl_Position +
+                  vec4(0.0, 0.5 * t.x * t.y * t.z, 0.0, 0.0);
+    color = t.x * vi[0].color + t.y * vi[1].color + t.z * vi[2].color + vec4(0.0, 0.0, float(gl_PrimitiveID) * 0.25, pd.x * 0.01);
+})";
+        const char* fs = "#version 460 core\nin vec4 color;\nout vec4 o;\nvoid main() { o = color; }\n";
+        GLuint p = program(kVS, kTCS, tes, fs);
+        glUseProgram(p);
+        glPatchParameteri(GL_PATCH_VERTICES, 3);
+        GLint lvl = glGetUniformLocation(p, "lvl");
+        const GLsizei counts[2] = {6, 6};
+        const void* offs[2] = {nullptr, nullptr};
+        const GLint bases[2] = {0, 4};
+        for (float level : {1.0f, 2.5f, 7.0f, 30.0f}) {
+            glUniform1f(lvl, level);
+            for (int multi = 0; multi < 2; multi++) {
+                auto draw = [&]() {
+                    if (multi) glMultiDrawElementsBaseVertex(GL_PATCHES, counts, GL_UNSIGNED_SHORT, offs, 2, bases);
+                    else glDrawElementsBaseVertex(GL_PATCHES, 6, GL_UNSIGNED_SHORT, nullptr, 4);
+                };
+                std::vector<float> ref = render(t, false, true, false, draw);
+                uint64_t h0 = mglTestTessMetalDraws();
+                std::vector<float> mt = render(t, false, true, false, draw, true);
+                CHECK(mglTestTessMetalDraws() > h0);
+                // fractional spacing: Metal's short segments differ, and with them the displaced interior
+                compare(multi ? "triangles, multi-draw" : "triangles", ref, mt, level == 1.0f ? 0.0 : 0.05, 0.05f);
+            }
+        }
+        glDeleteProgram(p);
+    }
+    // quads, equal spacing, both windings with back faces culled (GL's winding decides what Metal culls); instanced
+    // (the TES offsets instance 1); polygon mode lines; no TCS (GL_PATCH_DEFAULT_*_LEVEL)
+    for (int noTcs = 0; noTcs < 2; noTcs++)
+        for (int cw = 0; cw < 2; cw++) {
+            std::string tes = std::string("#version 460 core\nlayout(quads, equal_spacing, ") + (cw ? "cw" : "ccw") + R"() in;
+in V { vec4 color; flat int id; } vi[];
+in int inst[];
+out vec4 color;
+void main() {
+    vec2 u = gl_TessCoord.xy;
+    vec4 a = mix(gl_in[0].gl_Position, gl_in[1].gl_Position, u.x), b = mix(gl_in[3].gl_Position, gl_in[2].gl_Position, u.x);
+    gl_Position = mix(a, b, u.y) + vec4(0.0, 0.9 * float(inst[0]), 0.0, 0.0);
+    color = vec4(u, 0.5 * u.x + 0.25 * u.y, 1.0);
+})";
+            const char* vs = R"(#version 460 core
+layout(location = 0) in vec2 p;
+layout(location = 1) in vec4 c;
+out V { vec4 color; flat int id; } vo;
+out int inst;
+void main() {
+    vo.color = c;
+    vo.id = gl_VertexID;
+    inst = gl_InstanceID;
+    gl_Position = vec4(p, 0.0, 1.0);
+})";
+            const char* tcs = R"(#version 460 core
+layout(vertices = 4) out;
+in V { vec4 color; flat int id; } vi[];
+in int inst[];
+out V { vec4 color; flat int id; } vo[];
+out int instOut[];
+void main() {
+    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
+    vo[gl_InvocationID].color = vi[gl_InvocationID].color;
+    vo[gl_InvocationID].id = vi[gl_InvocationID].id;
+    instOut[gl_InvocationID] = inst[gl_InvocationID];
+    gl_TessLevelOuter[0] = 3.0; gl_TessLevelOuter[1] = 5.0; gl_TessLevelOuter[2] = 2.0; gl_TessLevelOuter[3] = 7.0;
+    gl_TessLevelInner[0] = 4.0; gl_TessLevelInner[1] = 6.0;
+})";
+            std::string tesSrc = tes;
+            if (!noTcs) {
+                size_t at = tesSrc.find("in int inst[];");
+                tesSrc.replace(at, 14, "in int instOut[];");
+                at = tesSrc.find("float(inst[0])");
+                tesSrc.replace(at, 14, "float(instOut[0])");
+            }
+            const char* fs = "#version 460 core\nin vec4 color;\nout vec4 o;\nvoid main() { o = color; }\n";
+            GLuint p = program(vs, noTcs ? nullptr : tcs, tesSrc.c_str(), fs);
+            glUseProgram(p);
+            glPatchParameteri(GL_PATCH_VERTICES, 4);
+            const float outer[4] = {3, 5, 2, 7}, inner[2] = {4, 6};
+            glPatchParameterfv(GL_PATCH_DEFAULT_OUTER_LEVEL, outer);
+            glPatchParameterfv(GL_PATCH_DEFAULT_INNER_LEVEL, inner);
+            glEnable(GL_CULL_FACE);
+            auto draw = [&]() { glDrawArraysInstanced(GL_PATCHES, 0, 4, 2); };
+            std::vector<float> ref = render(t, false, true, false, draw);
+            std::vector<float> mt = render(t, false, true, false, draw, true);
+            int covered = 0;
+            for (size_t i = 0; i < mt.size(); i += 4) covered += mt[i + 3] != -1.0f;
+            CHECK(cw ? covered == 0 : covered > 400);  // both instances
+            if (!cw) compare(noTcs ? "quads without TCS" : "quads", ref, mt, 0.0, 0.002f);
+            glDisable(GL_CULL_FACE);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            ref = render(t, false, true, false, draw);
+            mt = render(t, false, true, false, draw, true);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+            // lines: the same outline and grid lines, but Metal's triangulation draws other diagonals
+            compare("quads as lines", ref, mt, 0.35, 1.0f);
+            glDeleteProgram(p);
+        }
     glDeleteBuffers(2, bufs);
     glDeleteVertexArrays(1, &vao);
     CHECK_GL();

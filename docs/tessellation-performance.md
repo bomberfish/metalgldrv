@@ -1,7 +1,46 @@
 # Tessellation performance vs Apple's OpenGL
 
-Findings from running Unigine Heaven 4.0 on both drivers (2026-10-10). Tessellation is where metalgldrv falls
+Findings from running Unigine Heaven 4.0 on both drivers (2026-10-10). Tessellation is where metalgldrv fell
 furthest behind Apple's OpenGL; without it the two are close.
+
+## Current state: Metal's tessellator (classic `drawPatches`)
+
+Tessellated draws now go to classic Metal's tessellator, as Apple's GL driver does it (reverse engineering below):
+the `mgl_tcs` kernel runs VS + TCS and writes Metal's half-precision factors, `drawPatches` runs the TES as the
+post-tessellation vertex function. Metal 4 command buffers can't encode `drawPatches`, so these draws run in
+segments on a classic `MTLCommandQueue` between Metal 4 command buffers, ordered by an `MTLEvent`
+(docs/ARCHITECTURE.md, "Tessellation"). Metal's tessellator is implemented in Apple's driver, not in
+fixed-function hardware (Apple GPUs have no hardware tessellator); it is still far faster than our mesh-shader
+emulation, which stays for what it can't do (isolines, point_mode, geometry shaders, transform feedback, queries,
+...). `METALGLDRV_TESS_METAL=0` turns it off.
+
+Heaven, back to back on the same (busy) machine: Apple GL 78.4 fps, metalgldrv 73.9 fps (was 35 fps with the
+emulation; Apple GL measured 103 fps on a quieter machine earlier).
+
+displacebench, GPU ms per frame, back to back:
+
+| | weight 0.5 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| Metal's tessellator | 3.5 | 4.4 | 4.5 | 7.6 |
+| emulation (`METALGLDRV_TESS_METAL=0`) | 8.5 | 23.0 | 23.3 | 48.8 |
+| Apple GL | 1.7 | 2.5 | 2.9 | 6.2 |
+
+The remaining gap is a fixed cost per patch (the VS + TCS kernel, the TES reading its control points from device
+memory instead of stage-in). Differences from the emulation: Metal places domain points in fixed point (~1e-4 off
+for equal spacing), chooses its own lengths for the short segments of fractional spacing (GL leaves them to the
+implementation) and its own triangulation, so images differ in a few percent of pixels by small amounts;
+`glslrun --tesscheck` and `mgltest tessellation_metal_tessellator` check the differences stay within that.
+
+What it took besides the shaders:
+
+* Metal reads factors in half precision: levels round *up* to a half (35.011 would otherwise become 35.0, one
+  segment short).
+* `tessellationFactorStepFunction` defaults to constant (every patch reads patch 0's factors).
+* `upload()` kept its current 4 MB chunk only until the next flush, and every segment flushes: Heaven allocated
+  ~4 GB/s of new buffers. The current chunk now lives across flushes, large requests get their own power-of-two
+  buffers and the retired pool is bounded by bytes (256 MB).
+
+The sections below describe the emulation as measured before this change.
 
 ## Unigine Heaven 4.0
 
@@ -223,12 +262,12 @@ The three largest contributors to the performance gap:
    patch already costs 12 ms" floor in the notes above).
 
 3. **Software domain-point generation**: the merge-path search in `mgl_tess_unit_vertex` / `_prim` generates
-   domain coordinates and triangulation indices in the mesh shader. Metal's tessellator does this internally,
-   likely at lower cost (dedicated hardware or a highly optimized driver path).
+   domain coordinates and triangulation indices in the mesh shader. Metal's tessellator does this internally, in
+   Apple's driver (not fixed-function hardware), at much lower cost.
 
 ## Ideas not yet tried (updated)
 
-* **Classic Metal `drawPatches` on a separate command queue.** Apple's GL driver proves this works on current
+* **Classic Metal `drawPatches` on a separate command queue.** Done (see "Current state" at the top). Apple's GL driver proves this works on current
   hardware and OS. Use a classic-Metal `MTLCommandQueue` for tessellated draws; synchronize with the Metal 4
   queue via `MTLSharedEvent`. Tessellated draws break the Metal 4 render pass once per frame (not per draw)
   to switch queues. The classic-Metal side runs VS+TCS compute → `drawPatches` in a single command buffer;
@@ -259,8 +298,19 @@ not in the public SDK headers). These implement GL features that Metal's public 
 exposes differently. All identified by decompiling the arm64e slice in IDA Pro; arguments and semantics inferred
 from the decompiled call sites.
 
-A compile-time flag (`METALGLDRV_USE_PRIVATE_API` or similar) could gate use of these. They work on macOS with
-SIP intact (Apple's own driver calls them), but would be rejected from App Store review.
+metalgldrv gates the ones it uses (src/mtl/spi.h) behind the CMake option `MGL_PRIVATE_API` (on by default; turn
+it off for App Store builds, as review rejects private API) and, at run time, `METALGLDRV_MORALLY_WRONG=0`.
+Tested on macOS 27 / M4 Pro, most of them exist only on classic Metal objects, not on the Metal 4 encoders and
+descriptors metalgldrv records with:
+
+| Selector | On Metal 4 objects | Used |
+|---|---|---|
+| `setLineWidth:` | yes (`MTL4RenderCommandEncoder`) | yes: `glLineWidth`, 1..16 like Apple's GL (`GL_ALIASED_LINE_WIDTH_RANGE`), exact row counts in `mgltest wide_lines` |
+| `setIsOpenGLQueue:` | no (classic queue descriptor only) | yes, on the tessellation queue, as Apple's driver; no measured effect |
+| `setBorderColorSPI:` + `setCustomBorderColorValue_N:` + `setPixelFormat:` | yes (sampler descriptor) | no: the color only appears with directly bound samplers (`setSamplerState:`), never through argument buffers, which is how all metalgldrv samplers are bound; integer formats read 0 either way |
+| `commitAndHold`, `commitAndWaitUntilSubmitted` | no (classic command buffers only) | no: the tessellation segments order their command buffers with an event |
+| `setPrimitiveRestartEnabled:index:`, `setProvokingVertexMode:`, `setViewportTransformEnabled:` | no | no |
+| pipeline / render pass `setOpenGLModeEnabled:`, `setLogicOperation*:`, `setPointCoordLowerLeft:`, `setSampleCoverage*:`, `setDitherEnabled:` | no (classic descriptors only) | no |
 
 ### Queue and command buffer
 
@@ -371,7 +421,139 @@ SIP intact (Apple's own driver calls them), but would be rejected from App Store
 
 **Low value — not applicable or niche:**
 
-12. **`newFunctionWithGLCoreIR:`** — requires Apple's GLVM IR format. We compile GLSL→MSL, not GLSL→GLVM IR.
+12. **`newFunctionWithGLCoreIR:`** — requires Apple's GLVM IR format. We compile GLSL→MSL, not GLVM IR.
 13. **`commitAndWaitUntilSubmitted`** — synchronous, worse than our existing sync paths.
 14. **`enableNullBufferBinds:`** — minor convenience.
 15. **`setOpenGLModeEnabled:`** — unclear if it has any effect without the rest of Apple's GL plumbing.
+
+## General private Metal APIs (not GL-specific)
+
+Beyond the OpenGL-emulation SPIs above, the Metal runtime exposes private APIs on its descriptor, encoder,
+command buffer, and command queue classes that could improve metalgldrv performance. Discovered by dumping
+ObjC methods from the loaded Metal runtime classes (`MTL*Internal`, `AGXG16XFamily*`, `MTL3On4*`,
+`MTL4*Descriptor`) after forcing the GPU plugin to load. All verified present on the M4 Pro (AGXG16S).
+
+### Device feature queries (SPI)
+
+`MTLDevice` (via `_MTLDevice` and `AGXG16XFamilyDevice`) exposes ~250 `supports*` selectors. Most correspond
+to public `MTLGPUFamily` feature sets, but many are private. All return YES on M4 Pro.
+
+Key private capabilities verified on M4 Pro:
+- `supportsCustomBorderColor` — custom sampler border colors (see GL SPI section above)
+- `supportsPrimitiveRestartOverride` — hardware primitive restart with arbitrary index
+- `supportsDepthBoundsTesting` — depth bounds test (`GL_EXT_depth_bounds_test`)
+- `supportsDepthClipModeClampExtended` — extended depth clamp behavior
+- `supportsTessellation` — classic Metal tessellation (drawPatches)
+- `supportsFP32TessFactors` — FP32 tessellation factors (vs the default FP16)
+- `supportsIndirectTessellation` — indirect drawPatches
+- `supportsConcurrentComputeDispatch` — concurrent compute execution
+- `supportsDeadlineProfile` — deadline-based GPU scheduling
+- `supportsCommandBufferJump` — command buffer jumping (conditional execution?)
+- `supportsForkJoin` — fork/join in command buffers
+- `supportsCommandQueueBarriers` — cross-queue barriers
+- `supportsLateEvalEvent` — late-evaluated events
+- `supportsOpenCLTextureWriteSwizzles` — texture write swizzles
+- `supportsPartialRenderMemoryBarrier` — partial (non-full) render memory barriers
+- `supportsStencilFeedback` — read stencil buffer in fragment shader
+- `supportsSIMDGroupParallelForwardProgress` — forward progress for SIMD groups
+
+### Compute pipeline descriptor (MTL4ComputePipelineDescriptor)
+
+These are directly applicable to metalgldrv since it uses Metal 4 compute pipelines.
+
+| Selector | Arguments | What it does |
+|---|---|---|
+| `setContentionRelief:` | `uint64_t` | Reduces GPU contention when multiple compute pipelines compete for resources. Likely a hint to the scheduler about how aggressively to timeslice. Applicable to metalgldrv's TCS and prefix-sum compute dispatches that run alongside rendering. |
+| `setOptimizeForPersistentKernel:` | `BOOL` | Tells Metal that this kernel will be dispatched many times and should be kept resident in the GPU's instruction cache. Applicable to metalgldrv's TCS compute, which dispatches per tessellated draw. |
+| `setForwardProgressUsage:` | `uint64_t` | Controls forward progress guarantees for the compute pipeline. A lower setting may allow more aggressive GPU scheduling at the cost of starvation risk. |
+
+### Compute command encoder
+
+| Selector | Metal ver. | Arguments | What it does |
+|---|---|---|---|
+| `setParallelExecution:` | Classic | `BOOL` | Enables concurrent execution of compute dispatches within the same encoder. When YES, dispatches that don't depend on each other can run simultaneously on different GPU shader cores. Could improve utilization for independent tessellation compute passes. |
+| `setThreadgroupDistributionMode:` | Classic | `uint64_t` | Controls how threadgroups are distributed across GPU cores. Different modes may favor occupancy, locality, or load balancing. Could tune mesh shader / tessellation compute threadgroup scheduling. |
+| `setThreadgroupDistributionModeWithClusterGroupIndex:` | Classic | `uint64_t` | Same, but targets a specific cluster group on multi-cluster GPUs (M4 Pro has multiple GPU clusters). |
+| `enableNullBufferBinds:` | Classic | `BOOL` | Allows binding nil buffers without validation errors. |
+| `beginVirtualSubstream` / `nextVirtualSubstream` / `endVirtualSubstream` | Classic | — | Virtual substreams for partitioning compute work within an encoder. |
+
+### Command queue descriptor
+
+| Selector | Metal ver. | Arguments | What it does |
+|---|---|---|---|
+| `setQosLevel:` | Both | `uint64_t` | Quality-of-service level for the command queue. Higher QoS gets priority GPU scheduling. Could prioritize the render queue over background compute. |
+| `setDisableCrossQueueHazardTracking:` | Classic | `BOOL` | Disables Metal's automatic hazard tracking between queues. When metalgldrv manages queue synchronization manually (via events/fences), disabling the driver's tracking eliminates overhead. |
+| `setDisableIOFencing:` | Classic | `BOOL` | Disables IO fencing on the queue. May reduce overhead when IO ordering isn't needed. |
+| `setEnableLowLatencySignalSharedEvent:` | Classic | `BOOL` | Enables low-latency signaling of shared events from this queue. Reduces the latency when one queue signals another via `MTLSharedEvent`, relevant for the two-queue tessellation architecture. |
+| `setEnableLowLatencyWaitSharedEvent:` | Classic | `BOOL` | Enables low-latency waiting on shared events. The wait-side counterpart of the above. |
+| `setDevicePartition:` | Classic | `uint64_t` | Partitions GPU resources for this queue. Could isolate compute from render on multi-cluster GPUs. |
+
+### Command queue (runtime)
+
+| Selector | Arguments | What it does |
+|---|---|---|
+| `setGPUPriority:` | `int64_t` | Sets the GPU scheduling priority for this queue's work. Higher priority = more GPU time relative to other queues. Could ensure the render queue isn't starved by compute. |
+| `setGPUPriority:offset:` | `int64_t, int64_t` | Sets priority with an offset — finer control than the base priority. |
+| `resolveAndUpdateQueuePriority:` | `int64_t` | Resolves and updates the queue's effective priority. |
+
+### Command buffer
+
+| Selector | Arguments | What it does |
+|---|---|---|
+| `commitWithDeadline:` | `uint64_t` (Mach absolute time) | Commits the command buffer with a deadline — the GPU scheduler attempts to complete it by the specified time. For frame-paced rendering, set the deadline to the next VSync to prioritize the frame over background work. Requires `supportsDeadlineProfile`. |
+| `setDeadline:` | `uint64_t` | Sets the deadline before commit. |
+| `encodeCacheHintTag:resourceGroups:count:` | `uint64_t tag, id* groups, uint64_t count` | Tags resources with a cache hint for the GPU's L2/system-level cache. Tells the GPU which resources will be reused soon and should stay cached. |
+| `encodeCacheHintFinalize:resourceGroups:count:` | `uint64_t tag, id* groups, uint64_t count` | Finalizes a cache hint — tells the GPU the tagged resources are no longer needed in cache and can be evicted. Useful after a render pass finishes reading tessellation output buffers. |
+| `encodeWaitForEvent:value:timeout:` | `id event, uint64_t value, uint64_t timeout` | Wait-with-timeout variant of `encodeWaitForEvent:value:`. Avoids indefinite GPU hangs if the signal never comes. |
+| `commitAndHold` | — | See GL SPI section. Also applicable to non-GL use: commit a compute CB whose results feed a render CB without breaking the render pass. |
+
+### Render pipeline descriptor (classic Metal, non-GL)
+
+| Selector | Arguments | What it does |
+|---|---|---|
+| `setAlphaTestEnabled:` / `setAlphaTestFunction:` | `BOOL` / `MTLCompareFunction` | Hardware alpha test — the GPU discards fragments below the threshold before the fragment shader runs. Eliminates shader-based `discard` for alpha-tested geometry (foliage, fences in games). Only on classic Metal pipeline descriptors; not available on MTL4. |
+| `setClipDistanceEnableMask:` | `uint32_t` | Bitmask enabling `gl_ClipDistance[0..7]`. On classic Metal, clip distances aren't a public API — the shader outputs them and the pipeline must enable the mask. |
+| `setPointSmoothEnabled:` | `BOOL` | Enables smooth (antialiased) point rendering. |
+| `setTextureWriteRoundingMode:` | `uint64_t` | Controls rounding mode for floating-point-to-integer texture writes (round-to-nearest-even vs truncation). |
+| `setColorSampleCount:` | `uint64_t` | Separate color sample count (can differ from `rasterSampleCount` for custom MSAA resolve). |
+| `setProfileControl:` | `uint64_t` | Pipeline profiling mode — likely controls GPU performance counter collection. |
+| `setDriverCompilerOptions:` / `setGpuCompilerSPIOptions:` | `id` / `id` | Pass private options to Metal's shader compiler (driver-level or GPU compiler backend). Could control optimization levels, register pressure, or enable experimental codegen. |
+
+### Render command encoder
+
+| Selector | Metal ver. | Arguments | What it does |
+|---|---|---|---|
+| `setLineWidth:` | **Both** | `float` | Wide lines. Confirmed present on both `AGXG16XFamilyRenderContext` (classic) and `AGXG16XFamilyRenderContext_mtlnext` (Metal 4). metalgldrv can call this directly on its Metal 4 render encoder. |
+| `setDepthTestMinBound:maxBound:` | Classic | `float, float` | Depth bounds test — fragments outside [min, max] are discarded before the fragment shader. Useful for `GL_EXT_depth_bounds_test` and as a general early-Z optimization. Only on classic Metal encoder. |
+| `setPointSize:` | Classic | `float` | Set point size from the CPU side (vs outputting `[[point_size]]` from the vertex shader). Classic Metal only. |
+| `setAlphaTestReferenceValue:` | Classic | `float` | Alpha test reference value, companion to `setAlphaTestEnabled:` on the pipeline. |
+| `barrierAfterQueueStages:beforeStages:options:` | **Metal 4** | `uint64_t, uint64_t, uint64_t` | Cross-queue barrier on the Metal 4 encoder. Could synchronize a classic Metal tessellation queue with the Metal 4 render queue without MTLSharedEvent overhead. |
+
+### Potential performance wins for metalgldrv
+
+**Scheduling (frame pacing):**
+- `commitWithDeadline:` with the next VSync time gives the GPU scheduler a clear priority signal.
+  Combined with `setQosLevel:` on the command queue, this could reduce frame jitter and ensure
+  render work preempts background compute (shader compilation, etc.).
+
+**Tessellation (two-queue architecture):**
+- `setEnableLowLatencySignalSharedEvent:` / `setEnableLowLatencyWaitSharedEvent:` on the classic
+  Metal queue reduces the sync latency between the TCS compute queue and the Metal 4 render queue.
+- `setDisableCrossQueueHazardTracking:` eliminates Metal's per-resource tracking overhead when
+  metalgldrv already handles synchronization via MTLSharedEvent.
+- `barrierAfterQueueStages:beforeStages:options:` on the Metal 4 render encoder might replace
+  MTLSharedEvent entirely for within-frame sync.
+- `encodeCacheHintTag:` / `encodeCacheHintFinalize:` could keep tessellation output buffers hot
+  in L2 between the compute and render passes.
+
+**Compute (TCS / prefix sum):**
+- `setOptimizeForPersistentKernel: YES` on the TCS compute pipeline, which dispatches hundreds
+  of times per frame across tessellated draws.
+- `setContentionRelief:` to reduce contention between TCS compute and concurrent render work.
+- `setThreadgroupDistributionMode:` could improve occupancy for the mesh shader's small
+  threadgroups (32 threads) by controlling how they spread across GPU clusters.
+
+**Rendering features:**
+- `setLineWidth:` on Metal 4 is the immediate win — enables `glLineWidth` with no fallback needed.
+- `setAlphaTestEnabled:` (classic Metal only) avoids shader-based `discard` for alpha-tested
+  geometry, which is a significant optimization since `discard` disables early-Z on Apple GPUs.

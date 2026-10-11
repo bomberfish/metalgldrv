@@ -1,5 +1,6 @@
 #import "gl/pipeline.h"
 #include <atomic>
+#include <type_traits>
 #include "gl/context.h"
 #include "util/log.h"
 #include "util/stats.h"
@@ -47,6 +48,7 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     if (key.pdc) h = hashBytes(&key.pdc, 1, h);
     if (key.tessComputePass) h = hashBytes("tcp", 3, h);
     if (key.tessFused) h = hashBytes(&key.tessFused, 1, h ^ 0x7f);
+    if (key.tessMetal) h = hashBytes("mt", 2, h ^ 0x3b);
     if (key.patchVertices) h = hashBytes(&key.patchVertices, 1, h ^ 0x5d);
     if ((key.kind != glsl::PipelineKind::Classic && key.kind != glsl::PipelineKind::Compute) || key.manualFetch || key.xfbInVertex) {
         // Field by field: VertexFetch has padding bytes with indeterminate contents.
@@ -135,6 +137,7 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
             if (key.advancedBlend) why += " advancedBlend";
             if (key.source1FromLocation1) why += " source1FromLocation1";
             if (key.patchVertices) why += " patchVertices";
+            if (key.tessMetal) why += " tessMetal";
             MGL_INFO("draw-time variant: program %u (%s) %.1f ms:%s", prog->name, t_apiName, total, why.empty() ? " (link-time key)" : why.c_str());
         }
         hitchCompile("MSL generation", genMs);
@@ -152,7 +155,43 @@ static MTL4LibraryFunctionDescriptor* fn(id<MTLLibrary> lib, const std::string& 
     return f;
 }
 
+static void setColorAttachment(MTLRenderPipelineColorAttachmentDescriptor* c, MTLPixelFormat pf, const BlendKey& b);
+static void setColorAttachment(MTL4RenderPipelineColorAttachmentDescriptor* c, MTLPixelFormat pf, const BlendKey& b);
+
+// VariantKey::tessMetal: TES (mgl_tes_vs) + fragment function behind Metal's tessellator, for classic render encoders.
+static id<MTLRenderPipelineState> newTessMetalPipeline(Device* dev, const RenderPipelineKey& key) {
+    const ProgramVariant* v = key.variant;
+    const glsl::EntryPoint* vs = v->entry(glsl::EntryPoint::Vertex);
+    const glsl::EntryPoint* fs = v->entry(glsl::EntryPoint::Fragment);
+    if (!vs) return nil;
+    MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
+    d.vertexFunction = [v->lib newFunctionWithName:@(vs->name.c_str())];
+    if (fs && key.rasterEnabled) d.fragmentFunction = [v->lib newFunctionWithName:@(fs->name.c_str())];
+    d.rasterSampleCount = key.sampleCount;
+    d.alphaToCoverageEnabled = key.alphaToCoverage;
+    d.alphaToOneEnabled = key.alphaToOne;
+    d.rasterizationEnabled = key.rasterEnabled;
+    d.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    d.tessellationPartitionMode = (MTLTessellationPartitionMode)key.tessPartition;
+    d.maxTessellationFactor = 64;
+    d.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+    d.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+    d.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
+    d.tessellationOutputWindingOrder = (MTLWinding)key.tessWinding;
+    d.tessellationFactorScaleEnabled = NO;
+    for (int i = 0; i < 8; i++)
+        if (key.colorFormats[i]) setColorAttachment(d.colorAttachments[i], (MTLPixelFormat)key.colorFormats[i], key.blend[i]);
+    d.depthAttachmentPixelFormat = (MTLPixelFormat)key.depthFormat;
+    d.stencilAttachmentPixelFormat = (MTLPixelFormat)key.stencilFormat;
+    NSError* err = nil;
+    MGL_STAT("render-pipeline-create");
+    id<MTLRenderPipelineState> pso = [dev->mtl newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!pso) MGL_ERR("tessellation pipeline creation failed: %s", err.localizedDescription.UTF8String);
+    return pso;
+}
+
 static id<MTLRenderPipelineState> newRenderPipeline(Device* dev, const RenderPipelineKey& key) {
+    if (key.tessMetal) return newTessMetalPipeline(dev, key);
     const ProgramVariant* v = key.variant;
     MTL4PipelineDescriptor* desc = nil;
     const glsl::EntryPoint* vs = v->entry(glsl::EntryPoint::Vertex);
@@ -220,30 +259,41 @@ static id<MTLRenderPipelineState> newRenderPipeline(Device* dev, const RenderPip
     for (int i = 0; i < 8; i++) {
         MTLPixelFormat pf = (MTLPixelFormat)key.colorFormats[i];
         if (pf == MTLPixelFormatInvalid) continue;
-        MTL4RenderPipelineColorAttachmentDescriptor* c = colors[i];
-        c.pixelFormat = pf;
-        const BlendKey& b = key.blend[i];
-        c.blendingState = b.enabled ? MTL4BlendStateEnabled : MTL4BlendStateDisabled;
-        if (b.enabled) {
-            c.sourceRGBBlendFactor = (MTLBlendFactor)b.srcRGB;
-            c.destinationRGBBlendFactor = (MTLBlendFactor)b.dstRGB;
-            c.sourceAlphaBlendFactor = (MTLBlendFactor)b.srcA;
-            c.destinationAlphaBlendFactor = (MTLBlendFactor)b.dstA;
-            c.rgbBlendOperation = (MTLBlendOperation)b.eqRGB;
-            c.alphaBlendOperation = (MTLBlendOperation)b.eqA;
-        }
-        MTLColorWriteMask m = MTLColorWriteMaskNone;
-        if (b.writeMask & 1) m |= MTLColorWriteMaskRed;
-        if (b.writeMask & 2) m |= MTLColorWriteMaskGreen;
-        if (b.writeMask & 4) m |= MTLColorWriteMaskBlue;
-        if (b.writeMask & 8) m |= MTLColorWriteMaskAlpha;
-        c.writeMask = m;
+        setColorAttachment(colors[i], pf, key.blend[i]);
     }
     NSError* err = nil;
     MGL_STAT("render-pipeline-create");
     id<MTLRenderPipelineState> pso = [dev->compiler newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:nil error:&err];
     if (!pso) MGL_ERR("render pipeline creation failed: %s", err.localizedDescription.UTF8String);
     return pso;
+}
+
+// Color attachment state, for MTL4 and classic pipeline descriptors alike.
+template <class C>
+static void fillColorAttachment(C* c, MTLPixelFormat pf, const BlendKey& b) {
+    c.pixelFormat = pf;
+    if constexpr (std::is_same_v<C, MTL4RenderPipelineColorAttachmentDescriptor>) c.blendingState = b.enabled ? MTL4BlendStateEnabled : MTL4BlendStateDisabled;
+    else c.blendingEnabled = b.enabled;
+    if (b.enabled) {
+        c.sourceRGBBlendFactor = (MTLBlendFactor)b.srcRGB;
+        c.destinationRGBBlendFactor = (MTLBlendFactor)b.dstRGB;
+        c.sourceAlphaBlendFactor = (MTLBlendFactor)b.srcA;
+        c.destinationAlphaBlendFactor = (MTLBlendFactor)b.dstA;
+        c.rgbBlendOperation = (MTLBlendOperation)b.eqRGB;
+        c.alphaBlendOperation = (MTLBlendOperation)b.eqA;
+    }
+    MTLColorWriteMask m = MTLColorWriteMaskNone;
+    if (b.writeMask & 1) m |= MTLColorWriteMaskRed;
+    if (b.writeMask & 2) m |= MTLColorWriteMaskGreen;
+    if (b.writeMask & 4) m |= MTLColorWriteMaskBlue;
+    if (b.writeMask & 8) m |= MTLColorWriteMaskAlpha;
+    c.writeMask = m;
+}
+static void setColorAttachment(MTL4RenderPipelineColorAttachmentDescriptor* c, MTLPixelFormat pf, const BlendKey& b) {
+    fillColorAttachment(c, pf, b);
+}
+static void setColorAttachment(MTLRenderPipelineColorAttachmentDescriptor* c, MTLPixelFormat pf, const BlendKey& b) {
+    fillColorAttachment(c, pf, b);
 }
 
 id<MTLRenderPipelineState> PipelineCache::renderPipeline(const RenderPipelineKey& keyIn) {
@@ -301,6 +351,27 @@ id<MTLComputePipelineState> PipelineCache::computePipeline(ProgramVariant* v, co
     if (!cs || cs->kind != glsl::EntryPoint::Kernel) return nil;
     id<MTLComputePipelineState> p = newComputePipeline(ctx_->dev, v, cs);
     v->computeByName[name] = p;
+    return p;
+}
+
+id<MTLComputePipelineState> PipelineCache::classicComputePipeline(ProgramVariant* v, const std::string& name) {
+    std::string k = "classic:" + name;
+    auto it = v->computeByName.find(k);
+    if (it != v->computeByName.end()) return it->second;
+    const glsl::EntryPoint* cs = v->entry(name);
+    if (!cs || cs->kind != glsl::EntryPoint::Kernel) return nil;
+    id<MTLComputePipelineState> p = nil;
+    @autoreleasepool {
+        MTLComputePipelineDescriptor* d = [MTLComputePipelineDescriptor new];
+        d.computeFunction = [v->lib newFunctionWithName:@(name.c_str())];
+        NSUInteger threads = (NSUInteger)cs->threadsPerThreadgroup[0] * cs->threadsPerThreadgroup[1] * cs->threadsPerThreadgroup[2];
+        d.maxTotalThreadsPerThreadgroup = threads;
+        NSError* err = nil;
+        p = [ctx_->dev->mtl newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&err];
+        if (!p) MGL_ERR("compute pipeline %s creation failed: %s", name.c_str(), err.localizedDescription.UTF8String);
+        else if (p.maxTotalThreadsPerThreadgroup < threads) p = nil;
+    }
+    v->computeByName[k] = p;
     return p;
 }
 

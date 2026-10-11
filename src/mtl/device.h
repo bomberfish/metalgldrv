@@ -120,6 +120,17 @@ public:
     id<MTL4CommandAllocator> acquireAllocator();
     id<MTL4CommandBuffer> newCommandBuffer();
 
+    // --- classic Metal (tessellation) ------------------------------------------
+    // Metal 4 has no tessellation; tessellated draws run on this classic queue between Metal 4 command buffers
+    // (Context::openTessSegment). nil if it can't be created.
+    id<MTLCommandQueue> classicQueue();
+    // Commits a classic command buffer (after the residency set's pending changes).
+    void commitClassic(id<MTLCommandBuffer> cb);
+    // On the Metal 4 queue: signal `e` with `value` once the work committed so far is done / make the work
+    // committed from now on wait until `e` reaches `value`.
+    void queueSignal(id<MTLEvent> e, uint64_t value);
+    void queueWait(id<MTLEvent> e, uint64_t value);
+
     // --- app lifecycle (iOS) --------------------------------------------------
     // GPU work is not permitted while the app is in the background; GL threads
     // park here (at submits / swaps) until the app returns to the foreground.
@@ -182,6 +193,8 @@ private:
     bool init();
 
     void markComplete(uint64_t serial, NSError* error, double gpuStart = 0, double gpuEnd = 0);
+    id<MTLCommandQueue> classicQueue_ = nil;
+    bool classicQueueTried_ = false;
     std::map<uint64_t, std::pair<double, double>> gpuTimes_;
     double maxGpuSeconds_ = 0, lastLongWarning_ = 0;
     double gpuBusySeconds_ = 0, gpuBusyUntil_ = 0;

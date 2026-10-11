@@ -69,7 +69,10 @@ struct RenderPipelineKey {
     uint8_t sampleCount = 1, alphaToCoverage = 0, alphaToOne = 0, rasterEnabled = 1;
     uint8_t topologyClass = 0, logicOp = 0;
     uint8_t pdcPrepass = 0;  // ARB_post_depth_coverage pre-pass: fragment function mgl_fs_pdc of a VariantKey::pdc variant
-    uint8_t pad = 0;
+    // VariantKey::tessMetal: a classic pipeline (MTLRenderPipelineDescriptor) with Metal's tessellator: partition mode
+    // (MTLTessellationPartitionMode), output winding (MTLWinding) and the pass's depth / stencil formats
+    uint8_t tessMetal = 0, tessPartition = 0, tessWinding = 0, pad = 0;
+    uint32_t depthFormat = 0, stencilFormat = 0;
 };
 struct DepthStencilKey {
     uint8_t depthFunc = 0, depthWrite = 0, stencilEnabled = 0, pad = 0;
@@ -84,6 +87,8 @@ public:
     id<MTLRenderPipelineState> renderPipeline(const RenderPipelineKey& key);
     id<MTLComputePipelineState> computePipeline(ProgramVariant* v);
     id<MTLComputePipelineState> computePipeline(ProgramVariant* v, const std::string& name);
+    // Kernel `name` built for classic compute encoders (Metal's tessellator runs on a classic queue).
+    id<MTLComputePipelineState> classicComputePipeline(ProgramVariant* v, const std::string& name);
     id<MTLDepthStencilState> depthStencil(const DepthStencilKey& key);
 
 private:

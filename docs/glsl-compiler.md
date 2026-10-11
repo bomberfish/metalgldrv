@@ -116,6 +116,12 @@ object grid whose payloads add up to a few hundred MB (the watchdog kills it or 
   gl_MaxPatchVertices (indices clamped; arrays the stage uses whole keep their size). Tessellation follows
   GL 4.6 11.2.2 (clamping/rounding per spacing, culling on outer <= 0 or NaN, all domains, point_mode, cw/ccw), verified watertight
   by `glslrun --tesscheck`.
+* **Metal's tessellator** (`VariantKey::tessMetal`, `Reflection::tessMetal`): `mgl_tcs` (Kernel, pass 1 as above; with
+  `Reflection::tessBatchable` 32 / OUTV patches per threadgroup, `EntryPoint::patchesPerObjectGroup`) also writes each patch's
+  factors (`mgl_tess_metal_factors` into `MGLDrawInfo::tessFactors`), and `mgl_tes_vs` (Vertex, `[[patch(triangle|quad)]]`) runs
+  the TES for Metal's `[[patch_id]]` / `[[instance_id]]` / `[[position_in_patch]]` (gl_TessCoord as is: the factors follow GL's
+  edge order), loading its inputs from the pass 1 records, with classic outputs for a classic fragment function. The draw side
+  is in docs/ARCHITECTURE.md.
 * **Tessellation fast path** (`VariantKey::tessFused` = patch vertices): `mgl_vs` (Vertex) for a non-indexed triangle list of 3
   (quads: 6) vertices per grid patch; vertex k of patch p runs the VS for the patch's input vertices, the TCS invocations one after
   another, packs their outputs into the same records as pass 1 and runs the TES at domain corner k (mgl_tess_unit's special-case

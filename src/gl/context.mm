@@ -321,6 +321,7 @@ uint64_t Context::serial() {
 }
 
 id<MTL4CommandBuffer> Context::commandBuffer() {
+    if (tessSeg.open) endTessSegment();  // Metal 4 work after the segment's
     serial();
     return cb_;
 }
@@ -363,23 +364,37 @@ id<MTL4ComputeCommandEncoder> Context::computeEncoder() {
     return computeEnc;
 }
 
+// A retired upload buffer of at least `want` bytes the GPU is done with (the smallest), or nil.
+id<MTLBuffer> Context::takeRetiredUpload(size_t want) {
+    auto best = uploadRetired_.end();
+    for (auto it = uploadRetired_.begin(); it != uploadRetired_.end(); ++it)
+        if (it->second.length >= want && (best == uploadRetired_.end() || it->second.length < best->second.length) && dev->isComplete(it->first))
+            best = it;
+    if (best == uploadRetired_.end()) return nil;
+    id<MTLBuffer> b = best->second;
+    uploadRetired_.erase(best);
+    return b;
+}
+
 UploadAlloc Context::upload(size_t size, size_t align) {
     const size_t kChunk = 4 << 20;
     serial();
+    if (g_statsEnabled) statAddCaller(size > kChunk / 2 ? "upload KB (large)" : "upload KB", __builtin_return_address(0), size >> 10);
+    if (size > kChunk / 2) {
+        // Large (tessellation records of a big draw): a buffer of its own, a power of two so that the next frame's
+        // finds it again; the current chunk stays.
+        size_t want = kChunk;
+        while (want < size) want *= 2;
+        id<MTLBuffer> b = takeRetiredUpload(want);
+        if (!b) b = dev->newBuffer(want);
+        uploadUsed_.push_back(b);
+        return UploadAlloc{b, (uint8_t*)bufferContents(b), b.gpuAddress, 0};
+    }
     uploadOffset_ = (uploadOffset_ + align - 1) & ~(align - 1);
     if (!uploadChunk_ || uploadOffset_ + size > uploadChunk_.length) {
         if (uploadChunk_) uploadUsed_.push_back(uploadChunk_);
-        uploadChunk_ = nil;
-        size_t want = std::max(kChunk, size);
-        // reuse a retired chunk
-        for (auto it = uploadRetired_.begin(); it != uploadRetired_.end(); ++it) {
-            if (it->second.length >= want && dev->isComplete(it->first)) {
-                uploadChunk_ = it->second;
-                uploadRetired_.erase(it);
-                break;
-            }
-        }
-        if (!uploadChunk_) uploadChunk_ = dev->newBuffer(want);
+        uploadChunk_ = takeRetiredUpload(kChunk);
+        if (!uploadChunk_) uploadChunk_ = dev->newBuffer(kChunk);
         uploadOffset_ = 0;
     }
     UploadAlloc a{uploadChunk_, (uint8_t*)bufferContents(uploadChunk_) + uploadOffset_, uploadChunk_.gpuAddress + uploadOffset_,
@@ -388,13 +403,14 @@ UploadAlloc Context::upload(size_t size, size_t align) {
     return a;
 }
 
-void Context::flush(id<CAMetalDrawable> present) {
+void Context::flush(id<CAMetalDrawable> present, bool keepUploads) {
     MGL_STAT_CALLER("flush");
     struct InFlush {
         bool& f, saved;
         explicit InFlush(bool& b) : f(b), saved(b) { f = true; }
         ~InFlush() { f = saved; }
     } inFlush(inFlush_);
+    if (tessSeg.open) endTessSegment();
     statMaybeReport();
     if (pendingClear.any()) applyClearNow();
     if (!cb_) {
@@ -408,13 +424,18 @@ void Context::flush(id<CAMetalDrawable> present) {
     endEncoder();
     [cb_ endCommandBuffer];
     dev->submit(cb_, alloc_, serial_, present);
-    if (uploadChunk_) uploadUsed_.push_back(uploadChunk_);
-    uploadChunk_ = nil;
-    uploadOffset_ = 0;
-    for (auto& b : uploadUsed_) uploadRetired_.push_back({serial_, b});
-    uploadUsed_.clear();
-    // Trim the retired pool.
-    while (uploadRetired_.size() > 16) {
+    // Filled upload chunks retire with this command buffer. The current one continues in the next: it retires with
+    // the last command buffer that used it, which completes after the others (every encoder starts with a barrier
+    // after all earlier work on the queue). Retiring it at every flush would need a new chunk per command buffer.
+    if (!keepUploads) {
+        for (auto& b : uploadUsed_) uploadRetired_.push_back({serial_, b});
+        uploadUsed_.clear();
+    }
+    // Trim the retired pool: at most 64 buffers and 256 MB (a frame of a tessellation-heavy game uploads ~100 MB).
+    size_t retiredBytes = 0;
+    for (auto& r : uploadRetired_) retiredBytes += r.second.length;
+    while (uploadRetired_.size() > 64 || (retiredBytes > (256u << 20) && uploadRetired_.size() > 1)) {
+        retiredBytes -= uploadRetired_.front().second.length;
         dev->releaseAfter(uploadRetired_.front().second, uploadRetired_.front().first);
         uploadRetired_.erase(uploadRetired_.begin());
     }
@@ -423,6 +444,126 @@ void Context::flush(id<CAMetalDrawable> present) {
     passOpen = false;
     passDirty = true;
     dev->collect();
+}
+
+id<MTLBuffer> Context::uploadBuffer(uint64_t gpu, NSUInteger* offset) {
+    auto in = [&](id<MTLBuffer> b) { return b && gpu >= b.gpuAddress && gpu < b.gpuAddress + b.length; };
+    id<MTLBuffer> found = in(uploadChunk_) ? uploadChunk_ : nil;
+    for (size_t i = uploadUsed_.size(); !found && i-- > 0;)
+        if (in(uploadUsed_[i])) found = uploadUsed_[i];
+    if (found) *offset = (NSUInteger)(gpu - found.gpuAddress);
+    return found;
+}
+
+// Fills a render pass descriptor (Metal 4 or classic) for pass `p`, with the pending clears as load actions.
+template <class RP>
+static void fillPassDescriptor(RP* rp, const PassDesc& p, const PendingClear& clear) {
+    for (int i = 0; i < kMaxDrawBuffers; i++) {
+        if (!p.color[i].tex) continue;
+        MTLRenderPassColorAttachmentDescriptor* c = rp.colorAttachments[i];
+        c.texture = p.color[i].tex;
+        c.level = p.color[i].level;
+        c.slice = p.color[i].slice;
+        c.depthPlane = p.color[i].depthPlane;
+        c.storeAction = MTLStoreActionStore;
+        if (clear.colorMask & (1u << i)) {
+            c.loadAction = MTLLoadActionClear;
+            const FormatInfo* f = formatInfoForMTL(p.color[i].tex.pixelFormat);
+            if (f && (f->kind == FmtKind::UInt || f->kind == FmtKind::SInt))
+                c.clearColor = MTLClearColorMake((double)(int32_t)clear.colorInt[i][0], (double)(int32_t)clear.colorInt[i][1],
+                                                 (double)(int32_t)clear.colorInt[i][2], (double)(int32_t)clear.colorInt[i][3]);
+            else
+                c.clearColor = MTLClearColorMake(clear.color[i][0], clear.color[i][1], clear.color[i][2], p.color[i].noAlpha ? 1.0 : clear.color[i][3]);
+            if (f && f->kind == FmtKind::UInt)
+                c.clearColor = MTLClearColorMake((double)clear.colorInt[i][0], (double)clear.colorInt[i][1], (double)clear.colorInt[i][2],
+                                                 (double)clear.colorInt[i][3]);
+        } else {
+            c.loadAction = MTLLoadActionLoad;
+        }
+    }
+    if (p.depth.tex) {
+        MTLRenderPassDepthAttachmentDescriptor* d = rp.depthAttachment;
+        d.texture = p.depth.tex;
+        d.level = p.depth.level;
+        d.slice = p.depth.slice;
+        d.storeAction = MTLStoreActionStore;
+        d.loadAction = clear.depth ? MTLLoadActionClear : MTLLoadActionLoad;
+        d.clearDepth = clear.depthValue;
+    }
+    if (p.stencil.tex) {
+        MTLRenderPassStencilAttachmentDescriptor* s = rp.stencilAttachment;
+        s.texture = p.stencil.tex;
+        s.level = p.stencil.level;
+        s.slice = p.stencil.slice;
+        s.storeAction = MTLStoreActionStore;
+        s.loadAction = clear.stencil ? MTLLoadActionClear : MTLLoadActionLoad;
+        s.clearStencil = clear.stencilValue;
+    }
+    rp.renderTargetWidth = p.width;
+    rp.renderTargetHeight = p.height;
+    if (p.layers > 1) rp.renderTargetArrayLength = p.layers;
+    rp.defaultRasterSampleCount = p.samples;
+}
+
+bool Context::openTessSegment(const PassDesc& p) {
+    id<MTLCommandQueue> q = dev->classicQueue();
+    if (!q) return false;
+    if (tessSeg.open) endTessSegment();
+    MGL_STAT("tess-segment");
+    // Pending clears become the segment pass's load actions. Everything recorded so far runs first, and its
+    // upload memory stays live until S' (the segment may read it).
+    PendingClear clear = pendingClear;
+    pendingClear.reset();
+    flush(nil, true);
+    if (!tessEvent) tessEvent = [dev->mtl newEvent];
+    uint64_t v = ++tessEventValue;
+    tessEventValue += 2;
+    dev->queueSignal(tessEvent, v);
+    serial();  // S'
+    @autoreleasepool {
+        tessSeg.prep = [q commandBuffer];
+        tessSeg.main = [q commandBuffer];
+        [tessSeg.prep encodeWaitForEvent:tessEvent value:v];
+        [tessSeg.main encodeWaitForEvent:tessEvent value:v + 1];
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor new];
+        fillPassDescriptor(rp, p, clear);
+        tessSeg.compute = [tessSeg.prep computeCommandEncoder];
+        tessSeg.render = [tessSeg.main renderCommandEncoderWithDescriptor:rp];
+    }
+    if (!tessSeg.render || !tessSeg.compute) {
+        MGL_ERR("failed to begin a tessellation pass (%dx%d)", p.width, p.height);
+        tessSeg.open = true;
+        endTessSegment();
+        return false;
+    }
+    tessSeg.value = v;
+    tessSeg.pass = p;
+    tessSeg.open = true;
+    tessSeg.count++;
+    // the segment's pass is the current one for the draw state (applyDynamicState, fillColorKey)
+    curPass = p;
+    enc.reset();
+    return true;
+}
+
+void Context::endTessSegment() {
+    if (!tessSeg.open) return;
+    tessSeg.open = false;
+    uint64_t v = tessSeg.value;
+    @autoreleasepool {
+        [tessSeg.compute endEncoding];
+        [tessSeg.prep encodeSignalEvent:tessEvent value:v + 1];
+        dev->commitClassic(tessSeg.prep);
+        [tessSeg.render endEncoding];
+        [tessSeg.main encodeSignalEvent:tessEvent value:v + 2];
+        dev->commitClassic(tessSeg.main);
+    }
+    dev->queueWait(tessEvent, v + 2);
+    tessSeg.prep = tessSeg.main = nil;
+    tessSeg.compute = nil;
+    tessSeg.render = nil;
+    enc.reset();
+    passDirty = true;
 }
 
 void Context::finish() {
@@ -548,52 +689,7 @@ void Context::beginPass() {
         return;
     }
     MTL4RenderPassDescriptor* rp = [MTL4RenderPassDescriptor new];
-    for (int i = 0; i < kMaxDrawBuffers; i++) {
-        if (!p.color[i].tex) continue;
-        MTLRenderPassColorAttachmentDescriptor* c = rp.colorAttachments[i];
-        c.texture = p.color[i].tex;
-        c.level = p.color[i].level;
-        c.slice = p.color[i].slice;
-        c.depthPlane = p.color[i].depthPlane;
-        c.storeAction = MTLStoreActionStore;
-        if (pendingClear.colorMask & (1u << i)) {
-            c.loadAction = MTLLoadActionClear;
-            const FormatInfo* f = formatInfoForMTL(p.color[i].tex.pixelFormat);
-            if (f && (f->kind == FmtKind::UInt || f->kind == FmtKind::SInt))
-                c.clearColor = MTLClearColorMake((double)(int32_t)pendingClear.colorInt[i][0], (double)(int32_t)pendingClear.colorInt[i][1],
-                                                 (double)(int32_t)pendingClear.colorInt[i][2], (double)(int32_t)pendingClear.colorInt[i][3]);
-            else
-                c.clearColor = MTLClearColorMake(pendingClear.color[i][0], pendingClear.color[i][1], pendingClear.color[i][2],
-                                                 p.color[i].noAlpha ? 1.0 : pendingClear.color[i][3]);
-            if (f && f->kind == FmtKind::UInt)
-                c.clearColor = MTLClearColorMake((double)pendingClear.colorInt[i][0], (double)pendingClear.colorInt[i][1],
-                                                 (double)pendingClear.colorInt[i][2], (double)pendingClear.colorInt[i][3]);
-        } else {
-            c.loadAction = MTLLoadActionLoad;
-        }
-    }
-    if (p.depth.tex) {
-        MTLRenderPassDepthAttachmentDescriptor* d = rp.depthAttachment;
-        d.texture = p.depth.tex;
-        d.level = p.depth.level;
-        d.slice = p.depth.slice;
-        d.storeAction = MTLStoreActionStore;
-        d.loadAction = pendingClear.depth ? MTLLoadActionClear : MTLLoadActionLoad;
-        d.clearDepth = pendingClear.depthValue;
-    }
-    if (p.stencil.tex) {
-        MTLRenderPassStencilAttachmentDescriptor* s = rp.stencilAttachment;
-        s.texture = p.stencil.tex;
-        s.level = p.stencil.level;
-        s.slice = p.stencil.slice;
-        s.storeAction = MTLStoreActionStore;
-        s.loadAction = pendingClear.stencil ? MTLLoadActionClear : MTLLoadActionLoad;
-        s.clearStencil = pendingClear.stencilValue;
-    }
-    rp.renderTargetWidth = p.width;
-    rp.renderTargetHeight = p.height;
-    if (p.layers > 1) rp.renderTargetArrayLength = p.layers;
-    rp.defaultRasterSampleCount = p.samples;
+    fillPassDescriptor(rp, p, pendingClear);
     if (visibilityBuffer) {
         rp.visibilityResultBuffer = visibilityBuffer;
         rp.visibilityResultType = MTLVisibilityResultTypeAccumulate;

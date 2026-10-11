@@ -317,6 +317,10 @@ struct Reflection {
     // The VS and TCS have no memory writes or subgroup operations, so the emulation may run several patches in one
     // object threadgroup (EntryPoint::patchesPerObjectGroup).
     bool tessBatchable = false;
+    // Metal's tessellator can run the program (VariantKey::tessMetal): VS + TES, no GS, triangles or quads, not
+    // point_mode; the TES has no memory writes or subgroup operations and doesn't write gl_Layer /
+    // gl_ViewportIndex; the fragment shader doesn't read gl_PrimitiveID and its inputs fit a classic vertex function.
+    bool tessMetal = false;
     std::vector<TessLevelOp> tessLevels[6];
     // mesh shaders (EXT_mesh_shader)
     int taskLocalSize[3] = {1, 1, 1}, meshLocalSize[3] = {1, 1, 1};
@@ -429,6 +433,10 @@ struct VariantKey {
     // primitive at the domain corners): a classic vertex function runs, per output vertex, the VS for
     // the patch's `tessFused` input vertices, the TCS for all its invocations and the TES at the corner.
     uint8_t tessFused = 0;
+    // Tessellation on Metal's tessellator (Reflection::tessMetal, classic drawPatches; draw.mm executeTessMetal): pass 1 is
+    // the mgl_tcs kernel, which also writes Metal's half-precision factors (MGLDrawInfo::tessFactors), and the TES
+    // runs as the post-tessellation vertex function mgl_tes_vs in front of a classic fragment function.
+    bool tessMetal = false;
     // Tessellation: GL_PATCH_VERTICES of the draw (0 = unknown). The TCS's per-vertex input arrays (and the TES's
     // without a TCS) get that many elements instead of gl_MaxPatchVertices, the TES's the TCS output vertex count;
     // indices into them are clamped.
@@ -589,6 +597,9 @@ struct alignas(16) MGLDrawInfo {
     uint32_t subDrawIndexType;    // 0: indexBuffer[first + i] (decomposed list), 1: first + i (non-indexed),
                                   // 2 / 4: uint16 / uint32 index i at `indices` (the GL index buffer); base vertex added
     uint32_t vertexBufferSize[16];// bytes from vertexBuffer[b] to the end of the buffer: fetches past it read the default value
+    // VariantKey::tessMetal: Metal's tessellation factors per grid patch (MTLTriangleTessellationFactorsHalf, 4 halves, or
+    // MTLQuadTessellationFactorsHalf, 6), written by mgl_tcs
+    uint64_t tessFactors;
 };
 
 // One sub-draw of a tessellation draw (MGLDrawInfo::subDraws).

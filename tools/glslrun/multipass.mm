@@ -375,7 +375,32 @@ kernel void tesscheck(device const mgl_TCase* cases [[buffer(0)]], device float*
     counts[c] = n;
     mismatches[c] = bad;
 }
+
+// Metal's tessellator (VariantKey::tessMetal): the case's levels through mgl_tess_metal_factors, and every domain point
+// the post-tessellation vertex function sees.
+kernel void metalfactors(device const mgl_TCase* cases [[buffer(0)]], device half* tri [[buffer(1)]], device half* quad [[buffer(2)]],
+                      uint c [[thread_position_in_grid]]) {
+    bool q = cases[c].domain == 1u;
+    mgl_tess_metal_factors(q ? quad : tri, c, (device const float*)&cases[c].outer[0], q);
+}
+[[patch(triangle)]] vertex void metaltri(device float* out [[buffer(0)]], device atomic_uint* counts [[buffer(1)]], uint c [[patch_id]],
+                                      float3 p [[position_in_patch]]) {
+    uint i = atomic_fetch_add_explicit(counts + c, 1u, memory_order_relaxed);
+    if (i < 87000u) { out[c * 262144u + 3u * i] = p.x; out[c * 262144u + 3u * i + 1u] = p.y; out[c * 262144u + 3u * i + 2u] = p.z; }
+}
+[[patch(quad)]] vertex void metalquad(device float* out [[buffer(0)]], device atomic_uint* counts [[buffer(1)]], uint c [[patch_id]],
+                                   float2 p [[position_in_patch]]) {
+    uint i = atomic_fetch_add_explicit(counts + c, 1u, memory_order_relaxed);
+    if (i < 87000u) { out[c * 262144u + 3u * i] = p.x; out[c * 262144u + 3u * i + 1u] = p.y; out[c * 262144u + 3u * i + 2u] = 0.0f; }
+}
 )";
+
+// Unique domain points of a case (rounded to 2^-20), from a vertex list.
+static std::set<std::pair<int64_t, int64_t>> domainPoints(const float* v, uint32_t n) {
+    std::set<std::pair<int64_t, int64_t>> s;
+    for (uint32_t i = 0; i < n; i++) s.insert({llround(v[3 * i] * 1048576.0), llround(v[3 * i + 1] * 1048576.0)});
+    return s;
+}
 
 int runTessCheck(bool verbose) {
     std::vector<TessCase> cases;
@@ -407,7 +432,7 @@ int runTessCheck(bool verbose) {
         cases.push_back({d, sp, pts, (uint32_t)(i / 6) % 2u, {rlevel(), rlevel(), rlevel(), rlevel()}, {rlevel(), rlevel()}});
     }
     std::string body = kTessKernel;
-    std::string src = buildMSLPrelude(body + "\n// mgl_tess_setup mgl_tess_unit mgl_tess_unit_size mgl_tess_unit_vertex mgl_tess_unit_prim mgl_tess_unit_pieces mgl_tess_piece_bounds mgl_tess_piece_size mgl_tess_piece_vertex mgl_tess_piece_prim\n") + body;
+    std::string src = buildMSLPrelude(body + "\n// mgl_tess_setup mgl_tess_unit mgl_tess_unit_size mgl_tess_unit_vertex mgl_tess_unit_prim mgl_tess_unit_pieces mgl_tess_piece_bounds mgl_tess_piece_size mgl_tess_piece_vertex mgl_tess_piece_prim mgl_tess_metal_factors\n") + body;
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         NSError* err = nil;
@@ -443,13 +468,63 @@ int runTessCheck(bool verbose) {
         const float* out = (const float*)outB.contents;
         const uint32_t* counts = (const uint32_t*)cnt.contents;
         int failures = 0;
+        // Metal's tessellator: one patch per triangle / quad case (not point mode), drawn with its domain's pipeline
+        id<MTLBuffer> mtOut = [dev newBufferWithLength:cases.size() * 262144 * 4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> mtCnt = [dev newBufferWithLength:cases.size() * 4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> mtF[2] = {[dev newBufferWithLength:cases.size() * 8 options:MTLResourceStorageModeShared],
+                                [dev newBufferWithLength:cases.size() * 12 options:MTLResourceStorageModeShared]};
+        memset(mtCnt.contents, 0, cases.size() * 4);
+        {
+            id<MTLComputePipelineState> fp = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"metalfactors"] error:&err];
+            if (!check(fp, err, "pipeline")) return 5;
+            id<MTLRenderPipelineState> rp[2][3];
+            for (int dom = 0; dom < 2; dom++)
+                for (int sp = 0; sp < 3; sp++) {
+                    MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
+                    d.vertexFunction = [lib newFunctionWithName:dom ? @"metalquad" : @"metaltri"];
+                    d.rasterizationEnabled = NO;
+                    d.tessellationPartitionMode = sp == 0 ? MTLTessellationPartitionModeInteger : sp == 1 ? MTLTessellationPartitionModeFractionalEven
+                                                                                                         : MTLTessellationPartitionModeFractionalOdd;
+                    d.maxTessellationFactor = 64;
+                    d.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+                    d.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+                    rp[dom][sp] = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+                    if (!check(rp[dom][sp], err, "tessellation pipeline")) return 5;
+                }
+            id<MTLCommandBuffer> hc = [q commandBuffer];
+            id<MTLComputeCommandEncoder> fe = [hc computeCommandEncoder];
+            [fe setComputePipelineState:fp];
+            [fe setBuffer:cb0 offset:0 atIndex:0];
+            [fe setBuffer:mtF[0] offset:0 atIndex:1];
+            [fe setBuffer:mtF[1] offset:0 atIndex:2];
+            [fe dispatchThreads:MTLSizeMake(cases.size(), 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+            [fe endEncoding];
+            MTLRenderPassDescriptor* pd = [MTLRenderPassDescriptor new];
+            pd.renderTargetWidth = pd.renderTargetHeight = 16;
+            pd.defaultRasterSampleCount = 1;
+            id<MTLRenderCommandEncoder> re = [hc renderCommandEncoderWithDescriptor:pd];
+            [re setVertexBuffer:mtOut offset:0 atIndex:0];
+            [re setVertexBuffer:mtCnt offset:0 atIndex:1];
+            for (size_t ci = 0; ci < cases.size(); ci++) {
+                const TessCase& c = cases[ci];
+                if (c.domain > 1 || c.points) continue;
+                [re setRenderPipelineState:rp[c.domain][c.spacing]];
+                [re setTessellationFactorBuffer:mtF[c.domain] offset:0 instanceStride:0];
+                [re drawPatches:3 patchStart:ci patchCount:1 patchIndexBuffer:nil patchIndexBufferOffset:0 instanceCount:1 baseInstance:0];
+            }
+            [re endEncoding];
+            [hc commit];
+            [hc waitUntilCompleted];
+            if (hc.error) { fprintf(stderr, "GPU error: %s\n", hc.error.localizedDescription.UTF8String); return 6; }
+        }
         for (size_t ci = 0; ci < cases.size(); ci++) {
             const TessCase& c = cases[ci];
             uint32_t n = counts[ci];
             const float* v = out + ci * 262144;
             std::string label = std::string(c.domain == 0 ? "tri" : c.domain == 1 ? "quad" : "iso") + " sp" + std::to_string(c.spacing) +
                                 (c.points ? " points" : "") + " outer=" + std::to_string(c.outer[0]) + "," + std::to_string(c.outer[1]) +
-                                " inner=" + std::to_string(c.inner[0]);
+                                "," + std::to_string(c.outer[2]) + "," + std::to_string(c.outer[3]) + " inner=" + std::to_string(c.inner[0]) + "," +
+                                std::to_string(c.inner[1]);
             if (uint32_t m = ((const uint32_t*)mis.contents)[ci]) {
                 printf("FAIL %s: per-element generation differs in %u values\n", label.c_str(), m);
                 failures++;
@@ -457,6 +532,7 @@ int runTessCheck(bool verbose) {
             bool culled = !(c.outer[0] > 0) || !(c.outer[1] > 0);
             if (culled) {
                 if (n != 0) { printf("FAIL %s: culled patch produced %u vertices\n", label.c_str(), n); failures++; }
+                if (c.domain < 2 && ((const uint32_t*)mtCnt.contents)[ci]) { printf("FAIL %s: Metal's tessellator drew a culled patch\n", label.c_str()); failures++; }
                 continue;
             }
             if (n >= 87000) { printf("FAIL %s: output overflow\n", label.c_str()); failures++; continue; }
@@ -466,6 +542,34 @@ int runTessCheck(bool verbose) {
                 for (uint32_t i = 0; i < n; i++) s.insert({v[3 * i], v[3 * i + 1], v[3 * i + 2]});
                 if (s.size() != n) { printf("FAIL %s: %u points but %zu distinct\n", label.c_str(), n, s.size()); failures++; }
                 continue;
+            }
+            if (c.domain < 2) {
+                // Metal's tessellator places the same domain points
+                uint32_t hn = ((const uint32_t*)mtCnt.contents)[ci];
+                auto mine = domainPoints(v, n), mt = domainPoints((const float*)mtOut.contents + ci * 262144, std::min(hn, 87000u));
+                // Metal's domain coordinates are fixed point (as Direct3D's): ~1e-4 from ours at 64 segments. With
+                // fractional spacing the short segments' length is up to the implementation (GL 4.6 section 11.2.2, a
+                // monotonic function of n - f): Direct3D's differs from ours, so only the point counts must match.
+                bool fractional = c.spacing != 0;
+                auto near = [&](const std::set<std::pair<int64_t, int64_t>>& set, std::pair<int64_t, int64_t> pt) {
+                    if (fractional) return true;
+                    const int64_t tol = 256;  // 2^-20 units: ~2.4e-4 (points of a patch are >= 1/64 apart)
+                    for (auto it = set.lower_bound({pt.first - tol, INT64_MIN}); it != set.end() && it->first <= pt.first + tol; ++it)
+                        if (std::llabs(it->second - pt.second) <= tol) return true;
+                    return false;
+                };
+                size_t only = 0, onlyMetal = 0;
+                for (auto& pt : mine) only += !near(mt, pt);
+                for (auto& pt : mt) onlyMetal += !near(mine, pt);
+                if (fractional && mt.size() != mine.size()) only = 1;
+                if (only || onlyMetal || verbose)
+                    printf("%s %s: Metal's tessellator: %zu domain points (ours %zu), %zu only ours, %zu only Metal's\n",
+                           only || onlyMetal ? "FAIL" : "ok  ", label.c_str(), mt.size(), mine.size(), only, onlyMetal);
+                if ((only || onlyMetal) && getenv("TESSCHECK_POINTS")) {
+                    for (auto& pt : mine) printf("    ours  %.7f %.7f%s\n", pt.first / 1048576.0, pt.second / 1048576.0, near(mt, pt) ? "" : "  *");
+                    for (auto& pt : mt) printf("    metal %.7f %.7f%s\n", pt.first / 1048576.0, pt.second / 1048576.0, near(mine, pt) ? "" : "  *");
+                }
+                if (only || onlyMetal) failures++;
             }
             if (c.domain == 2) {
                 // isolines: lines * segments

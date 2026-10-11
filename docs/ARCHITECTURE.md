@@ -121,13 +121,35 @@ appending to the mesh output (≤256 vertices / 512 primitives per threadgroup,
 which matches GL's limits); strips are converted to lists on the fly.
 `gl_Layer` and `gl_ViewportIndex` map to per-primitive mesh outputs.
 
-## Tessellation (object + mesh emulation, fused fast path)
-Metal 4 dropped `drawPatches`, so the fixed-function tessellator isn't
-available. The emulation runs VS + TCS per patch, then an object+mesh pipeline:
+## Tessellation (Metal's tessellator, object + mesh emulation, fused fast path)
+Metal 4 dropped `drawPatches`. Most rasterized tessellation goes to classic Metal's tessellator on a second queue
+(below); what it can't do falls back to the emulation, which runs VS + TCS per patch, then an object+mesh pipeline:
 the object stage reads the levels and sizes the work; mesh
 threadgroups generate domain points and primitives with our own GL-rules
 tessellator (equal / fractional_even / fractional_odd spacing, triangles / quads
 / isolines, point_mode, cw/ccw) and run the TES per generated vertex.
+* **Metal's tessellator** (`VariantKey::tessMetal`, draw.mm `executeTessMetal`), as Apple's own GL driver does it:
+  the `mgl_tcs` kernel runs VS + TCS (up to 32 threads, several patches per threadgroup) and also converts the
+  levels to Metal's half-precision factors (`mgl_tess_metal_factors`: GL's culling, levels rounded up so that a
+  level like 35.01 keeps its 36 segments); `drawPatches` then runs the TES as the post-tessellation vertex function
+  (`mgl_tes_vs`) in front of a classic fragment function. Metal's tessellator is implemented by Apple's driver, not
+  fixed-function hardware, and it is 4-5x faster than the emulation (docs/tessellation-performance.md). Metal 4
+  command buffers can't encode it, so tessellated draws run in *segments* on the device's classic
+  `MTLCommandQueue` (`Context::openTessSegment`): the Metal 4 work so far is committed, a pre-pass command buffer
+  takes the draws' VS + TCS kernels and a classic render pass over the same attachments takes their
+  `drawPatches`; one `MTLEvent` per context orders Metal 4 work, pre-pass, render pass and the next Metal 4
+  command buffer, whose serial covers everything the segment used. Consecutive tessellated draws into the same
+  pass share a segment; any Metal 4 recording (`Context::commandBuffer`), a flush, `glMemoryBarrier` or
+  `glTextureBarrier` ends it. Classic encoders bind `MTLBuffer`s, so the draw's argument / system / draw-info
+  uploads are found by address (`Context::uploadBuffer`); resources stay resident through the device's residency
+  set, which the classic queue shares. Domain points match the emulation's for equal spacing up to Metal's fixed
+  point (~1e-4); for fractional spacing Metal (Direct3D's rules) picks other lengths for the two short segments,
+  which GL leaves to the implementation; triangulation and the provoking vertex of generated triangles differ too
+  (`glslrun --tesscheck` compares the points of 783 level sets, `mgltest tessellation_metal_tessellator` the
+  images). Not for isolines, point_mode, a geometry shader, a TES with memory writes or subgroup operations or that
+  writes gl_Layer / gl_ViewportIndex, a fragment shader that reads gl_PrimitiveID (`Reflection::tessMetal`),
+  program pipelines, indirect draws, transform feedback, primitive / occlusion / statistics queries, rasterizer
+  discard, polygon mode points, coarse shading or post-depth-coverage pre-passes. `METALGLDRV_TESS_METAL=0` turns it off.
 * **Pass 1 (VS + TCS)** runs in the object stage itself (one threadgroup per
   patch, control points and patch data passed in the payload), so tessellated
   draws stay inside the render pass. Patches too big for Metal's 16 KB payload,
@@ -239,6 +261,14 @@ emulation on the integer ALUs. Planned: move heavy ops into an
   and `test_fsr.cpp` cover the strict-only paths, `test_pdc.cpp` the super
   strict ones).
 
+## Private Metal API
+src/mtl/spi.h wraps the few private Metal selectors that help GL and work on the objects metalgldrv records with
+(Apple's GL driver uses them; docs/tessellation-performance.md lists what was tried): `setLineWidth:` on render
+encoders for `glLineWidth` (1..16, as Apple's GL; otherwise lines are 1 pixel and the range is 1..1) and
+`setIsOpenGLQueue:` on the tessellation queue. Built in with the CMake option `MGL_PRIVATE_API` (default ON; App
+Store review rejects private API, so apps shipped there turn it off), used unless `METALGLDRV_MORALLY_WRONG=0`, and
+each call checks that the object implements the selector.
+
 ## Environment variables
 Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `getenv`).
 
@@ -320,9 +350,12 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   compatibility contexts from sharing (patched in memory by default; see docs/doom2016.md).
 * `METALGLDRV_IMPLICIT_PATCHES=1` – draws whose primitives have GL_PATCH_VERTICES vertices run as
   patches while tessellation is active (Iris + Sodium; set by the Fabric mod).
-* `METALGLDRV_TESS_FAST=0`, `METALGLDRV_TESS_BATCH=0`, `METALGLDRV_TESS_PASS1=compute` – turn off
-  the tessellation fast path or multi-draw batching, or run tessellation pass 1 as a compute kernel
-  (see Tessellation; for comparisons and debugging).
+* `METALGLDRV_TESS_METAL=0`, `METALGLDRV_TESS_FAST=0`, `METALGLDRV_TESS_BATCH=0`, `METALGLDRV_TESS_PASS1=compute` –
+  turn off Metal's tessellator, the tessellation fast path or multi-draw batching, or run the emulation's pass 1 as a
+  compute kernel (see Tessellation; for comparisons and debugging).
+* `METALGLDRV_MORALLY_WRONG=0` – don't use private Metal API (src/mtl/spi.h) in a build that has it (the CMake
+  option `MGL_PRIVATE_API`, on by default; turn it off for apps that go through App Store review). See "Private
+  Metal API".
 * `METALGLDRV_PROFILE=core` – EGL and CGL create core instead of compatibility contexts.
 * `METALGLDRV_HOOK_NSOPENGL=1` – macOS replacement mode (NSOpenGL hooks + import
   rebinding, see above) without the JVMTI agent. It also turns on by itself when the process's

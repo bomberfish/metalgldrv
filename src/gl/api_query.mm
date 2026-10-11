@@ -104,6 +104,9 @@ void mglQueryAddPrimitives(Context* ctx, int stream, uint64_t generated, uint64_
     }
 }
 
+// An occlusion (or fragment shader invocations) query counts the draws' samples.
+bool mglQueryVisibilityActive(Context* ctx) { return activeVisibilityQuery(ctx) != nullptr; }
+
 bool mglQueryPrimitivesActive(Context* ctx) {
     for (int ti = 4; ti < 8; ti++)
         for (int i = 0; i < 4; i++)

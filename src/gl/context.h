@@ -347,8 +347,9 @@ public:
     id<MTL4RenderCommandEncoder> newRenderEncoder(MTL4RenderPassDescriptor* rp) NS_RETURNS_RETAINED;
     id<MTL4ComputeCommandEncoder> newComputeEncoder() NS_RETURNS_RETAINED;
     void endEncoder();
-    // Submits the command buffer. present: drawable to present after it.
-    void flush(id<CAMetalDrawable> present = nil);
+    // Submits the command buffer. present: drawable to present after it. keepUploads: the upload memory used so far
+    // stays with the next command buffer (retired with its serial; openTessSegment).
+    void flush(id<CAMetalDrawable> present = nil, bool keepUploads = false);
     // The command buffer flush() submitted last (its serial).
     uint64_t lastSubmittedSerial() const { return serial_; }
     // Serials of the last frames presented to window surfaces (presentWindowSurface keeps the CPU at most
@@ -360,6 +361,31 @@ public:
         if (cb_ && serial_ == serial) flush();
     }
     UploadAlloc upload(size_t size, size_t align = 256);
+    // The buffer and offset of upload memory at GPU address `gpu` used by the open command buffer (nil if none):
+    // classic encoders bind buffers, not addresses.
+    id<MTLBuffer> uploadBuffer(uint64_t gpu, NSUInteger* offset);
+
+    // ---- Metal's tessellator (draw.mm executeTessMetal) ----
+    // Metal 4 has no tessellation. Tessellated draws run on the device's classic queue in a segment between two
+    // Metal 4 command buffers: openTessSegment commits the Metal 4 work so far (S), a pre-pass command buffer runs
+    // the VS + TCS kernels and a render pass over the same attachments draws the patches (drawPatches); the next
+    // Metal 4 command buffer (S', the one open during the segment, whose serial everything the segment uses gets)
+    // waits for it. One event orders them: S signals v, the pre-pass waits for v and signals v + 1, the render
+    // command buffer waits for v + 1 and signals v + 2, which S' waits for. Consecutive tessellated draws into
+    // the same pass share a segment; anything recorded for Metal 4 (Context::commandBuffer) ends it.
+    struct TessSegment {
+        bool open = false;
+        PassDesc pass;
+        id<MTLCommandBuffer> prep = nil, main = nil;
+        id<MTLComputeCommandEncoder> compute = nil;
+        id<MTLRenderCommandEncoder> render = nil;
+        uint64_t value = 0;  // v (above)
+        uint64_t count = 0;  // segments opened by this context
+    } tessSeg;
+    id<MTLEvent> tessEvent = nil;
+    uint64_t tessEventValue = 0;
+    bool openTessSegment(const PassDesc& p);  // false if there is no classic queue
+    void endTessSegment();
     id<MTL4ArgumentTable> renderArgTable, computeArgTable;
     id<MTL4ArgumentTable> renderArgTableFS;  // fragment stage of a program pipeline whose FS comes from another program
 
@@ -403,6 +429,7 @@ public:
         float depthBias[3] = {NAN, NAN, NAN};
         float blendColor[4] = {NAN, NAN, NAN, NAN};
         uint32_t stencilRef[2] = {~0u, ~0u};
+        float lineWidth = 1;  // spi::setLineWidth (encoders start at 1)
         bool fsTableSplit = false;  // fragment stage bound to renderArgTableFS (pipeline mixing programs)
         void reset() { *this = EncState(); }
     } enc;
@@ -432,6 +459,7 @@ public:
 private:
     std::vector<std::pair<uint64_t, id<MTLBuffer>>> uploadRetired_;  // (serial, chunk)
     id<MTLBuffer> uploadChunk_ = nil;
+    id<MTLBuffer> takeRetiredUpload(size_t want);
     size_t uploadOffset_ = 0;
     std::vector<id<MTLBuffer>> uploadUsed_;  // chunks used by the open command buffer
     id<MTL4CommandBuffer> cb_ = nil;

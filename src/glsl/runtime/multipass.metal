@@ -54,6 +54,7 @@ struct MGLDrawInfo {
     uint subDrawCount;
     uint subDrawIndexType;
     uint vertexBufferSize[16];
+    device half* tessFactors;
 };
 // Address of the attribute data of vertex `vid` / instance `inst` in binding b, or null (the attribute's
 // default value) when nothing is bound or the vertex lies outside the buffer (garbage indices must not read
@@ -773,4 +774,23 @@ inline uint3 mgl_tess_piece_prim(thread const mgl_tess& T, uint unit, uint4 pb, 
         return (m & 1u) == 0u ? mgl_tess_wind(T, co, p00, p10, p11) : mgl_tess_wind(T, co, p00, p11, p01);
     }
     return mgl_tess_unit_prim(T, unit, m, co, tp);  // points, isolines (local from m0), one triangle / quad, triangle centre
+}
+
+//@chunk mgl_tess_metal_factors
+// Metal's tessellator (VariantKey::tessMetal): the GL levels of grid patch gp as MTLTriangleTessellationFactorsHalf /
+// MTLQuadTessellationFactorsHalf. An outer level <= 0 or NaN culls the patch (factors 0); otherwise levels are
+// raised to 1 (inner levels NaN or below 1 too), which changes nothing as both GL and Metal clamp them to the
+// spacing's minimum, and keeps small positive levels from rounding to a half-precision 0. Levels round up to a
+// half: 35.011 must still make 36 segments (half(35.011) is 35).
+inline half mgl_tess_metal_level(float x) {
+    half h = half(x);
+    return float(h) < x ? as_type<half>(ushort(as_type<ushort>(h) + 1u)) : h;
+}
+inline void mgl_tess_metal_factors(device half* f, uint gp, device const float* lv, bool quads) {
+    uint n = quads ? 4u : 3u;
+    bool cull = false;
+    for (uint i = 0; i < n; i++) cull = cull || !(lv[i] > 0.0f);
+    device half* o = f + gp * (quads ? 6u : 4u);
+    for (uint i = 0; i < n; i++) o[i] = cull ? 0.0h : mgl_tess_metal_level(clamp(lv[i], 1.0f, 64.0f));
+    for (uint i = 0; i < (quads ? 2u : 1u); i++) o[n + i] = cull ? 0.0h : mgl_tess_metal_level(lv[4u + i] > 1.0f ? min(lv[4u + i], 64.0f) : 1.0f);
 }
