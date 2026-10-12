@@ -48,6 +48,9 @@ id<MTLLibrary> internalLibrary();
 // Copies sample 0 of an integer multisample texture into a single-sample one.
 void resolveSample0(Context* ctx, id<MTLTexture> src, id<MTLTexture> dst, bool isSigned);
 void expandRgb32(Context* ctx, uint64_t srcAddr, uint64_t dstAddr, uint32_t texels, uint32_t alphaBits);
+// In place on the GPU, in command order: width x height 32-bit pixels at addr (rowBytes apart, a multiple of 4) get
+// red and blue swapped (swapRB) and / or alpha set to 1 (opaque).
+void packRgba8(Context* ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t rowBytes, bool swapRB, bool opaque);
 
 // Multisample images (METALGLDRV_STRICT, draw.mm): copy every sample of the multisample texture
 // `ms` (all layers) into the 2D array `shadow` (slice = layer * samples + sample), and back.

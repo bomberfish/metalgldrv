@@ -60,6 +60,13 @@ Heaven (1920x1080 High, Normal tessellation), interleaved runs on the quiet mach
 | + cached Objective-C properties | 94.9, 94.6 |
 | + per-draw CPU work below | 97.9, 97.9 (Apple GL 111.3, 113.3 interleaved) |
 | + feedback-loop check without Objective-C calls for unattached textures | 100.2, 100.5 (Apple GL 110.4, 112.2) |
+| + completeness / framebuffer memos, recycled buffer storage (cafe21e, c1f3926) | 103.5 |
+| + render passes start inside a segment once it drew tessellation, one event per signal source (50df9d6, 8bd2010) | 119.1, 122.2, 123.7 (Apple GL 109.0, 102.0, 112.1) |
+
+The last row (2026-10-12, 3 interleaved rounds, nothing else running; averages 121.7 vs 107.7 fps, +13%) runs
+metalgldrv with `METALGLDRV_SWAP_INTERVAL=0`: Heaven asks for swap interval 0, which Apple's GL honours without
+waiting for the display, while metalgldrv presents with display sync by default since 8bd2010 (capped at the
+refresh rate, 120 Hz here).
 
 (The morning's interleaved runs on a busy machine gave Apple GL 67.0 / 73.9 and metalgldrv 68.9 / 68.8: the
 machine's other work hid a 23% gap.)

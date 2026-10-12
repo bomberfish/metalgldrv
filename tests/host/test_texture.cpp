@@ -523,3 +523,47 @@ TEST(readpixels_pbo_gpu_copy) {
     glDeleteFramebuffers(1, &fb);
     glDeleteTextures(2, tex);
 }
+
+// GL_BGRA from RGBA8 (red and blue swapped on the GPU) and RGB8 (alpha = 1) through a pack buffer must match what
+// the same reads into client memory return.
+TEST(readpixels_pbo_rgba8_swizzle) {
+    GLuint tex[2], fb, pbo;
+    glGenTextures(2, tex);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    std::vector<uint8_t> src(13 * 7 * 4);
+    for (size_t i = 0; i < src.size(); i++) src[i] = (uint8_t)(i * 37 + 11);
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 13, 7, 0, GL_RGBA, GL_UNSIGNED_BYTE, src.data());
+    glBindTexture(GL_TEXTURE_2D, tex[1]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, 13, 7, 0, GL_RGBA, GL_UNSIGNED_BYTE, src.data());
+    glGenBuffers(1, &pbo);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+    glBufferData(GL_PIXEL_PACK_BUFFER, 4096, nullptr, GL_STREAM_READ);
+    struct Case { int tex; GLenum format, type; };
+    const Case cases[] = {{0, GL_BGRA, GL_UNSIGNED_BYTE}, {0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV}, {0, GL_RGBA, GL_UNSIGNED_BYTE},
+                          {1, GL_RGBA, GL_UNSIGNED_BYTE}, {1, GL_BGRA, GL_UNSIGNED_BYTE}};
+    for (const Case& c : cases) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[c.tex], 0);
+        std::vector<uint8_t> want(11 * 5 * 4, 0xcd), got(want.size(), 0);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        glReadPixels(1, 2, 11, 5, c.format, c.type, want.data());
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+        glReadPixels(1, 2, 11, 5, c.format, c.type, (void*)16);
+        glGetBufferSubData(GL_PIXEL_PACK_BUFFER, 16, (GLsizeiptr)got.size(), got.data());
+        CHECK_GL();
+        CHECK(got == want);
+        if (c.tex == 1) CHECK_EQ(got[3], 255);
+        const uint8_t* first = &src[(2 * 13 + 1) * 4];  // texel (1, 2)
+        bool bgra = c.format == GL_BGRA;
+        CHECK_EQ(got[0], first[bgra ? 2 : 0]);
+        CHECK_EQ(got[1], first[1]);
+        CHECK_EQ(got[2], first[bgra ? 0 : 2]);
+        if (c.tex == 0) CHECK_EQ(got[3], first[3]);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glDeleteBuffers(1, &pbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(2, tex);
+}

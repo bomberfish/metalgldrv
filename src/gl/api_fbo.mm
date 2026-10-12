@@ -1086,6 +1086,44 @@ bool readFramebufferPixels(Context* ctx, Framebuffer* fb, int x, int y, int w, i
     int lw = std::max(1, (int)src.width >> level), lh = std::max(1, (int)src.height >> level);
     ClientLayout cl = clientLayout(format, type, w, h, ps);
     size_t need = clientImageSize(format, type, w, h, 1, ps);
+    // Pack buffer bound, 8-bit RGBA / BGRA storage read as GL_RGBA / GL_BGRA bytes: the GPU copies, then swaps red
+    // and blue (and sets alpha for RGB buffers) in place. Capture tools read GL_BGRA from RGBA8 this way every frame;
+    // the CPU path below waits for the GPU and converts per pixel (~80 ms at 1080p under Rosetta).
+    bool rgbaStorage = src.pixelFormat == MTLPixelFormatRGBA8Unorm || src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB;
+    bool bgraStorage = src.pixelFormat == MTLPixelFormatBGRA8Unorm || src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
+    if (Buffer* pbo = ctx->pixelPackBuffer.get(); pbo && pbo->mtl && !pbo->sparse && (rgbaStorage || bgraStorage) && !isDepth &&
+                                                    !isStencil && !isDS && f->kind == FmtKind::Unorm &&
+                                                    (f->baseFormat == GL_RGBA || f->baseFormat == GL_RGB) && src.sampleCount == 1 &&
+                                                    src.textureType != MTLTextureType3D && !ps.swapBytes &&
+                                                    (format == GL_RGBA || format == GL_BGRA) &&
+                                                    (type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_INT_8_8_8_8_REV)) {
+        bool swapRB = (format == GL_BGRA) != bgraStorage, opaque = f->baseFormat == GL_RGB;
+        if ((size_t)pixels + need > (size_t)pbo->size) {
+            ctx->setError(GL_INVALID_OPERATION, "pack buffer %u too small", pbo->name);
+            return false;
+        }
+        if (pbo->mapped && !(pbo->mapAccess & GL_MAP_PERSISTENT_BIT)) {
+            ctx->setError(GL_INVALID_OPERATION, "pack buffer %u is mapped", pbo->name);
+            return false;
+        }
+        int x0 = std::max(0, x), y0 = std::max(0, y), x1 = std::min(lw, x + w), y1 = std::min(lh, y + h);
+        if (x1 <= x0 || y1 <= y0) return true;
+        size_t off = (size_t)pixels + cl.skipBytes + (size_t)(y0 - y) * cl.rowStride + (size_t)(x0 - x) * 4;
+        if (off % 4 == 0 && cl.rowStride % 4 == 0) {
+            id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+            [e copyFromTexture:src sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(x0, y0, 0)
+                    sourceSize:MTLSizeMake(x1 - x0, y1 - y0, 1) toBuffer:pbo->mtl destinationOffset:off
+                    destinationBytesPerRow:cl.rowStride destinationBytesPerImage:cl.rowStride * (y1 - y0)];
+            [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch
+                       visibilityOptions:MTL4VisibilityOptionDevice];
+            if (swapRB || opaque)
+                packRgba8(ctx, pbo->gpuAddress() + off, (uint32_t)(x1 - x0), (uint32_t)(y1 - y0), (uint32_t)cl.rowStride, swapRB, opaque);
+            pbo->lastUse = pbo->lastGpuWrite = ctx->serial();
+            pbo->contentVersion++;
+            MGL_STAT("readpixels-pbo-gpu-rgba8");
+            return true;
+        }
+    }
     // Pack buffer bound and a plain copy of the storage format: the GPU writes the PBO, no CPU wait (games
     // read back through PBOs every frame expecting exactly that, e.g. DOOM (2016)'s 160x120 R32F read).
     if (Buffer* pbo = ctx->pixelPackBuffer.get(); pbo && pbo->mtl && !pbo->sparse && !isDepth && !isStencil && !isDS &&

@@ -1144,6 +1144,25 @@ void convertFromStorage(const FormatInfo* f, GLenum format, GLenum type, const v
         for (int y = 0; y < height; y++) memcpy(d + y * dstRowStride, s + y * srcRowStride, row);
         return;
     }
+    // RGBA8 storage read as GL_BGRA (or an RGB8 buffer as RGBA / BGRA, alpha = 1): swap whole words.
+    if ((f->mtl == MTLPixelFormatRGBA8Unorm || f->mtl == MTLPixelFormatRGBA8Unorm_sRGB) && f->kind == FmtKind::Unorm &&
+        (f->baseFormat == GL_RGBA || f->baseFormat == GL_RGB) && (format == GL_RGBA || format == GL_BGRA) &&
+        (type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_INT_8_8_8_8_REV) && !swapBytes) {
+        bool swapRB = format == GL_BGRA;
+        uint32_t alpha = f->baseFormat == GL_RGB ? 0xff000000u : 0;
+        for (int y = 0; y < height; y++) {
+            const uint8_t* sr = s + y * srcRowStride;
+            uint8_t* dr = d + y * dstRowStride;
+            for (int x = 0; x < width; x++) {
+                uint32_t c;
+                memcpy(&c, sr + x * 4, 4);
+                if (swapRB) c = (c & 0xff00ff00u) | ((c >> 16) & 0xffu) | ((c & 0xffu) << 16);
+                c |= alpha;
+                memcpy(dr + x * 4, &c, 4);
+            }
+        }
+        return;
+    }
     int ps = clientPixelSize(format, type);
     for (int y = 0; y < height; y++) {
         const uint8_t* sr = s + y * srcRowStride;

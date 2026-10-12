@@ -127,6 +127,14 @@ kernel void expand_rgb32(device const uint* src [[buffer(0)]], device uint4* dst
     if (i >= p.x) return;
     dst[i] = uint4(src[3 * i], src[3 * i + 1], src[3 * i + 2], p.y);
 }
+// glReadPixels into a pack buffer: 8-bit RGBA <-> BGRA (and alpha = 1 for RGB buffers) in place.
+struct PackRgba8Args { uint width, height, rowWords, swapRB, alphaOr; };
+kernel void pack_rgba8(device uint* px [[buffer(0)]], constant PackRgba8Args& a [[buffer(1)]], uint2 g [[thread_position_in_grid]]) {
+    if (g.x >= a.width || g.y >= a.height) return;
+    uint i = g.y * a.rowWords + g.x, c = px[i];
+    if (a.swapRB) c = (c & 0xff00ff00u) | ((c >> 16) & 0xffu) | ((c & 0xffu) << 16);
+    px[i] = c | a.alphaOr;
+}
 )MSL";
 
 id<MTLLibrary> internalLibrary() {
@@ -540,6 +548,27 @@ void expandRgb32(Context* ctx, uint64_t srcAddr, uint64_t dstAddr, uint32_t texe
     [ctx->computeArgTable setAddress:dstAddr atIndex:1];
     [ctx->computeArgTable setAddress:pa.gpu atIndex:2];
     [e dispatchThreads:MTLSizeMake(texels, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+}
+
+void packRgba8(Context* ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t rowBytes, bool swapRB, bool opaque) {
+    static id<MTLComputePipelineState> pso = [] {
+        MTL4ComputePipelineDescriptor* d = [MTL4ComputePipelineDescriptor new];
+        d.computeFunctionDescriptor = fnDesc(internalLibrary(), @"pack_rgba8");
+        NSError* err = nil;
+        id<MTLComputePipelineState> p = [Device::get()->compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&err];
+        if (!p) MGL_ERR("pack_rgba8 pipeline failed: %s", err.localizedDescription.UTF8String);
+        return p;
+    }();
+    if (!pso || !width || !height) return;
+    UploadAlloc pa = ctx->upload(20);
+    uint32_t p[5] = {width, height, rowBytes / 4, swapRB, opaque ? 0xff000000u : 0u};
+    memcpy(pa.cpu, p, sizeof p);
+    id<MTL4ComputeCommandEncoder> e = ctx->computeEncoder();
+    [e setComputePipelineState:pso];
+    [ctx->computeArgTable setAddress:addr atIndex:0];
+    [ctx->computeArgTable setAddress:pa.gpu atIndex:1];
+    [e dispatchThreads:MTLSizeMake(width, height, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
     [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
 }
 
