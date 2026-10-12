@@ -389,8 +389,12 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
 * `METALGLDRV_RENDER_SCALE=<0.25..1>` – macOS replacement mode (Minecraft): views carrying our
   surfaces report and render at that fraction of their backing scale (`ourBackingScale` in nsgl.mm),
   so GLFW / SDL size the framebuffer smaller; ignored under Wine, which sizes windows itself.
-* `METALGLDRV_SWAP_INTERVAL=<n>` – overrides the app's swap interval (0: no display sync, which can tear when the
-  window is scanned out directly; Apple's GL composites windows and doesn't).
+* `METALGLDRV_WINDOW_SCREEN=<index>|builtin` – moves an NSOpenGL app's window to that screen (testing on a
+  particular display).
+* `METALGLDRV_SWAP_INTERVAL=<n>` – overrides the app's swap interval. Apps asking for 0 still present with display
+  sync (without it frames show out of turn: the image jumps back and forth and tears, which Apple's GL, compositing
+  its windows, never shows), so they are capped at the display's refresh rate; only an explicit
+  `METALGLDRV_SWAP_INTERVAL=0` presents without display sync.
 * `METALGLDRV_CAPTURE_SEQ=<file>` – appends every presented frame, downscaled to 480x270 RGB, to the file (read
   back asynchronously; for finding out-of-order or glitched frames in a sequence).
 * `METALGLDRV_MAX_FPS`, `METALGLDRV_CAPTURE*` (frame and

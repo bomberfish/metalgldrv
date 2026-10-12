@@ -291,17 +291,23 @@ void presentWindowSurface(Context* ctx, Surface* surf) {
 }
 
 void setSurfaceSwapInterval(Surface* s, int interval) {
-    // METALGLDRV_SWAP_INTERVAL=<n>: overrides the app's swap interval
-    if (const char* e = getenv("METALGLDRV_SWAP_INTERVAL"); e && *e) interval = atoi(e);
+    // Presenting without display sync (CAMetalLayer.displaySyncEnabled = NO) shows frames out of turn: the image
+    // jumps back and forth and tears, also in windows (Unigine Heaven, 2026-10-11). Apple's GL composites its windows
+    // and never shows that, so swap interval 0 presents with display sync too: frame rates above the display's
+    // refresh rate are capped. METALGLDRV_SWAP_INTERVAL=<n> overrides the app's interval, and only an explicit 0 there
+    // presents without display sync.
+    const char* e = getenv("METALGLDRV_SWAP_INTERVAL");
+    if (e && *e) interval = atoi(e);
+    bool displaySync = interval > 0 || !(e && *e);
     s->swapInterval = interval;
 #if !TARGET_OS_IPHONE
     if (s->layer) {
-        s->layer.displaySyncEnabled = interval > 0;
+        s->layer.displaySyncEnabled = displaySync;
         // Without display sync, a window the display scans out directly (full screen, Game Mode: the Metal HUD
         // says "Direct") tears, and with framebuffer-only (losslessly compressed) drawables the tear shows
         // half-written compressed tiles: flickering bands of colored noise. Shader-readable drawables aren't
         // compressed that way, so the tear is a plain line.
-        s->layer.framebufferOnly = interval > 0;
+        s->layer.framebufferOnly = displaySync;
     }
 #endif
 }

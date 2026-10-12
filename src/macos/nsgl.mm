@@ -363,6 +363,27 @@ void layoutViewLayer(NSView* view, CAMetalLayer* layer) {
     [CATransaction commit];
 }
 
+// METALGLDRV_WINDOW_SCREEN=<index>|builtin: moves the app's window to that screen (its top-left corner), for
+// testing on a particular display (apps like Unigine Heaven open on the main screen).
+static void moveWindowToScreen(NSWindow* w) {
+    const char* e = getenv("METALGLDRV_WINDOW_SCREEN");
+    if (!w || !e || !*e) return;
+    NSArray<NSScreen*>* screens = [NSScreen screens];
+    NSScreen* target = nil;
+    if (!strcmp(e, "builtin")) {
+        for (NSScreen* sc in screens) {
+            CGDirectDisplayID d = [sc.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+            if (CGDisplayIsBuiltin(d)) target = sc;
+        }
+    } else if (atoi(e) >= 0 && (NSUInteger)atoi(e) < screens.count) {
+        target = screens[(NSUInteger)atoi(e)];
+    }
+    if (!target) return MGL_WARN("METALGLDRV_WINDOW_SCREEN=%s: no such screen", e);
+    NSRect f = target.visibleFrame;
+    [w setFrameTopLeftPoint:NSMakePoint(NSMinX(f), NSMaxY(f))];
+    MGL_INFO("moved the window to screen %s (%.0fx%.0f)", e, NSWidth(target.frame), NSHeight(target.frame));
+}
+
 // Attaches the context to the view's surface (creating the view's layer / surface on
 // first use). Main thread.
 void attachView(ContextState* st, NSView* view) {
@@ -378,6 +399,7 @@ void attachView(ContextState* st, NSView* view) {
         vs->layer = [newSublayer(parent, false) retain];
         objc_setAssociatedObject(view, &kViewSurfaceKey, vs, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [vs release];
+        moveWindowToScreen(view.window);
     }
     layoutViewLayer(view, vs->layer);
     if (!vs->surface || !cgl::surfaceCompatible(st->cgl, vs->surface.get())) {
