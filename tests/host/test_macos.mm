@@ -5,6 +5,9 @@
 #if !TARGET_OS_IPHONE
 #define GL_SILENCE_DEPRECATION 1
 #include "harness.h"
+#import <Foundation/Foundation.h>
+#include <IOSurface/IOSurface.h>
+#include <OpenGL/CGLIOSurface.h>
 #include <OpenGL/OpenGL.h>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
@@ -271,6 +274,166 @@ TEST(cgl_pbuffer) {
     CGLReleaseContext(ctx);
 }
 
+static IOSurfaceRef newSurface(int w, int h, int bpe, uint32_t fourcc) {
+    NSDictionary* props = @{(id)kIOSurfaceWidth: @(w), (id)kIOSurfaceHeight: @(h), (id)kIOSurfaceBytesPerElement: @(bpe),
+                            (id)kIOSurfacePixelFormat: @(fourcc)};
+    return IOSurfaceCreate((__bridge CFDictionaryRef)props);
+}
+
+// Texels of an IOSurface (row 0 = memory row 0 = GL row 0).
+static uint8_t* surfaceTexel(IOSurfaceRef s, int x, int y) {
+    return (uint8_t*)IOSurfaceGetBaseAddress(s) + y * IOSurfaceGetBytesPerRow(s) + x * IOSurfaceGetBytesPerElement(s);
+}
+
+// Shares a texture's storage with an IOSurface both ways (Chromium, mpv, Syphon, OBS-style capture).
+TEST(cgl_iosurface) {
+    EGLRestore restore;
+    CGLPixelFormatObj pix = choose({kCGLPFAAccelerated, kCGLPFAOpenGLProfile, kCGLOGLPVersion_GL4_Core});
+    CHECK(pix);
+    if (!pix) return;
+    CGLContextObj ctx = nullptr;
+    CHECK_EQ(CGLCreateContext(pix, nullptr, &ctx), kCGLNoError);
+    CGLReleasePixelFormat(pix);
+    IOSurfaceRef surf = newSurface(64, 32, 4, 'BGRA'), r8 = newSurface(16, 8, 1, 'L008');
+    CHECK(ctx && surf && r8);
+    if (!ctx || !surf || !r8) return;
+    CHECK_EQ(CGLSetCurrentContext(ctx), kCGLNoError);
+
+    // CPU-written contents, B, G, R, A in memory: red left half, blue right half, green rows 24..31.
+    IOSurfaceLock(surf, 0, nullptr);
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 64; x++) {
+            uint8_t* p = surfaceTexel(surf, x, y);
+            uint8_t r = y >= 24 ? 0 : x < 32 ? 255 : 0, g = y >= 24 ? 255 : 0, b = y >= 24 ? 0 : x < 32 ? 0 : 255;
+            p[0] = b, p[1] = g, p[2] = r, p[3] = 255;
+        }
+    IOSurfaceUnlock(surf, 0, nullptr);
+
+    GLuint tex = 0, fbo = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_RECTANGLE, tex);
+    CHECK_EQ(CGLTexImageIOSurface2D(ctx, GL_TEXTURE_3D, GL_RGBA, 64, 32, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0),
+             kCGLBadEnumeration);
+    CHECK_EQ(CGLTexImageIOSurface2D(ctx, GL_TEXTURE_RECTANGLE, GL_RGBA, 65, 32, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0),
+             kCGLBadValue);  // larger than the surface
+    CHECK_EQ(CGLTexImageIOSurface2D(ctx, GL_TEXTURE_RECTANGLE, GL_R8, 64, 32, GL_RED, GL_UNSIGNED_BYTE, surf, 0),
+             kCGLBadValue);  // 1-byte texels on a 4-byte surface
+    CHECK_EQ(CGLTexImageIOSurface2D(ctx, GL_TEXTURE_RECTANGLE, GL_RGBA, 64, 32, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, surf, 1),
+             kCGLBadValue);  // no such plane
+    CHECK_EQ(CGLTexImageIOSurface2D(ctx, GL_TEXTURE_RECTANGLE, GL_RGBA, 64, 32, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0),
+             kCGLNoError);
+    GLint tw = 0, th = 0, tf = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_WIDTH, &tw);
+    glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_HEIGHT, &th);
+    glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_INTERNAL_FORMAT, &tf);
+    CHECK_EQ(tw, 64);
+    CHECK_EQ(th, 32);
+    CHECK_EQ(tf, GL_RGBA);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, tex, 0);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), (GLenum)GL_FRAMEBUFFER_COMPLETE);
+    CHECK_PIXEL(5, 5, 255, 0, 0, 255);
+    CHECK_PIXEL(40, 5, 0, 0, 255, 255);
+    CHECK_PIXEL(40, 28, 0, 255, 0, 255);
+    uint8_t px[4] = {};
+    glReadPixels(40, 5, 1, 1, GL_BGRA, GL_UNSIGNED_BYTE, px);  // straight from BGRA storage
+    CHECK(px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255);
+
+    // GL writes land in the surface's memory.
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 8, 8, 8);
+    glClearColor(1, 1, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_SCISSOR_TEST);
+    glFinish();
+    IOSurfaceLock(surf, kIOSurfaceLockReadOnly, nullptr);
+    const uint8_t* q = surfaceTexel(surf, 3, 10);
+    CHECK(q[0] == 0 && q[1] == 255 && q[2] == 255 && q[3] == 255);
+    q = surfaceTexel(surf, 3, 20);
+    CHECK(q[0] == 0 && q[1] == 0 && q[2] == 255);
+    IOSurfaceUnlock(surf, kIOSurfaceLockReadOnly, nullptr);
+
+    // Later CPU writes show up without rebinding.
+    IOSurfaceLock(surf, 0, nullptr);
+    uint8_t* w = surfaceTexel(surf, 50, 2);
+    w[0] = 0, w[1] = 128, w[2] = 64, w[3] = 255;
+    IOSurfaceUnlock(surf, 0, nullptr);
+    CHECK_PIXEL(50, 2, 64, 128, 0, 255);
+
+    // Sampled through a rectangle sampler: copy it into a plain texture with a draw (blit framebuffer).
+    GLuint dst = 0, dfbo = 0;
+    glGenTextures(1, &dst);
+    glBindTexture(GL_TEXTURE_2D, dst);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 32, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);  // complete (glCopyImageSubData below)
+    glGenFramebuffers(1, &dfbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dfbo);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    glBlitFramebuffer(0, 0, 64, 32, 0, 0, 32, 16, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, dfbo);
+    CHECK_PIXEL(28, 2, 0, 0, 255, 255);
+    CHECK_PIXEL(2, 2, 255, 0, 0, 255);
+    CHECK_PIXEL(28, 14, 0, 255, 0, 255);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    // glCopyImageSubData between B, G, R, A surface storage and an ordinary RGBA8 texture, both ways.
+    glCopyImageSubData(tex, GL_TEXTURE_RECTANGLE, 0, 36, 0, 0, dst, GL_TEXTURE_2D, 0, 0, 0, 0, 8, 8, 1);  // blue
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, dfbo);
+    CHECK_PIXEL(3, 3, 0, 0, 255, 255);
+    glCopyImageSubData(dst, GL_TEXTURE_2D, 0, 0, 0, 0, tex, GL_TEXTURE_RECTANGLE, 0, 0, 0, 0, 4, 4, 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    CHECK_PIXEL(1, 1, 0, 0, 255, 255);
+    CHECK_PIXEL(6, 1, 255, 0, 0, 255);
+    glFinish();
+    IOSurfaceLock(surf, kIOSurfaceLockReadOnly, nullptr);
+    q = surfaceTexel(surf, 1, 1);
+    CHECK(q[0] == 255 && q[1] == 0 && q[2] == 0 && q[3] == 255);
+    IOSurfaceUnlock(surf, kIOSurfaceLockReadOnly, nullptr);
+
+    // Single-channel surface (a plane of a YUV image).
+    GLuint rtex = 0;
+    IOSurfaceLock(r8, 0, nullptr);
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 16; x++) *surfaceTexel(r8, x, y) = (uint8_t)(x * 16 + y);
+    IOSurfaceUnlock(r8, 0, nullptr);
+    glGenTextures(1, &rtex);
+    glBindTexture(GL_TEXTURE_RECTANGLE, rtex);
+    CHECK_EQ(CGLTexImageIOSurface2D(ctx, GL_TEXTURE_RECTANGLE, GL_R8, 16, 8, GL_RED, GL_UNSIGNED_BYTE, r8, 0), kCGLNoError);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, rtex, 0);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), (GLenum)GL_FRAMEBUFFER_COMPLETE);
+    uint8_t red = 0;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(9, 3, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &red);
+    CHECK_EQ((int)red, 9 * 16 + 3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+
+    // Respecifying detaches: the surface keeps its contents.
+    glBindTexture(GL_TEXTURE_RECTANGLE, tex);
+    glTexImage2D(GL_TEXTURE_RECTANGLE, 0, GL_RGBA8, 64, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, tex, 0);
+    glClearColor(1, 1, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glFinish();
+    CHECK_PIXEL(5, 5, 255, 255, 255, 255);
+    IOSurfaceLock(surf, kIOSurfaceLockReadOnly, nullptr);
+    q = surfaceTexel(surf, 5, 5);
+    CHECK(q[0] == 0 && q[1] == 0 && q[2] == 255);
+    IOSurfaceUnlock(surf, kIOSurfaceLockReadOnly, nullptr);
+    CHECK_GL();
+
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteFramebuffers(1, &dfbo);
+    glDeleteTextures(1, &tex);
+    glDeleteTextures(1, &rtex);
+    glDeleteTextures(1, &dst);
+    CGLSetCurrentContext(nullptr);
+    CGLReleaseContext(ctx);
+    CFRelease(surf);
+    CFRelease(r8);
+}
+
 TEST(glu_check_extension) {
     const GLubyte* s = (const GLubyte*)"GL_ARB_foo GL_ARB_foo_bar GL_EXT_x";
     CHECK(gluCheckExtension((const GLubyte*)"GL_ARB_foo", s));
@@ -302,7 +465,7 @@ TEST(gl_exports_dlsym) {
     CHECK(mgl_gl_procs_count > 2000);
     for (const char* n : {"glDrawArraysIndirect", "glTexStorage2D", "glClipControl", "glCreateBuffers", "glSpecializeShader",
                           "glMultiDrawArraysIndirectCount", "glPolygonOffsetClamp", "glBufferStorage", "glDispatchCompute",
-                          "glGetTextureSubImage", "glCopyColorTable", "CGLChoosePixelFormat", "CGLTexImagePBuffer",
+                          "glGetTextureSubImage", "glCopyColorTable", "CGLChoosePixelFormat", "CGLTexImagePBuffer", "CGLTexImageIOSurface2D",
                           "gluCheckExtension", "eglGetProcAddress", "Agent_OnLoad"})
         CHECK(dlsym(h, n) != nullptr);
     dlclose(h);

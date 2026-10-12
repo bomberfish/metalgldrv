@@ -153,6 +153,10 @@ Applications can also select behaviour per executable name through application p
 
 ## Limitations
 
-* No IOSurface interop yet (`CGLTexImageIOSurface2D`). The legacy `CGLSetFullScreen*` modes do nothing;
-  full-screen windows work normally.
+* `CGLTexImageIOSurface2D` shares a texture's memory with an IOSurface (no copy, writes visible both ways
+  once GL work has finished, as with Apple's OpenGL) for these formats: `GL_RGBA` / `GL_SRGB8_ALPHA8` / `GL_RGB`
+  with `GL_BGRA` data (8-bit, a 'BGRA' surface), and 8, 16-bit, half and single float `GL_RED` / `GL_RG` /
+  `GL_RGBA` with matching data (e.g. the planes of a bi-planar YUV surface). Not supported: `GL_RGB10_A2` /
+  `GL_UNSIGNED_INT_2_10_10_10_REV` and the YCbCr 4:2:2 formats (`GL_RGB_422_APPLE`).
+* The legacy `CGLSetFullScreen*` modes do nothing; full-screen windows work normally.
 * One GPU: the default Metal device. Renderer selection through CGL renderer IDs isn't supported.

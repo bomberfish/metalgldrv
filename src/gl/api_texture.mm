@@ -177,7 +177,8 @@ static void defineLevel(Texture* t, int face, int level, int w, int h, int d, GL
     L.depth = d;
     L.internalFormat = internalFormat;
     L.fmt = f;
-    if (changed) {
+    if (t->iosurface) t->storageDirty = true;  // detaches the IOSurface (ensureTextureStorage)
+    else if (changed) {
         // Storage may need reallocation if this level no longer fits.
         if (!t->mtl) t->storageDirty = true;
         else {
@@ -1806,6 +1807,7 @@ static void copyImageLoc(GLenum target, int x, int y, int z, NSUInteger& slice, 
 static bool ensureFormatViewable(Context* ctx, Texture* t) {
     if (t->viewParent) t = t->viewParent.get();
     if (t->mtl && (t->mtl.usage & MTLTextureUsagePixelFormatView)) return true;
+    if (t->iosurface) return false;  // Metal made it without format views; its storage can't be replaced
     t->needsFormatView = true;
     id<MTLTexture> old = t->mtl;
     t->mtl = nil;
@@ -1887,6 +1889,12 @@ API void APIENTRY glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint src
             }
         }
         [e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        // 8-bit RGBA to or from B, G, R, A storage (IOSurface textures): the raw bytes need red and blue swapped.
+        if (pass == 0 && !direct && s.f->comp == Comp::U8 && s.f->bytesPerPixel == 4 && dr.f->comp == Comp::U8 &&
+            dr.f->bytesPerPixel == 4 && (s.f->order[0] == 2) != (dr.f->order[0] == 2)) {
+            packRgba8(ctx, stage.gpu, (uint32_t)w, (uint32_t)(h * d), (uint32_t)bpr, true, false);
+            e = ctx->computeEncoder();
+        }
     }
     if (s.tex) s.tex->lastUse = ctx->serial();
     if (s.rb) s.rb->lastUse = ctx->serial();
@@ -2156,7 +2164,7 @@ API void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, G
         t->needsShaderWrite |= !ms;
         bool missing = t->mtl && ((!ms && !(t->mtl.usage & MTLTextureUsageShaderWrite)) ||
                                   (needView && !(t->mtl.usage & MTLTextureUsagePixelFormatView)));
-        if (missing && t->target != GL_TEXTURE_BUFFER && !t->sparse) {  // sparse storage has every usage it supports
+        if (missing && t->target != GL_TEXTURE_BUFFER && !t->sparse && !t->iosurface) {  // sparse storage has every usage it supports
             // Reallocate with write (and format view) usage, copying contents.
             id<MTLTexture> old = t->mtl;
             const FormatInfo* oldFmt = t->storageFmt;

@@ -22,6 +22,7 @@ static int maxAnisotropyCap() {
 
 Texture::~Texture() {
     dropViews();
+    if (iosurface) CFRelease(iosurface);
     if (mtl) Device::get()->releaseAfter(mtl, std::max(lastUse, lastGpuWrite));
     if (sparse && mtl && !viewParent) {
         Device::get()->sparseTextures--;
@@ -152,6 +153,16 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
         t->mtl = v;
         return true;
     }
+    if (t->iosurface) {
+        if (!t->storageDirty && t->mtl) return true;
+        // Respecified: the texture leaves the surface (new storage, as on Apple's OpenGL).
+        if (t->mtl) ctx->dev->releaseAfter(t->mtl, std::max(t->lastUse, t->lastGpuWrite));
+        t->mtl = nil;
+        t->storageFmt = nullptr;
+        CFRelease(t->iosurface);
+        t->iosurface = nullptr;
+        t->iosurfacePlane = 0;
+    }
     if (!t->storageDirty && t->mtl) return true;
     int ref = textureStorageLevelFor(t);
     if (ref < 0) return false;
@@ -248,6 +259,45 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
     }
     t->dropViews();
     t->lastUse = ctx->serial();
+    return true;
+}
+
+bool textureFromIOSurface(Context* ctx, Texture* t, GLenum internalFormat, const FormatInfo* f, int w, int h, IOSurfaceRef surface,
+                          uint32_t plane) {
+    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f->mtl width:w height:h mipmapped:NO];
+    td.storageMode = MTLStorageModeShared;
+    td.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+    // Every usage it may need later, since this storage can't be reallocated: image stores, format views.
+    const MTLTextureUsage base = MTLTextureUsageShaderRead | (f->renderable ? MTLTextureUsageRenderTarget : 0);
+    td.usage = base | MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
+    id<MTLTexture> nt = [ctx->dev->mtl newTextureWithDescriptor:td iosurface:surface plane:plane];
+    if (!nt) {
+        td.usage = base;
+        nt = [ctx->dev->mtl newTextureWithDescriptor:td iosurface:surface plane:plane];
+    }
+    if (!nt) return false;
+    if (!t->label.empty()) nt.label = @(t->label.c_str());
+    ctx->dev->makeResident(nt);
+    if (t->mtl) ctx->dev->releaseAfter(t->mtl, std::max(t->lastUse, t->lastGpuWrite));
+    if (t->iosurface) CFRelease(t->iosurface);
+    for (auto& face : t->levels)
+        for (auto& L : face) L = TexImageLevel();
+    t->levels[0][0] = TexImageLevel{w, h, 1, internalFormat, f};
+    t->specVersion++;
+    t->mtl = nt;
+    t->storageFmt = f;
+    t->storageW = w;
+    t->storageH = h;
+    t->storageD = 1;
+    t->storageLayers = 1;
+    t->storageLevels = 1;
+    t->storageDirty = false;
+    t->needsShaderWrite = (td.usage & MTLTextureUsageShaderWrite) != 0;
+    t->needsFormatView = (td.usage & MTLTextureUsagePixelFormatView) != 0;
+    t->iosurface = (void*)CFRetain(surface);
+    t->iosurfacePlane = plane;
+    t->dropViews();
+    t->lastUse = t->lastGpuWrite = ctx->serial();
     return true;
 }
 
@@ -717,7 +767,7 @@ void requireBitExact(Context* ctx, Texture* t) {
     root->bitExact = true;
     id<MTLTexture> old = root->mtl;
     if (!old || losslessCompressionSafe(old.pixelFormat) || !old.allowGPUOptimizedContents || root->sparse ||
-        root->target == GL_TEXTURE_BUFFER)
+        root->target == GL_TEXTURE_BUFFER || root->iosurface)
         return;
     // Reallocate without compression, copying the contents (as for added usages, api_texture.mm).
     const FormatInfo* oldFmt = root->storageFmt;

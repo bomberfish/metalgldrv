@@ -217,6 +217,11 @@ public:
     // uploaded to keep it (SuperTuxKart's R11F_G11F_B10F light buffers).
     bool bitExact = false;
     bool needsFormatView = false;   // reinterpreted by a texture view
+    // CGLTexImageIOSurface2D: `mtl` is this IOSurface's memory (an IOSurfaceRef, retained; plane `iosurfacePlane`), shared
+    // with whoever else uses the surface. It is never reallocated behind the app's back (it has every usage the
+    // surface allows from the start); respecifying the texture (glTexImage*, glTexStorage*) detaches it.
+    void* iosurface = nullptr;
+    uint32_t iosurfacePlane = 0;
     uint64_t lastUse = 0;
     uint64_t lastGpuWrite = 0;
 

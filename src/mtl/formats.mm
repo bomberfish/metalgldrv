@@ -169,11 +169,46 @@ const FormatInfo* formatInfo(GLenum internalFormat) {
     return it == m.end() ? nullptr : it->second;
 }
 
+// Storage in B, G, R, A byte order: only IOSurface-backed textures (CGLTexImageIOSurface2D) have it, since a 'BGRA'
+// surface's memory can't be viewed as RGBA8. Not in formatMap: internal formats still resolve to RGBA8 storage.
+// clang-format off
+static const FormatInfo kBgraFormats[] = {
+{GL_RGBA8,        MTLPixelFormatBGRA8Unorm,      GL_RGBA, FmtKind::Unorm, Comp::U8, 4, 4, 1, 1, 0, 1, 1, IDENT,{2,1,0,3}, 8, 8, 8, 8, 0, 0, UN},
+{GL_SRGB8_ALPHA8, MTLPixelFormatBGRA8Unorm_sRGB, GL_RGBA, FmtKind::Unorm, Comp::U8, 4, 4, 1, 1, 1, 1, 1, IDENT,{2,1,0,3}, 8, 8, 8, 8, 0, 0, UN},
+{GL_RGB8,         MTLPixelFormatBGRA8Unorm,      GL_RGB,  FmtKind::Unorm, Comp::U8, 4, 4, 1, 1, 0, 1, 1, RGB1, {2,1,0,3}, 8, 8, 8, 0, 0, 0, UN},
+};
+// clang-format on
+
 const FormatInfo* formatInfoForMTL(MTLPixelFormat f) {
     for (auto& e : kFormats)
         if (e.mtl == f && e.swizzle.red == MTLTextureSwizzleRed && e.swizzle.alpha == MTLTextureSwizzleAlpha) return &e;
     for (auto& e : kFormats)
         if (e.mtl == f) return &e;
+    for (auto& e : kBgraFormats)
+        if (e.mtl == f) return &e;
+    return nullptr;
+}
+
+const FormatInfo* iosurfaceFormat(GLenum internalFormat, GLenum format, GLenum type) {
+    auto sized = [](GLenum i, GLenum unsized, GLenum s) { return i == unsized || i == s; };
+    bool bgra8 = format == GL_BGRA && (type == GL_UNSIGNED_INT_8_8_8_8_REV || type == GL_UNSIGNED_BYTE);
+    if (bgra8) {
+        if (sized(internalFormat, GL_RGBA, GL_RGBA8)) return &kBgraFormats[0];
+        if (sized(internalFormat, GL_SRGB_ALPHA, GL_SRGB8_ALPHA8)) return &kBgraFormats[1];
+        if (sized(internalFormat, GL_RGB, GL_RGB8)) return &kBgraFormats[2];
+        return nullptr;
+    }
+    struct Combo { GLenum unsized, sized, format, type; };
+    static const Combo kCombos[] = {
+        {GL_RGBA, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE},        {GL_SRGB_ALPHA, GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE},
+        {GL_RED, GL_R8, GL_RED, GL_UNSIGNED_BYTE},             {GL_RG, GL_RG8, GL_RG, GL_UNSIGNED_BYTE},
+        {GL_RED, GL_R16, GL_RED, GL_UNSIGNED_SHORT},           {GL_RG, GL_RG16, GL_RG, GL_UNSIGNED_SHORT},
+        {GL_RGBA, GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT},      {GL_RED, GL_R16F, GL_RED, GL_HALF_FLOAT},
+        {GL_RG, GL_RG16F, GL_RG, GL_HALF_FLOAT},               {GL_RGBA, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT},
+        {GL_RED, GL_R32F, GL_RED, GL_FLOAT},                   {GL_RGBA, GL_RGBA32F, GL_RGBA, GL_FLOAT},
+    };
+    for (const Combo& c : kCombos)
+        if (format == c.format && type == c.type && sized(internalFormat, c.unsized, c.sized)) return formatInfo(c.sized);
     return nullptr;
 }
 

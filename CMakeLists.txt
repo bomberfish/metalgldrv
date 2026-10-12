@@ -78,7 +78,7 @@ target_link_libraries(metalgldrv PRIVATE mglsl "-framework Metal" "-framework Qu
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   target_link_libraries(metalgldrv PRIVATE "-framework UIKit")
 else()
-  target_link_libraries(metalgldrv PRIVATE "-framework AppKit" "-framework CoreVideo")
+  target_link_libraries(metalgldrv PRIVATE "-framework AppKit" "-framework CoreVideo" "-framework IOSurface")
 endif()
 target_compile_options(metalgldrv PRIVATE -fvisibility=hidden -fobjc-arc -Wall -Wno-unused-parameter -Wno-unused-function)
 target_compile_definitions(metalgldrv PRIVATE METALGLDRV_PRIVATE_API=$<BOOL:${MGL_PRIVATE_API}>)

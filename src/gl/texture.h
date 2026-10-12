@@ -1,6 +1,7 @@
 // Texture helpers shared by the texture/framebuffer/draw code.
 #pragma once
 #include <vector>
+#include <IOSurface/IOSurfaceRef.h>
 #include "gl/context.h"
 #include "gl/pipeline.h"
 
@@ -9,6 +10,10 @@ namespace mgl {
 MTLTextureType mtlTextureType(GLenum target, int samples);
 int textureStorageLevelFor(const Texture* t);
 bool ensureBufferTexture(Context* ctx, Texture* t);
+// CGLTexImageIOSurface2D: makes level 0 of `t` (any earlier images dropped) a w x h image of format `f` whose
+// storage is plane `plane` of `surface`. False if Metal can't make a texture over it (nothing changed then).
+bool textureFromIOSurface(Context* ctx, Texture* t, GLenum internalFormat, const FormatInfo* f, int w, int h, IOSurfaceRef surface,
+                          uint32_t plane);
 // Bytes per texel of a buffer texture's data store (GL_RGB32* are 12, stored as 16).
 inline int bufferTexelBytes(const FormatInfo* f) { return f->baseFormat == GL_RGB && f->bytesPerPixel == 16 ? 12 : f->bytesPerPixel; }
 bool textureComplete(const Texture* t, const SamplerState& s, int* firstLevel, int* lastLevel);

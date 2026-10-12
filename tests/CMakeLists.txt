@@ -9,7 +9,7 @@ else()
   # (linking the table against the dylib also checks every entry is exported).
   add_executable(mgltest ${TEST_SOURCES} main/main_mac.cpp ${CMAKE_SOURCE_DIR}/src/macos/macho_rebind.cpp
                  ${CMAKE_BINARY_DIR}/gen/gl_procs.cpp)
-  target_link_libraries(mgltest PRIVATE metalgldrv "-framework Foundation")
+  target_link_libraries(mgltest PRIVATE metalgldrv "-framework Foundation" "-framework IOSurface")
   target_include_directories(mgltest PRIVATE ${CMAKE_SOURCE_DIR}/src)
   set_target_properties(mgltest PROPERTIES BUILD_RPATH "${CMAKE_BINARY_DIR}")
 endif()

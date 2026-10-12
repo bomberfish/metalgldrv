@@ -44,6 +44,9 @@ struct FormatInfo {
 const FormatInfo* formatInfo(GLenum internalFormat);
 const FormatInfo* resolveInternalFormat(GLenum internalFormat, GLenum format, GLenum type);
 const FormatInfo* formatInfoForMTL(MTLPixelFormat f);
+// Storage format of a texture over an IOSurface (CGLTexImageIOSurface2D) given as (internalFormat, format, type), as
+// Apple's OpenGL accepts them; nullptr if unsupported. GL_BGRA data gets BGRA8 storage (B, G, R, A in memory).
+const FormatInfo* iosurfaceFormat(GLenum internalFormat, GLenum format, GLenum type);
 bool isCompressedFormat(GLenum internalFormat);
 bool isDepthOrStencil(const FormatInfo* f);
 // GL 4.6 Table 8.27 view class: texel bits for uncompressed classes, 1000+n for

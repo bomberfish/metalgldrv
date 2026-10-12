@@ -15,6 +15,7 @@
 #include "macos/cgl_internal.h"
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <IOSurface/IOSurface.h>
 #include <atomic>
 #include <cstring>
 #include <strings.h>
@@ -23,6 +24,7 @@
 #include <set>
 #include <unordered_set>
 #include "gl/app_profile.h"
+#include "gl/texture.h"
 #include "gl/winsys.h"
 #include "util/log.h"
 
@@ -934,6 +936,50 @@ CGL_EXPORT CGLError CGLTexImagePBuffer(CGLContextObj ctx, CGLPBufferObj pbuffer,
 }
 
 // ---------------------------------------------------------------------------
+// IOSurface-backed textures
+
+// Makes the texture bound to `target` (GL_TEXTURE_RECTANGLE or GL_TEXTURE_2D) in `ctx` a single-level image whose
+// storage is plane `plane` of the IOSurface: no copy, both sides see each other's writes (GL writes once flushed and
+// finished, e.g. glFlush + a fence, as with Apple's OpenGL). (internal_format, format, type) are the combinations
+// Apple's OpenGL documents, e.g. GL_RGBA / GL_BGRA / GL_UNSIGNED_INT_8_8_8_8_REV for a 'BGRA' surface, GL_R8 / GL_RED /
+// GL_UNSIGNED_BYTE and GL_RG8 / GL_RG for the planes of a bi-planar YUV surface. Respecifying the texture detaches it.
+CGL_EXPORT CGLError CGLTexImageIOSurface2D(CGLContextObj ctx, GLenum target, GLenum internal_format, GLsizei width, GLsizei height,
+                                           GLenum format, GLenum type, IOSurfaceRef ioSurface, GLuint plane) {
+    ContextImpl* c = lookup(ctx);
+    if (!c) return kCGLBadContext;
+    if (!ioSurface) return kCGLBadAddress;
+    if (target != GL_TEXTURE_RECTANGLE && target != GL_TEXTURE_2D) return kCGLBadEnumeration;
+    const FormatInfo* f = iosurfaceFormat(internal_format, format, type);
+    if (!f) {
+        MGL_WARN("CGL: CGLTexImageIOSurface2D: unsupported format 0x%x / 0x%x / 0x%x", internal_format, format, type);
+        return kCGLBadValue;
+    }
+    size_t planes = IOSurfaceGetPlaneCount(ioSurface);
+    if (planes ? plane >= planes : plane != 0) return kCGLBadValue;
+    size_t pw = planes ? IOSurfaceGetWidthOfPlane(ioSurface, plane) : IOSurfaceGetWidth(ioSurface);
+    size_t ph = planes ? IOSurfaceGetHeightOfPlane(ioSurface, plane) : IOSurfaceGetHeight(ioSurface);
+    size_t bpe = planes ? IOSurfaceGetBytesPerElementOfPlane(ioSurface, plane) : IOSurfaceGetBytesPerElement(ioSurface);
+    if (width <= 0 || height <= 0 || (size_t)width > pw || (size_t)height > ph || bpe != f->bytesPerPixel) {
+        MGL_WARN("CGL: CGLTexImageIOSurface2D: %dx%d, %d bytes per texel doesn't fit plane %u (%zux%zu, %zu bytes per element)",
+                 width, height, f->bytesPerPixel, plane, pw, ph, bpe);
+        return kCGLBadValue;
+    }
+    Context* gl = c->ctx.get();
+    Context* prev = currentContext();
+    if (prev != gl) setCurrentContext(gl);
+    CGLError err = kCGLNoError;
+    Texture* t = gl->boundTexture(target);
+    if (!t || t->immutable || t->viewParent) err = kCGLBadState;
+    else if (!textureFromIOSurface(gl, t, internal_format, f, width, height, ioSurface, plane)) {
+        MGL_WARN("CGL: CGLTexImageIOSurface2D: Metal can't make a %dx%d texture (format %d) over plane %u of the surface", width,
+                 height, (int)f->mtl, plane);
+        err = kCGLBadAlloc;
+    }
+    if (prev != gl) setCurrentContext(prev);
+    return err;
+}
+
+// ---------------------------------------------------------------------------
 // global options, version, errors
 
 CGL_EXPORT CGLError CGLSetGlobalOption(CGLGlobalOption pname, const GLint* params) {
@@ -1014,7 +1060,8 @@ void* mgl::cgl::exportedFunction(const char* name) {
         E(CGLSetVirtualScreen), E(CGLGetVirtualScreen), E(CGLSetOffScreen), E(CGLGetOffScreen), E(CGLSetFullScreen),
         E(CGLSetFullScreenOnDisplay), E(CGLCreatePBuffer), E(CGLDestroyPBuffer), E(CGLRetainPBuffer), E(CGLReleasePBuffer),
         E(CGLGetPBufferRetainCount), E(CGLDescribePBuffer), E(CGLSetPBuffer), E(CGLGetPBuffer), E(CGLTexImagePBuffer),
-        E(CGLSetGlobalOption), E(CGLGetGlobalOption), E(CGLSetOption), E(CGLGetOption), E(CGLGetVersion), E(CGLErrorString),
+        E(CGLTexImageIOSurface2D), E(CGLSetGlobalOption), E(CGLGetGlobalOption), E(CGLSetOption), E(CGLGetOption),
+        E(CGLGetVersion), E(CGLErrorString),
         E(gluCheckExtension),
     };
 #undef E
