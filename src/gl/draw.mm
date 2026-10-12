@@ -3879,11 +3879,15 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
         executePdc(ctx, prog, var, fsProg, fsVar, mixedFs, frefl, d, ii, minIdx, maxIdx, argAddr, fsArgAddr, pdc.writes ? &pdcSplit : nullptr);
         return;
     }
-    // A new pass into a framebuffer whose last pass drew tessellation starts in a segment
-    if (!fsrAddr && !ctx->tessSeg.open && ctx->drawFb && ctx->drawFb->tessHint && !ctx->rasterizerDiscard && !mglQueryVisibilityActive(ctx) &&
+    // A new pass into a framebuffer whose last pass drew tessellation starts in a segment, also when another segment is
+    // open: consecutive segments stay on the classic queue, where a Metal 4 pass between them would cost a round trip
+    // between the queues (the faces of a cube shadow map drawing untessellated objects first: Unigine Heaven).
+    if (!fsrAddr && ctx->drawFb && ctx->drawFb->tessHint && !ctx->rasterizerDiscard && !mglQueryVisibilityActive(ctx) &&
         envFlagCached("METALGLDRV_TESS_SEGMENT_DRAWS", true)) {
         PassDesc p;
-        if (ctx->resolvePass(p) && !(ctx->passOpen && p == ctx->curPass && !ctx->pendingClear.any())) {
+        bool resolved = ctx->resolvePass(p);
+        bool current = !ctx->pendingClear.any() && (ctx->tessSeg.open ? p == ctx->tessSeg.pass : ctx->passOpen && p == ctx->curPass);
+        if (resolved && !current) {
             MGL_STAT("tess-segment-early");
             ctx->openTessSegment(p, false);
         }
