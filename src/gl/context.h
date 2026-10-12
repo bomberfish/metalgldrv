@@ -373,7 +373,7 @@ public:
     // device's classic queue in a segment: a pre-pass command buffer runs the VS + TCS kernels, and a render pass
     // over the same attachments draws (drawPatches). The segment has a serial of its own (Context::serial() while it
     // is open), complete when its render command buffer is. Anything recorded for Metal 4 (Context::commandBuffer)
-    // ends it. Ordering, with one event:
+    // ends it. Ordering, with three events (tessMtlEvent, tessPrepEvent, tessMainEvent below):
     //  - openTessSegment submits the Metal 4 work so far and signals `mtl` after it; the pre-pass waits for it (or,
     //    without Metal 4 work since the last segment, for that one's pre-pass).
     //  - The render command buffer waits for the pre-pass (`prep`) and the previous segment's render command buffer
@@ -390,9 +390,10 @@ public:
         id<MTLComputeCommandEncoder> compute = nil;
         id<MTLRenderCommandEncoder> render = nil;
         uint64_t serial = 0;
-        uint64_t mtl = 0, prepDone = 0, mainDone = 0;  // event values (above)
+        uint64_t mtl = 0, prepChain = 0, prepDone = 0, mainDone = 0;  // event values (above; prepChain: tessPrepWaitForPrevious)
         bool prepWaitsMain = false;
         uint64_t count = 0;  // segments opened by this context
+        uint32_t tessDraws = 0;  // tessellated draws in this segment
         // what the pass was resolved from (tessSegmentPassCurrent)
         Framebuffer* fb = nullptr;
         uint64_t fbVersion = 0;
@@ -405,8 +406,10 @@ public:
     // the same framebuffer, unchanged, its attachments on the same storage.
     bool tessSegmentPassCurrent() const;
     void tessSegmentSnapshot();  // records the draw framebuffer's state for tessSegmentPassCurrent
-    id<MTLEvent> tessEvent = nil;
-    uint64_t tessEventValue = 0;
+    // One event per source, each signaled in order (an event takes the value signaled last, so values from sources
+    // that complete out of order would release waiters early): the Metal 4 queue, the pre-passes, the render passes.
+    id<MTLEvent> tessMtlEvent = nil, tessPrepEvent = nil, tessMainEvent = nil;
+    uint64_t tessMtlValue = 0, tessPrepValue = 0, tessMainValue = 0;
     uint64_t tessLastMain = 0;    // event value of the last segment's render command buffer
     uint64_t tessLastPrep = 0;    // and of its (last) pre-pass
     bool tessMtlWork = false;     // Metal 4 work submitted since the last segment opened

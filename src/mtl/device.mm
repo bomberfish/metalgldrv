@@ -178,6 +178,7 @@ void Device::completionState(uint64_t out[4]) {
 }
 
 bool Device::isComplete(uint64_t serial) {
+    if (serial <= watermarkPublished_.load(std::memory_order_acquire)) return true;
     std::lock_guard<std::mutex> g(mutex_);
     return isCompleteLocked(serial);
 }
@@ -208,6 +209,7 @@ void Device::markComplete(uint64_t serial, NSError* error, double gpuStart, doub
         completedAbove_.insert(serial);
         while (!completedAbove_.empty() && *completedAbove_.begin() == watermark_ + 1) {
             watermark_++;
+            watermarkPublished_.store(watermark_, std::memory_order_release);
             completedAbove_.erase(completedAbove_.begin());
         }
     }

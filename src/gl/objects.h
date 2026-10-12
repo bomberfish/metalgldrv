@@ -328,6 +328,9 @@ public:
     bool defaultFixedSampleLocations = false;
     uint32_t version = 1;  // bumped on any attachment change
     bool isDefault = false;
+    // its last pass drew tessellation: the next one starts in a tessellation segment (Context::TessSegment), so a
+    // tessellated draw after other draws doesn't end a Metal 4 pass (storing and reloading every attachment)
+    bool tessHint = false;
     // framebufferStatus's last answer and what it depended on (every draw asks)
     struct StatusMemo {
         struct Att {

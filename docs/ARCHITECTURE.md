@@ -82,7 +82,9 @@ sRGB-capable. Not supported: accumulation/aux/stereo/float pixel formats,
 * CPU writes to buffers the GPU may still read either **rename** the storage
   (small buffers; earlier draws keep the old `MTLBuffer`) or stage a GPU copy in
   stream order (large buffers). Texture uploads always stage through the upload
-  ring and copy in stream order.
+  ring and copy in stream order. GL buffer storage (also `glBufferData`'s
+  orphaning) comes from power-of-two size classes that are recycled once the GPU
+  is done with them (`Device::newBufferRecycled`), staying resident.
 * All resources live in one `MTLResidencySet` attached to the queue.
 * GL threads never drain an autorelease pool (glcts' main thread, the game's
   render thread), so driver code must not leave autoreleased objects behind:
@@ -99,7 +101,10 @@ Each linked program owns an *argument buffer* of 8-byte slots (layout chosen by
 the linker, `glsl::Reflection::slots`): UBO/SSBO/atomic-counter GPU addresses,
 texture & sampler `MTLResourceID`s per sampler uniform (element), image views,
 the default-uniform-block address, SSBO sizes. Per draw the runtime fills a
-fresh slot array from current GL bindings (`buildArguments`). Argument-table
+fresh slot array from current GL bindings (`buildArguments`; texture completeness,
+framebuffer status and the last render pipeline per variant are remembered, and the
+Metal objects on this path are passed unretained, which matters for x86_64 apps
+running under Rosetta: tests/bench/draw_bench.cpp measures it). Argument-table
 buffer indices: 0 = slots, 1 = `MGLSys` (per-draw system values), 2..17 =
 vertex buffer bindings (stage_in with dynamic strides), 30 = current generic
 attribute values (constant step), 18..21 xfb, 22+ multi-pass scratch.
@@ -140,7 +145,10 @@ tessellator (equal / fractional_even / fractional_odd spacing, triangles / quads
   takes their `drawPatches`. Draws without tessellation into the same pass join the open segment
   (draw.mm `segmentDraw`, classic pipelines: `RenderPipelineKey::classic`), so a pass with tessellation switches
   queues once, not once per run of tessellated draws (each switch ends both passes and costs tens of
-  microseconds; `METALGLDRV_TESS_SEGMENT_DRAWS=0` turns this off). Any Metal 4 recording
+  microseconds; `METALGLDRV_TESS_SEGMENT_DRAWS=0` turns this off). A framebuffer whose last pass drew
+  tessellation (`Framebuffer::tessHint`) starts its next pass in a segment, so that a tessellated draw after
+  other draws doesn't end a Metal 4 pass (storing and reloading every attachment); a segment that ends without
+  a tessellated draw clears the hint. Any Metal 4 recording
   (`Context::commandBuffer`), a flush, `glMemoryBarrier` or `glTextureBarrier` ends a segment. A segment has a
   serial of its own (`Context::serial()` while it is open), complete with its render command buffer; one
   `MTLEvent` per context orders the work (`Context::TessSegment`): the pre-pass after earlier Metal 4 work, the

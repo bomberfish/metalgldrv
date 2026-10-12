@@ -219,6 +219,7 @@ private:
     std::condition_variable bgCv_;
     uint64_t nextSerial_ = 1;
     uint64_t watermark_ = 0;              // all serials <= watermark_ are complete
+    std::atomic<uint64_t> watermarkPublished_{0};  // watermark_ for isComplete without the lock (only ever grows)
     std::set<uint64_t> completedAbove_;   // completed serials > watermark_
     std::set<uint64_t> submitted_;        // submitted, not complete
     bool residencyDirty_ = false;

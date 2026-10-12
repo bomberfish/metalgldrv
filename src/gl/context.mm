@@ -561,25 +561,30 @@ bool Context::openTessSegment(const PassDesc& p, bool prevWrites) {
     PendingClear clear = pendingClear;
     pendingClear.reset();
     if (cb_ && cbUsed_) flush(nil, true);
-    if (!tessEvent) tessEvent = [dev->mtl newEvent];
+    if (!tessMtlEvent) {
+        tessMtlEvent = [dev->mtl newEvent];
+        tessPrepEvent = [dev->mtl newEvent];
+        tessMainEvent = [dev->mtl newEvent];
+    }
     tessSeg.mtl = 0;
     if (tessMtlWork) {  // the Metal 4 work so far; else the previous pre-pass (which waited for it), in queue order
-        tessSeg.mtl = ++tessEventValue;
-        dev->queueSignal(tessEvent, tessSeg.mtl);
+        tessSeg.mtl = ++tessMtlValue;
+        dev->queueSignal(tessMtlEvent, tessSeg.mtl);
         tessMtlWork = false;
     }
-    tessSeg.prepDone = ++tessEventValue;
-    tessSeg.mainDone = ++tessEventValue;
+    tessSeg.prepChain = ++tessPrepValue;
+    tessSeg.prepDone = ++tessPrepValue;
+    tessSeg.mainDone = ++tessMainValue;
     bool waitMain = (prevWrites || tessBarrier) && tessLastMain;
     tessBarrier = false;
     @autoreleasepool {
         tessSeg.prep = [q commandBuffer];
         tessSeg.main = [q commandBuffer];
-        if (tessSeg.mtl) [tessSeg.prep encodeWaitForEvent:tessEvent value:tessSeg.mtl];
-        else if (tessLastPrep) [tessSeg.prep encodeWaitForEvent:tessEvent value:tessLastPrep];
-        if (waitMain) [tessSeg.prep encodeWaitForEvent:tessEvent value:tessLastMain];
-        [tessSeg.main encodeWaitForEvent:tessEvent value:tessSeg.prepDone];
-        if (tessLastMain) [tessSeg.main encodeWaitForEvent:tessEvent value:tessLastMain];
+        if (tessSeg.mtl) [tessSeg.prep encodeWaitForEvent:tessMtlEvent value:tessSeg.mtl];
+        else if (tessLastPrep) [tessSeg.prep encodeWaitForEvent:tessPrepEvent value:tessLastPrep];
+        if (waitMain) [tessSeg.prep encodeWaitForEvent:tessMainEvent value:tessLastMain];
+        [tessSeg.main encodeWaitForEvent:tessPrepEvent value:tessSeg.prepDone];
+        if (tessLastMain) [tessSeg.main encodeWaitForEvent:tessMainEvent value:tessLastMain];
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor new];
         fillPassDescriptor(rp, p, clear);
         tessSeg.compute = [tessSeg.prep computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];  // TCS dispatches are independent
@@ -590,6 +595,7 @@ bool Context::openTessSegment(const PassDesc& p, bool prevWrites) {
     tessSeg.pass = p;
     tessSeg.open = true;
     tessSeg.count++;
+    tessSeg.tessDraws = 0;
     if (!tessSeg.render || !tessSeg.compute) {
         MGL_ERR("failed to begin a tessellation pass (%dx%d)", p.width, p.height);
         endTessSegment();
@@ -648,14 +654,13 @@ bool Context::tessSegmentPassCurrent() const {
 void Context::tessPrepWaitForPrevious() {
     if (!tessSeg.open || tessSeg.prepWaitsMain) return;
     // the pre-pass so far goes first; the next one waits for it and for the previous segment
-    uint64_t chain = ++tessEventValue;
     @autoreleasepool {
         [tessSeg.compute endEncoding];
-        [tessSeg.prep encodeSignalEvent:tessEvent value:chain];
+        [tessSeg.prep encodeSignalEvent:tessPrepEvent value:tessSeg.prepChain];
         dev->commitClassic(tessSeg.prep, false, 0);
         tessSeg.prep = [dev->classicQueue() commandBuffer];
-        [tessSeg.prep encodeWaitForEvent:tessEvent value:chain];
-        [tessSeg.prep encodeWaitForEvent:tessEvent value:tessLastMain];
+        [tessSeg.prep encodeWaitForEvent:tessPrepEvent value:tessSeg.prepChain];
+        [tessSeg.prep encodeWaitForEvent:tessMainEvent value:tessLastMain];
         tessSeg.compute = [tessSeg.prep computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
     }
     tessSeg.prepWaitsMain = true;
@@ -664,12 +669,13 @@ void Context::tessPrepWaitForPrevious() {
 void Context::endTessSegment() {
     if (!tessSeg.open) return;
     tessSeg.open = false;
+    if (!tessSeg.tessDraws && tessSeg.fb && tessSeg.fb == drawFb.get()) tessSeg.fb->tessHint = false;  // a guess that missed
     @autoreleasepool {
         [tessSeg.compute endEncoding];
-        [tessSeg.prep encodeSignalEvent:tessEvent value:tessSeg.prepDone];
+        [tessSeg.prep encodeSignalEvent:tessPrepEvent value:tessSeg.prepDone];
         dev->commitClassic(tessSeg.prep, false, 0);
         [tessSeg.render endEncoding];
-        [tessSeg.main encodeSignalEvent:tessEvent value:tessSeg.mainDone];
+        [tessSeg.main encodeSignalEvent:tessMainEvent value:tessSeg.mainDone];
         dev->commitClassic(tessSeg.main, true, tessSeg.serial);
     }
     tessLastMain = tessSeg.mainDone;
@@ -685,7 +691,7 @@ void Context::endTessSegment() {
 
 void Context::queueAfterTessSegments() {
     if (tessLastMain <= tessQueueWaited) return;
-    dev->queueWait(tessEvent, tessLastMain);
+    dev->queueWait(tessMainEvent, tessLastMain);
     tessQueueWaited = tessLastMain;
 }
 

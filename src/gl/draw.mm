@@ -2932,6 +2932,8 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
         if (!pso) return false;
         MGL_STAT("draw:tess-metal");
         g_tessMetalDraws++;
+        seg.tessDraws++;
+        if (ctx->drawFb) ctx->drawFb->tessHint = true;
         if (prevWrites) ctx->tessPrepWaitForPrevious();
         id<MTLComputeCommandEncoder> ce = seg.compute;
         [ce setComputePipelineState:tcs];
@@ -3876,6 +3878,15 @@ static void executeDrawImpl(Context* ctx, const DrawParams& d, const DrawParams*
     if (vk.pdc) {
         executePdc(ctx, prog, var, fsProg, fsVar, mixedFs, frefl, d, ii, minIdx, maxIdx, argAddr, fsArgAddr, pdc.writes ? &pdcSplit : nullptr);
         return;
+    }
+    // A new pass into a framebuffer whose last pass drew tessellation starts in a segment
+    if (!fsrAddr && !ctx->tessSeg.open && ctx->drawFb && ctx->drawFb->tessHint && !ctx->rasterizerDiscard && !mglQueryVisibilityActive(ctx) &&
+        envFlagCached("METALGLDRV_TESS_SEGMENT_DRAWS", true)) {
+        PassDesc p;
+        if (ctx->resolvePass(p) && !(ctx->passOpen && p == ctx->curPass && !ctx->pendingClear.any())) {
+            MGL_STAT("tess-segment-early");
+            ctx->openTessSegment(p, false);
+        }
     }
     if (!fsrAddr && segmentDraw(ctx, prog, var, fsProg, fsVar, mixedFs, frefl, d, ii, minIdx, maxIdx, argAddr, fsArgAddr)) return;
     // owned by the context for the draw
