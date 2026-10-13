@@ -14,9 +14,9 @@
 // FSB_LOGTEX=1: logs the Metal texture descriptors the driver creates. FSB_TEXSTORAGE=1: non-rg32f textures are immutable with one level (glTexStorage2D). FSB_CAPTURE=<file.gputrace> with
 // MTL_CAPTURE_ENABLED=1: a Metal GPU capture of one frame (Apple's OpenGL runs on Metal too: its shaders are in it).
 //
-// Unigine Heaven's SSAO pass (2026-10-13): Apple's OpenGL 2.1 ms per pass, metalgldrv 7.2 ms, same image; the same
-// shader written by hand in MSL also takes ~6.8 ms in a plain Metal program, so the difference is in how Apple's
-// OpenGL compiles it, not in metalgldrv's MSL or bindings.
+// Unigine Heaven's SSAO pass (2026-10-13): Apple's OpenGL 2.1 ms per pass, metalgldrv 7.2 ms, same image and the
+// same compiled shader (METALGLDRV_SHADER_STATS); the difference was the textures' GPU-optimized (compressed) layout,
+// which scattered fetches pay for: 32-bit float textures now go without it (texture.mm).
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl3.h>
 #include <dlfcn.h>
