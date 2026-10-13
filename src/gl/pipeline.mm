@@ -4,6 +4,7 @@
 #include "gl/context.h"
 #include "util/log.h"
 #include "util/stats.h"
+#include "mtl/spi.h"
 
 namespace mgl {
 
@@ -296,8 +297,29 @@ static id<MTLRenderPipelineState> newRenderPipeline(Device* dev, const RenderPip
     }
     NSError* err = nil;
     MGL_STAT("render-pipeline-create");
+    // Debugging aid: METALGLDRV_SHADER_STATS=1 logs the GPU compiler's statistics for each render pipeline (registers,
+    // instruction and wait counts, spills), as Xcode's GPU capture shows them (private API).
+    static const bool shaderStats = envFlag("METALGLDRV_SHADER_STATS", false);
+    if (shaderStats) {
+        MTL4PipelineOptions* po = desc.options ? desc.options : [MTL4PipelineOptions new];
+        po.shaderReflection = MTL4ShaderReflectionBindingInfo;  // the statistics come with the reflection
+        spi::requestPipelineStatistics(po);
+        desc.options = po;
+    }
     id<MTLRenderPipelineState> pso = [dev->compiler newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:nil error:&err];
     if (!pso) MGL_ERR("render pipeline creation failed: %s", err.localizedDescription.UTF8String);
+    if (pso && shaderStats) {
+        NSDictionary* st = spi::pipelineStatistics(pso);
+        for (NSString* stage in st) {
+            NSDictionary* d = st[stage];
+            if (![d isKindOfClass:[NSDictionary class]]) continue;
+            NSMutableString* line = [NSMutableString string];
+            for (NSString* k in @[@"Temporary register count", @"Instruction count", @"ALU instruction count", @"Texture reads instruction count",
+                                  @"Wait instruction count", @"Spilled bytes", @"Uniform register count", @"FP16 instruction count"])
+                if (d[k]) [line appendFormat:@"%@ %@, ", k, d[k]];
+            MGL_INFO("shader stats: variant %llu %s: %s", (unsigned long long)v->uid, stage.UTF8String, line.UTF8String);
+        }
+    }
     return pso;
 }
 

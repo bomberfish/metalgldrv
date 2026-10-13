@@ -28,5 +28,11 @@ float maxLineWidth();
 bool cubeSeamsSupported();
 void forceCubeSeams(MTLSamplerDescriptor* d);
 
+// GPU compiler statistics (METALGLDRV_SHADER_STATS, a debugging aid): -[MTL4PipelineOptions
+// setEnablePerformanceStatistics:YES] when compiling, then -[MTLRenderPipelineReflection performanceStatistics] of
+// the pipeline: per stage, a dictionary of register, instruction and wait counts as Xcode's GPU capture shows them.
+void requestPipelineStatistics(MTL4PipelineOptions* o);
+NSDictionary* pipelineStatistics(id<MTLRenderPipelineState> pso);
+
 
 }  // namespace mgl::spi

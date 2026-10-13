@@ -80,4 +80,22 @@ void markOpenGLQueue(MTLCommandQueueDescriptor* d) {
 #endif
 }
 
+void requestPipelineStatistics(MTL4PipelineOptions* o) {
+#if METALGLDRV_PRIVATE_API
+    if (enabled()) send<BOOL>(o, "setEnablePerformanceStatistics:", YES);
+#endif
+}
+
+NSDictionary* pipelineStatistics(id<MTLRenderPipelineState> pso) {
+#if METALGLDRV_PRIVATE_API
+    SEL s = sel_registerName("performanceStatistics");
+    id refl = enabled() && [(id)pso respondsToSelector:@selector(reflection)] ? [(id)pso reflection] : nil;
+    if (refl && [refl respondsToSelector:s]) {
+        id st = ((id (*)(id, SEL))objc_msgSend)(refl, s);
+        if ([st isKindOfClass:[NSDictionary class]]) return st;
+    }
+#endif
+    return nil;
+}
+
 }  // namespace mgl::spi

@@ -11,7 +11,7 @@
 // the bits of a packed random normal, as Unigine's deferred buffers). Unset uniforms keep 0. Each frame runs --passes
 // passes into the target (blended additively, so that each is shaded), then glFlush; reports wall ms per pass over
 // the frames after glFinish, and the sum of the target's pixels (to compare the drivers' results).
-// FSB_TEXSTORAGE=1: non-rg32f textures are immutable with one level (glTexStorage2D). FSB_CAPTURE=<file.gputrace> with
+// FSB_LOGTEX=1: logs the Metal texture descriptors the driver creates. FSB_TEXSTORAGE=1: non-rg32f textures are immutable with one level (glTexStorage2D). FSB_CAPTURE=<file.gputrace> with
 // MTL_CAPTURE_ENABLED=1: a Metal GPU capture of one frame (Apple's OpenGL runs on Metal too: its shaders are in it).
 //
 // Unigine Heaven's SSAO pass (2026-10-13): Apple's OpenGL 2.1 ms per pass, metalgldrv 7.2 ms, same image; the same
@@ -32,6 +32,7 @@
 
 bool mtlCaptureStart(const char* path);
 void mtlCaptureStop();
+void mtlLogTextures();
 
 namespace {
 
@@ -167,6 +168,7 @@ int main(int argc, char** argv) {
     std::stringstream fsSrc;
     fsSrc << f.rdbuf();
 
+    if (getenv("FSB_LOGTEX")) mtlLogTextures();
     CGLPixelFormatAttribute attrs[] = {kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_3_2_Core, kCGLPFAAccelerated,
                                        (CGLPixelFormatAttribute)0};
     CGLPixelFormatObj pf = nullptr;
