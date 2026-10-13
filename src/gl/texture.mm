@@ -217,7 +217,15 @@ bool ensureTextureStorage(Context* ctx, Texture* t) {
         }
     }
     td.usage = usage;
-    if (!losslessCompressionSafe(fmt->mtl) && t->bitExact) td.allowGPUOptimizedContents = NO;
+    // 32-bit float formats get no "GPU-optimized" layout (lossless compression): engines keep G-buffer data in them
+    // (depth, packed normals) and fetch it at scattered places, where the compressed layout costs several times the
+    // memory traffic: Unigine Heaven's SSAO (32 scattered texelFetches of an RG32F buffer per pixel) runs 1.6x as
+    // fast, the whole benchmark ~9%. Without compression everywhere, render target loads and stores cost more than
+    // that saves (SuperTuxKart -17%). METALGLDRV_GPU_OPTIMIZED_TEXTURES=1 keeps Metal's default for these too.
+    // Formats the compression doesn't round-trip get none either for bit-exact textures (requireBitExact).
+    bool f32 = fmt->mtl == MTLPixelFormatR32Float || fmt->mtl == MTLPixelFormatRG32Float || fmt->mtl == MTLPixelFormatRGBA32Float;
+    if ((f32 && !envFlagCached("METALGLDRV_GPU_OPTIMIZED_TEXTURES", false)) || (!losslessCompressionSafe(fmt->mtl) && t->bitExact))
+        td.allowGPUOptimizedContents = NO;
     id<MTLTexture> nt = [ctx->dev->mtl newTextureWithDescriptor:td];
     if (nt && g_statsEnabled) statAddCaller("newTexture KB", __builtin_return_address(0), nt.allocatedSize >> 10);
     if (!nt) {
