@@ -669,6 +669,12 @@ void Context::tessPrepWaitForPrevious() {
 void Context::endTessSegment() {
     if (!tessSeg.open) return;
     tessSeg.open = false;
+    if (g_profilePasses) {
+        char label[96];
+        snprintf(label, sizeof label, "tess segment fb %u %dx%d%s", tessSeg.fb ? tessSeg.fb->name : 0, tessSeg.pass.width, tessSeg.pass.height,
+                 tessSeg.pass.depth.tex ? " +depth" : "");
+        profileTag(tessSeg.serial, label);
+    }
     if (!tessSeg.tessDraws && tessSeg.fb && tessSeg.fb == drawFb.get()) tessSeg.fb->tessHint = false;  // a guess that missed
     @autoreleasepool {
         [tessSeg.compute endEncoding];

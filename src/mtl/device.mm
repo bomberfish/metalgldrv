@@ -333,7 +333,9 @@ void Device::commitClassic(id<MTLCommandBuffer> cb, bool render, uint64_t serial
             std::lock_guard<std::mutex> g(mutex_);
             tessGpuSeconds_[render] += c.GPUEndTime - c.GPUStartTime;
         }
-        if (serial) this->markComplete(serial, c.error, 0, 0);
+        if (g_profilePasses && !render && c.GPUEndTime > 0) profileAdd("tessellation pre-pass (VS + TCS)", c.GPUEndTime - c.GPUStartTime);
+        // METALGLDRV_PROFILE_PASSES: segments' render passes get their GPU time like Metal 4 passes
+        if (serial) this->markComplete(serial, c.error, g_profilePasses ? c.GPUStartTime : 0, g_profilePasses ? c.GPUEndTime : 0);
         else if (c.error) MGL_ERR("GPU command buffer (tessellation) failed: %s", c.error.description.UTF8String);
     }];
     std::lock_guard<std::mutex> g(mutex_);
@@ -649,11 +651,12 @@ id<MTLLibrary> Device::compileLibrary(const std::string& source, std::string* er
         // keep the precise ones; METALGLDRV_MSL_OPTS=precisefn too.
         co.mathFloatingPointFunctions = caps.strictLevel >= 1 ? MTLMathFloatingPointFunctionsPrecise : MTLMathFloatingPointFunctionsFast;
         co.preserveInvariance = YES;
-        // Debugging aid, read per compile: METALGLDRV_MSL_OPTS containing "noinv", "safemath", "nofuse", "size",
-        // "precisefn".
+        // Debugging aid, read per compile: METALGLDRV_MSL_OPTS containing "noinv", "safemath", "fastmath", "nofuse",
+        // "size", "precisefn".
         if (const char* o = getenv("METALGLDRV_MSL_OPTS")) {
             if (strstr(o, "noinv")) co.preserveInvariance = NO;
             if (strstr(o, "safemath")) co.mathMode = MTLMathModeSafe;
+            if (strstr(o, "fastmath")) co.mathMode = MTLMathModeFast;
             if (strstr(o, "size")) co.optimizationLevel = MTLLibraryOptimizationLevelSize;
             if (strstr(o, "precisefn")) co.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
         }

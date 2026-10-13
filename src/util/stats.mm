@@ -77,6 +77,13 @@ void profileComplete(uint64_t serial, double gpuSeconds) {
     e.second++;
 }
 
+void profileAdd(const char* label, double gpuSeconds) {
+    std::lock_guard<std::mutex> g(g_profMutex);
+    auto& e = g_profTimes[label];
+    e.first += gpuSeconds;
+    e.second++;
+}
+
 static std::string profileReport() {
     std::vector<std::pair<std::string, std::pair<double, uint64_t>>> v;
     {

@@ -360,7 +360,8 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   separately, their VS + TCS pre-passes too), logged every 5 s.
   `METALGLDRV_PROFILE_PASSES=1` adds GPU time per render pass / compute dispatch (each is committed
   in its own command buffer, so it changes performance; labels name the framebuffer, the entry
-  point that opened the pass, its draw count and first program).
+  point that opened the pass, its draw count and first program), tessellation segments' render passes
+  ("tess segment fb N") and their VS + TCS pre-passes (overlapping other work, so not exclusive time).
 * `METALGLDRV_TRACE_CALLS=1|<n>` – calls per GL entry point, the 30 (or n) most frequent logged
   every 5 s from a background thread (also while the app draws nothing);
   `METALGLDRV_TRACE_SEQ=<n>` also logs each thread's first n calls in order.

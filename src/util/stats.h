@@ -23,6 +23,7 @@ void hitchCompile(const char* what, double ms);
 extern bool g_profilePasses;
 void profileTag(uint64_t serial, const char* label);
 void profileComplete(uint64_t serial, double gpuSeconds);
+void profileAdd(const char* label, double gpuSeconds);  // time not tied to a serial (tessellation pre-passes)
 }  // namespace mgl
 #define MGL_STAT_CALLER(ev) do { if (::mgl::g_statsEnabled) ::mgl::statCaller(ev, __builtin_return_address(0)); } while (0)
 #define MGL_STAT(ev) do { if (::mgl::g_statsEnabled) ::mgl::statCount(ev); } while (0)
