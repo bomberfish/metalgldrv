@@ -316,13 +316,20 @@ int main(int argc, char** argv) {
         CHECK(glGetError_() == GL_NO_ERROR);
 
         GLint one = 1, got = 0;
+        unsetenv("METALGLDRV_SWAP_INTERVAL");
         [ctx setValues:&one forParameter:NSOpenGLContextParameterSwapInterval];
         [ctx getValues:&got forParameter:NSOpenGLContextParameterSwapInterval];
         CHECK(got == 1);
         CHECK(layer && layer.displaySyncEnabled);
+        // Swap interval 0 still presents with display sync; only METALGLDRV_SWAP_INTERVAL=0 turns it off.
         GLint zero = 0;
         [ctx setValues:&zero forParameter:NSOpenGLContextParameterSwapInterval];
+        CHECK(layer && layer.displaySyncEnabled);
+        setenv("METALGLDRV_SWAP_INTERVAL", "0", 1);
+        [ctx setValues:&one forParameter:NSOpenGLContextParameterSwapInterval];
         CHECK(layer && !layer.displaySyncEnabled);
+        unsetenv("METALGLDRV_SWAP_INTERVAL");
+        [ctx setValues:&zero forParameter:NSOpenGLContextParameterSwapInterval];
         [ctx flushBuffer];
 
         // Resize: -update re-lays the layer; the next flush resizes the surface.
