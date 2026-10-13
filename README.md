@@ -141,6 +141,11 @@ Every `METALGLDRV_*` variable is listed in [docs/ARCHITECTURE.md](docs/ARCHITECT
   thread, shader compiles, residency).
 * `METALGLDRV_APP_PROFILE`, `METALGLDRV_VENDOR`, ...: per-application profiles and overrides
   (`src/gl/app_profiles.cpp`).
+* `METALGLDRV_GPU_OPTIMIZED_TEXTURES=1`: textures with 32-bit float channels (`R32F`, `RG32F`,
+  `RGBA32F`) keep Metal's compressed GPU layout. By default they skip it, because it makes shaders
+  that read scattered texels from them several times slower (Heaven: +9% without it). Shaders that
+  mostly render to or stream through such textures can be faster with it, so try this if a game
+  (for example a Minecraft shader pack) got slower.
 
 ## Tests
 
