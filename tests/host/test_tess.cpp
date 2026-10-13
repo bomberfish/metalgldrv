@@ -10,6 +10,7 @@
 
 extern "C" void mglTestEnvChanged(void);
 extern "C" void mglTestTessCounters(uint64_t* passes, uint64_t* fused);
+extern "C" uint64_t mglTestTessPrepWaits(void);
 
 namespace {
 
@@ -1034,6 +1035,135 @@ void main() {
     glDeleteProgram(plain2);
     glDeleteRenderbuffers(1, &depth);
     glDeleteBuffers(2, bufs);
+    glDeleteVertexArrays(1, &vao);
+    CHECK_GL();
+}
+
+// A pre-pass (VS + TCS) that samples what an earlier segment rendered waits for that segment's render pass
+// (tessPrepNeedsMain); one that samples other textures doesn't. 32 rounds without a CPU sync in between: each renders
+// its value into texture A with a tessellated draw, then a tessellated draw whose vertex shader fetches A writes it to
+// its own 8x8 tile of the target.
+TEST(tessellation_prepass_reads_previous_segment) {
+    Target t;
+    GLuint texA, fboA, vao;
+    glGenTextures(1, &texA);
+    glBindTexture(GL_TEXTURE_2D, texA);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 256, 256);
+    glGenFramebuffers(1, &fboA);
+    glBindFramebuffer(GL_FRAMEBUFFER, fboA);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texA, 0);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    const char* tcs = R"(#version 460 core
+layout(vertices = 3) out;
+in vec4 vc[];
+out vec4 tc[];
+void main() {
+    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
+    tc[gl_InvocationID] = vc[gl_InvocationID];
+    gl_TessLevelOuter[0] = gl_TessLevelOuter[1] = gl_TessLevelOuter[2] = 2.0;
+    gl_TessLevelInner[0] = 2.0;
+})";
+    const char* tes = R"(#version 460 core
+layout(triangles, equal_spacing, ccw) in;
+in vec4 tc[];
+out vec4 color;
+void main() {
+    vec3 t = gl_TessCoord;
+    gl_Position = t.x * gl_in[0].gl_Position + t.y * gl_in[1].gl_Position + t.z * gl_in[2].gl_Position;
+    color = t.x * tc[0] + t.y * tc[1] + t.z * tc[2] + vec4(0.0, 0.0, 0.0, t.x * t.y);  // not affine: Metal's tessellator
+})";
+    const char* fs = "#version 460 core\nin vec4 color;\nout vec4 o;\nvoid main() { o = color; }\n";
+    // slow: the writer's render pass is still running when the reader's pre-pass could start
+    const char* slowFS = R"(#version 460 core
+in vec4 color;
+uniform int iterations;
+out vec4 o;
+void main() {
+    float a = 0.0;
+    for (int i = 0; i < iterations; i++) a += sin(a + float(i));
+    o = color + vec4(step(1e30, abs(a)));
+})";
+    // a triangle covering the viewport
+    const char* writerVS = R"(#version 460 core
+uniform float value;
+out vec4 vc;
+void main() {
+    vc = vec4(value);
+    gl_Position = vec4(float(gl_VertexID == 1) * 4.0 - 1.0, float(gl_VertexID == 2) * 4.0 - 1.0, 0.0, 1.0);
+})";
+    const char* readerVS = R"(#version 460 core
+uniform sampler2D src;
+out vec4 vc;
+void main() {
+    vc = texelFetch(src, ivec2(8, 8), 0);
+    gl_Position = vec4(float(gl_VertexID == 1) * 4.0 - 1.0, float(gl_VertexID == 2) * 4.0 - 1.0, 0.0, 1.0);
+})";
+    GLuint writer = program(writerVS, tcs, tes, slowFS), reader = program(readerVS, tcs, tes, fs);
+    setenv("METALGLDRV_TESS_METAL", "1", 1);
+    mglTestEnvChanged();
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+    glClearColor(-1, -1, -1, -1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(reader);
+    glUniform1i(glGetUniformLocation(reader, "src"), 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texA);
+    uint64_t w0 = mglTestTessPrepWaits();
+    for (int k = 0; k < 32; k++) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fboA);
+        glViewport(0, 0, 256, 256);
+        glUseProgram(writer);
+        glUniform1f(glGetUniformLocation(writer, "value"), float(k + 1));
+        glUniform1i(glGetUniformLocation(writer, "iterations"), 2000);
+        glDrawArrays(GL_PATCHES, 0, 3);
+        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        glViewport((k % 8) * 8, (k / 8) * 8, 8, 8);
+        glUseProgram(reader);
+        glDrawArrays(GL_PATCHES, 0, 3);
+    }
+    glViewport(0, 0, 64, 64);
+    std::vector<float> px = t.read();
+    int wrong = 0;
+    for (int k = 0; k < 32; k++) {
+        float v = px[(((k / 8) * 8 + 4) * 64 + (k % 8) * 8 + 4) * 4];
+        if (v != float(k + 1)) {
+            if (!wrong) fprintf(stderr, "  tile %d: %g, expected %d\n", k, v, k + 1);
+            wrong++;
+        }
+    }
+    CHECK(wrong == 0);
+    CHECK(mglTestTessPrepWaits() - w0 >= 32);
+    // the reader samples texture B instead, which no segment renders: its pre-passes don't wait
+    GLuint texB;
+    glGenTextures(1, &texB);
+    glBindTexture(GL_TEXTURE_2D, texB);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 16, 16);
+    std::vector<float> ones(16 * 16 * 4, 7.0f);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 16, 16, GL_RGBA, GL_FLOAT, ones.data());
+    w0 = mglTestTessPrepWaits();
+    for (int k = 0; k < 8; k++) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fboA);
+        glViewport(0, 0, 256, 256);
+        glUseProgram(writer);
+        glDrawArrays(GL_PATCHES, 0, 3);
+        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        glViewport(k * 8, 0, 8, 8);
+        glUseProgram(reader);
+        glDrawArrays(GL_PATCHES, 0, 3);
+    }
+    CHECK(mglTestTessPrepWaits() - w0 == 0);
+    glViewport(0, 0, 64, 64);
+    px = t.read();
+    CHECK(px[(4 * 64 + 4) * 4] == 7.0f && px[(4 * 64 + 60) * 4] == 7.0f);
+    glDeleteTextures(1, &texB);
+    unsetenv("METALGLDRV_TESS_METAL");
+    mglTestEnvChanged();
+    glDeleteProgram(writer);
+    glDeleteProgram(reader);
+    glDeleteFramebuffers(1, &fboA);
+    glDeleteTextures(1, &texA);
     glDeleteVertexArrays(1, &vao);
     CHECK_GL();
 }

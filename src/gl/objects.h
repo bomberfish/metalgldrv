@@ -447,6 +447,7 @@ public:
     std::vector<Loc> locations;
     // current values of sampler/image uniforms (texture unit per element)
     std::vector<int> samplerUnits;  // indexed by slot
+    int8_t fragmentWritesMemory = -1;  // the fragment stage uses images, storage blocks or atomic counters (-1: not known yet)
     std::vector<int> blockBindings; // uniform block index -> binding point
     std::vector<int> storageBindings;
 

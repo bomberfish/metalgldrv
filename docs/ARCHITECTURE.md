@@ -369,6 +369,8 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
   compatibility contexts from sharing (patched in memory by default; see docs/doom2016.md).
 * `METALGLDRV_IMPLICIT_PATCHES=1` – draws whose primitives have GL_PATCH_VERTICES vertices run as
   patches while tessellation is active (Iris + Sodium; set by the Fabric mod).
+* `METALGLDRV_TESS_PREP_TRACK=0` – a tessellation pre-pass (VS + TCS) whose shaders sample any texture waits for the
+  earlier segments' render passes (by default only when it samples one of their attachments).
 * `METALGLDRV_TESS_SEGMENT_DRAWS=0` – draws without tessellation end a tessellation segment instead of joining it.
 * `METALGLDRV_GPU_OPTIMIZED_TEXTURES=1` – keep Metal's GPU-optimized (losslessly compressed) layout also for 32-bit
   float textures, which otherwise go without it (scattered G-buffer fetches cost several times as much compressed).

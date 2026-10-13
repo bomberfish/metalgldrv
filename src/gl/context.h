@@ -415,6 +415,14 @@ public:
     bool tessMtlWork = false;     // Metal 4 work submitted since the last segment opened
     uint64_t tessQueueWaited = 0;  // the last such value the Metal 4 queue waits for
     bool tessBarrier = false;      // glMemoryBarrier / glTextureBarrier since the last segment
+    // What segments' render passes wrote since a pre-pass last waited for them (tessPrepNeedsMain): their attachments
+    // (Metal storage) and whether a fragment shader in them may have written memory (images, storage buffers).
+    std::vector<__unsafe_unretained id<MTLTexture>> tessUnwaitedTargets;  // owned by the textures (only compared)
+    bool tessUnwaitedMemory = false;
+    void tessMainsWaited() {
+        tessUnwaitedTargets.clear();
+        tessUnwaitedMemory = false;
+    }
     // prevWrites: the first draw's VS / TCS read what the previous segment may have written (prepWaitsMain)
     bool openTessSegment(const PassDesc& p, bool prevWrites);  // false if there is no classic queue
     void endTessSegment();

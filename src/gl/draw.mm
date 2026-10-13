@@ -2855,17 +2855,69 @@ extern "C" __attribute__((visibility("default"))) void mglTestEnvChanged(void) {
 
 // The VS / TCS of `prog` read what draws may write (textures, images, storage buffers, atomic counters): their
 // pre-pass waits for the previous tessellation segment (Context::TessSegment).
-static bool tessPrepReadsWrites(ProgramObj* prog) {
+// The fragment stage may write memory (images, storage blocks, atomic counters): a later pre-pass can't tell what.
+static bool fragmentWritesMemory(ProgramObj* prog) {
+    if (prog->composite) {  // program pipeline: the fragment stage's program
+        ProgramObj* fs = prog->stagePrograms[(int)glsl::Stage::Fragment].get();
+        return fs && fs != prog && fragmentWritesMemory(fs);
+    }
+    if (prog->fragmentWritesMemory < 0) {
+        const uint32_t fs = 1u << (int)glsl::Stage::Fragment;
+        const glsl::Reflection& r = prog->refl;
+        bool w = false;
+        for (const auto& b : r.storageBlocks) w |= (b.stageMask & fs) != 0;
+        for (const auto& a : r.atomicCounterBuffers) w |= (a.stageMask & fs) != 0;
+        for (const auto& sl : r.slots)
+            if (sl.kind == glsl::SlotKind::Image && sl.index < r.uniforms.size()) w |= (r.uniforms[sl.index].stageMask & fs) != 0;
+        prog->fragmentWritesMemory = w;
+    }
+    return prog->fragmentWritesMemory != 0;
+}
+
+// Whether the VS / TCS pre-pass of a tessellated draw must wait for the render passes of earlier segments: it reads
+// storage blocks, atomic counters or images (anything a fragment shader may have written), or samples a texture that
+// one of those passes rendered to (Context::tessUnwaitedTargets) or after a fragment shader that writes memory.
+// Otherwise the pre-pass overlaps them: the faces of a cube shadow map, drawn with a tessellation shader that samples
+// a heightmap (Unigine Heaven).
+static bool tessPrepNeedsMain(Context* ctx, ProgramObj* prog) {
+    if (prog->composite) return true;  // program pipeline: resources per stage program (not tracked)
     const uint32_t stages = 1u << (int)glsl::Stage::Vertex | 1u << (int)glsl::Stage::TessControl;
     const glsl::Reflection& r = prog->refl;
-    for (const auto& u : r.uniforms)
-        if (u.slot >= 0 && (u.stageMask & stages)) return true;
     for (const auto& b : r.storageBlocks)
         if (b.stageMask & stages) return true;
     for (const auto& a : r.atomicCounterBuffers)
         if (a.stageMask & stages) return true;
+    if (!envFlagCached("METALGLDRV_TESS_PREP_TRACK", true)) {
+        for (const auto& u : r.uniforms)
+            if (u.slot >= 0 && (u.stageMask & stages)) return true;
+        return false;
+    }
+    for (size_t i = 0; i < r.slots.size(); i++) {
+        const glsl::Slot& sl = r.slots[i];
+        if (sl.kind != glsl::SlotKind::Texture && sl.kind != glsl::SlotKind::Image) continue;
+        if (sl.index >= r.uniforms.size() || !(r.uniforms[sl.index].stageMask & stages)) continue;
+        if (sl.kind == glsl::SlotKind::Image || ctx->tessUnwaitedMemory) return true;
+        int unit = i < prog->samplerUnits.size() ? prog->samplerUnits[i] : -1;
+        int ti = texTargetIndex(sl.textureTarget);
+        Texture* t = unit >= 0 && unit < kMaxTextureUnits && ti >= 0 ? ctx->textures[unit][ti].get() : nullptr;
+        if (t && t->viewParent) t = t->viewParent.get();
+        if (!t || !t->mtl) continue;  // nothing bound: a dummy
+        id<MTLTexture> m = t->mtl;
+        for (id<MTLTexture> w : ctx->tessUnwaitedTargets)
+            if (w == m) return true;
+        if (ctx->tessSeg.open) {
+            const PassDesc& p = ctx->tessSeg.pass;
+            for (const PassAttachment* a : {&p.depth, &p.stencil})
+                if (a->tex && (a->tex == m || a->tex.parentTexture == m)) return true;
+            for (const PassAttachment& a : p.color)
+                if (a.tex && (a.tex == m || a.tex.parentTexture == m)) return true;
+        }
+    }
     return false;
 }
+
+static uint64_t g_tessPrepWaits = 0;
+extern "C" __attribute__((visibility("default"))) uint64_t mglTestTessPrepWaits(void) { return g_tessPrepWaits; }
 
 // False: nothing was encoded and the emulation draws it.
 static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d, glsl::VariantKey vk, const DrawParams* batch, int batchCount) {
@@ -2893,7 +2945,8 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
                                   : refl.tesSpacing == GL_FRACTIONAL_ODD ? MTLTessellationPartitionModeFractionalOdd
                                                                          : MTLTessellationPartitionModeInteger);
     key.tessWinding = (uint8_t)(refl.tesOrder == GL_CW ? MTLWindingClockwise : MTLWindingCounterClockwise);
-    bool prevWrites = tessPrepReadsWrites(prog);
+    bool prevWrites = tessPrepNeedsMain(ctx, prog);
+    if (prevWrites) g_tessPrepWaits++;
     // Setting up the draw can record Metal 4 work (texture storage, feedback-loop copies), which ends the segment:
     // then once more in a new one.
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -2933,6 +2986,7 @@ static bool executeTessMetal(Context* ctx, ProgramObj* prog, const DrawParams& d
         if (!pso) return false;
         MGL_STAT("draw:tess-metal");
         g_tessMetalDraws++;
+        if (fragmentWritesMemory(prog)) ctx->tessUnwaitedMemory = true;
         seg.tessDraws++;
         if (ctx->drawFb) ctx->drawFb->tessHint = true;
         if (prevWrites) ctx->tessPrepWaitForPrevious();
@@ -3037,6 +3091,7 @@ static bool segmentDraw(Context* ctx, ProgramObj* prog, ProgramVariant* var, Pro
     if (!pso) return true;
     MGL_STAT("draw:tess-segment");
     g_segmentDraws++;
+    if (fragmentWritesMemory(mixedFs && fsProg ? fsProg : prog)) ctx->tessUnwaitedMemory = true;
     __unsafe_unretained id<MTLRenderCommandEncoder> e = seg.render;  // owned by the segment
     if (ctx->enc.pipeline != pso) {
         [e setRenderPipelineState:pso];

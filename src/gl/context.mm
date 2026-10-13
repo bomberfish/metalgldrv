@@ -576,6 +576,7 @@ bool Context::openTessSegment(const PassDesc& p, bool prevWrites) {
     tessSeg.prepDone = ++tessPrepValue;
     tessSeg.mainDone = ++tessMainValue;
     bool waitMain = (prevWrites || tessBarrier) && tessLastMain;
+    if (waitMain) tessMainsWaited();
     tessBarrier = false;
     @autoreleasepool {
         tessSeg.prep = [q commandBuffer];
@@ -664,11 +665,21 @@ void Context::tessPrepWaitForPrevious() {
         tessSeg.compute = [tessSeg.prep computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
     }
     tessSeg.prepWaitsMain = true;
+    tessMainsWaited();
 }
 
 void Context::endTessSegment() {
     if (!tessSeg.open) return;
     tessSeg.open = false;
+    auto unwaited = [&](id<MTLTexture> t) {  // each texture once: the list stays as small as the set of render targets
+        if (!t) return;
+        if (t.parentTexture) t = t.parentTexture;
+        if (std::find(tessUnwaitedTargets.begin(), tessUnwaitedTargets.end(), t) == tessUnwaitedTargets.end())
+            tessUnwaitedTargets.push_back(t);
+    };
+    unwaited(tessSeg.pass.depth.tex);
+    unwaited(tessSeg.pass.stencil.tex);
+    for (const PassAttachment& a : tessSeg.pass.color) unwaited(a.tex);
     if (g_profilePasses) {
         char label[96];
         snprintf(label, sizeof label, "tess segment fb %u %dx%d%s", tessSeg.fb ? tessSeg.fb->name : 0, tessSeg.pass.width, tessSeg.pass.height,
