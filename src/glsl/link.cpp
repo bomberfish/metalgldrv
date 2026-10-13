@@ -254,6 +254,7 @@ private:
     void writeInit(const Type& t, const TL& L, const ConstVal& cv, size_t& ci, uint8_t* dst);
     void stageMetadata();
     bool tessLevelCode(const Expr* e, std::vector<TessLevelOp>& out);
+    bool arrangementFree(Stage st, bool barriers) const;
     void tessFusedAnalysis();
     void tessLevelAnalysis();
     bool tesAffineAnalysis();
@@ -2109,6 +2110,48 @@ bool Linker::tesAffineAnalysis() {
     return true;
 }
 
+// Whether stage st runs correctly with its invocations in other arrangements (or not at all): no memory writes (they
+// could happen more than once) and no subgroup operations; with `barriers`, no TCS barrier() either (invocations in
+// sequence). A stage the program doesn't have is.
+bool Linker::arrangementFree(Stage st, bool barriers) const {
+    auto bufferRoot = [](const Expr* e) {
+        while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
+        return e->kind == EK::Var && e->var->q.storage == Storage::Buffer;
+    };
+    const StageCode& sc = prog_->stages[(int)st];
+    if (!sc.main) return true;
+    for (const std::string& n : sc.usedNames)
+        if (n.compare(0, 11, "gl_Subgroup") == 0 || n.compare(0, 11, "gl_SubGroup") == 0) return false;
+    bool bad = false;
+    Walker w;
+    w.onExpr = [&](const Expr* e) {
+        switch (e->kind) {
+            case EK::Assign: bad |= bufferRoot(e->args[0]); return;
+            case EK::Unary:
+                if (e->op == Op::PreInc || e->op == Op::PreDec || e->op == Op::PostInc || e->op == Op::PostDec) bad |= bufferRoot(e->args[0]);
+                return;
+            case EK::Call: case EK::Builtin: case EK::SubroutineCall: break;
+            default: return;
+        }
+        if (!e->fn) return;
+        for (size_t i = 0; i < e->args.size() && i < e->fn->params.size(); i++) {  // buffer lvalues as out / inout arguments
+            Storage s = e->fn->params[i]->q.storage;
+            if ((s == Storage::Out || s == Storage::InOut) && bufferRoot(e->args[i])) bad = true;
+        }
+        if (e->kind != EK::Builtin) return;
+        const std::string& n = e->fn->name;
+        if ((n.compare(0, 6, "atomic") == 0 && n != "atomicCounter") || n.compare(0, 10, "imageStore") == 0 ||
+            n.compare(0, 11, "imageAtomic") == 0)
+            bad = true;
+        if ((n == "barrier" && st == Stage::TessControl && barriers) || n.compare(0, 8, "subgroup") == 0 || n.compare(0, 6, "ballot") == 0 ||
+            n.compare(0, 14, "readInvocation") == 0 || n.compare(0, 19, "readFirstInvocation") == 0 ||
+            n.compare(0, 13, "anyInvocation") == 0 || n.compare(0, 14, "allInvocations") == 0)
+            bad = true;
+    };
+    for (auto* f : sc.reachable) w.stmt(f->body);
+    return !bad;
+}
+
 // Decides Reflection::tessFusable, tessLevels and tesAffine (see glsl.h).
 void Linker::tessFusedAnalysis() {
     auto& r = prog_->refl;
@@ -2116,46 +2159,7 @@ void Linker::tessFusedAnalysis() {
     auto has = [&](Stage s) { return (m & (1u << (int)s)) != 0; };
     if (!has(Stage::TessEval)) return;
     tessLevelAnalysis();
-    auto bufferRoot = [](const Expr* e) {
-        while (e->kind == EK::Index || e->kind == EK::Field || e->kind == EK::Swizzle) e = e->args[0];
-        return e->kind == EK::Var && e->var->q.storage == Storage::Buffer;
-    };
-    // Whether stage st runs correctly with its invocations in other arrangements: no memory writes (they could happen
-    // more than once) and no subgroup operations; with `barriers`, no TCS barrier() either (invocations in sequence).
-    auto fusableStage = [&](Stage st, bool barriers) {
-        const StageCode& sc = prog_->stages[(int)st];
-        if (!sc.main) return true;
-        for (const std::string& n : sc.usedNames)
-            if (n.compare(0, 11, "gl_Subgroup") == 0 || n.compare(0, 11, "gl_SubGroup") == 0) return false;
-        bool bad = false;
-        Walker w;
-        w.onExpr = [&](const Expr* e) {
-            switch (e->kind) {
-                case EK::Assign: bad |= bufferRoot(e->args[0]); return;
-                case EK::Unary:
-                    if (e->op == Op::PreInc || e->op == Op::PreDec || e->op == Op::PostInc || e->op == Op::PostDec) bad |= bufferRoot(e->args[0]);
-                    return;
-                case EK::Call: case EK::Builtin: case EK::SubroutineCall: break;
-                default: return;
-            }
-            if (!e->fn) return;
-            for (size_t i = 0; i < e->args.size() && i < e->fn->params.size(); i++) {  // buffer lvalues as out / inout arguments
-                Storage s = e->fn->params[i]->q.storage;
-                if ((s == Storage::Out || s == Storage::InOut) && bufferRoot(e->args[i])) bad = true;
-            }
-            if (e->kind != EK::Builtin) return;
-            const std::string& n = e->fn->name;
-            if ((n.compare(0, 6, "atomic") == 0 && n != "atomicCounter") || n.compare(0, 10, "imageStore") == 0 ||
-                n.compare(0, 11, "imageAtomic") == 0)
-                bad = true;
-            if ((n == "barrier" && st == Stage::TessControl && barriers) || n.compare(0, 8, "subgroup") == 0 || n.compare(0, 6, "ballot") == 0 ||
-                n.compare(0, 14, "readInvocation") == 0 || n.compare(0, 19, "readFirstInvocation") == 0 ||
-                n.compare(0, 13, "anyInvocation") == 0 || n.compare(0, 14, "allInvocations") == 0)
-                bad = true;
-        };
-        for (auto* f : sc.reachable) w.stmt(f->body);
-        return !bad;
-    };
+    auto fusableStage = [&](Stage st, bool barriers) { return arrangementFree(st, barriers); };
     // Several patches per object threadgroup (tessellation emulation): VS and TCS run once per control point, but threads
     // past the draw's last patch repeat its work without storing it.
     r.tessBatchable = fusableStage(Stage::Vertex, false) && fusableStage(Stage::TessControl, false);
@@ -2290,6 +2294,13 @@ LinkResult Linker::run() {
         stageMetadata();
         if (ok_) reflectProgramInterface(*prog_, prog_->refl);
         if (ok_) tessFusedAnalysis();
+        if (ok_) {
+            const StageCode& fs = prog_->stages[(int)Stage::Fragment];
+            bool sampleMask = false;
+            for (auto* v : fs.used)
+                if (v->builtin == BuiltinVar::SampleMask) sampleMask = true;
+            prog_->refl.fsOutputOnly = fs.main && !fs.usesDiscard && !fs.writesFragDepth && !sampleMask && arrangementFree(Stage::Fragment, false);
+        }
     }
     // names produced by the stage feeding the rasterizer (used by the FS emitter to drop unmatched inputs)
     if (ok_) {

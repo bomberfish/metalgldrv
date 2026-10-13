@@ -327,6 +327,10 @@ struct Reflection {
     int meshMaxVertices = 0, meshMaxPrimitives = 0;
     uint32_t meshOutputPrimitive = 0;  // GL_POINTS / GL_LINES / GL_TRIANGLES
     bool usesFragDepth = false, earlyFragmentTests = false, usesDiscard = false;
+    // The fragment shader only computes its color outputs: no discard, gl_FragDepth, gl_SampleMask, memory writes or
+    // subgroup operations. Without color attachments (or with all of them masked) it changes nothing: a depth-only
+    // pass (shadow maps) runs without it.
+    bool fsOutputOnly = false;
     // ARB_post_depth_coverage (super strict): the fragment shader declares post_depth_coverage and reads
     // gl_SampleMaskIn, which must hold only the samples that passed the early depth/stencil tests (VariantKey::pdc).
     bool postDepthCoverage = false;
@@ -453,6 +457,10 @@ struct EntryPoint {
     uint32_t spillRecordBytes = 0;  // Mesh: bytes per primitive of spilled varyings (0 = none)
     uint32_t scratchWordsPerItem = 0;  // mgl_gs_copy: size of each item's MGLDrawInfo::gsRecord area
     uint32_t patchesPerObjectGroup = 1;  // mgl_tes_obj: patches per object threadgroup (grid x = patches / this, rounded up)
+    // Fragment: the entry point only writes color outputs; nothing it adds changes coverage or depth (GL_SAMPLE_MASK,
+    // the compatibility alpha test, coarse shading's discards, gl_FragDepth). With Reflection::fsOutputOnly, a pipeline
+    // without color writes may leave it out.
+    bool colorOnly = false;
 };
 
 struct MSLOutput {

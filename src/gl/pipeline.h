@@ -20,6 +20,7 @@ struct ProgramVariant {
     id<MTLLibrary> lib = nil;
     bool ok = false;
     bool manualFetch = false;  // classic VS pulls vertices from MGLDrawInfo (no vertex descriptor)
+    bool fsOutputOnly = false;  // the program's Reflection::fsOutputOnly
     std::string error;
     const glsl::EntryPoint* entry(glsl::EntryPoint::Kind k) const {
         for (auto& e : msl.entryPoints)

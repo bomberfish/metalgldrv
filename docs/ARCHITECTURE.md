@@ -370,6 +370,8 @@ Read by the driver at startup (`envFlag`/`envInt` in `src/util/log.mm`, or `gete
 * `METALGLDRV_IMPLICIT_PATCHES=1` – draws whose primitives have GL_PATCH_VERTICES vertices run as
   patches while tessellation is active (Iris + Sodium; set by the Fabric mod).
 * `METALGLDRV_TESS_SEGMENT_DRAWS=0` – draws without tessellation end a tessellation segment instead of joining it.
+* `METALGLDRV_SKIP_UNUSED_FS=0` – keep fragment shaders in pipelines without color writes (by default a fragment stage
+  that only writes color is left out of depth-only passes such as shadow maps).
 * `METALGLDRV_TESS_METAL=0`, `METALGLDRV_TESS_FAST=0`, `METALGLDRV_TESS_BATCH=0`, `METALGLDRV_TESS_PASS1=compute` –
   turn off Metal's tessellator, the tessellation fast path or multi-draw batching, or run the emulation's pass 1 as a
   compute kernel (see Tessellation; for comparisons and debugging).

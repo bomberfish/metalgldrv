@@ -4000,6 +4000,8 @@ inline uint2 mgl_fsr_comb(uint2 a, uint2 b, uint op) {
     e += "}\n\n";
     entries_ += e;
     out_.entryPoints.push_back({"mgl_fs", Stage::Fragment, EntryPoint::Fragment});
+    out_.entryPoints.back().colorOnly = !fragDepth && !biByKind.count(BuiltinVar::SampleMask) && !K.sampleMask && alpha.empty() &&
+                                        !fsr_ && !K.pdc;
     if (K.pdc) {
         // ARB_post_depth_coverage pre-pass: marks the samples that pass the depth/stencil tests (writes disabled)
         entries_ += "[[early_fragment_tests]]\nfragment float4 mgl_fs_pdc() {\n    return float4(1.0f);\n}\n\n";

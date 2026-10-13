@@ -71,6 +71,7 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     static std::atomic<uint64_t> nextUid{1};
     v->uid = nextUid++;
     v->manualFetch = key.manualFetch;
+    v->fsOutputOnly = prog->refl.fsOutputOnly;
     if (!prog->program) {
         v->error = "program not linked";
     } else {
@@ -150,6 +151,17 @@ ProgramVariant* PipelineCache::variant(ProgramObj* prog, const glsl::VariantKey&
     return r;
 }
 
+// A fragment stage that only computes color outputs changes nothing without color writes (a depth-only pass: shadow
+// maps): the pipeline runs without it, as other drivers do (Unigine Heaven draws its cube shadow maps so).
+static bool fragmentStageNeeded(const RenderPipelineKey& key, const ProgramVariant* fsVariant, const glsl::EntryPoint* fs) {
+    if (!fsVariant || !fsVariant->fsOutputOnly || !fs || !fs->colorOnly || key.alphaToCoverage || !envFlagCached("METALGLDRV_SKIP_UNUSED_FS", true))
+        return true;
+    for (int i = 0; i < 8; i++)
+        if (key.colorFormats[i] && key.blend[i].writeMask) return true;
+    MGL_STAT("render-pipeline-without-fs");
+    return false;
+}
+
 static MTL4LibraryFunctionDescriptor* fn(id<MTLLibrary> lib, const std::string& name) {
     MTL4LibraryFunctionDescriptor* f = [MTL4LibraryFunctionDescriptor new];
     f.library = lib;
@@ -196,7 +208,8 @@ static id<MTLRenderPipelineState> newClassicPipeline(Device* dev, const RenderPi
     if (!vs) return nil;
     MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = [v->lib newFunctionWithName:@(vs->name.c_str())];
-    if (fs && key.rasterEnabled) d.fragmentFunction = [fsLib newFunctionWithName:@(fs->name.c_str())];
+    if (fs && key.rasterEnabled && fragmentStageNeeded(key, key.fsVariantUid ? key.fsVariant : v, fs))
+        d.fragmentFunction = [fsLib newFunctionWithName:@(fs->name.c_str())];
     d.rasterSampleCount = key.sampleCount;
     d.alphaToCoverageEnabled = key.alphaToCoverage;
     d.alphaToOneEnabled = key.alphaToOne;
@@ -253,7 +266,8 @@ static id<MTLRenderPipelineState> newRenderPipeline(Device* dev, const RenderPip
         }
         d.meshFunctionDescriptor = fn(v->lib, ms->name);
         d.maxTotalThreadsPerMeshThreadgroup = ms->threadsPerThreadgroup[0] * ms->threadsPerThreadgroup[1] * ms->threadsPerThreadgroup[2];
-        if (fs && key.rasterEnabled) d.fragmentFunctionDescriptor = fn(fsLib, fs->name);
+        if (fs && key.rasterEnabled && (key.pdcPrepass || fragmentStageNeeded(key, key.fsVariantUid ? key.fsVariant : v, fs)))
+            d.fragmentFunctionDescriptor = fn(fsLib, fs->name);
         d.rasterSampleCount = key.sampleCount;
         d.alphaToCoverageState = key.alphaToCoverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
         d.alphaToOneState = key.alphaToOne ? MTL4AlphaToOneStateEnabled : MTL4AlphaToOneStateDisabled;
@@ -264,7 +278,8 @@ static id<MTLRenderPipelineState> newRenderPipeline(Device* dev, const RenderPip
         MTL4RenderPipelineDescriptor* d = [MTL4RenderPipelineDescriptor new];
         if (!vs) return nil;
         d.vertexFunctionDescriptor = fn(v->lib, vs->name);
-        if (fs && key.rasterEnabled) d.fragmentFunctionDescriptor = fn(fsLib, fs->name);
+        if (fs && key.rasterEnabled && (key.pdcPrepass || fragmentStageNeeded(key, key.fsVariantUid ? key.fsVariant : v, fs)))
+            d.fragmentFunctionDescriptor = fn(fsLib, fs->name);
         d.vertexDescriptor = vertexDescriptor(key);
         d.rasterSampleCount = key.sampleCount;
         d.alphaToCoverageState = key.alphaToCoverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;

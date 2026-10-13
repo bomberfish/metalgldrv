@@ -2055,6 +2055,7 @@ ProgramObj* mglPipelineDrawProgram(Context* ctx) {
     r.earlyFragmentTests = fs && fs->refl.earlyFragmentTests;
     r.blendSupport = fs ? fs->refl.blendSupport : 0;
     r.usesDiscard = fs && fs->refl.usesDiscard;
+    r.fsOutputOnly = fs && fs->refl.fsOutputOnly;
     r.usesFlatShading = fs && fs->refl.usesFlatShading;
     r.multipass = glsl::multipassInfo(lp);
     c->refl = std::move(r);
