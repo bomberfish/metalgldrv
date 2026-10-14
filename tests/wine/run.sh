@@ -15,6 +15,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="$(cd "${1:?usage: tests/wine/run.sh RUNNER [DYLIB]}" && pwd -P)"
 DYLIB="${2:-$HERE/../../build-universal/libmetalgldrv.dylib}"
+# Absolute: Wine starts its processes from another directory, where a relative DYLD path finds nothing.
+DYLIB="$(cd "$(dirname "$DYLIB")" && pwd -P)/$(basename "$DYLIB")"
 LLVM="${LLVM_BIN:-/opt/homebrew/opt/llvm/bin}" LLD="${LLD_BIN:-/opt/homebrew/opt/lld/bin}"
 W="$(mktemp -d)"
 cleanup() { [[ -x "$W/runner/bin/wineserver" ]] && WINEPREFIX="$W/pfx" "$W/runner/bin/wineserver" -k 2>/dev/null; rm -rf "$W"; }
