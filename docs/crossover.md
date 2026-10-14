@@ -133,10 +133,24 @@ didn't happen.
 * Watch the log for `unimplemented: glXxx` (an entry point DOOM calls that the
   driver lacks) and for shader compile errors (`METALGLDRV_DUMP_FAILED_GLSL=1`).
 
+## Injected instead of linked (per game)
+
+Instead of patching `winemac.so`, the driver can be injected into Wine with
+`DYLD_INSERT_LIBRARIES=<universal libmetalgldrv.dylib>` and
+`METALGLDRV_HOOK_NSOPENGL=1`. When `winemac.so` loads, the driver then points its
+CGL imports, not only its `dlopen`, at itself (src/macos/hooks.mm). This works
+only where Wine's loader is signed to allow `DYLD_*` variables: NotProton's
+runners are, CrossOver.app's isn't. NotProton uses this for its per-game
+"metalgldrv" switch, so the runner stays unpatched and other games keep Apple's
+OpenGL. Drivers before 0.1.1 only handle the linked case.
+
+`tests/wine/run.sh RUNNER` builds a small Windows OpenGL program (Homebrew LLVM, no
+SDK), runs it in a clone of the runner with the driver injected, and checks for a
+4.6 core context that renders.
+
 ## Known risks / limitations
 
-* Untested end to end: none of this has been run inside Wine yet. The x86_64
-  slice passes the host suites under Rosetta (`arch -x86_64
+* The x86_64 slice also passes the host suites under Rosetta (`arch -x86_64
   build-universal/tests/mgltest`, `nsgltest`, `winemodetest`); `winemodetest`
   loads a fake `winemac.so` linked against the driver and checks the dlopen
   redirect, the `NSOpenGLContext` subclass path and rendering through it.

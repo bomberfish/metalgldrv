@@ -182,13 +182,17 @@ void patchWinemacShareCheck(const mach_header* mh, const char* path) {
 void onWinemac(const mach_header* mh, intptr_t slide, const char* path) {
     static std::once_flag once;
     std::call_once(once, [&] {
+        // Injected (DYLD_INSERT_LIBRARIES with METALGLDRV_HOOK_NSOPENGL=1, e.g. NotProton's per-game switch)
+        // instead of linked: winemac.so's CGL imports still point at OpenGL.framework, so they move too.
+        bool injected = g_replacement.load();
         int n;
         {
             std::lock_guard<std::recursive_mutex> g(rebindMutex());
-            n = macho::rebindImage(mh, slide, wineResolver, nullptr);
+            n = injected ? macho::rebindImage(mh, slide, replacementResolver, (void*)path)
+                         : macho::rebindImage(mh, slide, wineResolver, nullptr);
         }
-        MGL_INFO("CrossOver/Wine: %s: dlopen rebound (%d slot%s); OpenGL.framework -> %s", path, n, n == 1 ? "" : "s",
-                 macos::ownPath());
+        MGL_INFO("CrossOver/Wine: %s: %s rebound (%d slot%s); OpenGL.framework -> %s", path,
+                 injected ? "CGL and dlopen" : "dlopen", n, n == 1 ? "" : "s", macos::ownPath());
         patchWinemacShareCheck(mh, path);
         macos::installNSOpenGLHooks();
     });
