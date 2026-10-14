@@ -24,14 +24,14 @@ echo "==> metalgldrv $VERSION"
 cmake -G Ninja -S "$REPO" -B "$B" -DMGL_UNIVERSAL=ON -DMGL_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
 ninja -C "$B" metalgldrv
-lipo -archs "$B/libmetalgldrv.dylib"
+xcrun lipo -archs "$B/libmetalgldrv.dylib"
 
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/lib" "$stage/dsym"
 cp "$B/libmetalgldrv.dylib" "$stage/lib/libmetalgldrv.dylib"
-dsymutil "$stage/lib/libmetalgldrv.dylib" -o "$stage/dsym/libmetalgldrv.dylib.dSYM"
-strip -S "$stage/lib/libmetalgldrv.dylib"
+xcrun dsymutil "$stage/lib/libmetalgldrv.dylib" -o "$stage/dsym/libmetalgldrv.dylib.dSYM"
+xcrun strip -S "$stage/lib/libmetalgldrv.dylib"
 codesign -f -s - "$stage/lib/libmetalgldrv.dylib"
 echo "$VERSION" > "$stage/lib/VERSION"
 cp "$REPO/LICENCE" "$stage/lib/LICENCE"
