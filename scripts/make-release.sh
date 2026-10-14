@@ -6,6 +6,7 @@
 #   libmetalgldrv-macos-universal.zip         libmetalgldrv.dylib (debug info stripped, signed
 #                                             ad hoc), VERSION (git describe), LICENCE
 #   libmetalgldrv-macos-universal.zip.sha256
+#   libmetalgldrv.dylib                       the same dylib on its own, for manual installs
 #   libmetalgldrv-macos-universal.dSYM.zip    the debug symbols, for symbolicating crash logs
 #   metalgldrv-fabric-<version>.jar           the Fabric mod with that dylib (mods/fabric/build.sh)
 # The asset names carry no version, so releases/latest/download/<name> always finds them.
@@ -37,9 +38,10 @@ echo "$VERSION" > "$stage/lib/VERSION"
 cp "$REPO/LICENCE" "$stage/lib/LICENCE"
 
 mkdir -p "$OUT"
-rm -f "$OUT/$NAME.zip" "$OUT/$NAME.zip.sha256" "$OUT/$NAME.dSYM.zip"
+rm -f "$OUT/$NAME.zip" "$OUT/$NAME.zip.sha256" "$OUT/$NAME.dSYM.zip" "$OUT/libmetalgldrv.dylib"
+cp "$stage/lib/libmetalgldrv.dylib" "$OUT/libmetalgldrv.dylib"
 (cd "$stage/lib" && zip -q -X "$OUT/$NAME.zip" libmetalgldrv.dylib VERSION LICENCE)
 (cd "$stage/dsym" && zip -q -r -X "$OUT/$NAME.dSYM.zip" libmetalgldrv.dylib.dSYM)
 (cd "$OUT" && shasum -a 256 "$NAME.zip" > "$NAME.zip.sha256")
 "$REPO/mods/fabric/build.sh" --dylib "$stage/lib/libmetalgldrv.dylib" --version "${VERSION#v}"
-ls -l "$OUT/$NAME.zip" "$OUT/$NAME.zip.sha256" "$OUT/$NAME.dSYM.zip" "$OUT/metalgldrv-fabric-${VERSION#v}.jar"
+ls -l "$OUT/libmetalgldrv.dylib" "$OUT/$NAME.zip" "$OUT/$NAME.zip.sha256" "$OUT/$NAME.dSYM.zip" "$OUT/metalgldrv-fabric-${VERSION#v}.jar"
