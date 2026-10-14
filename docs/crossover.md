@@ -40,7 +40,10 @@ compatibility). The long-term target is DOOM (2016)'s OpenGL renderer (GL 4.5 co
 
 ## Install
 
-1. Build the universal driver:
+1. The script downloads the universal driver from the latest GitHub release
+   (`libmetalgldrv-macos-universal.zip`, checked against its `.sha256`).
+   `--release TAG` installs an older one. To use your own build instead, pass
+   `--build` (builds `build-universal/` from the checkout) or `--dylib PATH`:
 
        cmake -G Ninja -B build-universal -DMGL_UNIVERSAL=ON -DMGL_BUILD_TESTS=OFF
        ninja -C build-universal metalgldrv
@@ -59,8 +62,8 @@ compatibility). The long-term target is DOOM (2016)'s OpenGL renderer (GL 4.5 co
    The script copies the dylib to
    `~/Library/Application Support/metalgldrv/libmetalgldrv.dylib` (`--dest` to
    change), keeps `winemac.so.metalgldrv-backup` next to `winemac.so`, patches and
-   re-signs `winemac.so`, and checks the result with `otool -L`. Run it again after
-   rebuilding the driver (it re-copies the dylib; the patch is already in place).
+   re-signs `winemac.so`, and checks the result with `otool -L`. Run it again to
+   update the driver (it re-copies the dylib; the patch is already in place).
    It refuses to run if a backup exists that differs from an unpatched
    `winemac.so` (CrossOver was updated: delete the stale backup and re-run).
 

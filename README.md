@@ -82,10 +82,12 @@ scripts/crossover-install.sh --app ~/Applications/CrossOver-MetalGL.app
 scripts/crossover-install.sh --app ~/Applications/CrossOver-MetalGL.app --uninstall   # undo
 ```
 
-This points that copy's `winemac.so` at the universal build, so its bottles use metalgldrv for
-OpenGL. It works the same with [NotProton](https://github.com/NotProtonNot/NotProton)'s CrossOver
-runner: `scripts/notproton-install.sh` builds the driver and patches the runner (run it again after
-NotProton updates its runner; `--uninstall` undoes it). See [docs/crossover.md](docs/crossover.md), and [docs/doom2016.md](docs/doom2016.md)
+This downloads the driver from the latest [release](https://github.com/bomberfish/metalgldrv/releases)
+and points that copy's `winemac.so` at it, so its bottles use metalgldrv for OpenGL. `--build`
+builds the driver from this checkout instead, and `--release v0.1.0` picks a specific release. It
+works the same with [NotProton](https://github.com/NotProtonNot/NotProton)'s CrossOver runner:
+`scripts/notproton-install.sh` (same options) patches the runner. Run it again after NotProton
+updates its runner, or to update the driver; `--uninstall` undoes it. See [docs/crossover.md](docs/crossover.md), and [docs/doom2016.md](docs/doom2016.md)
 for DOOM specifics.
 
 Games launched by Steam/NotProton/CrossOver don't see your shell environment. Put driver settings in
@@ -170,4 +172,4 @@ tests/fabric-mod/run.sh                     # Fabric mod loader scenarios
 
 ## License
 
-Not yet chosen.
+MIT; see [LICENCE](LICENCE).

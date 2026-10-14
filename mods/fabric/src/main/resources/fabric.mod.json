@@ -5,6 +5,7 @@
   "name": "metalgldrv",
   "description": "Runs Minecraft's OpenGL on metalgldrv, an OpenGL 4.6 driver on Metal 4, on Apple silicon Macs. Loads the bundled driver before the game window opens; no JVM arguments or custom GLFW needed. Does nothing on other systems.",
   "authors": ["bomberfish"],
+  "license": "MIT",
   "contact": {
     "sources": "https://github.com/bomberfish/metalgldrv"
   },

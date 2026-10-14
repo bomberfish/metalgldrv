@@ -4,7 +4,8 @@
 # winemac.so (Wine's macOS driver, x86_64, runs under Rosetta) links
 # /System/Library/Frameworks/OpenGL.framework for CGL and dlopen()s it for the gl*
 # entry points. This script:
-#   1. copies the universal libmetalgldrv.dylib to a stable place (DEST),
+#   1. downloads the universal libmetalgldrv.dylib from the latest GitHub release (or builds it,
+#      --build) and copies it to a stable place (DEST),
 #   2. backs up winemac.so (winemac.so.metalgldrv-backup, next to it),
 #   3. rewrites winemac.so's OpenGL.framework dependency to DEST/libmetalgldrv.dylib
 #      (install_name_tool -change) and re-signs it ad hoc (codesign -f -s -).
@@ -19,8 +20,10 @@
 #   --wine-root DIR  a bare CrossOver directory instead of an app bundle (the one holding
 #                    lib/wine/x86_64-unix/winemac.so), e.g. NotProton's runner:
 #                    "~/Library/Application Support/notproton/runners/current"
-#   --dylib PATH     driver to install (default: build-universal/libmetalgldrv.dylib;
-#                    must contain x86_64)
+#   --release TAG    install that release instead of the latest (e.g. v0.1.0)
+#   --build          build the driver from this checkout (build-universal/) instead of
+#                    downloading a release; needs Xcode's command line tools, CMake and Ninja
+#   --dylib PATH     install this driver file instead (must contain x86_64)
 #   --dest DIR       where the driver is installed (default:
 #                    "~/Library/Application Support/metalgldrv")
 #   --uninstall      restore winemac.so from the backup (the installed dylib is kept)
@@ -30,8 +33,10 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-APP="" WINE_ROOT="" DYLIB="$REPO/build-universal/libmetalgldrv.dylib" DEST="$HOME/Library/Application Support/metalgldrv"
-UNINSTALL=0 DRY=0
+APP="" WINE_ROOT="" DYLIB="" DEST="$HOME/Library/Application Support/metalgldrv"
+UNINSTALL=0 DRY=0 BUILD=0 RELEASE=latest
+GITHUB_REPO="${METALGLDRV_GITHUB_REPO:-bomberfish/metalgldrv}"
+ASSET="libmetalgldrv-macos-universal.zip"
 WINEMAC_REL="Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix/winemac.so"
 BACKUP_SUFFIX=".metalgldrv-backup"
 
@@ -60,6 +65,8 @@ while [[ $# -gt 0 ]]; do
         --app) APP="$2"; shift 2 ;;
         --wine-root) WINE_ROOT="$2"; shift 2 ;;
         --dylib) DYLIB="$2"; shift 2 ;;
+        --build) BUILD=1; shift ;;
+        --release) RELEASE="$2"; shift 2 ;;
         --dest) DEST="$2"; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
         --dry-run) DRY=1; shift ;;
@@ -127,8 +134,42 @@ if [[ $UNINSTALL == 1 ]]; then
 fi
 
 # --- install ---------------------------------------------------------------
-[[ -f "$DYLIB" ]] || die "$DYLIB not found. Build it first:
-  cmake -G Ninja -B build-universal -DMGL_UNIVERSAL=ON -DMGL_BUILD_TESTS=OFF && ninja -C build-universal metalgldrv"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# The release's zip (libmetalgldrv.dylib + VERSION) and its .sha256, into $tmp. curl needs the
+# repository to be public; for a private one, an authenticated gh CLI downloads it instead.
+fetch_release() {
+    local base
+    if [[ $RELEASE == latest ]]; then base="https://github.com/$GITHUB_REPO/releases/latest/download"
+    else base="https://github.com/$GITHUB_REPO/releases/download/$RELEASE"; fi
+    say "downloading $base/$ASSET"
+    if ! curl -fsSL --retry 3 -o "$tmp/$ASSET" "$base/$ASSET" || ! curl -fsSL --retry 3 -o "$tmp/$ASSET.sha256" "$base/$ASSET.sha256"; then
+        command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 ||
+            die "download failed (no such release, or no network). Use --build to build from source."
+        say "download failed; trying the gh CLI"
+        rm -f "$tmp/$ASSET" "$tmp/$ASSET.sha256"
+        gh release download $([[ $RELEASE == latest ]] || echo "$RELEASE") -R "$GITHUB_REPO" -D "$tmp" -p "$ASSET" -p "$ASSET.sha256" ||
+            die "gh release download failed. Use --build to build from source."
+    fi
+    (cd "$tmp" && shasum -a 256 -c "$ASSET.sha256" >/dev/null) || die "$ASSET doesn't match its checksum"
+    unzip -q "$tmp/$ASSET" -d "$tmp/release"
+    DYLIB="$tmp/release/libmetalgldrv.dylib"
+    [[ -f "$DYLIB" ]] || die "$ASSET has no libmetalgldrv.dylib"
+    say "release: $(cat "$tmp/release/VERSION" 2>/dev/null || echo "$RELEASE")"
+}
+
+if [[ -n "$DYLIB" ]]; then
+    [[ -f "$DYLIB" ]] || die "$DYLIB not found"
+elif [[ $BUILD == 1 ]]; then
+    [[ -f "$REPO/CMakeLists.txt" ]] || die "--build needs the metalgldrv source tree around this script"
+    B="$REPO/build-universal"
+    [[ -f "$B/build.ninja" ]] || cmake -G Ninja -S "$REPO" -B "$B" -DMGL_UNIVERSAL=ON -DMGL_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
+    ninja -C "$B" metalgldrv
+    DYLIB="$B/libmetalgldrv.dylib"
+else
+    fetch_release
+fi
 archs="$(lipo -archs "$DYLIB")"
 [[ " $archs " == *" x86_64 "* ]] || die "$DYLIB has no x86_64 slice ($archs); CrossOver's Wine runs x86_64 under Rosetta. Use the universal build."
 [[ "$(file -b "$WINEMAC")" == *x86_64* ]] || die "winemac.so is not x86_64; this layout is not supported"
@@ -168,8 +209,6 @@ if [[ ! -f "$BACKUP" ]]; then
 fi
 
 say "patching winemac.so: $dep -> $TARGET"
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
 run cp -p "$src" "$tmp/winemac.so"
 if ! run install_name_tool -change "$dep" "$TARGET" "$tmp/winemac.so"; then
     die "install_name_tool failed (no room for the longer path?). Try a shorter --dest."
