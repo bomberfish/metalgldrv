@@ -445,3 +445,4 @@ A profile entry sets the same options; environment variables override it.
 | Profile | Executables | Options | Why |
 |---|---|---|---|
 | `doom2016` | `DOOMx64.exe` | vendor `ATI Technologies Inc.`, VRAM at most 8192 MB, `vs_position_always_invariant` | docs/doom2016.md |
+| `gmod` | `gmod` | version `4.1 metalgldrv`, hides `GL_ARB_buffer_storage` | togl's persistent ring buffers (taken at 4.4+ or with the extension) bypass its buffer binding cache, so a later vertex buffer Lock maps the wrong, already mapped buffer and the engine dies in `CMeshDX8::LockVertexBuffer`; same as its `-gl_disable_arb_buffer_storage` |

@@ -50,6 +50,15 @@ const ProfileEntry kProfiles[] = {
      .glslQuirks = "vs_position_always_invariant",
      .vramCapMB = 8192,
      .shareFramebuffers = true},
+    // Garry's Mod (Source, togl). With GL_ARB_buffer_storage (the extension, or GL_VERSION >= 4.4) togl streams
+    // through persistently mapped ring buffers that it binds behind its own binding cache; a later
+    // IDirect3DVertexBuffer9::Lock then trusts the cache and maps the ring buffer still bound instead of its own,
+    // which fails, and the engine dies in CMeshDX8::LockVertexBuffer ("Failed to lock vertex buffer"). Apple's
+    // driver (4.1, no buffer storage) never took that path; this is togl's -gl_disable_arb_buffer_storage.
+    {.name = "gmod",
+     .exes = "gmod",
+     .version = "4.1 metalgldrv",
+     .hideExtensions = "GL_ARB_buffer_storage"},
 };
 
 std::vector<std::string> splitList(const char* s) {
