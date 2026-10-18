@@ -491,10 +491,10 @@ CGL_EXPORT CGLError CGLDescribeRenderer(CGLRendererInfoObj rend, GLint rend_num,
     case kCGLRPDisplayMask: v = activeDisplayMask(); break;
     case kCGLRPAccelerated: case kCGLRPBackingStore: case kCGLRPWindow: case kCGLRPCompliant: case kCGLRPOnline:
     case kCGLRPGPUVertProcCapable: case kCGLRPGPUFragProcCapable: case kCGLRPAcceleratedCompute: case kCGLRPMPSafe:
-    case kCGLRPMultiScreen:
+    case kCGLRPMultiScreen: case kCGLRPFullScreen:
         v = 1;
         break;
-    case kCGLRPOffScreen: case kCGLRPFullScreen: case kCGLRPRobust: case kCGLRPSampleAlpha: case kCGLRPRemovable:
+    case kCGLRPOffScreen: case kCGLRPRobust: case kCGLRPSampleAlpha: case kCGLRPRemovable:
     case kCGLRPAccumModes:
         v = 0;
         break;
