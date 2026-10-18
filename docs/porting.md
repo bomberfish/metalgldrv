@@ -96,6 +96,13 @@ Without rebuilding the app at all (for testing): `DYLD_INSERT_LIBRARIES=/path/to
 METALGLDRV_HOOK_NSOPENGL=1 ./app`. This only works for apps without the hardened runtime, which strips
 `DYLD_*` variables. Java apps use `-agentpath:` instead (docs/minecraft-macos.md).
 
+For an app started by a launcher that doesn't pass the environment through (Steam), add the load
+command to its executable instead: `scripts/macho-add-dylib.py --weak --sign path/to/executable
+/path/to/libmetalgldrv.dylib`. A main executable that links libmetalgldrv turns replacement mode on
+by itself (Route 1); `--weak` keeps the app starting when the dylib isn't there. The edit puts the
+command in the header padding, invalidates the signature (`--sign` signs it again ad hoc), and is
+undone by the app's next update.
+
 ## Route 3, macOS and iOS: EGL
 
 EGL is the portable route and the only one on iOS. Standard EGL 1.5:
