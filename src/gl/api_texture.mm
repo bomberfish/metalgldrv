@@ -809,6 +809,8 @@ static void texParam(Context* ctx, Texture* t, GLenum pname, const double* v, in
     case GL_TEXTURE_PRIORITY: case GL_DEPTH_TEXTURE_MODE: case GL_TEXTURE_COMPARE_FAIL_VALUE_ARB:
         if (ctx->coreProfile) return ctx->setError(GL_INVALID_ENUM);
         break;
+    case 0x85B6:  // GL_TEXTURE_MINIMIZE_STORAGE_APPLE (Apple's gl.h only, not the registry): a hint, togl sets it per texture
+        break;
     case GL_TEXTURE_SPARSE_ARB: case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
         if (!ctx->dev->caps.sparse) return ctx->setError(GL_INVALID_ENUM, "glTexParameter(0x%x)", pname);
         if (t->immutable) return ctx->setError(GL_INVALID_OPERATION, "sparse parameters of immutable storage");
