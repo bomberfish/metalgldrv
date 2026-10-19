@@ -140,9 +140,23 @@ Instead of patching `winemac.so`, the driver can be injected into Wine with
 `METALGLDRV_HOOK_NSOPENGL=1`. When `winemac.so` loads, the driver then points its
 CGL imports, not only its `dlopen`, at itself (src/macos/hooks.mm). This works
 only where Wine's loader is signed to allow `DYLD_*` variables: NotProton's
-runners are, CrossOver.app's isn't. NotProton uses this for its per-game
-"metalgldrv" switch, so the runner stays unpatched and other games keep Apple's
-OpenGL. Drivers before 0.1.1 only handle the linked case.
+runners are, CrossOver.app's isn't. Drivers before 0.1.1 only handle the linked
+case.
+
+NotProton plug-ins (`~/.config/notproton/features.d/*.conf`) use this:
+`scripts/notproton-install.sh` installs the driver without touching the runner and
+writes descriptors for a per-game "metalgldrv" switch in the Developer section of
+a game's Compatibility panel. It injects the driver and sets
+`METALGLDRV_HOOK_NSOPENGL=1`. Switches that appear under it set
+`METALGLDRV_USE_METALFX=1`, `METALGLDRV_STRICT=1`, `METALGLDRV_TURBOHAX=1` or
+`METALGLDRV_SPEEDDEMON=1`; turn on one profile at a time. The runner stays
+unpatched, so other games keep Apple's OpenGL and runner updates don't undo it.
+The main switch's key, `NOTPROTON_METALGLDRV`, is the one the `metalgldrv` branch
+of [bomberfish/NotProton](https://github.com/bomberfish/NotProton/tree/metalgldrv) uses. `--plugin` / `--patch` force either
+way; `--uninstall` removes only the descriptors the script wrote. Other
+`METALGLDRV_*` launch options don't reach the game through plug-ins; use
+`metalgldrv.conf` for those. The driver is tested with NotProton's Rosetta build
+(x86_64 Wine), not FEX.
 
 `tests/wine/run.sh RUNNER` builds a small Windows OpenGL program (Homebrew LLVM, no
 SDK), runs it in a clone of the runner with the driver injected, and checks for a

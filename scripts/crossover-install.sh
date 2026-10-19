@@ -26,6 +26,8 @@
 #   --dylib PATH     install this driver file instead (must contain x86_64)
 #   --dest DIR       where the driver is installed (default:
 #                    "~/Library/Application Support/metalgldrv")
+#   --driver-only    install the driver to DEST and stop; Wine is left alone (for NotProton's
+#                    plug-ins, which load the driver into each game themselves)
 #   --uninstall      restore winemac.so from the backup (the installed dylib is kept)
 #   --dry-run        print what would be done, change nothing
 #   -h, --help
@@ -34,7 +36,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 APP="" WINE_ROOT="" DYLIB="" DEST="$HOME/Library/Application Support/metalgldrv"
-UNINSTALL=0 DRY=0 BUILD=0 RELEASE=latest
+UNINSTALL=0 DRY=0 BUILD=0 DRIVER_ONLY=0 RELEASE=latest
 GITHUB_REPO="${METALGLDRV_GITHUB_REPO:-bomberfish/metalgldrv}"
 ASSET="libmetalgldrv-macos-universal.zip"
 WINEMAC_REL="Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix/winemac.so"
@@ -68,6 +70,7 @@ while [[ $# -gt 0 ]]; do
         --build) BUILD=1; shift ;;
         --release) RELEASE="$2"; shift 2 ;;
         --dest) DEST="$2"; shift 2 ;;
+        --driver-only) DRIVER_ONLY=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         --dry-run) DRY=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -75,7 +78,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -n "$WINE_ROOT" ]]; then
+TARGET="$DEST/libmetalgldrv.dylib"
+if [[ $DRIVER_ONLY == 1 ]]; then
+    [[ $UNINSTALL == 0 ]] || die "--driver-only installs; there is nothing to uninstall"
+elif [[ -n "$WINE_ROOT" ]]; then
     WINE_ROOT="${WINE_ROOT%/}"
     WINEMAC="$WINE_ROOT/lib/wine/x86_64-unix/winemac.so"
     APP="$WINE_ROOT"
@@ -85,13 +91,14 @@ elif [[ -z "$APP" ]]; then
     done
     [[ -n "$APP" ]] || die "no CrossOver found; pass --app /path/to/CrossOver.app"
 fi
-APP="${APP%/}"
-[[ -n "$WINE_ROOT" ]] || WINEMAC="$APP/$WINEMAC_REL"
-BACKUP="$WINEMAC$BACKUP_SUFFIX"
-TARGET="$DEST/libmetalgldrv.dylib"
-[[ -f "$WINEMAC" ]] || die "$WINEMAC not found (is $APP a CrossOver bundle?)"
-say "CrossOver: $APP"
-say "winemac.so: $WINEMAC"
+if [[ $DRIVER_ONLY == 0 ]]; then
+    APP="${APP%/}"
+    [[ -n "$WINE_ROOT" ]] || WINEMAC="$APP/$WINEMAC_REL"
+    BACKUP="$WINEMAC$BACKUP_SUFFIX"
+    [[ -f "$WINEMAC" ]] || die "$WINEMAC not found (is $APP a CrossOver bundle?)"
+    say "CrossOver: $APP"
+    say "winemac.so: $WINEMAC"
+fi
 
 # The OpenGL.framework path winemac.so links (or our dylib, when already patched).
 opengl_dep() { otool -L "$1" | awk 'NR > 1 && /OpenGL\.framework/ { print $1; exit }'; }
@@ -172,6 +179,14 @@ else
 fi
 archs="$(lipo -archs "$DYLIB")"
 [[ " $archs " == *" x86_64 "* ]] || die "$DYLIB has no x86_64 slice ($archs); CrossOver's Wine runs x86_64 under Rosetta. Use the universal build."
+
+if [[ $DRIVER_ONLY == 1 ]]; then
+    say "installing driver: $TARGET"
+    run mkdir -p "$DEST"
+    replace_file "$DYLIB" "$TARGET"
+    run codesign -f -s - "$TARGET"
+    exit 0
+fi
 [[ "$(file -b "$WINEMAC")" == *x86_64* ]] || die "winemac.so is not x86_64; this layout is not supported"
 
 current="$(our_dep "$WINEMAC")"

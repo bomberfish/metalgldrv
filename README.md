@@ -85,9 +85,12 @@ scripts/crossover-install.sh --app ~/Applications/CrossOver-MetalGL.app --uninst
 This downloads the driver from the latest [release](https://github.com/bomberfish/metalgldrv/releases)
 and points that copy's `winemac.so` at it, so its bottles use metalgldrv for OpenGL. `--build`
 builds the driver from this checkout instead, and `--release v0.1.0` picks a specific release. It
-works the same with [NotProton](https://github.com/NotProtonNot/NotProton)'s CrossOver runner:
-`scripts/notproton-install.sh` (same options) patches the runner. Run it again after NotProton
-updates its runner, or to update the driver; `--uninstall` undoes it. See [docs/crossover.md](docs/crossover.md), and [docs/doom2016.md](docs/doom2016.md)
+works the same with [NotProton](https://github.com/NotProtonNot/NotProton): `scripts/notproton-install.sh`
+(same options). On NotProton builds with plug-in support it adds a per-game **metalgldrv** switch
+(Properties > Compatibility > Developer), with MetalFX and accuracy-profile switches under it, and
+leaves the runner alone. On older builds it patches the runner instead, so every game uses
+metalgldrv; run it again after NotProton updates its runner. Run it again to update the driver;
+`--uninstall` undoes it. See [docs/crossover.md](docs/crossover.md), and [docs/doom2016.md](docs/doom2016.md)
 for DOOM specifics.
 
 Games launched by Steam/NotProton/CrossOver don't see your shell environment. Put driver settings in
